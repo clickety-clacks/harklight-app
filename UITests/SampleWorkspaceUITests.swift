@@ -175,7 +175,6 @@ final class SampleWorkspaceUITests: XCTestCase {
     func testOrdinaryConversationSharesAdaptivePanelWithoutLiveServices() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--conversation-fixture"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
         let search = app.searchFields.firstMatch
@@ -206,7 +205,6 @@ final class SampleWorkspaceUITests: XCTestCase {
     func testAcceptedSenderUpdateIsVisibleInTheSameOrdinaryRequestAndHistory() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--conversation-fixture"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let field = app.searchFields.firstMatch
@@ -231,7 +229,6 @@ final class SampleWorkspaceUITests: XCTestCase {
     func testMixedCleanupRetainsUnidentifiedFilesWithoutInventedCommittedHistory() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--conversation-fixture"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let search = app.searchFields.firstMatch
@@ -255,7 +252,6 @@ final class SampleWorkspaceUITests: XCTestCase {
     func testCompactBackLeavesMessageButClosingChatDoesNotAbandonItsUpload() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--conversation-fixture"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let search = app.searchFields.firstMatch
@@ -288,7 +284,6 @@ final class SampleWorkspaceUITests: XCTestCase {
     func testNavigationKeepsUnsubmittedUploadCleanupTruthfulAcrossAdaptiveRebuild() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--conversation-fixture"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let search = app.searchFields.firstMatch
@@ -325,7 +320,6 @@ final class SampleWorkspaceUITests: XCTestCase {
     func testRetractedItemKeepsItsSelectedChoiceHistoryAndUnsentDiscussion() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--conversation-fixture"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let search = app.searchFields.firstMatch
@@ -354,7 +348,6 @@ final class SampleWorkspaceUITests: XCTestCase {
     func testConversationRevisionFileFactsAndClosureUseTheOrdinaryApp() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--conversation-fixture"]
         func open(_ id: String, search: String) {
             app.terminate()
             app.launch()

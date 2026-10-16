@@ -40,24 +40,8 @@ final class NativeAppLaunch {
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
-        #if DEBUG
-        let conversationFixture = arguments.contains("--conversation-fixture")
-        #else
-        let conversationFixture = false
-        #endif
-        guidedJoin = NativeGuidedJoinCoordinator(deviceName: UIDevice.current.name, isShowing: !fixture && !conversationFixture)
-        if conversationFixture {
-            // Exercise the ordinary app root with an isolated model. No enrollment restore or relay activation.
-            do {
-                let local = try SampleFixtureDomain()
-                try local.populate()
-                state = .live(local.viewModel)
-            } catch {
-                state = .enrollmentRequired
-                enrollmentMessage = "The local conversation fixture could not be loaded."
-            }
-            didRestore = true
-        } else if fixture {
+        guidedJoin = NativeGuidedJoinCoordinator(deviceName: UIDevice.current.name, isShowing: !fixture)
+        if fixture {
             state = .fixture(PrototypeStore.loadFromBundle())
         } else {
             state = .enrollmentRequired
