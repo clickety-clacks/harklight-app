@@ -297,6 +297,57 @@ public final class AttentionDomainPort: @unchecked Sendable {
         )
     }
 
+    public func conversations(context suppliedContext: PortContext) throws -> ConversationSnapshot {
+        try validate(suppliedContext)
+        return try store.conversationSnapshot(context: profileContext)
+    }
+
+    public func inspectAnswerDraft(context suppliedContext: PortContext, request key: RequestKey,
+                                   revision: UInt64) throws -> PresentedRequest? {
+        try validate(suppliedContext)
+        let snapshot = try store.snapshot(context: profileContext)
+        guard let thread = snapshot.conversationThreads[key], let payload = thread.revisions[revision],
+              let draft = thread.answerDrafts?[revision], let stored = snapshot.requests[key] else { return nil }
+        return try present(StoredRequest(key: key, originalPayload: payload), acceptanceOrder: stored.acceptanceOrder ?? 0,
+            draft: draft, session: nil, remote: nil, submission: nil, selector: nil)
+    }
+
+    public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) throws {
+        try validate(suppliedContext)
+        try store.saveConversationDraft(draft, context: profileContext)
+    }
+
+    @discardableResult
+    public func updateConversationDraftText(_ text: ExactText, for binding: ConversationBinding,
+                                            context suppliedContext: PortContext) throws -> ConversationDraft {
+        try validate(suppliedContext)
+        return try store.updateConversationDraftText(text, for: binding, context: profileContext)
+    }
+
+    public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws {
+        try validate(suppliedContext)
+        try store.appendFixtureDiscussion(binding, context: profileContext)
+    }
+
+    public func abandonConversationUploads(for request: RequestKey, context suppliedContext: PortContext) throws -> [ConversationUploadCleanup] {
+        try validate(suppliedContext)
+        return try store.abandonConversationUploads(for: request, context: profileContext)
+    }
+
+    public func markConversationCleanupUnknown(for request: RequestKey, reason: ExactText, context suppliedContext: PortContext) throws {
+        try validate(suppliedContext)
+        let pending = try store.conversationSnapshot(context: profileContext).threads[request]?.uploadCleanups ?? [:]
+        for cleanup in pending.values {
+            if case .acknowledged = cleanup.outcome { continue }
+            try store.recordConversationCleanup(cleanup.id, request: request, outcome: .unknown(reason), context: profileContext)
+        }
+    }
+
+    public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws -> UUID {
+        try validate(suppliedContext)
+        return try store.prepareDiscussion(binding, context: profileContext)
+    }
+
     public func observe(context suppliedContext: PortContext) throws -> PresentationSnapshot {
         try validate(suppliedContext)
         return try presentation(from: store.snapshot(context: profileContext), selectorFor: nil)
@@ -304,6 +355,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
     public func inspect(context suppliedContext: PortContext, request key: RequestKey) throws -> PresentationSnapshot {
         try validate(suppliedContext)
+        let snapshot = try store.snapshot(context: profileContext)
+        if snapshot.conversationThreads[key]?.currentContentRedacted == true {
+            return try presentation(from: snapshot, selectorFor: nil).filtering(to: key)
+        }
         let selector = try store.selector(for: key, context: profileContext)
         return try presentation(from: store.snapshot(context: profileContext), selectorFor: [key: selector])
             .filtering(to: key)
@@ -513,7 +568,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),
                         session: snapshot.fixtureSessions[item.request.key],
                         remote: snapshot.remoteStates[item.request.key],
-                        submission: snapshot.intents.values.first(where: { $0.requestKey == item.request.key }),
+                        submission: snapshot.intents.values.first(where: {
+                            $0.requestKey == item.request.key &&
+                            $0.requestRevision == snapshot.conversationThreads[item.request.key]?.currentRevision
+                        }),
                         selector: selectors?[item.request.key])
         }
         return PresentationSnapshot(revision: snapshot.revision,
@@ -533,7 +591,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
-        case .some(.open):
+        case .some(.open) where remote?.isTerminal != true:
             status = .open
             receiptFacts = nil
         case .some(.pending(_)):
@@ -546,7 +604,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             receiptFacts = ReceiptPresentationFacts(evidenceLabel: terminal.evidenceLabel,
                                                     ownOutcome: terminal.ownOutcome,
                                                     originalOperationUncertainty: terminal.ownOutcome == .unconfirmed)
-        case .none:
+        case .some(.open), .none:
             if let terminal = remote?.state {
                 status = AppLifecycleStatus(rawValue: terminal.rawValue) ?? .open
                 let hasAcceptedIntent = submission.map { value in

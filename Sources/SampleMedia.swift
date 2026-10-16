@@ -172,93 +172,9 @@ struct SampleAnnotationEditor: View {
 struct SampleChatView: View {
     let sender: String
     let title: String
-    @Bindable var response: SampleResponse
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    let response: SampleResponse
     var body: some View {
-        VStack(spacing: 0) {
-            if verticalSizeClass != .compact {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(sender).font(.headline)
-                    Text("About \(title)").font(.caption).foregroundStyle(.secondary)
-                }.padding().frame(maxWidth: .infinity, alignment: .leading)
-            }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 18) {
-                        ForEach(response.chat) { line in
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(line.fromPerson ? "You" : sender).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                                Text(line.text).textSelection(.enabled)
-                                ForEach(line.attachmentNames, id: \.self) { name in Label(name, systemImage: "doc") }
-                            }
-                            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(line.fromPerson ? Color.blue.opacity(0.06) : Color.clear, in: RoundedRectangle(cornerRadius: 12))
-                            .id(line.id)
-                        }
-                    }.padding(.horizontal)
-                }
-                .onChange(of: response.chat.count) { _, _ in
-                    if let id = response.chat.last?.id { proxy.scrollTo(id, anchor: .bottom) }
-                }
-            }
-            Text("Local conversation · nothing sent").font(.caption2).foregroundStyle(.secondary).padding(.top, 8)
-            SampleChatComposer(response: response).padding(verticalSizeClass == .compact ? 4 : 12)
-        }
-        .onAppear { response.chatRead = true }
-    }
-}
-
-struct SampleChatComposer: View {
-    @Bindable var response: SampleResponse
-    @State private var attachmentChoices = false
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            Button { attachmentChoices = true } label: {
-                Image(systemName: "plus")
-            }
-            .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
-            .accessibilityLabel("Add sample attachment")
-            .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
-                Button("Sample photo") { addAttachment("Photo") }
-                Button("Sample file") { addAttachment("Document") }
-                Button("Sample camera image") { addAttachment("Camera") }
-                Button("Cancel", role: .cancel) {}
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                if !response.attachments.isEmpty {
-                    ScrollView(.horizontal) {
-                        HStack {
-                            ForEach(response.attachments, id: \.self) { name in
-                                VStack(spacing: 4) {
-                                    if name.hasPrefix("Document") {
-                                        Image(systemName: "doc.text.fill").font(.title).frame(width: 72, height: 48)
-                                    } else { SamplePicture(name: "harbor").frame(width: 72) }
-                                    Text(name).font(.caption2).lineLimit(1)
-                                    Button("Remove", systemImage: "xmark.circle.fill") { response.attachments.removeAll { $0 == name } }.labelStyle(.iconOnly)
-                                }
-                            }
-                        }
-                    }
-                }
-                TextField("Write a message…", text: $response.chatDraft, axis: .vertical)
-                    .lineLimit(1...5).accessibilityIdentifier("sample-chat-composer")
-            }
-            .padding(12)
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("sample-chat-input-surface")
-            Button { response.sendLocalChat() } label: {
-                Image(systemName: "arrow.up").font(.headline)
-            }
-            .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
-            .accessibilityLabel("Send locally")
-            .disabled(response.chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && response.attachments.isEmpty)
-        }
-    }
-
-    private func addAttachment(_ kind: String) {
-        var number = 1
-        while response.attachments.contains("\(kind) \(number)") { number += 1 }
-        response.attachments.append("\(kind) \(number)")
+        ConversationPanel(store: response.viewModel, key: response.key, sender: sender, title: title)
+            .onAppear { response.chatRead = true }
     }
 }

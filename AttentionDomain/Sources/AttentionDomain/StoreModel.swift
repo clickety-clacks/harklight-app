@@ -106,6 +106,7 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
 }
 
 public struct Submission: Equatable, Codable, Sendable {
+    public let requestRevision: UInt64?
     public let requestKey: RequestKey
     public let answer: JSONValue
     public let intentID: UUID
@@ -132,7 +133,9 @@ public struct Submission: Equatable, Codable, Sendable {
                 opaqueSubmissionID: ExactText = ExactText(""),
                 descriptorFingerprint: String,
                 contentFingerprint: String,
-                disposition: IntentDisposition = .pending) {
+                disposition: IntentDisposition = .pending,
+                requestRevision: UInt64? = nil) {
+        self.requestRevision = requestRevision
         self.requestKey = requestKey
         self.answer = answer
         self.intentID = intentID
@@ -255,10 +258,12 @@ public enum RelayEventBody: Equatable, Codable, Sendable {
 public struct RelayEvent: Equatable, Codable, Sendable {
     public let sequence: UInt64
     public let body: RelayEventBody
+    public let conversation: RelayConversationMetadata?
 
-    public init(sequence: UInt64, body: RelayEventBody) {
+    public init(sequence: UInt64, body: RelayEventBody, conversation: RelayConversationMetadata? = nil) {
         self.sequence = sequence
         self.body = body
+        self.conversation = conversation
     }
 
     public func hasSameSemanticContent(as other: RelayEvent) -> Bool {
@@ -284,6 +289,40 @@ public struct RelayEvent: Equatable, Codable, Sendable {
     }
 }
 
+/// Additive ordinary-stream metadata initializes or closes a conversation without
+/// borrowing a conversation sequence number or changing the sender's message JSON.
+public struct RelayConversationMetadata: Equatable, Codable, Sendable {
+    public let revision: UInt64
+    public let sessionHandle: ExactText?
+    public let eventID: ExactText?
+    public let availability: ConversationAvailability?
+    public let listeningSupport: JSONValue?
+    public let author: ConversationAuthor?
+    public let terminalReason: ExactText?
+    public let files: [ConversationFile]?
+
+    public init(revision: UInt64, sessionHandle: ExactText? = nil, eventID: ExactText? = nil,
+                availability: ConversationAvailability? = nil, listeningSupport: JSONValue? = nil,
+                author: ConversationAuthor? = nil, files: [ConversationFile]? = nil, terminalReason: ExactText? = nil) {
+        self.revision = revision
+        self.sessionHandle = sessionHandle
+        self.eventID = eventID
+        self.availability = availability
+        self.listeningSupport = listeningSupport
+        self.author = author
+        self.terminalReason = terminalReason
+        self.files = files
+    }
+
+    func canEnrich(_ old: RelayConversationMetadata) -> Bool {
+        revision == old.revision && (old.sessionHandle == nil || old.sessionHandle == sessionHandle) &&
+        (old.eventID == nil || old.eventID == eventID) && (old.availability == nil || old.availability == availability) &&
+        (old.listeningSupport == nil || old.listeningSupport == listeningSupport) &&
+        (old.author == nil || old.author == author) && (old.files == nil || old.files == files) &&
+        (old.terminalReason == nil || old.terminalReason == terminalReason)
+    }
+}
+
 public enum StoreRepairIssue: Equatable, Codable, Sendable {
     case eventGap(expected: UInt64, received: UInt64)
     case missingOriginContent(sequence: UInt64, requestKey: RequestKey)
@@ -298,6 +337,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let outbox: [Submission]
     public let remoteStates: [RequestKey: RemoteRequestState]
     public let fixtureSessions: [RequestKey: RequestSession]
+    public let conversationThreads: [RequestKey: ConversationThread]
     public let cursor: UInt64
     public let replayBarrier: UInt64?
     public let repairIssues: [StoreRepairIssue]
@@ -311,7 +351,9 @@ public struct AttentionStoreSnapshot: Sendable {
                 revision: UInt64,
                 cursor: UInt64,
                 replayBarrier: UInt64?,
-                repairIssues: [StoreRepairIssue]) {
+                repairIssues: [StoreRepairIssue],
+                conversationThreads: [RequestKey: ConversationThread] = [:]) {
+        self.conversationThreads = conversationThreads
         self.requests = requests
         self.drafts = drafts
         self.intents = intents

@@ -64,7 +64,7 @@ struct SampleMark: Identifiable, Equatable, Codable {
 }
 
 struct SampleChatLine: Identifiable, Equatable {
-    let id = UUID()
+    let id: String
     let text: String
     let fromPerson: Bool
     var attachmentNames: [String] = []
@@ -84,6 +84,10 @@ final class SampleResponse {
     }
 
     private var draft: RequestDraft? { viewModel.request(for: key)?.draft }
+    var isClosed: Bool {
+        guard let status = viewModel.request(for: key)?.lifecycleStatus else { return false }
+        return status != .open && status != .pending
+    }
     var choices: Set<String> {
         get {
             if message.kind == .multipleChoice {
@@ -170,9 +174,24 @@ final class SampleResponse {
     }
     var deferred = false
     var chatRead = false
-    var chatDraft = ""
-    var attachments: [String] = []
-    var chat: [SampleChatLine] = []
+    private var conversationRevision: UInt64 { viewModel.conversation(for: key)?.currentRevision ?? 1 }
+    var chatDraft: String {
+        get { viewModel.conversationDraft(for: key, revision: conversationRevision).text.rawValue }
+        set { viewModel.updateConversation(for: key, revision: conversationRevision, text: newValue) }
+    }
+    var attachments: [String] {
+        get { viewModel.conversationDraft(for: key, revision: conversationRevision).files.map { $0.name.rawValue } }
+        set {
+            viewModel.updateConversation(for: key, revision: conversationRevision, files: [])
+            for name in newValue { viewModel.addLocalAttachment(name, for: key, revision: conversationRevision) }
+        }
+    }
+    var chat: [SampleChatLine] {
+        (viewModel.conversation(for: key)?.turns ?? []).map {
+            SampleChatLine(id: $0.id.rawValue, text: $0.text.rawValue, fromPerson: $0.author == .person,
+                attachmentNames: $0.files.map { $0.name.rawValue })
+        }
+    }
 
     func addMark(_ mark: SampleMark) {
         var value = annotations
@@ -215,10 +234,7 @@ final class SampleResponse {
     }
 
     func sendLocalChat() {
-        guard !chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
-        chat.append(SampleChatLine(text: chatDraft, fromPerson: true, attachmentNames: attachments))
-        chatDraft = ""
-        attachments = []
+        viewModel.sendDiscussion(for: key, revision: conversationRevision)
     }
 }
 
@@ -255,12 +271,6 @@ final class SampleLibrary {
             self.fixture = fixture
             for message in messages where responses[message.id] == nil {
                 let response = SampleResponse(viewModel: fixture.viewModel, key: fixture.key(for: message), message: message)
-                if message.hasChat {
-                    response.chat = [
-                        SampleChatLine(text: "Could you explain the tradeoff?", fromPerson: true),
-                        SampleChatLine(text: "The first option favors speed; the second leaves more room to revise. This is an example conversation.", fromPerson: false)
-                    ]
-                }
                 if message.kind == .value,
                    fixture.viewModel.request(for: response.key)?.draft.inputs[ExactText("value")]?.text?.rawValue.isEmpty != false {
                     response.number = 30

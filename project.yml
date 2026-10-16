@@ -31,6 +31,31 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: NO
+  HarklightConversationUITestHost:
+    type: application
+    platform: iOS
+    dependencies:
+      - package: AttentionDomain
+        product: AttentionDomain
+      - package: HarklightNativeRelay
+        product: HarklightNativeRelay
+    sources:
+      - path: Sources
+        excludes:
+          - AttentionClientDuoPrototypeApp.swift
+      - path: UITestHost
+      - path: Resources
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.uitesthost
+        INFOPLIST_KEY_CFBundleDisplayName: Harklight Conversation UI Tests
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Configuration/HarklightInfo.plist
+        IPHONEOS_DEPLOYMENT_TARGET: "27.0"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGNING_ALLOWED: NO
   AttentionClientDuoPrototypeTests:
     type: bundle.unit-test
     platform: iOS
@@ -55,6 +80,8 @@ targets:
     platform: iOS
     sources:
       - path: UITests
+        excludes:
+          - ConversationSampleUITests.swift
     dependencies:
       - target: AttentionClientDuoPrototype
       - package: AttentionDomain
@@ -67,6 +94,25 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: NO
+        TEST_TARGET_NAME: AttentionClientDuoPrototype
+  HarklightConversationUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests/ConversationSampleUITests.swift
+    dependencies:
+      - target: HarklightConversationUITestHost
+      - package: AttentionDomain
+        product: AttentionDomain
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.conversation.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        IPHONEOS_DEPLOYMENT_TARGET: "27.0"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGNING_ALLOWED: NO
+        TEST_TARGET_NAME: HarklightConversationUITestHost
 schemes:
   AttentionClientDuoPrototype:
     build:
@@ -77,3 +123,4 @@ schemes:
       targets:
         - AttentionClientDuoPrototypeTests
         - AttentionClientDuoPrototypeUITests
+        - HarklightConversationUITests

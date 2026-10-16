@@ -138,6 +138,44 @@ final class NativeRelayLifecycle {
         await refreshFlights.afterCurrent()
     }
 
+    func submitDiscussion(_ binding: ConversationBinding, expected: ProfileContext,
+                          retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
+        guard context == expected, let configuration else { throw NativeRelayCoreError.inactive }
+        let pending = try configuration.store.conversationSnapshot(context: expected).threads[binding.request]?.drafts[binding.revision]
+        let operation: UUID?
+        switch pending?.disposition {
+        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _): operation = id
+        default: operation = nil
+        }
+        _ = await refreshFlights.coalesced()
+        guard context == expected, let core else { throw NativeRelayCoreError.inactive }
+        // Refresh may already have joined the uncertain operation. Do not turn
+        // that successful reconciliation into a new send or a missing-draft error.
+        if let operation, let accepted = try configuration.store.conversationSnapshot(context: expected)
+            .threads[binding.request]?.turns.first(where: { $0.operationID == operation }) {
+            return .accepted(turnID: accepted.id)
+        }
+        return try await core.submitDiscussion(binding, retainedFile: retainedFile)
+    }
+
+    func discardAbandonedUploads(for request: RequestKey, expected: ProfileContext) async throws {
+        guard context == expected, let core else { throw NativeRelayCoreError.inactive }
+        // Do not wait for the active send flight: departure fences its upload.
+        try await core.discardAbandonedUploads(for: request)
+        guard context == expected else { throw NativeRelayCoreError.inactive }
+    }
+
+    func fetchConversationFile(_ file: ConversationFile, to destination: URL, expected: ProfileContext) async throws {
+        guard context == expected else { throw NativeRelayCoreError.inactive }
+        _ = await refreshFlights.coalesced()
+        guard context == expected, let core, let transport,
+              let endpoint = try await core.conversationOriginURL() else {
+            throw ConversationError.uploadRequired(file.name)
+        }
+        try await transport.fetchConversationFile(file, to: destination, originURL: endpoint)
+        guard context == expected else { throw NativeRelayCoreError.inactive }
+    }
+
     private func performRefresh(generation: UUID) async -> NativeRelayRefreshResult {
         guard refreshGeneration == generation else { return .unavailable }
         // A past replay is not proof that this connection attempt worked.
@@ -166,6 +204,15 @@ final class NativeRelayLifecycle {
         _ = try await core.resyncAndDrainOutbox()
         guard refreshGeneration == generation, self.context == context else { throw NativeRelayCoreError.inactive }
         confirmedRelayContext = context
+        if let configuration {
+            let threads = try configuration.store.conversationSnapshot(context: context).threads
+            for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {
+                if case .acknowledged = $0.outcome { return false }; return true
+            }) {
+                // Cleanup retry never resends a discussion or changes a replay cursor.
+                try? await core.discardAbandonedUploads(for: request)
+            }
+        }
         // Notification setup is a separate fact from the replay/answer receipt
         // already committed above. Its refusal cannot undo that success.
         return await NativeRelayRefreshResult.afterConfirmedRelay {

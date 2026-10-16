@@ -1,5 +1,7 @@
 import AttentionDomain
+import HarklightNativeRelay
 import Foundation
+import CryptoKit
 import Observation
 import Security
 import UIKit
@@ -63,7 +65,11 @@ final class NativeAppLaunch {
         guidedJoin.didRemoveCurrentAccount = { [weak self] in
             guard let self else { return }
             self.activationGeneration = UUID()
-            if case let .live(previous) = self.state { previous.stopObserving() }
+            if case let .live(previous) = self.state {
+                previous.stopObserving()
+                do { try previous.removeAccountConversationFiles() }
+                catch { self.enrollmentMessage = "The account was removed, but its local conversation file copies could not be removed (\(error))." }
+            }
             self.state = .enrollmentRequired
             await NativeRelayLifecycle.shared.deactivate()
         }
@@ -191,7 +197,9 @@ final class NativeAppLaunch {
         await NativeRelayLifecycle.shared.deactivate()
         guard activationGeneration == generation else { return }
         let persistence = try FileAttentionStatePersistence.applicationSupport()
-        let store = try AttentionDomainStore(context: installation.context, persistence: persistence)
+        let fileStorage = try ConversationFileStorage(identity: installation.context.identity)
+        let store = try AttentionDomainStore(context: installation.context, persistence: persistence,
+                                             conversationFileReferences: fileStorage)
         let presentation = try LivePresentationStore(store: store, context: installation.context)
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
@@ -244,7 +252,7 @@ final class NativeAppLaunch {
     }
 
     func refreshLive() async {
-        guard case let .live(presentation) = state else { return }
+        guard case let .live(presentation) = state, !presentation.isLocalExample else { return }
         let result = await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
         guard case let .live(current) = state, current === presentation else { return }
         presentation.applyRefreshResult(result)
@@ -256,6 +264,10 @@ final class NativeAppLaunch {
 @MainActor
 @Observable
 final class LivePresentationStore {
+    private(set) var conversationThreads: [RequestKey: ConversationThread]
+    private(set) var conversationError: String?
+    private(set) var isSendingDiscussion = false
+    private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
     private(set) var selectedRequestKey: RequestKey?
     private(set) var observationError: String?
@@ -267,6 +279,8 @@ final class LivePresentationStore {
 
     @ObservationIgnored private let port: AttentionDomainPort
     private let permitsDelivery: Bool
+    @ObservationIgnored private let conversationFiles: ConversationFileStorage?
+    @ObservationIgnored private let profileContext: ProfileContext
     @ObservationIgnored private var observation: Task<Void, Never>?
 
     convenience init(store: AttentionDomainStore, context: ProfileContext) throws {
@@ -282,19 +296,231 @@ final class LivePresentationStore {
 
     private init(store: AttentionDomainStore, context: ProfileContext, permitsDelivery: Bool) throws {
         self.permitsDelivery = permitsDelivery
+        self.profileContext = context
         _ = try store.snapshot(context: context)
         let port = AttentionDomainPort(store: store)
         let snapshot = try port.observe(context: port.context)
         self.port = port
         self.presentation = snapshot
+        self.conversationThreads = try port.conversations(context: port.context).threads
+        self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
+    }
+
+    var isLocalExample: Bool { !permitsDelivery }
+
+    func hasAcceptedUpdate(for key: RequestKey) -> Bool {
+        conversationThreads[key]?.acceptedUpdates.isEmpty == false
+    }
+    func isRetracted(_ key: RequestKey) -> Bool { conversationThreads[key]?.isRetracted == true }
+
+    func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
+
+    func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
+        try? port.inspectAnswerDraft(context: port.context, request: key, revision: revision)
+    }
+
+    func removeAccountConversationFiles() throws {
+        try conversationFiles?.removeAccountFiles()
+    }
+
+    func prepareConversationPreview(_ file: ConversationFile) async throws -> URL {
+        guard permitsDelivery, let files = conversationFiles else { throw AttentionStoreError.fixtureOnlyOperation }
+        if let cached = try files.cachedPreview(for: file) { return cached }
+        let destination = try files.previewDestination(for: file)
+        try await NativeRelayLifecycle.shared.fetchConversationFile(file, to: destination, expected: profileContext)
+        try files.verify(destination, for: file)
+        return destination
+    }
+
+    func reportConversationImportError(_ error: String) {
+        conversationError = "The selected file could not be opened: " + error + ". Your saved draft is retained."
+    }
+
+    func conversationDraft(for key: RequestKey, revision: UInt64) -> ConversationDraft {
+        conversationThreads[key]?.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
+    }
+
+    func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
+                            files: [ConversationFile]? = nil) {
+        do {
+            if let text, files == nil {
+                guard var thread = conversationThreads[key] else { throw ConversationError.missingRequest }
+                let binding = ConversationBinding(request: key, revision: revision)
+                let updated = try port.updateConversationDraftText(ExactText(text), for: binding,
+                    context: port.context)
+                thread.drafts[revision] = updated
+                conversationThreads[key] = thread
+                conversationError = nil
+                return
+            }
+            var draft = conversationDraft(for: key, revision: revision)
+            if let text { draft.text = ExactText(text) }
+            if let files { draft.files = files }
+            draft.disposition = .saved
+            try port.saveConversationDraft(draft, context: port.context)
+            try refreshFromDurableStore()
+            conversationError = nil
+        } catch {
+            conversationError = "Your discussion edit could not be saved. Its earlier saved draft is retained."
+        }
+    }
+
+    /// The ordinary inbox calls this only for explicit selection/back navigation.
+    /// Rebuilding a detail or losing transport never calls it.
+    func navigateMessage(from previous: RequestKey?, to next: RequestKey?) {
+        guard previous != next else { return }
+        if let previous {
+            do {
+                let pending = try port.abandonConversationUploads(for: previous, context: port.context)
+                try refreshFromDurableStore()
+                if !pending.isEmpty {
+                    if permitsDelivery { Task { await retryUploadCleanup(for: previous) } }
+                    else {
+                        try port.markConversationCleanupUnknown(for: previous,
+                            reason: ExactText("Local example: no service is contacted"), context: port.context)
+                        try refreshFromDurableStore()
+                    }
+                }
+            } catch {
+                conversationError = "Upload cleanup could not be saved. Return to this message and retry; deletion is not confirmed."
+            }
+        }
+        selectRequest(next)
+    }
+
+    func hasPendingUploadCleanup(for key: RequestKey, revision: UInt64) -> Bool {
+        (conversationThreads[key]?.uploadCleanups ?? [:]).values.contains {
+            guard $0.binding.revision == revision else { return false }
+            if case .acknowledged = $0.outcome { return false }; return true
+        }
+    }
+
+    func hasAbandonedDiscussion(for key: RequestKey, revision: UInt64) -> Bool {
+        let draft = conversationDraft(for: key, revision: revision)
+        let operation: UUID
+        switch draft.disposition {
+        case let .submitting(id), let .outcomeUnknown(id): operation = id
+        default: return false
+        }
+        return conversationThreads[key]?.uploadGroups?[operation]?.cleanupID != nil
+    }
+
+    func refreshDiscussionHistory() async {
+        guard permitsDelivery else { return }
+        _ = await NativeRelayLifecycle.shared.refreshFromTrustedRelay()
+        try? refreshFromDurableStore()
+    }
+
+    func uploadNeedsReselection(_ file: ConversationFile, for key: RequestKey, revision: UInt64) -> Bool {
+        (conversationThreads[key]?.uploadGroups ?? [:]).values.contains {
+            $0.binding.revision == revision && $0.cleanupID != nil && $0.originals.contains(where: { $0.id == file.id })
+        }
+    }
+
+    func hasUnreadyUploadReference(for key: RequestKey, revision: UInt64) -> Bool {
+        conversationDraft(for: key, revision: revision).files.contains {
+            uploadNeedsReselection($0, for: key, revision: revision)
+        }
+    }
+
+    func uploadHistoryNeedsReconciliation(for key: RequestKey, revision: UInt64) -> Bool {
+        hasUnreadyUploadReference(for: key, revision: revision) &&
+        (conversationThreads[key]?.uploadCleanups ?? [:]).values.contains {
+            guard $0.binding.revision == revision, case let .acknowledged(result) = $0.outcome else { return false }
+            return result.state == .committed
+        }
+    }
+
+    func retryUploadCleanup(for key: RequestKey) async {
+        guard permitsDelivery, retryingCleanupRequests.insert(key).inserted else { return }
+        defer { retryingCleanupRequests.remove(key) }
+        do {
+            try await NativeRelayLifecycle.shared.discardAbandonedUploads(for: key, expected: profileContext)
+        } catch {
+            try? port.markConversationCleanupUnknown(for: key,
+                reason: ExactText("Cleanup not confirmed: \(error)"), context: port.context)
+        }
+        try? refreshFromDurableStore()
+    }
+
+    func sendDiscussion(for key: RequestKey, revision: UInt64) {
+        do {
+            let binding = ConversationBinding(request: key, revision: revision)
+            guard !hasPendingUploadCleanup(for: key, revision: revision),
+                  !hasUnreadyUploadReference(for: key, revision: revision) else {
+                conversationError = "Upload files are not ready to resend. Reconcile cleanup/history or remove and reselect them; your text draft is retained."
+                return
+            }
+            if permitsDelivery {
+                guard !isSendingDiscussion, let files = conversationFiles else { return }
+                isSendingDiscussion = true
+                conversationError = nil
+                Task { [weak self] in
+                    guard let self else { return }
+                    defer { isSendingDiscussion = false }
+                    do {
+                        let result = try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: profileContext) { file in
+                            try files.fileURL(for: file)
+                        }
+                        try refreshFromDurableStore()
+                        switch result {
+                        case .accepted: conversationError = nil
+                        case let .rejected(reason): conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
+                        case .unresolved: conversationError = "Submission unconfirmed. Retry uses the same saved operation."
+                        }
+                    } catch {
+                        try? refreshFromDurableStore()
+                        if (error as? ConversationError) == .emptyDraft {
+                            conversationError = "Add a message before sending these files. Your draft is retained."
+                        } else {
+                            conversationError = "Discussion could not be confirmed (\(error)). Your saved text and files are retained."
+                        }
+                    }
+                }
+                return
+            }
+            try port.appendFixtureDiscussion(binding, context: port.context)
+            try refreshFromDurableStore()
+            conversationError = nil
+        } catch {
+            conversationError = "Not delivered: the discussion could not be submitted. Your draft is retained."
+        }
+    }
+
+    func addLocalAttachment(_ name: String, for key: RequestKey, revision: UInt64) {
+        guard !permitsDelivery else { return }
+        let bytes = Data(("Fictional local attachment: " + name).utf8)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let file = ConversationFile(id: ExactText(UUID().uuidString.lowercased()), name: ExactText(name),
+            byteCount: UInt64(bytes.count), sha256: ExactText(digest), content: .inline(bytes))
+        var files = conversationDraft(for: key, revision: revision).files
+        files.append(file)
+        updateConversation(for: key, revision: revision, files: files)
+    }
+
+    func importConversationFiles(_ urls: [URL], for key: RequestKey, revision: UInt64) async {
+        guard permitsDelivery, let conversationFiles else { return }
+        var files = conversationDraft(for: key, revision: revision).files
+        for url in urls {
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let file = try await Task.detached { try conversationFiles.retain(url) }.value
+                files.append(file)
+                updateConversation(for: key, revision: revision, files: files)
+            } catch {
+                conversationError = "\(url.lastPathComponent): the file could not be retained. Your text and other selected files remain saved."
+            }
+        }
     }
 
     var inboxRows: [InboxRequestRow] {
         presentation.requests.map {
             InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
                 sender: $0.key.senderID.rawValue,
-                status: String(localized: LiveLifecycleTitle($0.lifecycleStatus).label),
+                status: (hasAcceptedUpdate(for: $0.key) ? "Updated · " : "") +
+                    (isRetracted($0.key) ? "Retracted" : String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)),
                 bodyText: $0.body?.rawValue ?? "")
         }
     }
@@ -531,6 +757,8 @@ final class LivePresentationStore {
     }
 
     private func adopt(_ snapshot: PresentationSnapshot) {
+        do { conversationThreads = try port.conversations(context: port.context).threads }
+        catch { observationError = "The local conversation could not be refreshed." }
         presentation = snapshot
         if let key = actionErrorRequest,
            let current = snapshot.requests.first(where: { $0.key == key }),

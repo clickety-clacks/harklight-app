@@ -135,6 +135,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let context: ProfileContext
     private let persistence: any AttentionStatePersistence
+    private let conversationFileReferences: (any ConversationFileReferenceStore)?
     private let maximumWireFrameBytes: Int
     private var state: PersistedAttentionState
     private var selectorBindings: [UUID: SelectorBinding] = [:]
@@ -145,9 +146,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public init(context: ProfileContext,
                 persistence: any AttentionStatePersistence,
-                maximumWireFrameBytes: Int = 65_536) throws {
+                maximumWireFrameBytes: Int = 65_536,
+                conversationFileReferences: (any ConversationFileReferenceStore)? = nil) throws {
         self.context = context
         self.persistence = persistence
+        self.conversationFileReferences = conversationFileReferences
         self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
         if let data = try persistence.load(identity: context.identity) {
             let loaded = try PropertyListDecoder().decode(PersistedAttentionState.self, from: data)
@@ -176,7 +179,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
                   validIntents, validIntentIndex, validFences, validOutbox else {
                 throw AttentionStoreError.persistence("The profile store contains cross-account or inconsistent request state.")
             }
-            self.state = loaded
+            guard (loaded.conversation?.threads.keys.allSatisfy { $0.accountScope == context.identity.personID } ?? true),
+                  (loaded.conversation?.events.values.allSatisfy { $0.binding.request.accountScope == context.identity.personID } ?? true) else {
+                throw AttentionStoreError.persistence("The conversation store contains a different account's requests.")
+            }
+            self.state = try Self.externalizingConversationFiles(in: loaded,
+                using: conversationFileReferences,
+                allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
         } else {
             self.state = PersistedAttentionState(profileIdentity: context.identity)
         }
@@ -244,10 +253,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(requestKey, in: context.identity)
-        guard let request = state.requests[requestKey] else { throw AttentionStoreError.requestMissing }
+        guard state.conversation?.threads[requestKey]?.currentContentRedacted != true else {
+            throw AttentionStoreError.unsupportedInterface
+        }
+        guard let request = effectiveRequest(for: requestKey) else { throw AttentionStoreError.requestMissing }
         let id = UUID()
         let submissionID = UUID()
-        selectorBindings[id] = SelectorBinding(requestKey: requestKey,
+        selectorBindings[id] = SelectorBinding(requestRevision: state.conversation?.threads[requestKey]?.currentRevision,
+                                               requestKey: requestKey,
                                                profileGeneration: context.generation,
                                                descriptorFingerprint: fingerprint(request.answerDescription?.canonicalJSON ?? ""),
                                                submissionFingerprint: fingerprint(submissionSignature(for: request.interface)),
@@ -308,14 +321,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let answer = try compose(typedSubmission, draft: draft, for: request)
         let descriptorFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
         let normalizedInputs = normalizedSubmission(typedSubmission, interface: request.interface)
-        let contentFingerprint = fingerprint([
+        var fingerprintParts = [
             request.key.accountScope.rawValue,
             request.key.senderID.rawValue,
             request.key.messageID.rawValue,
             descriptorFingerprint,
             normalizedInputs.canonicalJSON,
             answer.canonicalJSON
-        ].joined(separator: "\u{0}"))
+        ]
+        if let revision = state.conversation?.threads[request.key]?.currentRevision {
+            fingerprintParts += ["request_revision", String(revision)]
+        }
+        let contentFingerprint = fingerprint(fingerprintParts.joined(separator: "\u{0}"))
 
         if let existing = state.intents[intentID] {
             guard existing.requestKey == request.key,
@@ -339,7 +356,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
 
         let operationID = UUID()
-        let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID)
+        let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID,
+                                             requestRevision: state.conversation?.threads[request.key]?.currentRevision)
         let frame = Data((operation.jsonString + "\n").utf8)
         guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
         let submission = Submission(requestKey: request.key,
@@ -351,7 +369,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    opaqueDocumentID: selector.opaqueDocumentID,
                                    opaqueSubmissionID: selector.opaqueSubmissionID,
                                    descriptorFingerprint: descriptorFingerprint,
-                                   contentFingerprint: contentFingerprint)
+                                   contentFingerprint: contentFingerprint,
+                                   requestRevision: state.conversation?.threads[request.key]?.currentRevision)
 
         var next = state
         next.drafts[request.key] = draft
@@ -492,12 +511,26 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        let event = try Self.externalizingConversationFiles(in: event,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
 
         if event.sequence <= state.cursor {
             guard let previous = state.appliedEvents[event.sequence],
                   previous.hasSameSemanticContent(as: event) else {
                 try recordRepair(.conflictingEvent(sequence: event.sequence))
                 throw AttentionStoreError.eventConflict(event.sequence)
+            }
+            if let metadata = event.conversation {
+                if let previous = state.appliedEvents[event.sequence]?.conversation, !metadata.canEnrich(previous) {
+                    throw ConversationError.conflict
+                }
+                var next = state
+                try applyOrdinaryConversationMetadata(event, to: &next)
+                if state.appliedEvents[event.sequence]?.conversation != metadata {
+                    next.appliedEvents[event.sequence] = event
+                    try commit(next)
+                }
             }
             if case let .delivery(request, classification) = event.body,
                state.remoteStates[request.key]?.classification != classification {
@@ -539,10 +572,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
             } else {
                 next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
-                next.drafts[request.key] = RequestDraft(interface: request.interface)
+                let thread = next.conversation?.threads[request.key]
+                let currentPayload = thread?.currentQuestionPayload ?? request.originalPayload
+                next.drafts[request.key] = RequestDraft(interface: StoredRequest(key: request.key, originalPayload: currentPayload).interface)
             }
             let previous = next.remoteStates[request.key]
-            next.remoteStates[request.key] = RemoteRequestState(state: previous?.state,
+            next.remoteStates[request.key] = RemoteRequestState(state: previous?.state ?? next.conversation?.threads[request.key]?.terminal,
                                                                 authorizedOriginAnswer: previous?.authorizedOriginAnswer,
                                                                 classification: classification,
                                                                 eventSequence: event.sequence)
@@ -585,6 +620,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 next.outboxOrder.removeAll(where: { $0 == intentID })
             }
         }
+        try applyOrdinaryConversationMetadata(event, to: &next)
         next.appliedEvents[event.sequence] = event
         next.cursor = event.sequence
         next.repairIssues.removeAll { issue in
@@ -596,6 +632,86 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         try commit(next)
         return state.cursor
+    }
+
+    private func applyOrdinaryConversationMetadata(_ event: RelayEvent, to next: inout PersistedAttentionState) throws {
+        var conversation = next.conversation ?? ConversationState()
+        switch event.body {
+        case .delivery, .originReference:
+            guard let metadata = event.conversation else { return }
+            let request: StoredRequest
+            switch event.body {
+            case let .delivery(delivered, _): request = delivered
+            case let .originReference(key):
+                guard let retained = next.requests[key] else { throw AttentionStoreError.missingOriginContent(key) }
+                request = retained.acceptanceOrder == nil ? retained.assigningAcceptanceOrder(event.sequence) : retained
+                next.requests[key] = request
+            default: throw ConversationError.invalidBinding
+            }
+            guard metadata.revision == 1, let handle = metadata.sessionHandle, !handle.rawValue.isEmpty else {
+                throw ConversationError.invalidBinding
+            }
+            var thread: ConversationThread
+            if let prior = conversation.threads[request.key] {
+                guard prior.sessionHandle == handle,
+                      prior.revisions[1]?.semanticallyEquals(request.originalPayload) == true else {
+                    throw ConversationError.conflict
+                }
+                thread = prior
+            } else {
+                thread = ConversationThread(request: request.key, sessionHandle: handle,
+                    revision: 1, payload: request.originalPayload)
+                if let availability = metadata.availability { thread.availability = availability }
+                thread.listeningSupport = metadata.listeningSupport
+                thread.terminal = next.remoteStates[request.key]?.state
+            }
+            if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
+            if let id = metadata.eventID, !thread.turns.contains(where: { $0.id == id }) {
+                try validateConversationFiles(metadata.files ?? [])
+                thread.turns.append(ConversationTurn(id: id, binding: ConversationBinding(request: request.key, revision: 1),
+                    author: .origin, sessionHandle: handle, text: ExactText(""), files: metadata.files ?? [], kind: .revision))
+                thread.facts[id, default: ConversationTurnFacts()] = thread.facts[id] ?? ConversationTurnFacts()
+                thread.orderTurns()
+            }
+            conversation.threads[request.key] = thread
+        case let .terminal(key, terminal, _):
+            guard var thread = conversation.threads[key] else { return }
+            guard thread.terminal == nil || thread.terminal == terminal else { throw ConversationError.conflict }
+            thread.terminal = terminal
+            if let author = event.conversation?.author { thread.terminalAuthor = author }
+            if let eventID = event.conversation?.eventID {
+                guard thread.terminalTurn == nil || thread.terminalTurn == eventID else { throw ConversationError.conflict }
+                thread.terminalTurn = eventID
+                if let author = event.conversation?.author, !thread.turns.contains(where: { $0.id == eventID }) {
+                    thread.turns.append(ConversationTurn(id: eventID,
+                        binding: ConversationBinding(request: key, revision: event.conversation!.revision), author: author,
+                        sessionHandle: thread.sessionHandle, text: ExactText(""), files: event.conversation?.files ?? [], kind: .terminal))
+                    thread.facts[eventID, default: ConversationTurnFacts()] = thread.facts[eventID] ?? ConversationTurnFacts()
+                    thread.orderTurns()
+                }
+            }
+            if event.conversation?.terminalReason == ExactText("retracted") {
+                guard terminal == .cleared, event.conversation?.author == .origin,
+                      let id = event.conversation?.eventID, let revision = event.conversation?.revision else {
+                    throw ConversationError.invalidBinding
+                }
+                try thread.recordRetraction(turn: id, sequence: event.sequence, revision: revision)
+                if let saved = next.drafts[key] {
+                    var archived = thread.answerDrafts ?? [:]
+                    archived[thread.currentRevision] = saved
+                    thread.answerDrafts = archived
+                }
+            }
+            for revision in thread.drafts.keys {
+                guard var draft = thread.drafts[revision] else { continue }
+                if case .saved = draft.disposition {
+                    draft.disposition = .rejected(ExactText("Not delivered: request closed"))
+                    thread.drafts[revision] = draft
+                }
+            }
+            conversation.threads[key] = thread
+        }
+        next.conversation = conversation
     }
 
     public func applyRelayEvent(_ event: RelayEvent,
@@ -721,7 +837,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        let publishedRequests = state.replayPublishedRequests ?? state.requests
+        let publishedRequests = (state.replayPublishedRequests ?? state.requests).mapValues { original in
+            effectiveRequest(for: original.key) ?? original
+        }
         let visibleKeys = Set(publishedRequests.keys)
         let visibleDrafts = state.drafts.filter { visibleKeys.contains($0.key) }
         let visibleSessions = state.fixtureSessions.filter { visibleKeys.contains($0.key) }
@@ -735,7 +853,407 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       revision: state.revision,
                                       cursor: state.cursor,
                                       replayBarrier: state.replayBarrier,
-                                      repairIssues: state.repairIssues)
+                                      repairIssues: state.repairIssues,
+                                      conversationThreads: state.conversation?.threads ?? [:])
+    }
+
+    public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let conversation = state.conversation ?? ConversationState()
+        return ConversationSnapshot(cursor: conversation.cursor, threads: conversation.threads)
+    }
+
+    /// The conversation cursor commits in the same account transaction as its fact.
+    /// Neither it nor its ACK can advance ordinary delivery/lifecycle replay.
+    @discardableResult
+    public func applyConversation(_ event: ConversationEvent, context suppliedContext: ProfileContext) throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let event = try Self.externalizingConversationFiles(in: event,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        try validate(event.binding.request, in: context.identity)
+        switch event.fact {
+        case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn): try validateConversationFiles(turn.files)
+        default: break
+        }
+        var next = state
+        var conversation = next.conversation ?? ConversationState()
+        try conversation.apply(event)
+        if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
+        let key = event.binding.request
+        if let previous = state.conversation?.threads[key],
+           let current = conversation.threads[key], current.currentRevision != previous.currentRevision {
+            var archived = previous.answerDrafts ?? [:]
+            if let draft = state.drafts[key] { archived[previous.currentRevision] = draft }
+            conversation.threads[key]?.answerDrafts = archived
+            if next.requests[key] != nil {
+                let fresh = RequestDraft(interface: StoredRequest(key: key, originalPayload: current.currentQuestionPayload).interface)
+                next.drafts[key] = fresh
+                if var fixture = next.fixtureSessions[key], case .open = fixture.lifecycle {
+                    fixture.draft = fresh
+                    next.fixtureSessions[key] = fixture
+                }
+            }
+            if current.terminal == nil, let id = next.intentByRequest[key], var intent = next.intents[id] {
+                if case .accepted = intent.disposition { throw ConversationError.conflict }
+                // An authoritative newer open question proves an earlier final answer did not close it.
+                intent.disposition = .lost
+                next.intents[id] = intent
+                next.intentByRequest.removeValue(forKey: key)
+                next.outboxOrder.removeAll { $0 == id }
+            }
+        }
+        if case let .terminal(_, _, terminal) = event.fact, next.requests[key] != nil {
+            let previous = next.remoteStates[key] ?? RemoteRequestState()
+            guard previous.state == nil || previous.state == terminal else { throw ConversationError.conflict }
+            next.remoteStates[key] = RemoteRequestState(state: terminal,
+                authorizedOriginAnswer: previous.authorizedOriginAnswer, classification: previous.classification,
+                eventSequence: previous.eventSequence)
+            next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
+        }
+        if case let .retraction(_, sequence) = event.fact, next.requests[key] != nil {
+            // This projection references the one ordinary terminal. It closes
+            // action locally without advancing or fabricating its ordinary cursor.
+            let previous = next.remoteStates[key] ?? RemoteRequestState()
+            guard previous.state == nil || previous.state == .cleared else { throw ConversationError.conflict }
+            next.remoteStates[key] = RemoteRequestState(state: .cleared,
+                authorizedOriginAnswer: previous.authorizedOriginAnswer, classification: previous.classification,
+                eventSequence: sequence)
+            if let saved = next.drafts[key], let revision = conversation.threads[key]?.currentRevision {
+                var archived = conversation.threads[key]?.answerDrafts ?? [:]
+                archived[revision] = saved
+                conversation.threads[key]?.answerDrafts = archived
+            }
+            if let id = next.intentByRequest[key], var intent = next.intents[id] {
+                if case .accepted = intent.disposition {} else {
+                    intent.disposition = .terminal(state: .cleared, sequence: sequence,
+                        authorizedAnswer: previous.authorizedOriginAnswer)
+                    next.intents[id] = intent
+                }
+            }
+            next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
+        }
+        next.conversation = conversation
+        try commit(next)
+        return conversation.cursor
+    }
+
+    public func finishConversationReplay(at highWater: UInt64, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let actual = state.conversation?.cursor ?? 0
+        guard highWater == actual else {
+            throw AttentionStoreError.replayIncomplete(expected: highWater, actual: actual)
+        }
+    }
+
+    public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let draft = try Self.externalizingConversationFiles(in: draft,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        try validate(draft.binding.request, in: context.identity)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
+              thread.revisions[draft.binding.revision] != nil else { throw ConversationError.missingRequest }
+        guard thread.terminal == nil else { throw ConversationError.closed }
+        if let previous = thread.drafts[draft.binding.revision] {
+            switch previous.disposition {
+            case .submitting, .outcomeUnknown, .acceptedPendingReplay: throw ConversationError.pendingSubmission
+            default: break
+            }
+        }
+        guard case .saved = draft.disposition else { throw ConversationError.invalidBinding }
+        try validateConversationFiles(draft.files)
+        thread.drafts[draft.binding.revision] = draft
+        conversation.threads[draft.binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    /// Updates only the text of an existing draft. Its files were normalized
+    /// when they entered the store, so editing text must not walk them again.
+    @discardableResult
+    public func updateConversationDraftText(_ text: ExactText, for binding: ConversationBinding,
+                                           context suppliedContext: ProfileContext) throws -> ConversationDraft {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(binding.request, in: context.identity)
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
+        guard thread.terminal == nil else { throw ConversationError.closed }
+        var draft = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
+        guard draft.binding == binding else { throw ConversationError.invalidBinding }
+        switch draft.disposition {
+        case .submitting, .outcomeUnknown, .acceptedPendingReplay:
+            throw ConversationError.pendingSubmission
+        case .saved, .rejected:
+            break
+        }
+        draft.text = text
+        draft.disposition = .saved
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return draft
+    }
+
+    public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, let thread = conversation.threads[binding.request],
+              let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        guard thread.terminal == nil else { throw ConversationError.closed }
+        guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
+            throw ConversationError.emptyDraft
+        }
+        let turn = ConversationTurn(id: ExactText(UUID().uuidString.lowercased()), binding: binding,
+            author: .person, sessionHandle: thread.sessionHandle, text: draft.text, files: draft.files)
+        try conversation.apply(ConversationEvent(sequence: conversation.cursor + 1, binding: binding, fact: .turn(turn)))
+        conversation.threads[binding.request]?.drafts.removeValue(forKey: binding.revision)
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    /// A typed local upload example, with no delivery operation or transport.
+    public func stageFixtureConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
+        text: ExactText, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        let file = try Self.externalizingConversationFiles(in: file,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
+        try validateConversationFiles([file])
+        let operation = UUID()
+        let uploaded = ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
+            sha256: file.sha256, content: .uploaded(ExactText(UUID().uuidString.lowercased())))
+        thread.drafts[binding.revision] = ConversationDraft(binding: binding, text: text, files: [file],
+            disposition: .rejected(ExactText("Local example · upload not submitted")))
+        let group = ConversationUploadGroup(operationID: operation, binding: binding,
+            originals: [file], uploaded: [uploaded], cleanupID: nil)
+        thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    /// Freeze a durable operation before transport. Local examples may edit drafts,
+    /// but cannot enter this submission path or acquire a delivery operation.
+    public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws -> UUID {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        guard thread.terminal == nil else { throw ConversationError.closed }
+        guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
+            throw ConversationError.emptyDraft
+        }
+        guard !(thread.uploadCleanups ?? [:]).values.contains(where: {
+            guard $0.binding == binding else { return false }
+            if case .acknowledged = $0.outcome { return false }; return true
+        }) else { throw ConversationError.pendingSubmission }
+        let unready = Set((thread.uploadGroups ?? [:]).values.filter { $0.cleanupID != nil }
+            .flatMap { $0.originals.map(\.id) })
+        guard !draft.files.contains(where: { unready.contains($0.id) }) else { throw ConversationError.pendingSubmission }
+        let operation: UUID
+        switch draft.disposition {
+        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
+            guard thread.uploadGroups?[id]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
+            operation = id
+        case .saved, .rejected:
+            operation = UUID()
+            draft.disposition = .submitting(operation)
+        }
+        // Register planned upload-tier files before awaiting limits or disk/HTTP.
+        // Departure during that preparation must fence this original operation too.
+        let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
+        let uploads = zip(draft.files, tiers).filter { $0.1 == .upload }.map { $0.0 }
+        if !uploads.isEmpty, thread.uploadGroups?[operation] == nil {
+            let group = ConversationUploadGroup(operationID: operation, binding: binding,
+                originals: uploads, uploaded: [], cleanupID: nil)
+            thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
+        }
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return operation
+    }
+
+    /// Called before starting an upload, not after its response: navigation may
+    /// happen while the transfer is suspended or its result is unknown.
+    public func registerConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
+        operation: UUID, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        switch draft.disposition {
+        case let .submitting(id), let .outcomeUnknown(id):
+            guard id == operation else { throw ConversationError.conflict }
+        default: throw ConversationError.pendingSubmission
+        }
+        guard draft.files.contains(file) else { throw ConversationError.fileMismatch }
+        var group = thread.uploadGroups?[operation] ?? ConversationUploadGroup(operationID: operation,
+            binding: binding, originals: [], uploaded: [], cleanupID: nil)
+        guard group.binding == binding, group.cleanupID == nil else { throw ConversationError.pendingSubmission }
+        if !group.originals.contains(file) { group.originals.append(file) }
+        thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func recordConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
+        operation: UUID, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var group = thread.uploadGroups?[operation], group.binding == binding,
+              let original = group.originals.first(where: { $0.id == file.id }),
+              original.name == file.name, original.byteCount == file.byteCount,
+              original.sha256 == file.sha256, case .uploaded = file.content else { throw ConversationError.fileMismatch }
+        if let prior = group.uploaded.first(where: { $0.id == file.id }), prior != file { throw ConversationError.conflict }
+        if !group.uploaded.contains(file) { group.uploaded.append(file) }
+        thread.uploadGroups?[operation] = group
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        // Retain the actual returned reference, but never promote an abandoned
+        // transfer to readiness or continue its submission.
+        guard group.cleanupID == nil else { throw ConversationError.pendingSubmission }
+    }
+
+    /// Explicit navigation only. Neither replay nor connection lifecycle calls
+    /// this mutation. Each revision gets one stable cleanup command across all
+    /// its uncommitted upload groups; retries preserve that command identity.
+    public func abandonConversationUploads(for request: RequestKey,
+        context suppliedContext: ProfileContext) throws -> [ConversationUploadCleanup] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[request] else { return [] }
+        let committed = Set(thread.turns.compactMap(\.operationID))
+        let groups = (thread.uploadGroups ?? [:]).values.filter { $0.cleanupID == nil && !committed.contains($0.operationID) }
+        for revision in Set(groups.map { $0.binding.revision }) {
+            let operations = groups.filter { $0.binding.revision == revision }.map(\.operationID)
+                .sorted { $0.uuidString < $1.uuidString }
+            let cleanup = ConversationUploadCleanup(id: UUID(), binding: ConversationBinding(request: request, revision: revision),
+                uploadOperations: operations, outcome: .pending)
+            thread.uploadCleanups = (thread.uploadCleanups ?? [:]).merging([cleanup.id: cleanup]) { _, new in new }
+            for operation in operations { thread.uploadGroups?[operation]?.cleanupID = cleanup.id }
+        }
+        conversation.threads[request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return (thread.uploadCleanups ?? [:]).values.filter {
+            if case .acknowledged = $0.outcome { return false }; return true
+        }
+    }
+
+    public func recordConversationCleanup(_ id: UUID, request: RequestKey,
+        outcome: ConversationUploadCleanup.Outcome, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[request],
+              var cleanup = thread.uploadCleanups?[id] else { throw ConversationError.missingRequest }
+        // A late failure must not undo an already acknowledged cleanup.
+        if case .acknowledged = cleanup.outcome { return }
+        cleanup.outcome = outcome
+        thread.uploadCleanups?[id] = cleanup
+        if case .acknowledged = outcome { thread.settleAbandonedDraft(revision: cleanup.binding.revision) }
+        conversation.threads[request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func markDiscussionOutcome(_ binding: ConversationBinding, operation: UUID,
+                                      rejection: ExactText?, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        switch draft.disposition {
+        case let .submitting(savedID) where savedID == operation,
+             let .outcomeUnknown(savedID) where savedID == operation: break
+        default: throw ConversationError.conflict
+        }
+        // Rejection and unknown outcomes retain text, selected files and addressed revision.
+        draft.disposition = rejection.map { .rejected($0) } ?? .outcomeUnknown(operation)
+        thread.drafts[binding.revision] = draft
+        thread.settleAbandonedDraft(revision: binding.revision)
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func markDiscussionAccepted(_ binding: ConversationBinding, operation: UUID, turn: ExactText,
+                                        context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay, !turn.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        switch draft.disposition {
+        case let .submitting(id), let .outcomeUnknown(id):
+            guard id == operation else { throw ConversationError.conflict }
+        case let .acceptedPendingReplay(id, priorTurn):
+            guard id == operation, priorTurn == turn else { throw ConversationError.conflict }
+        default: throw ConversationError.conflict
+        }
+        draft.disposition = .acceptedPendingReplay(operation: operation, turn: turn)
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    private func validateConversationFiles(_ files: [ConversationFile]) throws {
+        guard Set(files.map(\.id)).count == files.count else { throw ConversationError.fileMismatch }
+        for file in files {
+            guard !file.id.rawValue.isEmpty, !file.name.rawValue.isEmpty else { throw ConversationError.fileMismatch }
+            if case let .inline(bytes) = file.content {
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                guard UInt64(bytes.count) == file.byteCount, digest == file.sha256.rawValue else {
+                    throw ConversationError.fileMismatch
+                }
+            }
+        }
     }
 
     public func revisions(context suppliedContext: ProfileContext,
@@ -775,16 +1293,24 @@ public final class AttentionDomainStore: @unchecked Sendable {
               let binding = selectorBindings[id],
               binding.profileGeneration == context.generation,
               binding.requestKey == selector.request,
+              binding.requestRevision == state.conversation?.threads[selector.request]?.currentRevision,
               binding.opaqueSubmissionID == selector.opaqueSubmissionID else {
             throw AttentionStoreError.selectorExpired
         }
-        guard let request = state.requests[selector.request] else { throw AttentionStoreError.requestMissing }
+        guard let request = effectiveRequest(for: selector.request) else { throw AttentionStoreError.requestMissing }
         let currentFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
         guard currentFingerprint == binding.descriptorFingerprint,
               fingerprint(submissionSignature(for: request.interface)) == binding.submissionFingerprint else {
             throw AttentionStoreError.selectorExpired
         }
         return request
+    }
+
+    private func effectiveRequest(for key: RequestKey) -> StoredRequest? {
+        guard let original = state.requests[key] else { return nil }
+        guard let thread = state.conversation?.threads[key] else { return original }
+        let current = StoredRequest(key: key, originalPayload: thread.currentQuestionPayload)
+        return original.acceptanceOrder.map { current.assigningAcceptanceOrder($0) } ?? current
     }
 
     private func validate(_ suppliedContext: ProfileContext) throws {
@@ -801,6 +1327,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     private func commit(_ proposed: PersistedAttentionState) throws {
+        // File payloads are normalized when events and drafts enter the state,
+        // and loaded state is normalized during initialization. Rewalking every
+        // retained conversation value here makes an unrelated text edit grow
+        // with conversation history.
         var next = proposed
         next.revision = state.revision &+ 1
         do {
@@ -815,12 +1345,116 @@ public final class AttentionDomainStore: @unchecked Sendable {
         } catch {
             if let bytes = try? persistence.load(identity: context.identity),
                let recovered = try? PropertyListDecoder().decode(PersistedAttentionState.self, from: bytes),
-               recovered.profileIdentity == context.identity {
-                state = recovered
+               recovered.profileIdentity == context.identity,
+               let normalized = try? Self.externalizingConversationFiles(in: recovered,
+                    using: conversationFileReferences,
+                    allowInlinePersistence: persistence is MemoryAttentionStatePersistence) {
+                // A failed write may leave the prior on-disk plist in its legacy
+                // inline form. Keep the in-memory invariant used by text-only
+                // edits when recovering that older durable snapshot. This scan
+                // runs only after a failed commit, never on the normal edit path.
+                state = normalized
             }
             if let storeError = error as? AttentionStoreError { throw storeError }
             throw AttentionStoreError.persistence(error.localizedDescription)
         }
+    }
+
+    private static func externalizingConversationFiles(in file: ConversationFile,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationFile {
+        guard case .inline = file.content else { return file }
+        guard let references else {
+            guard allowInlinePersistence else {
+                throw AttentionStoreError.persistence("Account-owned conversation file storage is required for durable inline content.")
+            }
+            return file
+        }
+        let stored = try references.retainInlineContent(of: file)
+        guard stored.id == file.id, stored.name == file.name, stored.byteCount == file.byteCount,
+              stored.sha256 == file.sha256, case .localFile = stored.content else {
+            throw ConversationError.fileMismatch
+        }
+        return stored
+    }
+
+    private static func externalizingConversationFiles(in turn: ConversationTurn,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationTurn {
+        ConversationTurn(id: turn.id, binding: turn.binding, author: turn.author,
+            sessionHandle: turn.sessionHandle, text: turn.text, inReplyTo: turn.inReplyTo,
+            operationID: turn.operationID,
+            files: try turn.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
+            contentRedacted: turn.contentRedacted, kind: turn.kind, resultStatus: turn.resultStatus)
+    }
+
+    private static func externalizingConversationFiles(in draft: ConversationDraft,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationDraft {
+        ConversationDraft(binding: draft.binding, text: draft.text,
+            files: try draft.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
+            disposition: draft.disposition)
+    }
+
+    private static func externalizingConversationFiles(in event: ConversationEvent,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationEvent {
+        let fact: ConversationEvent.Fact
+        switch event.fact {
+        case let .turn(turn):
+            fact = .turn(try externalizingConversationFiles(in: turn, using: references, allowInlinePersistence: allowInlinePersistence))
+        case let .revision(turn, payload):
+            fact = .revision(try externalizingConversationFiles(in: turn, using: references, allowInlinePersistence: allowInlinePersistence), payload: payload)
+        case let .redactedRevision(turn):
+            fact = .redactedRevision(try externalizingConversationFiles(in: turn, using: references, allowInlinePersistence: allowInlinePersistence))
+        default: fact = event.fact
+        }
+        return ConversationEvent(sequence: event.sequence, binding: event.binding, fact: fact)
+    }
+
+    private static func externalizingConversationFiles(in event: RelayEvent,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> RelayEvent {
+        let metadata = try event.conversation.map { old in
+            RelayConversationMetadata(revision: old.revision, sessionHandle: old.sessionHandle,
+                eventID: old.eventID, availability: old.availability, listeningSupport: old.listeningSupport,
+                author: old.author,
+                files: try old.files.map { files in
+                    try files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+                },
+                terminalReason: old.terminalReason)
+        }
+        return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata)
+    }
+
+    private static func externalizingConversationFiles(in thread: ConversationThread,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationThread {
+        var next = thread
+        next.turns = try thread.turns.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+        next.drafts = try thread.drafts.mapValues { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+        if let groups = thread.uploadGroups {
+            next.uploadGroups = try groups.mapValues { group in
+                var copy = group
+                copy.originals = try group.originals.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+                copy.uploaded = try group.uploaded.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+                return copy
+            }
+        }
+        return next
+    }
+
+    private static func externalizingConversationFiles(in state: PersistedAttentionState,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> PersistedAttentionState {
+        var next = state
+        next.appliedEvents = try state.appliedEvents.mapValues {
+            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+        }
+        if let oldConversation = state.conversation {
+            var conversation = oldConversation
+            conversation.events = try oldConversation.events.mapValues {
+                try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+            }
+            conversation.threads = try oldConversation.threads.mapValues {
+                try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+            }
+            next.conversation = conversation
+        }
+        return next
     }
 
     private func recordRepair(_ issue: StoreRepairIssue) throws {
@@ -989,15 +1623,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
     }
 
-    private func relayAnswerOperation(request: StoredRequest, answer: JSONValue, operationID: UUID) -> JSONValue {
-        .object([
+    private func relayAnswerOperation(request: StoredRequest, answer: JSONValue, operationID: UUID, requestRevision: UInt64?) -> JSONValue {
+        var members = [
             JSONMember("v", .number(JSONNumber(lexeme: "1"))),
             JSONMember("type", .string(ExactText("answer"))),
             JSONMember("op_id", .string(ExactText(operationID.uuidString.lowercased()))),
             JSONMember("sender_id", .string(request.key.senderID)),
             JSONMember("message_id", .string(request.key.messageID)),
             JSONMember("answer", answer)
-        ])
+        ]
+        if let requestRevision { members.append(JSONMember("request_revision", .number(JSONNumber(lexeme: String(requestRevision))))) }
+        return .object(members)
     }
 
     private func fingerprint(_ value: String) -> String {
@@ -1043,6 +1679,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
 }
 
 private struct SelectorBinding {
+    let requestRevision: UInt64?
     let requestKey: RequestKey
     let profileGeneration: UUID
     let descriptorFingerprint: String
@@ -1072,6 +1709,8 @@ private struct PersistedAttentionState: Codable {
     var replayPublishedStates: [RequestKey: RemoteRequestState]?
     var replayPublishedIntents: [UUID: Submission]?
     var repairIssues: [StoreRepairIssue] = []
+    // Optional keeps existing schema-2 account files readable without resetting their data.
+    var conversation: ConversationState?
 
     init(profileIdentity: ProfileIdentity) {
         self.schemaVersion = Self.currentSchemaVersion

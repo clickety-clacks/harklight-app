@@ -25,11 +25,12 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// A keychain-backed installation certificate and an enrollment-approved relay
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
-public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
+public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
+    private let profileContext: ProfileContext
 
     public init(profile: ProfileContext,
                 relayURL: URL,
@@ -57,6 +58,7 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
             throw InstallationTransportError.wrongDeviceIdentity
         }
         authenticatedIdentity = profile.identity
+        profileContext = profile
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root)
         self.delegate = delegate
         let configuration = URLSessionConfiguration.ephemeral
@@ -69,8 +71,16 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
         task.resume()
     }
 
-    public func resync(_ request: Data,
-                       consume: @Sendable (Data) async throws -> Void) async throws {
+    public func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        try await replay(request, ref: "native-sync", event: "delivery", end: "resynced", consume: consume)
+    }
+
+    public func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        try await replay(request, ref: "native-conversation-sync", event: "conversation", end: "conversation_resynced", consume: consume)
+    }
+
+    private func replay(_ request: Data, ref: String, event: String, end: String,
+                        consume: @Sendable (Data) async throws -> Void) async throws {
         try await send(request)
         var accepted = false
         while true {
@@ -78,24 +88,35 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
             let value = try JSONValue.parse(frame)
             let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
             if kind == "error" { throw InstallationTransportError.serverRejected }
+            let ordinary = kind == "delivery" || kind == "lifecycle"
+            let conversation = kind == "conversation"
             if !accepted {
-                // A subscribed socket may have a push from before this
-                // request. The explicit resync replays it durably below.
-                if kind == "delivery" || kind == "lifecycle" { continue }
-                guard kind == "ok",
-                      value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-sync" else {
+                // Incidental known projection frames remain in their own durable
+                // replay journal. This read cannot advance or ACK either cursor.
+                if ordinary || conversation { continue }
+                guard kind == "ok", value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref else {
                     throw InstallationTransportError.unexpectedServerFrame
                 }
                 accepted = true
+            } else if (event == "conversation" && ordinary) || (event == "delivery" && conversation) {
+                continue
             }
             try await consume(frame)
-            if kind == "resynced" { return }
+            if kind == end { return }
         }
     }
 
+    public func acknowledgeConversation(_ request: Data) async throws {
+        try await acknowledgeProjection(request, field: "conversation_seq", ref: "native-conversation-ack")
+    }
+
     public func acknowledge(_ request: Data) async throws {
+        try await acknowledgeProjection(request, field: "seq", ref: "native-ack")
+    }
+
+    private func acknowledgeProjection(_ request: Data, field: String, ref: String) async throws {
         let requestValue = try JSONValue.parse(request)
-        guard case let .number(expectedNumber)? = requestValue.uniqueValue(named: "seq"),
+        guard case let .number(expectedNumber)? = requestValue.uniqueValue(named: field),
               let expected = UInt64(expectedNumber.lexeme) else {
             throw InstallationTransportError.unexpectedServerFrame
         }
@@ -103,19 +124,19 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
         while true {
             let value = try JSONValue.parse(try await receive())
             switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
-            case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-ack":
-                guard case let .number(actualNumber)? = value.uniqueValue(named: "seq"),
+            case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref:
+                guard case let .number(actualNumber)? = value.uniqueValue(named: field),
                       UInt64(actualNumber.lexeme) == expected else {
                     throw InstallationTransportError.unexpectedServerFrame
                 }
                 return
             case "error":
-                if value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-ack",
+                if value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref,
                    value.uniqueValue(named: "reason")?.stringValue?.rawValue == "invalid_cursor" {
                     throw InstallationTransportError.acknowledgementBehind
                 }
                 throw InstallationTransportError.serverRejected
-            case "delivery", "lifecycle":
+            case "delivery", "lifecycle", "conversation":
                 // These remain on the server's replay journal until a future
                 // durable resync. They are never ACKed by this incidental read.
                 continue
@@ -150,12 +171,34 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
                 return .accepted(operationID: operationID, terminalSequence: sequence)
             case "error":
                 return .unresolved
-            case "delivery", "lifecycle":
+            case "delivery", "lifecycle", "conversation":
                 continue
             default:
                 close()
                 return .unresolved
             }
+        }
+    }
+
+    /// A send response is not a replay ACK and cannot advance either cursor.
+    public func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
+        do {
+            let outgoing = try JSONValue.parse(frame)
+            guard outgoing.uniqueValue(named: "type") == .string(ExactText("discussion")),
+                  outgoing.uniqueValue(named: "op_id")?.stringValue?.rawValue == operationID.uuidString.lowercased() else {
+                return .rejected(reason: ExactText("The saved discussion operation does not match its frame"))
+            }
+            try await send(frame)
+            let wire = try ConversationWire(profile: profileContext)
+            while true {
+                let incoming = try await receive()
+                let kind = try JSONValue.parse(incoming).uniqueValue(named: "type")?.stringValue?.rawValue
+                if kind == "delivery" || kind == "lifecycle" || kind == "conversation" { continue }
+                return try wire.decodeDiscussionResult(incoming)
+            }
+        } catch {
+            close()
+            return .unresolved
         }
     }
 
@@ -181,7 +224,7 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
                         throw InstallationTransportError.unexpectedServerFrame
                     }
                     return
-                case "delivery", "lifecycle":
+                case "delivery", "lifecycle", "conversation":
                     continue
                 case "error":
                     throw InstallationTransportError.serverRejected
@@ -199,6 +242,53 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
     public func close() {
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
+    }
+
+    public func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
+                                           originURL: URL) async throws -> ConversationUploadDiscardResult {
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let (data, response) = try await urlSession.data(for: wire.discardRequest(cleanup))
+        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+        return try wire.decodeDiscard(data, status: http.statusCode)
+    }
+
+    public func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let (data, response) = try await urlSession.data(for: wire.limitsRequest())
+        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+        return try wire.decodeLimits(data, status: http.statusCode)
+    }
+
+    /// Reuses the enrolled certificate/CA session and streams the retained file;
+    /// no discussion is submitted by a successful upload.
+    public func uploadConversationFile(_ file: ConversationFile, from source: URL,
+                                       binding: ConversationBinding, operationID: UUID,
+                                       limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
+        if let cap = limits.uploadCap, file.byteCount > cap {
+            throw ConversationError.uploadCapExceeded(file: file.name, cap: cap)
+        }
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        try wire.verify(source, file: file)
+        let request = try wire.uploadRequest(file: file, binding: binding, operationID: operationID)
+        let (data, response) = try await urlSession.upload(for: request, fromFile: source)
+        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+        return try wire.decodeUpload(data, status: http.statusCode, original: file)
+    }
+
+    public func fetchConversationFile(_ file: ConversationFile, to destination: URL, originURL: URL) async throws {
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let (temporary, response) = try await urlSession.download(for: wire.fetchRequest(file))
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+        guard http.statusCode == 200 else {
+            throw ConversationFileTransportError.server(status: http.statusCode, reason: ExactText("File could not be fetched"))
+        }
+        guard http.value(forHTTPHeaderField: "Content-Length") == String(file.byteCount),
+              http.value(forHTTPHeaderField: "X-Harklight-Sha256") == file.sha256.rawValue else {
+            throw ConversationError.fileMismatch
+        }
+        try wire.verify(temporary, file: file)
+        try FileManager.default.copyItem(at: temporary, to: destination)
     }
 
     private func send(_ frame: Data) async throws {

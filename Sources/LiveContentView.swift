@@ -17,7 +17,8 @@ struct LiveContentView: View {
                 }
             },
             warnings: [store.observationError, store.notificationWarning,
-                       store.connectionWarning, store.pushRegistrationWarning].compactMap { $0 })
+                       store.connectionWarning, store.pushRegistrationWarning].compactMap { $0 },
+            conversationStore: store)
     }
 }
 
@@ -48,8 +49,17 @@ struct LiveRequestDetail: View {
                 MessageHeading(sender: request.key.senderID.rawValue,
                                initials: String(request.key.senderID.rawValue.prefix(2)).uppercased(),
                                title: request.title?.rawValue ?? request.key.senderID.rawValue)
-                Text(LiveLifecycleTitle(request.lifecycleStatus).label)
+                if let thread = store.conversation(for: request.key), thread.currentRevision > 1 {
+                    Text(store.hasAcceptedUpdate(for: request.key) ? "Updated · version \(thread.currentRevision)" : "Question version \(thread.currentRevision)")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("request-update-fact")
+                }
+                Text(store.isRetracted(request.key) ? "Retracted" : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                     .font(.caption).foregroundStyle(.secondary)
+                if store.isRetracted(request.key) {
+                    Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if deferred {
                     HStack {
                         Label("Not now", systemImage: "clock")
@@ -117,15 +127,50 @@ struct LiveRequestDetail: View {
             ToolbarItemGroup(placement: .bottomBar) {
                 Button("Later", systemImage: "clock") { deferred.toggle() }.labelStyle(.iconOnly)
                 Spacer()
-                Button("Chat", systemImage: "bubble.left.and.bubble.right") { chatPresented = true }
+                Button("Chat", systemImage: "bubble.left.and.bubble.right") {
+                    if context.canInlineChat { context.openChat?() } else { chatPresented = true }
+                }
                     .labelStyle(.iconOnly)
                     .popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                        ContentUnavailableView("Conversation is not available yet",
-                            systemImage: "bubble.left.and.bubble.right",
-                            description: Text("Your request and answer continue to use their existing delivery path."))
-                            .frame(idealWidth: 360, idealHeight: 300)
-                            .presentationCompactAdaptation(.sheet)
+                        NavigationStack {
+                            ConversationPanel(store: store, key: request.key,
+                                sender: request.key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                                .toolbar {
+                                    ToolbarItem(placement: .cancellationAction) {
+                                        Button("Close", systemImage: "xmark") { chatPresented = false }.labelStyle(.iconOnly)
+                                    }
+                                }
+                        }
+                        .frame(idealWidth: 380, idealHeight: 560)
+                        .presentationCompactAdaptation(.sheet)
+                        .presentationDetents([.medium, .large])
                     }
+            }
+        }
+        .onChange(of: context.inlineChat) { _, inline in
+            if inline { chatPresented = false }
+        }
+    }
+}
+
+@MainActor
+struct HistoricalAnswerDraftView: View {
+    let request: PresentedRequest
+    let store: LivePresentationStore
+    var retracted = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(request.title?.rawValue ?? "Earlier question").font(.headline)
+            if let body = request.body { Text(body.rawValue).font(.caption) }
+            Text(retracted ? "Saved answer · request retracted. Its original wording and choices are retained." : "Not delivered · this selection belongs to the earlier question")
+                .font(.caption).foregroundStyle(.secondary)
+            switch request.projection {
+            case let .sender(sender):
+                LiveProjectedSceneView(request: request, sender: sender, node: sender.scene, store: store, readOnly: true)
+            case let .compatibility(actions):
+                LiveCompatibilityActions(request: request, actions: actions, store: store, readOnly: true)
+            case .unsupported:
+                Text("This saved answer format cannot be displayed.").font(.caption)
             }
         }
     }
@@ -202,7 +247,9 @@ private struct LiveProjectedInputView: View {
     let store: LivePresentationStore
     let readOnly: Bool
 
-    private var draft: InputDraft? { store.request(for: request.key)?.draft.inputs[input.id] }
+    private var draft: InputDraft? {
+        readOnly ? request.draft.inputs[input.id] : store.request(for: request.key)?.draft.inputs[input.id]
+    }
 
     var body: some View {
         switch input.kind {
@@ -216,7 +263,7 @@ private struct LiveProjectedInputView: View {
                    let action = actions.first(where: { $0.id == selected }),
                    action.kind == .text {
                     TextEditor(text: Binding(
-                        get: { store.request(for: request.key)?.draft.inputs[input.id]?.textByActionID[selected]?.rawValue ?? "" },
+                        get: { draft?.textByActionID[selected]?.rawValue ?? "" },
                         set: { store.updateText($0, input: input.id, action: selected, for: request.key) }
                     ))
                     .frame(minHeight: 120)
@@ -228,7 +275,7 @@ private struct LiveProjectedInputView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(input.label.rawValue).font(.headline)
                 TextEditor(text: Binding(
-                    get: { store.request(for: request.key)?.draft.inputs[input.id]?.text?.rawValue ?? "" },
+                    get: { draft?.text?.rawValue ?? "" },
                     set: { store.updateText($0, input: input.id, action: nil, for: request.key) }
                 ))
                 .frame(minHeight: 120)
@@ -280,7 +327,7 @@ private struct LiveProjectedInputView: View {
     private func pointBinding(horizontal: Bool) -> Binding<Int> {
         Binding(
             get: {
-                let point = store.request(for: request.key)?.draft.inputs[input.id]?.effectivePoint
+                let point = draft?.effectivePoint
                 return horizontal ? (point?.x ?? 500) : (point?.y ?? 500)
             },
             set: { value in
@@ -302,7 +349,7 @@ private struct LiveCompatibilityActions: View {
     let readOnly: Bool
 
     private var selected: ExactText? {
-        store.request(for: request.key)?.draft.compatibility.selectedActionID
+        readOnly ? request.draft.compatibility.selectedActionID : store.request(for: request.key)?.draft.compatibility.selectedActionID
     }
 
     var body: some View {
@@ -322,7 +369,7 @@ private struct LiveCompatibilityActions: View {
                let action = actions.first(where: { $0.id == selected }),
                action.kind == .text {
                 TextEditor(text: Binding(
-                    get: { store.request(for: request.key)?.draft.compatibility.textByActionID[selected]?.rawValue ?? "" },
+                    get: { (readOnly ? request.draft.compatibility : store.request(for: request.key)?.draft.compatibility)?.textByActionID[selected]?.rawValue ?? "" },
                     set: { store.updateCompatibilityText($0, action: selected, for: request.key) }
                 ))
                 .frame(minHeight: 120)

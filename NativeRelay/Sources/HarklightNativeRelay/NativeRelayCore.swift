@@ -13,6 +13,23 @@ public protocol AuthenticatedInstallationSession: AnyObject, Sendable {
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult
 }
 
+public protocol AuthenticatedConversationSession: AuthenticatedInstallationSession {
+    func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws
+    func acknowledgeConversation(_ request: Data) async throws
+}
+
+public protocol AuthenticatedConversationFileSession: AuthenticatedConversationSession {
+    func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits
+    func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
+                                operationID: UUID, limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile
+    func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult
+}
+
+public protocol AuthenticatedConversationCleanupSession: AuthenticatedConversationFileSession {
+    func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
+                                    originURL: URL) async throws -> ConversationUploadDiscardResult
+}
+
 public enum OriginalOperationResult: Equatable, Sendable {
     case accepted(operationID: UUID, terminalSequence: UInt64)
     case unresolved
@@ -38,6 +55,145 @@ public actor NativeRelayCore {
     private var active = true
     private var busy = false
     private var activeReplay: ReplayProgress?
+    private var conversationReplay: ConversationReplayProgress?
+    private var inspectedConversationMetadata = false
+    private var discoveredOriginURL: URL?
+    private var activeCleanupRequests: Set<UUID> = []
+
+    public func conversationOriginURL() throws -> URL? {
+        try validate()
+        return discoveredOriginURL
+    }
+
+    /// Independent of the send/replay busy flag: departure can fence an upload
+    /// while it is awaiting HTTP. This method never submits a discussion.
+    public func discardAbandonedUploads(for request: RequestKey) async throws {
+        try validate()
+        let pending = (try store.conversationSnapshot(context: context).threads[request]?.uploadCleanups ?? [:]).values
+            .filter { if case .acknowledged = $0.outcome { return false }; return true }
+        for cleanup in pending {
+            // Foreground replay and explicit navigation may retry the same
+            // durable cleanup together. Keep one request in flight so a late
+            // duplicate cannot fence a newly reselected upload after success.
+            guard activeCleanupRequests.insert(cleanup.id).inserted else { continue }
+            defer { activeCleanupRequests.remove(cleanup.id) }
+            do {
+                guard let endpoint = discoveredOriginURL,
+                      let transport = session as? any AuthenticatedConversationCleanupSession else {
+                    throw NativeRelayCoreError.inactive
+                }
+                let result = try await transport.discardConversationUploads(cleanup, originURL: endpoint)
+                try validate()
+                try store.recordConversationCleanup(cleanup.id, request: request,
+                    outcome: .acknowledged(result), context: context)
+            } catch {
+                try store.recordConversationCleanup(cleanup.id, request: request,
+                    outcome: .unknown(ExactText(String(describing: error))), context: context)
+                throw error
+            }
+        }
+    }
+
+    private func validateUploadOperation(_ binding: ConversationBinding, operation: UUID) throws {
+        let thread = try store.conversationSnapshot(context: context).threads[binding.request]
+        guard thread?.uploadGroups?[operation]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
+    }
+
+    public func submitDiscussion(_ binding: ConversationBinding,
+        retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
+        guard !busy else { throw NativeRelayCoreError.inactive }
+        busy = true
+        defer { busy = false }
+        try validate()
+        guard let transport = session as? any AuthenticatedConversationFileSession,
+              let draft = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+            throw ConversationError.missingRequest
+        }
+        if case let .acceptedPendingReplay(_, turn) = draft.disposition {
+            try await replayConversationAndAcknowledge(using: transport)
+            return .accepted(turnID: turn)
+        }
+        guard !draft.text.rawValue.isEmpty else { throw ConversationError.emptyDraft }
+        let wasUncertain: Bool
+        switch draft.disposition {
+        case .submitting, .outcomeUnknown: wasUncertain = true
+        default: wasUncertain = false
+        }
+        let operation = try store.prepareDiscussion(binding, context: context)
+        guard let frozen = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+            throw ConversationError.missingRequest
+        }
+        let frame: Data
+        do {
+            var prepared: [ConversationFile] = []
+            var limits: ConversationFileLimits?
+            if !frozen.files.isEmpty {
+                guard let endpoint = discoveredOriginURL else {
+                    throw ConversationError.uploadRequired(frozen.files[0].name)
+                }
+                let published = try await transport.conversationFileLimits(originURL: endpoint)
+                try validate()
+                limits = published
+                let tiers = try published.tiers(for: frozen.files)
+                for (file, tier) in zip(frozen.files, tiers) {
+                    if case .uploaded = file.content { prepared.append(file); continue }
+                    if tier == .upload {
+                        try store.registerConversationUpload(file, binding: binding, operation: operation, context: context)
+                        let source = try await retainedFile(file)
+                        try validateUploadOperation(binding, operation: operation)
+                        let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
+                            operationID: operation, limits: published, originURL: endpoint)
+                        try validate()
+                        try store.recordConversationUpload(uploaded, binding: binding, operation: operation, context: context)
+                        prepared.append(uploaded)
+                    } else {
+                        let bytes: Data
+                        if case let .inline(inline) = file.content { bytes = inline }
+                        else {
+                            let source = try await retainedFile(file)
+                            bytes = try Data(contentsOf: source)
+                        }
+                        prepared.append(ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
+                            sha256: file.sha256, content: .inline(bytes)))
+                    }
+                }
+            }
+            frame = try ConversationWire(profile: context).discussion(frozen, operationID: operation,
+                preparedFiles: prepared, limits: limits)
+        } catch {
+            // No discussion frame has been sent by this attempt. A previous
+            // ambiguous attempt must still keep its exact operation frozen.
+            // Keep all original bytes/draft; unreferenced uploads do not submit a turn.
+            let names = frozen.files.map { $0.name.rawValue }.joined(separator: ", ")
+            try store.markDiscussionOutcome(binding, operation: operation,
+                rejection: wasUncertain ? nil : ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
+                context: context)
+            throw error
+        }
+        try validate()
+        try validateUploadOperation(binding, operation: operation)
+        let result = await transport.sendDiscussion(frame, operationID: operation)
+        try validate()
+        switch result {
+        case let .accepted(turn):
+            try store.markDiscussionAccepted(binding, operation: operation, turn: turn, context: context)
+            // The accepted turn is durable even if replay temporarily fails. A later
+            // refresh joins it; the send response cannot move a replay cursor.
+            try? await replayConversationAndAcknowledge(using: transport)
+        case let .rejected(reason):
+            try store.markDiscussionOutcome(binding, operation: operation, rejection: reason, context: context)
+        case .unresolved:
+            try store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+        }
+        return result
+    }
+
+    private struct ConversationReplayProgress {
+        var expected: UInt64
+        let durableCursor: UInt64
+        var accepted = false
+        var high: UInt64?
+    }
 
     private struct ReplayProgress {
         var expected: UInt64
@@ -73,8 +229,14 @@ public actor NativeRelayCore {
         busy = true
         defer { busy = false }
         try validate()
-        let before = try store.snapshot(context: context).cursor
+        let snapshot = try store.snapshot(context: context)
+        // An upgraded store can have ordinary delivery history predating the
+        // additive metadata. Replay enriches it without replacing drafts or cursor.
+        let enrich = session is any AuthenticatedConversationSession && !inspectedConversationMetadata &&
+            snapshot.conversationThreads.isEmpty && !snapshot.requests.isEmpty
+        let before = enrich ? 0 : snapshot.cursor
         var high = try await replayAndAcknowledge(since: before)
+        inspectedConversationMetadata = true
         let attempted = try await drainPending()
         if attempted > 0 {
             // The answer may have created a terminal event after the first
@@ -82,7 +244,59 @@ public actor NativeRelayCore {
             // an operation's receipt sequence cannot advance C's cursor.
             high = try await replayAndAcknowledge(since: store.snapshot(context: context).cursor)
         }
+        if try !store.conversationSnapshot(context: context).threads.isEmpty,
+           let conversationSession = session as? any AuthenticatedConversationSession {
+            try await replayConversationAndAcknowledge(using: conversationSession)
+        }
         return high
+    }
+
+    private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
+        let wire = try ConversationWire(profile: context)
+        var high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
+            using: transport, wire: wire)
+        do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
+        catch InstallationTransportError.acknowledgementBehind {
+            high = try await replayConversation(since: 0, using: transport, wire: wire)
+            try await transport.acknowledgeConversation(wire.acknowledge(high))
+        }
+    }
+
+    private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,
+                                    wire: ConversationWire) async throws -> UInt64 {
+        try validate()
+        conversationReplay = ConversationReplayProgress(expected: cursor,
+            durableCursor: try store.conversationSnapshot(context: context).cursor)
+        defer { conversationReplay = nil }
+        try await transport.openConversation(wire.open(since: cursor)) { frame in
+            try await self.consumeConversationReplay(frame)
+        }
+        try validate()
+        guard let high = conversationReplay?.high else { throw NativeRelayCoreError.invalidReplay }
+        return high
+    }
+
+    private func consumeConversationReplay(_ frame: Data) throws {
+        try validate()
+        guard var replay = conversationReplay, replay.high == nil else { throw NativeRelayCoreError.invalidReplay }
+        let wire = try ConversationWire(profile: context)
+        if !replay.accepted {
+            guard try wire.isOpenAccepted(frame) else { throw NativeRelayCoreError.invalidReplay }
+            discoveredOriginURL = try wire.originEndpoint(frame)
+            replay.accepted = true
+        } else if let high = try? wire.decodeResynced(frame) {
+            guard high >= replay.durableCursor, high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
+            try store.finishConversationReplay(at: high, context: context)
+            replay.high = high
+        } else {
+            let event = try wire.decodeEvent(frame)
+            guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            _ = try store.applyConversation(event, context: context)
+            replay.expected = event.sequence
+        }
+        conversationReplay = replay
     }
 
     private func replayAndAcknowledge(since cursor: UInt64) async throws -> UInt64 {

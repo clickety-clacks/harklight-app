@@ -122,6 +122,7 @@ struct HarklightInbox<RequestDetail: View>: View {
     let selectRequest: (RequestKey) -> Void
     @ViewBuilder let requestDetail: (RequestKey, InboxCardContext) -> RequestDetail
     var warnings: [String] = []
+    var conversationStore: LivePresentationStore? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: InboxSelection?
     @State private var visibility: NavigationSplitViewVisibility = .all
@@ -139,19 +140,43 @@ struct HarklightInbox<RequestDetail: View>: View {
         rows.first { $0.id == id }?.preview
     }
 
-    private func cardContext(for id: InboxSelection) -> InboxCardContext {
+    private func navigate(to next: InboxSelection?) {
+        let previous = selection
+        guard previous != next else { return }
+        let oldRequest: RequestKey? = if case let .request(key) = previous { key } else { nil }
+        let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
+        conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
+        let oldExample: RequestKey? = if case let .sample(id) = previous { samples.responses[id]?.key } else { nil }
+        let newExample: RequestKey? = if case let .sample(id) = next { samples.responses[id]?.key } else { nil }
+        samples.fixture?.viewModel.navigateMessage(from: oldExample, to: newExample)
+        selection = next
+        if let newRequest { selectRequest(newRequest) }
+        if case let .sample(id) = next { samples.select(id) }
+    }
+
+    // SwiftUI writes this binding for its native compact Back navigation.
+    // Our adaptive/programmatic changes write state directly, not this setter.
+    private var compactNavigation: Binding<NavigationSplitViewColumn> {
+        Binding(get: { compactColumn }, set: { column in
+            if compactColumn == .detail, column == .sidebar,
+               horizontalSizeClass == .compact { navigate(to: nil) }
+            compactColumn = column
+        })
+    }
+
+    private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
+                             canInlineChat: Bool = false, openChat: (() -> Void)? = nil) -> InboxCardContext {
         let ids = orderedIDs
         let index = ids.firstIndex(of: id) ?? 0
         return InboxCardContext(position: index + 1, total: ids.count,
             previous: index > 0 ? preview(for: ids[index - 1]) : nil,
-            next: index + 1 < ids.count ? preview(for: ids[index + 1]) : nil) { direction in
+            next: index + 1 < ids.count ? preview(for: ids[index + 1]) : nil,
+            inlineChat: inlineChat, canInlineChat: canInlineChat, openChat: openChat) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
                 guard let current = orderedIDs.firstIndex(of: id),
                       orderedIDs.indices.contains(current + direction) else { return }
                 let next = orderedIDs[current + direction]
-                selection = next
-                if case let .request(key) = next { selectRequest(key) }
-                if case let .sample(key) = next { samples.select(key) }
+                navigate(to: next)
             }
     }
 
@@ -160,14 +185,12 @@ struct HarklightInbox<RequestDetail: View>: View {
             let landscape = windowSize.width > windowSize.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
-            NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: $compactColumn) {
+            NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: compactNavigation) {
                 InboxList(rows: rows, search: $search,
                           selected: selection, compact: horizontalSizeClass == .compact,
                           showSettings: { settings = true }, select: { id in
                     searchFocused = false
-                    selection = id
-                    if case let .request(key) = id { selectRequest(key) }
-                    if case let .sample(key) = id { samples.select(key) }
+                    navigate(to: id)
                     compactColumn = .detail
                     if !landscape { visibility = .detailOnly }
                 })
@@ -177,7 +200,8 @@ struct HarklightInbox<RequestDetail: View>: View {
                     NavigationStack {
                         switch selection {
                         case let .request(key):
-                            requestDetail(key, cardContext(for: .request(key)))
+                            requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
+                                canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
                                 .id(key)
                         case let .sample(id):
                             if let message = samples.messages.first(where: { $0.id == id }),
@@ -194,6 +218,13 @@ struct HarklightInbox<RequestDetail: View>: View {
                         }
                     }
                     .frame(maxWidth: .infinity)
+                    if inlineChat, case let .request(key) = selection, let conversationStore,
+                       let request = conversationStore.request(for: key) {
+                        Divider()
+                        ConversationPanel(store: conversationStore, key: key,
+                            sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                            .frame(width: min(360, geometry.size.width * 0.34))
+                    }
                     if inlineChat, case let .sample(id) = selection,
                        let message = samples.messages.first(where: { $0.id == id }),
                        let response = samples.responses[id] {
