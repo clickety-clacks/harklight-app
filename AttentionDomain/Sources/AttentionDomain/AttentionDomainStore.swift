@@ -135,6 +135,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let context: ProfileContext
     private let persistence: any AttentionStatePersistence
+    private let conversationFileReferences: (any ConversationFileReferenceStore)?
     private let maximumWireFrameBytes: Int
     private var state: PersistedAttentionState
     private var selectorBindings: [UUID: SelectorBinding] = [:]
@@ -145,9 +146,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public init(context: ProfileContext,
                 persistence: any AttentionStatePersistence,
-                maximumWireFrameBytes: Int = 65_536) throws {
+                maximumWireFrameBytes: Int = 65_536,
+                conversationFileReferences: (any ConversationFileReferenceStore)? = nil) throws {
         self.context = context
         self.persistence = persistence
+        self.conversationFileReferences = conversationFileReferences
         self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
         if let data = try persistence.load(identity: context.identity) {
             let loaded = try PropertyListDecoder().decode(PersistedAttentionState.self, from: data)
@@ -180,7 +183,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                   (loaded.conversation?.events.values.allSatisfy { $0.binding.request.accountScope == context.identity.personID } ?? true) else {
                 throw AttentionStoreError.persistence("The conversation store contains a different account's requests.")
             }
-            self.state = loaded
+            self.state = try Self.externalizingConversationFiles(in: loaded,
+                using: conversationFileReferences,
+                allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
         } else {
             self.state = PersistedAttentionState(profileIdentity: context.identity)
         }
@@ -506,6 +511,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        let event = try Self.externalizingConversationFiles(in: event,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
 
         if event.sequence <= state.cursor {
             guard let previous = state.appliedEvents[event.sequence],
@@ -864,6 +872,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
+        let event = try Self.externalizingConversationFiles(in: event,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
         try validate(event.binding.request, in: context.identity)
         switch event.fact {
         case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn): try validateConversationFiles(turn.files)
@@ -945,6 +956,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
+        let draft = try Self.externalizingConversationFiles(in: draft,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
         try validate(draft.binding.request, in: context.identity)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
@@ -1279,7 +1293,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     private func commit(_ proposed: PersistedAttentionState) throws {
-        var next = proposed
+        var next = try Self.externalizingConversationFiles(in: proposed,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
         next.revision = state.revision &+ 1
         do {
             let encoder = PropertyListEncoder()
@@ -1299,6 +1315,101 @@ public final class AttentionDomainStore: @unchecked Sendable {
             if let storeError = error as? AttentionStoreError { throw storeError }
             throw AttentionStoreError.persistence(error.localizedDescription)
         }
+    }
+
+    private static func externalizingConversationFiles(in file: ConversationFile,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationFile {
+        guard case .inline = file.content else { return file }
+        guard let references else {
+            guard allowInlinePersistence else {
+                throw AttentionStoreError.persistence("Account-owned conversation file storage is required for durable inline content.")
+            }
+            return file
+        }
+        let stored = try references.retainInlineContent(of: file)
+        guard stored.id == file.id, stored.name == file.name, stored.byteCount == file.byteCount,
+              stored.sha256 == file.sha256, case .localFile = stored.content else {
+            throw ConversationError.fileMismatch
+        }
+        return stored
+    }
+
+    private static func externalizingConversationFiles(in turn: ConversationTurn,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationTurn {
+        ConversationTurn(id: turn.id, binding: turn.binding, author: turn.author,
+            sessionHandle: turn.sessionHandle, text: turn.text, inReplyTo: turn.inReplyTo,
+            operationID: turn.operationID,
+            files: try turn.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
+            contentRedacted: turn.contentRedacted, kind: turn.kind, resultStatus: turn.resultStatus)
+    }
+
+    private static func externalizingConversationFiles(in draft: ConversationDraft,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationDraft {
+        ConversationDraft(binding: draft.binding, text: draft.text,
+            files: try draft.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
+            disposition: draft.disposition)
+    }
+
+    private static func externalizingConversationFiles(in event: ConversationEvent,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationEvent {
+        let fact: ConversationEvent.Fact
+        switch event.fact {
+        case let .turn(turn):
+            fact = .turn(try externalizingConversationFiles(in: turn, using: references, allowInlinePersistence: allowInlinePersistence))
+        case let .revision(turn, payload):
+            fact = .revision(try externalizingConversationFiles(in: turn, using: references, allowInlinePersistence: allowInlinePersistence), payload: payload)
+        case let .redactedRevision(turn):
+            fact = .redactedRevision(try externalizingConversationFiles(in: turn, using: references, allowInlinePersistence: allowInlinePersistence))
+        default: fact = event.fact
+        }
+        return ConversationEvent(sequence: event.sequence, binding: event.binding, fact: fact)
+    }
+
+    private static func externalizingConversationFiles(in event: RelayEvent,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> RelayEvent {
+        let metadata = try event.conversation.map { old in
+            RelayConversationMetadata(revision: old.revision, sessionHandle: old.sessionHandle,
+                eventID: old.eventID, availability: old.availability, listeningSupport: old.listeningSupport,
+                author: old.author,
+                files: try old.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
+                terminalReason: old.terminalReason)
+        }
+        return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata)
+    }
+
+    private static func externalizingConversationFiles(in thread: ConversationThread,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationThread {
+        var next = thread
+        next.turns = try thread.turns.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+        next.drafts = try thread.drafts.mapValues { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+        if let groups = thread.uploadGroups {
+            next.uploadGroups = try groups.mapValues { group in
+                var copy = group
+                copy.originals = try group.originals.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+                copy.uploaded = try group.uploaded.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+                return copy
+            }
+        }
+        return next
+    }
+
+    private static func externalizingConversationFiles(in state: PersistedAttentionState,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> PersistedAttentionState {
+        var next = state
+        next.appliedEvents = try state.appliedEvents.mapValues {
+            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+        }
+        if let oldConversation = state.conversation {
+            var conversation = oldConversation
+            conversation.events = try oldConversation.events.mapValues {
+                try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+            }
+            conversation.threads = try oldConversation.threads.mapValues {
+                try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+            }
+            next.conversation = conversation
+        }
+        return next
     }
 
     private func recordRepair(_ issue: StoreRepairIssue) throws {

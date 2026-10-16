@@ -280,7 +280,7 @@ private struct ConversationTurnView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text(turn.author == .person ? "You" : turn.author == .origin ? sender : "Harklight")
+                Text(authorLabel)
                 Text("· version \(turn.binding.revision)")
             }.font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             if let replyContext {
@@ -311,6 +311,15 @@ private struct ConversationTurnView: View {
         }
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)
         .background(turn.author == .person ? Color.blue.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var authorLabel: String {
+        switch turn.author {
+        case .person: return "You"
+        case .origin: return sender
+        case .agent: return "Agent"
+        case .server: return "Harklight"
+        }
     }
 }
 

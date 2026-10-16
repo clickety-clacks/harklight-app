@@ -5,6 +5,58 @@ import XCTest
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testInlineTurnAndDraftBytesStayBehindAccountFileReferencesAcrossComposerWrites() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let persistence = FileAttentionStatePersistence(directoryURL: root.appendingPathComponent("State", isDirectory: true))
+        let storage = try ConversationFileStorage(identity: identity, root: root.appendingPathComponent("Files", isDirectory: true))
+        let domain = try AttentionDomainStore(context: context, persistence: persistence,
+            conversationFileReferences: storage)
+        let request = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: request, revision: 1)
+        let bytes = Data(repeating: 0xA7, count: 200_000)
+        let digest = ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+        let inline = ConversationFile(id: ExactText("attachment"), name: ExactText("large-note.bin"),
+            byteCount: UInt64(bytes.count), sha256: digest, content: .inline(bytes))
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Before edit"), files: [inline]),
+            context: context)
+        let turn = ConversationTurn(id: ExactText("turn-2"), binding: binding, author: .person,
+            sessionHandle: ExactText("session"), text: ExactText("Shared exact bytes"), files: [inline])
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn)), context: context)
+
+        let saved = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[request]?.drafts[1])
+        let savedFile = try XCTUnwrap(saved.files.first)
+        guard case .localFile = savedFile.content else { return XCTFail("Inline bytes must become an account-owned file reference.") }
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("After composer edit"), files: saved.files),
+            context: context)
+
+        let persisted = try XCTUnwrap(persistence.load(identity: identity))
+        XCTAssertLessThan(persisted.count, bytes.count / 2, "Whole-state persistence must contain references, not copied inline payloads.")
+        XCTAssertNil(persisted.range(of: bytes), "Composer keystrokes must not rewrite attachment bytes into account state.")
+        let storedURL = try storage.fileURL(for: savedFile)
+        try storage.verify(storedURL, for: savedFile)
+        XCTAssertEqual(try Data(contentsOf: storedURL), bytes)
+
+        let restored = try AttentionDomainStore(context: context, persistence: persistence,
+            conversationFileReferences: storage)
+        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[request])
+        XCTAssertEqual(thread.currentRevision, 1)
+        XCTAssertEqual(thread.turns.first?.id, turn.id)
+        XCTAssertEqual(thread.turns.first?.binding, binding)
+        XCTAssertEqual(thread.turns.first?.files.first?.id, inline.id)
+        XCTAssertEqual(thread.turns.first?.files.first?.content, savedFile.content)
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("After composer edit"))
+        XCTAssertEqual(thread.drafts[1]?.files.first?.content, savedFile.content)
+        try restored.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn)), context: context)
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 2,
+            "A duplicate inline replay normalizes to the same retained reference instead of conflicting.")
+    }
+
     func testQuestionRevisionArchivesTheOldAnswerAndInvalidatesItsSelectorWithoutReusingIt() throws {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("fictional-relay"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)

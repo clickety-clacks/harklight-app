@@ -12,7 +12,7 @@ public struct ConversationBinding: Equatable, Hashable, Codable, Sendable {
 }
 
 public enum ConversationAuthor: String, Codable, Sendable {
-    case person, origin, server
+    case person, origin, agent, server
 }
 
 public enum ConversationAvailability: Equatable, Codable, Sendable {
@@ -56,6 +56,12 @@ public struct ConversationFile: Equatable, Codable, Identifiable, Sendable {
         self.sha256 = sha256
         self.content = content
     }
+}
+
+/// Keeps exact conversation bytes outside the whole-account state file while
+/// the domain state retains their account-owned local reference and identity.
+public protocol ConversationFileReferenceStore: Sendable {
+    func retainInlineContent(of file: ConversationFile) throws -> ConversationFile
 }
 
 public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
@@ -251,6 +257,27 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         }
     }
 
+    mutating func merge(_ turn: ConversationTurn) throws {
+        guard turn.binding.request == request, turn.sessionHandle == sessionHandle,
+              !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+        if let index = turns.firstIndex(where: { $0.id == turn.id }) {
+            let old = turns[index]
+            if old == turn { return }
+            // Ordinary lifecycle and conversation history are independent
+            // projections of one answer. Replace only its empty terminal join
+            // placeholder with the matching authored result turn.
+            guard old.kind == .terminal, (turn.kind == .result || turn.kind == .reply),
+                  old.binding == turn.binding, old.sessionHandle == turn.sessionHandle,
+                  old.author == turn.author, terminal != nil, terminalTurn == turn.id,
+                  terminalAuthor == turn.author else { throw ConversationError.conflict }
+            turns[index] = turn
+        } else {
+            turns.append(turn)
+        }
+        facts[turn.id] = facts[turn.id] ?? ConversationTurnFacts()
+        orderTurns()
+    }
+
     mutating func recordRetraction(turn: ExactText, sequence: UInt64, revision: UInt64) throws {
         guard !turn.rawValue.isEmpty, sequence > 0, revision > 0,
               terminal == nil || terminal == .cleared,
@@ -365,15 +392,10 @@ struct ConversationState: Codable {
             case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
                 guard turn.binding == binding, turn.sessionHandle == thread.sessionHandle,
                       !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
-                if let old = thread.turns.first(where: { $0.id == turn.id }) {
-                    guard old == turn else { throw ConversationError.conflict }
-                } else {
-                    // Ordinary replay can close the request before older conversation history arrives.
-                    // Authoritative historical entries remain applicable; local submission checks closure.
-                    thread.turns.append(turn)
-                    thread.facts[turn.id] = ConversationTurnFacts()
-                    thread.orderTurns()
-                }
+                // Ordinary replay can close the request before its result turn
+                // arrives. The exact matching identity enriches one retained
+                // row; authoritative historical entries remain applicable.
+                try thread.merge(turn)
                 // Only an exact accepted operation clears its frozen draft.
                 if let draft = thread.drafts[binding.revision], let operationID = turn.operationID {
                     if case let .acceptedPendingReplay(savedID, savedTurn) = draft.disposition,

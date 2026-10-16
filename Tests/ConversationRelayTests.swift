@@ -10,6 +10,7 @@ final class ConversationRelayTests: XCTestCase {
         var conversation: [Data] = []
         var ordinaryACKs: [Data] = []
         var conversationACKs: [Data] = []
+        var onOrdinaryACK: (() throws -> Void)?
         var onConversationACK: (() throws -> Void)?
         var onConversationOpen: (() -> Void)?
         var rejectFirstConversationACK = false
@@ -17,7 +18,10 @@ final class ConversationRelayTests: XCTestCase {
         func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             for frame in ordinary { try await consume(frame) }
         }
-        func acknowledge(_ request: Data) async throws { ordinaryACKs.append(request) }
+        func acknowledge(_ request: Data) async throws {
+            try onOrdinaryACK?()
+            ordinaryACKs.append(request)
+        }
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             onConversationOpen?()
             for frame in conversation { try await consume(frame) }
@@ -66,6 +70,75 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(thread.turns.first?.id, ExactText("2"))
         XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
         XCTAssertNil(thread.facts[ExactText("2")]?.actedBy)
+    }
+    func testAgentAnswerOrdinaryAndProjectionFactsJoinBeforeTheirIndependentACKs() async throws {
+        let (context, _, store, session) = try setup()
+        session.ordinary[2] = data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"request","origin":"origin","state":"answered","by":"agent_answer","request_revision":1,"event_id":"answer-2","author":"agent"}"#)
+        session.ordinary.append(data(#"{"v":1,"type":"resynced","seq":2}"#))
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("result", sequence: 1, fields: #""author":"agent","event_id":"answer-2","text":"Agent answer","status":"accepted""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        session.onOrdinaryACK = {
+            let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+            XCTAssertEqual(thread.terminal, .answered)
+            XCTAssertEqual(thread.terminalTurn, ExactText("answer-2"))
+            XCTAssertEqual(thread.terminalAuthor, .agent)
+            XCTAssertEqual(thread.turns.count, 1)
+            XCTAssertEqual(thread.turns.first?.kind, .terminal, "The ordinary lifecycle is durably committed before its ACK.")
+        }
+        session.onConversationACK = {
+            let snapshot = try store.conversationSnapshot(context: context)
+            let thread = try XCTUnwrap(snapshot.threads.values.first)
+            XCTAssertEqual(snapshot.cursor, 1)
+            XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+            XCTAssertEqual(thread.terminal, .answered, "The conversation result must not create another closure.")
+            XCTAssertEqual(thread.terminalAuthor, .agent)
+            XCTAssertEqual(thread.turns.count, 1)
+            XCTAssertEqual(thread.turns.first?.kind, .result)
+            XCTAssertEqual(thread.turns.first?.author, .agent)
+            XCTAssertEqual(thread.turns.first?.text, ExactText("Agent answer"))
+        }
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 2)
+        XCTAssertEqual(session.ordinaryACKs.count, 1)
+        XCTAssertEqual(session.conversationACKs.count, 1)
+    }
+
+    func testProjectionFirstAgentResultSurvivesLaterOrdinaryLifecycleReplay() async throws {
+        let (context, _, store, session) = try setup()
+        let relayWire = try RelayWire(profile: context)
+        _ = try store.apply(relayWire.decodeEvent(session.ordinary[1]), context: context)
+        let result = event("result", sequence: 1,
+            fields: #""author":"agent","event_id":"answer-2","text":"Agent answer","status":"accepted""#)
+        _ = try store.applyConversation(try ConversationWire(profile: context).decodeEvent(result), context: context)
+        session.ordinary[2] = data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"request","origin":"origin","state":"answered","by":"agent_answer","request_revision":1,"event_id":"answer-2","author":"agent"}"#)
+        session.ordinary.append(data(#"{"v":1,"type":"resynced","seq":2}"#))
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#), result,
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        session.onOrdinaryACK = {
+            let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+            XCTAssertEqual(thread.terminal, .answered)
+            XCTAssertEqual(thread.terminalAuthor, .agent)
+            XCTAssertEqual(thread.turns.count, 1)
+            XCTAssertEqual(thread.turns.first?.kind, .result)
+            XCTAssertEqual(thread.turns.first?.text, ExactText("Agent answer"))
+        }
+        session.onConversationACK = {
+            let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+            XCTAssertEqual(thread.terminal, .answered)
+            XCTAssertEqual(thread.terminalTurn, ExactText("answer-2"))
+            XCTAssertEqual(thread.turns.count, 1)
+            XCTAssertEqual(thread.turns.first?.author, .agent)
+            XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        }
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 2)
+        XCTAssertEqual(session.ordinaryACKs.count, 1)
+        XCTAssertEqual(session.conversationACKs.count, 1)
     }
     func testLegacyDeliveryNeedsNoConversationProjection() async throws {
         let (context, _, store, session) = try setup()

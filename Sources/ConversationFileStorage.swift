@@ -34,6 +34,22 @@ struct ConversationFileStorage: Sendable {
         }
     }
 
+    func retainInlineContent(of file: ConversationFile) throws -> ConversationFile {
+        guard case let .inline(bytes) = file.content else { return file }
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        guard UInt64(bytes.count) == file.byteCount, digest == file.sha256.rawValue else {
+            throw ConversationError.fileMismatch
+        }
+        let relative = "Inline/\(digest).bin"
+        let folder = directory.appendingPathComponent("Inline", isDirectory: true)
+        let destination = directory.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try bytes.write(to: destination, options: .atomic)
+        try verify(destination, for: file)
+        return ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
+            sha256: file.sha256, content: .localFile(ExactText(relative)))
+    }
+
     func fileURL(for file: ConversationFile) throws -> URL {
         guard case let .localFile(name) = file.content else { throw ConversationError.fileMismatch }
         return directory.appendingPathComponent(name.rawValue)
@@ -90,3 +106,5 @@ struct ConversationFileStorage: Sendable {
         return (count, digest.finalize().map { String(format: "%02x", $0) }.joined())
     }
 }
+
+extension ConversationFileStorage: ConversationFileReferenceStore {}

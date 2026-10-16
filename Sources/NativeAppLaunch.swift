@@ -213,7 +213,9 @@ final class NativeAppLaunch {
         await NativeRelayLifecycle.shared.deactivate()
         guard activationGeneration == generation else { return }
         let persistence = try FileAttentionStatePersistence.applicationSupport()
-        let store = try AttentionDomainStore(context: installation.context, persistence: persistence)
+        let fileStorage = try ConversationFileStorage(identity: installation.context.identity)
+        let store = try AttentionDomainStore(context: installation.context, persistence: persistence,
+                                             conversationFileReferences: fileStorage)
         let presentation = try LivePresentationStore(store: store, context: installation.context)
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
