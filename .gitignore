@@ -1,0 +1,9 @@
+.DS_Store
+*.xcuserstate
+DerivedData/
+build/
+.derivedData/
+
+# Generated loopback-only TLS test credentials.
+/Tests/Fixtures/guided-local-tls.pem
+/Tests/Fixtures/guided-local-tls.p12

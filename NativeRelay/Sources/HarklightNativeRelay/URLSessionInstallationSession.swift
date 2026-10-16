@@ -1,0 +1,319 @@
+import AttentionDomain
+import CryptoKit
+import Foundation
+import Security
+
+public enum InstallationTransportError: Error {
+    case invalidEndpoint
+    case invalidTrustAnchor
+    case wrongDeviceIdentity
+    case invalidServerTrust
+    case unexpectedServerFrame
+    case serverRejected
+    case acknowledgementBehind
+}
+
+/// Security.framework keychain identities are immutable references usable by
+/// URLSession's delegate queue. The native enrollment owner retains custody of
+/// the private key; only this reference crosses the actor boundary.
+public struct TrustedKeychainIdentity: @unchecked Sendable {
+    let value: SecIdentity
+
+    public init(_ value: SecIdentity) { self.value = value }
+}
+
+/// A keychain-backed installation certificate and an enrollment-approved relay
+/// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
+/// URLSession presents the identity only to this exact `wss:/relay` endpoint.
+public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
+    public nonisolated let authenticatedIdentity: ProfileIdentity
+    private let delegate: DeviceTLSDelegate
+    private let urlSession: URLSession
+    private let task: URLSessionWebSocketTask
+
+    public init(profile: ProfileContext,
+                relayURL: URL,
+                clientIdentity: TrustedKeychainIdentity,
+                trustedRootDER: Data) throws {
+        guard profile.transportMode == .relay,
+              relayURL.scheme == "wss",
+              relayURL.path == "/relay",
+              relayURL.query == nil,
+              relayURL.fragment == nil,
+              relayURL.user == nil,
+              relayURL.password == nil,
+              let host = relayURL.host,
+              host == profile.identity.trustedRelayAuthority.rawValue else {
+            throw InstallationTransportError.invalidEndpoint
+        }
+        guard let root = SecCertificateCreateWithData(nil, trustedRootDER as CFData) else {
+            throw InstallationTransportError.invalidTrustAnchor
+        }
+        var certificate: SecCertificate?
+        guard SecIdentityCopyCertificate(clientIdentity.value, &certificate) == errSecSuccess,
+              let certificate,
+              DeviceCertificateBinding.matches(SecCertificateCopyData(certificate) as Data,
+                                               expectedDeviceID: profile.identity.deviceID.rawValue) else {
+            throw InstallationTransportError.wrongDeviceIdentity
+        }
+        authenticatedIdentity = profile.identity
+        let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root)
+        self.delegate = delegate
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        urlSession = session
+        task = session.webSocketTask(with: relayURL, protocols: ["attention-relay/1"])
+        task.resume()
+    }
+
+    public func resync(_ request: Data,
+                       consume: @Sendable (Data) async throws -> Void) async throws {
+        try await send(request)
+        var accepted = false
+        while true {
+            let frame = try await receive()
+            let value = try JSONValue.parse(frame)
+            let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+            if kind == "error" { throw InstallationTransportError.serverRejected }
+            if !accepted {
+                // A subscribed socket may have a push from before this
+                // request. The explicit resync replays it durably below.
+                if kind == "delivery" || kind == "lifecycle" { continue }
+                guard kind == "ok",
+                      value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-sync" else {
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+                accepted = true
+            }
+            try await consume(frame)
+            if kind == "resynced" { return }
+        }
+    }
+
+    public func acknowledge(_ request: Data) async throws {
+        let requestValue = try JSONValue.parse(request)
+        guard case let .number(expectedNumber)? = requestValue.uniqueValue(named: "seq"),
+              let expected = UInt64(expectedNumber.lexeme) else {
+            throw InstallationTransportError.unexpectedServerFrame
+        }
+        try await send(request)
+        while true {
+            let value = try JSONValue.parse(try await receive())
+            switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+            case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-ack":
+                guard case let .number(actualNumber)? = value.uniqueValue(named: "seq"),
+                      UInt64(actualNumber.lexeme) == expected else {
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+                return
+            case "error":
+                if value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-ack",
+                   value.uniqueValue(named: "reason")?.stringValue?.rawValue == "invalid_cursor" {
+                    throw InstallationTransportError.acknowledgementBehind
+                }
+                throw InstallationTransportError.serverRejected
+            case "delivery", "lifecycle":
+                // These remain on the server's replay journal until a future
+                // durable resync. They are never ACKed by this incidental read.
+                continue
+            default:
+                throw InstallationTransportError.unexpectedServerFrame
+            }
+        }
+    }
+
+    public func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        do { try await send(frame) }
+        catch {
+            close()
+            return .unresolved
+        }
+        while true {
+            let value: JSONValue
+            do { value = try JSONValue.parse(try await receive()) }
+            catch {
+                // The response could still arrive later. Retire this socket
+                // so a stale uncorrelated `ok` cannot confirm a later send.
+                close()
+                return .unresolved
+            }
+            switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+            case "ok":
+                guard case let .number(number)? = value.uniqueValue(named: "seq"),
+                      let sequence = UInt64(number.lexeme), sequence > 0 else {
+                    close()
+                    return .unresolved
+                }
+                return .accepted(operationID: operationID, terminalSequence: sequence)
+            case "error":
+                return .unresolved
+            case "delivery", "lifecycle":
+                continue
+            default:
+                close()
+                return .unresolved
+            }
+        }
+    }
+
+    /// The APNs address is a separate device binding, never answer content.
+    /// The caller durably owns the operation ID and revision across retries.
+    public func registerPush(address: String, operationID: UUID, revision: UInt64) async throws {
+        guard address.count == 64,
+              address.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              revision > 0, revision < UInt64(Int64.max) else {
+            throw InstallationTransportError.unexpectedServerFrame
+        }
+        let frame = Data(("{\"v\":1,\"type\":\"push_register\",\"ref\":\"native-push\",\"op_id\":\"\(operationID.uuidString.lowercased())\",\"revision\":\(revision),\"profile_id\":\"harklight-sandbox\",\"address_kind\":\"apns_token\",\"address\":\"\(address)\"}\n").utf8)
+        do {
+            try await send(frame)
+            while true {
+                let value = try JSONValue.parse(try await receive())
+                switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+                case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-push":
+                    guard case let .number(number)? = value.uniqueValue(named: "revision"),
+                          UInt64(number.lexeme) == revision,
+                          let binding = value.uniqueValue(named: "binding_id")?.stringValue?.rawValue,
+                          UUID(uuidString: binding) != nil else {
+                        throw InstallationTransportError.unexpectedServerFrame
+                    }
+                    return
+                case "delivery", "lifecycle":
+                    continue
+                case "error":
+                    throw InstallationTransportError.serverRejected
+                default:
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+            }
+        } catch {
+            // A late `ok` on this socket must never confirm a different op.
+            close()
+            throw error
+        }
+    }
+
+    public func close() {
+        task.cancel(with: .normalClosure, reason: nil)
+        urlSession.invalidateAndCancel()
+    }
+
+    private func send(_ frame: Data) async throws {
+        guard let text = String(data: frame, encoding: .utf8), text.hasSuffix("\n") else {
+            throw InstallationTransportError.unexpectedServerFrame
+        }
+        try await task.send(.string(text))
+    }
+
+    private func receive() async throws -> Data {
+        switch try await task.receive() {
+        case let .string(text): return Data(text.utf8)
+        case .data: throw InstallationTransportError.unexpectedServerFrame
+        @unknown default: throw InstallationTransportError.unexpectedServerFrame
+        }
+    }
+}
+
+/// The server identifies a device by lowercase SHA-256 of its certificate's
+/// DER SubjectPublicKeyInfo, not by certificate subject or an app-supplied ID.
+public enum DeviceCertificateBinding {
+    public static func fingerprint(_ certificate: Data) -> String? {
+        guard let key = subjectPublicKeyInfo(certificate) else { return nil }
+        return SHA256.hash(data: key).map { String(format: "%02x", $0) }.joined()
+    }
+
+    public static func matches(_ certificate: Data, expectedDeviceID: String) -> Bool {
+        guard expectedDeviceID.count == 64,
+              expectedDeviceID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              let actual = fingerprint(certificate) else { return false }
+        return actual == expectedDeviceID
+    }
+
+    private static func subjectPublicKeyInfo(_ certificate: Data) -> Data? {
+        let bytes = Array(certificate)
+        guard let outer = read(bytes, at: 0), outer.tag == 0x30,
+              outer.end == bytes.count,
+              let tbs = read(bytes, at: outer.content), tbs.tag == 0x30 else { return nil }
+        var offset = tbs.content
+        if let version = read(bytes, at: offset), version.tag == 0xa0 { offset = version.end }
+        for tag: UInt8 in [0x02, 0x30, 0x30, 0x30, 0x30] {
+            guard let field = read(bytes, at: offset), field.tag == tag,
+                  field.end <= tbs.end else { return nil }
+            offset = field.end
+        }
+        guard let key = read(bytes, at: offset), key.tag == 0x30,
+              key.end <= tbs.end else { return nil }
+        return Data(bytes[offset..<key.end])
+    }
+
+    private static func read(_ bytes: [UInt8], at start: Int) -> (tag: UInt8, content: Int, end: Int)? {
+        guard start >= 0, start + 2 <= bytes.count else { return nil }
+        let tag = bytes[start]
+        let first = bytes[start + 1]
+        var length = Int(first)
+        var content = start + 2
+        if first & 0x80 != 0 {
+            let width = Int(first & 0x7f)
+            guard width > 0, width <= 4, content + width <= bytes.count else { return nil }
+            length = 0
+            for byte in bytes[content..<(content + width)] {
+                guard length <= (Int.max - Int(byte)) / 256 else { return nil }
+                length = length * 256 + Int(byte)
+            }
+            content += width
+        }
+        guard length <= bytes.count - content else { return nil }
+        return (tag, content, content + length)
+    }
+}
+
+private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let host: String
+    private let identity: SecIdentity
+    private let root: SecCertificate
+
+    init(host: String, identity: SecIdentity, root: SecCertificate) {
+        self.host = host
+        self.identity = identity
+        self.root = root
+    }
+
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        // Authentication belongs only to the original pinned relay endpoint.
+        completionHandler(nil)
+    }
+
+    func urlSession(_ session: URLSession,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        switch challenge.protectionSpace.authenticationMethod {
+        case NSURLAuthenticationMethodClientCertificate:
+            guard challenge.protectionSpace.host == host else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            completionHandler(.useCredential,
+                              URLCredential(identity: identity, certificates: nil, persistence: .forSession))
+        case NSURLAuthenticationMethodServerTrust:
+            guard challenge.protectionSpace.host == host,
+                  let trust = challenge.protectionSpace.serverTrust,
+                  SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, host as CFString)) == errSecSuccess,
+                  SecTrustSetAnchorCertificates(trust, [root] as CFArray) == errSecSuccess,
+                  SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
+                  SecTrustEvaluateWithError(trust, nil) else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        default:
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}

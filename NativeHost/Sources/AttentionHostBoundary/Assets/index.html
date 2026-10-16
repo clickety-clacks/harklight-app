@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Harklight</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/sender.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><h1>Harklight</h1><p id="host-state" role="status">Connecting to this device</p></header>
+    <section id="pairing" aria-labelledby="pairing-title">
+      <h2 id="pairing-title">Connect this pane</h2>
+      <p>Enter the pairing code shown by the Harklight app on this Mac.</p>
+      <form id="pair-form">
+        <label for="pair-secret">Pairing code</label>
+        <input id="pair-secret" type="password" autocomplete="off" spellcheck="false" required>
+        <button type="submit">Connect</button>
+      </form>
+      <p id="pair-state" role="status"></p>
+    </section>
+    <section id="workspace" hidden>
+      <nav aria-label="Requests"><h2>Requests</h2><div id="request-list"></div></nav>
+      <article id="request-detail" aria-labelledby="task-heading">
+        <div class="task-header">
+          <h2 id="task-heading" tabindex="-1"></h2>
+          <div id="app-status"></div>
+        </div>
+        <div id="instructions-panel"></div>
+        <div id="sender-scene"></div>
+        <div id="action-row"></div>
+      </article>
+      <section id="request-details" aria-labelledby="details-heading" hidden>
+        <button id="details-back" type="button">Back to request</button>
+        <h2 id="details-heading" tabindex="-1">Request details</h2>
+        <div id="receipt"></div>
+      </section>
+      <button id="disconnect" type="button">Disconnect this pane</button>
+    </section>
+  </main>
+</body>
+</html>

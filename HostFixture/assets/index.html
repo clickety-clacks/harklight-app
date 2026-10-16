@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Harklight synthetic host boundary</title>
+<style>body{font:16px system-ui;max-width:48rem;margin:auto;padding:1rem;background:#f8f9fc;color:#152037}main{display:grid;gap:1rem}section{background:white;border:1px solid #a6b4c9;border-radius:12px;padding:1rem}label{display:block;margin:.5rem 0}input,button{font:inherit;max-width:100%;padding:.5rem}button{margin:.25rem}.status{white-space:pre-wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
+</head><body><main><h1>Harklight host boundary fixture</h1>
+<p>Synthetic profile and app-owned controls for host testing.</p>
+<p id="probe-status" role="status">Checking guest POST boundary…</p>
+<section><h2>Connect this pane</h2><label for="secret">Local pairing secret</label><input id="secret" type="password" autocomplete="off" spellcheck="false"><button id="pair">Connect</button><button id="logout">Log out</button><p id="status" role="status" class="status">Disconnected</p></section>
+<section><h2>Fixture request</h2><p id="item"></p><label for="response">Response text</label><input id="response" type="text"><button id="inspect">Inspect</button><button id="stream">Observe stream</button><button id="send">Send fixture response</button><p id="stream-status" role="status" class="status"></p><pre id="result" aria-label="Fixture result"></pre></section>
+</main><script src="/app.js"></script></body></html>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Self-hosted servers use invitation-pinned CAs and can have any DNS name.
+         Allow the app's mandatory TLS trust delegates to evaluate those roots.
+         Live transports still require HTTPS/WSS, TLS 1.2+, the exact hostname,
+         and a valid chain to the invitation's sole pinned trust anchor. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key><true/>
+    </dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>co.clicketyclacks.Harklight.invitation</string>
+            <key>CFBundleURLSchemes</key><array><string>harklight</string></array>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+        </dict>
+    </array>
+</dict>
+</plist>

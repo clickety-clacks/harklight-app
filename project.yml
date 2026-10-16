@@ -1,0 +1,79 @@
+name: AttentionClientDuoPrototype
+options:
+  bundleIdPrefix: com.example.attentionclient
+  deploymentTarget:
+    iOS: "27.0"
+packages:
+  AttentionDomain:
+    path: AttentionDomain
+  HarklightNativeRelay:
+    path: NativeRelay
+targets:
+  AttentionClientDuoPrototype:
+    type: application
+    platform: iOS
+    dependencies:
+      - package: AttentionDomain
+        product: AttentionDomain
+      - package: HarklightNativeRelay
+        product: HarklightNativeRelay
+    sources:
+      - path: Sources
+      - path: Resources
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype
+        INFOPLIST_KEY_CFBundleDisplayName: Harklight
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Configuration/HarklightInfo.plist
+        IPHONEOS_DEPLOYMENT_TARGET: "27.0"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGNING_ALLOWED: NO
+  AttentionClientDuoPrototypeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+      - path: Resources
+        buildPhase: resources
+    dependencies:
+      - package: AttentionDomain
+        product: AttentionDomain
+      - target: AttentionClientDuoPrototype
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.tests
+        GENERATE_INFOPLIST_FILE: YES
+        IPHONEOS_DEPLOYMENT_TARGET: "27.0"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGNING_ALLOWED: NO
+  AttentionClientDuoPrototypeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: AttentionClientDuoPrototype
+      - package: AttentionDomain
+        product: AttentionDomain
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        IPHONEOS_DEPLOYMENT_TARGET: "27.0"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGNING_ALLOWED: NO
+schemes:
+  AttentionClientDuoPrototype:
+    build:
+      targets:
+        AttentionClientDuoPrototype: all
+    test:
+      config: Debug
+      targets:
+        - AttentionClientDuoPrototypeTests
+        - AttentionClientDuoPrototypeUITests

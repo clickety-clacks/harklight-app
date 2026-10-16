@@ -1,0 +1,937 @@
+{
+  "purpose": "Normative fictional fixtures for corrected M2 and production profile conformance; no live source or transport envelope",
+  "account": "fictional-sample-account",
+  "requestOrder": [
+    "review-01",
+    "facilities-01",
+    "unknown-01"
+  ],
+  "requests": [
+    {
+      "sender_id": "fixture:Studio",
+      "message_id": "review-01",
+      "created_at": 1791792000000,
+      "title": "Studio review",
+      "body": "Compare the supplied cover studies or send a note.",
+      "answer_ui": {
+        "schema": "attention-client.ui/1",
+        "requires": [
+          "scene/1",
+          "result/1",
+          "illustration/1",
+          "response/1"
+        ],
+        "illustrations": [
+          {
+            "id": "cover-a",
+            "label": "Cover A: amber blocks next to a blue circle",
+            "width": 300,
+            "height": 180,
+            "primitives": [
+              {
+                "kind": "rect",
+                "x": 0,
+                "y": 0,
+                "width": 300,
+                "height": 180,
+                "fill": "#F7F1E5"
+              },
+              {
+                "kind": "rect",
+                "x": 20,
+                "y": 30,
+                "width": 120,
+                "height": 45,
+                "fill": "#C8663E"
+              },
+              {
+                "kind": "circle",
+                "cx": 220,
+                "cy": 90,
+                "r": 42,
+                "fill": "#3B6680"
+              }
+            ]
+          },
+          {
+            "id": "cover-b",
+            "label": "Cover B: a blue band below two amber circles",
+            "width": 300,
+            "height": 180,
+            "primitives": [
+              {
+                "kind": "rect",
+                "x": 0,
+                "y": 0,
+                "width": 300,
+                "height": 180,
+                "fill": "#F7F1E5"
+              },
+              {
+                "kind": "rect",
+                "x": 20,
+                "y": 115,
+                "width": 260,
+                "height": 30,
+                "fill": "#3B6680"
+              },
+              {
+                "kind": "circle",
+                "cx": 70,
+                "cy": 60,
+                "r": 25,
+                "fill": "#C8663E"
+              },
+              {
+                "kind": "circle",
+                "cx": 210,
+                "cy": 60,
+                "r": 25,
+                "fill": "#C8663E"
+              }
+            ]
+          },
+          {
+            "id": "review-closed",
+            "label": "Two sealed cover sheets; neither is identified as winner",
+            "width": 300,
+            "height": 180,
+            "primitives": [
+              {
+                "kind": "rect",
+                "x": 25,
+                "y": 30,
+                "width": 110,
+                "height": 100,
+                "fill": "#8D9CA4"
+              },
+              {
+                "kind": "rect",
+                "x": 165,
+                "y": 30,
+                "width": 110,
+                "height": 100,
+                "fill": "#8D9CA4"
+              },
+              {
+                "kind": "line",
+                "x1": 20,
+                "y1": 150,
+                "x2": 280,
+                "y2": 150,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "circle",
+                "cx": 150,
+                "cy": 150,
+                "r": 15,
+                "fill": "#38535E"
+              }
+            ]
+          }
+        ],
+        "inputs": [
+          {
+            "kind": "response",
+            "id": "review",
+            "label": "Studio response",
+            "actions": [
+              {
+                "id": "cover-a",
+                "label": "Cover A",
+                "kind": "value",
+                "illustration": "cover-a",
+                "value": {
+                  "draft": "A",
+                  "revision": 9007199254740993,
+                  "extra": {
+                    "flag": false,
+                    "empty": null
+                  }
+                }
+              },
+              {
+                "id": "cover-b",
+                "label": "Cover B",
+                "kind": "value",
+                "illustration": "cover-b",
+                "value": {
+                  "draft": "B",
+                  "magnitude": 1e1000
+                }
+              },
+              {
+                "id": "note",
+                "label": "Send a note",
+                "kind": "text"
+              }
+            ]
+          }
+        ],
+        "open": {
+          "kind": "stack",
+          "axis": "vertical",
+          "children": [
+            {
+              "kind": "text",
+              "text": "Choose the cover",
+              "style": "title"
+            },
+            {
+              "kind": "input",
+              "id": "review",
+              "layout": "cards"
+            }
+          ]
+        },
+        "resolved": {
+          "kind": "stack",
+          "axis": "vertical",
+          "children": [
+            {
+              "kind": "illustration",
+              "id": "review-closed"
+            },
+            {
+              "kind": "text",
+              "text": "Review closed",
+              "style": "title"
+            }
+          ]
+        },
+        "submission": {
+          "label": "Send answer",
+          "result": {
+            "kind": "input",
+            "id": "review"
+          }
+        }
+      },
+      "by_when": 1,
+      "urgency": {
+        "future": "high"
+      },
+      "default": {
+        "never": "execute"
+      },
+      "callback": {
+        "url": "https://example.invalid/inert"
+      },
+      "open": {
+        "argv": [
+          "echo",
+          "not executed"
+        ],
+        "terminal": false
+      }
+    },
+    {
+      "sender_id": "fixture:Facilities",
+      "message_id": "facilities-01",
+      "created_at": 1791792000000,
+      "title": "Facilities desk",
+      "body": "Select the location on the floor plan and add a note.",
+      "answer_ui": {
+        "schema": "attention-client.ui/1",
+        "requires": [
+          "scene/1",
+          "result/1",
+          "illustration/1",
+          "point/1",
+          "text/1",
+          "result-point/1"
+        ],
+        "illustrations": [
+          {
+            "id": "floor-plan",
+            "label": "Floor plan with a door at the lower left, partition and desk at upper right",
+            "width": 300,
+            "height": 180,
+            "primitives": [
+              {
+                "kind": "rect",
+                "x": 0,
+                "y": 0,
+                "width": 300,
+                "height": 180,
+                "fill": "#EDF0E9"
+              },
+              {
+                "kind": "line",
+                "x1": 10,
+                "y1": 10,
+                "x2": 290,
+                "y2": 10,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "line",
+                "x1": 290,
+                "y1": 10,
+                "x2": 290,
+                "y2": 170,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "line",
+                "x1": 290,
+                "y1": 170,
+                "x2": 90,
+                "y2": 170,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "line",
+                "x1": 10,
+                "y1": 170,
+                "x2": 10,
+                "y2": 10,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "line",
+                "x1": 150,
+                "y1": 10,
+                "x2": 150,
+                "y2": 100,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "rect",
+                "x": 190,
+                "y": 30,
+                "width": 70,
+                "height": 40,
+                "fill": "#7795A3"
+              },
+              {
+                "kind": "text",
+                "x": 30,
+                "y": 155,
+                "text": "Door",
+                "fill": "#38535E",
+                "fontSize": 16,
+                "align": "start"
+              }
+            ]
+          },
+          {
+            "id": "closed-plan",
+            "label": "Closed floor-plan illustration with no asserted repair point",
+            "width": 300,
+            "height": 180,
+            "primitives": [
+              {
+                "kind": "rect",
+                "x": 0,
+                "y": 0,
+                "width": 300,
+                "height": 180,
+                "fill": "#E5E9E3"
+              },
+              {
+                "kind": "line",
+                "x1": 10,
+                "y1": 10,
+                "x2": 290,
+                "y2": 10,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "line",
+                "x1": 290,
+                "y1": 10,
+                "x2": 290,
+                "y2": 170,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "line",
+                "x1": 290,
+                "y1": 170,
+                "x2": 10,
+                "y2": 170,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "line",
+                "x1": 10,
+                "y1": 170,
+                "x2": 10,
+                "y2": 10,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "line",
+                "x1": 150,
+                "y1": 10,
+                "x2": 150,
+                "y2": 100,
+                "stroke": "#38535E",
+                "strokeWidth": 4
+              },
+              {
+                "kind": "rect",
+                "x": 190,
+                "y": 30,
+                "width": 70,
+                "height": 40,
+                "fill": "#91A09A"
+              },
+              {
+                "kind": "circle",
+                "cx": 265,
+                "cy": 140,
+                "r": 14,
+                "fill": "#38535E"
+              }
+            ]
+          }
+        ],
+        "inputs": [
+          {
+            "kind": "point",
+            "id": "location",
+            "label": "Repair location",
+            "illustration": "floor-plan"
+          },
+          {
+            "kind": "text",
+            "id": "note",
+            "label": "Note"
+          }
+        ],
+        "open": {
+          "kind": "stack",
+          "axis": "vertical",
+          "children": [
+            {
+              "kind": "text",
+              "text": "Mark the repair location",
+              "style": "title"
+            },
+            {
+              "kind": "input",
+              "id": "location",
+              "layout": "diagram"
+            },
+            {
+              "kind": "input",
+              "id": "note",
+              "layout": "editor"
+            }
+          ]
+        },
+        "resolved": {
+          "kind": "stack",
+          "axis": "vertical",
+          "children": [
+            {
+              "kind": "illustration",
+              "id": "closed-plan"
+            },
+            {
+              "kind": "text",
+              "text": "Location request closed",
+              "style": "title"
+            }
+          ]
+        },
+        "resolvedByState": {
+          "cleared": {
+            "kind": "stack",
+            "axis": "vertical",
+            "children": [
+              {
+                "kind": "illustration",
+                "id": "closed-plan"
+              },
+              {
+                "kind": "text",
+                "text": "Location request cleared",
+                "style": "title"
+              }
+            ]
+          },
+          "expired": {
+            "kind": "stack",
+            "axis": "vertical",
+            "children": [
+              {
+                "kind": "illustration",
+                "id": "closed-plan"
+              },
+              {
+                "kind": "text",
+                "text": "Location request expired",
+                "style": "title"
+              }
+            ]
+          },
+          "superseded": {
+            "kind": "stack",
+            "axis": "vertical",
+            "children": [
+              {
+                "kind": "illustration",
+                "id": "closed-plan"
+              },
+              {
+                "kind": "text",
+                "text": "Location request superseded",
+                "style": "title"
+              }
+            ]
+          }
+        },
+        "answeredWithResult": {
+          "kind": "stack",
+          "axis": "vertical",
+          "children": [
+            {
+              "kind": "result-point",
+              "id": "floor-plan",
+              "path": [
+                "point"
+              ],
+              "label": "Established submitted location"
+            },
+            {
+              "kind": "text",
+              "text": "Location request closed",
+              "style": "title"
+            }
+          ]
+        },
+        "submission": {
+          "label": "Send",
+          "result": {
+            "kind": "object",
+            "members": [
+              {
+                "name": "point",
+                "value": {
+                  "kind": "input",
+                  "id": "location"
+                }
+              },
+              {
+                "name": "note",
+                "value": {
+                  "kind": "input",
+                  "id": "note"
+                }
+              },
+              {
+                "name": "drawingRevision",
+                "value": {
+                  "kind": "literal",
+                  "value": 9007199254740993
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "sender_id": "fixture:Future",
+      "message_id": "unknown-01",
+      "created_at": 1791792000000,
+      "title": "Unfamiliar interface",
+      "body": "This item carries a presentation from a newer sender interface.",
+      "answer_ui": {
+        "schema": "example-sender.ui/7",
+        "requires": [
+          "unfamiliar-interaction/1"
+        ],
+        "content": {
+          "future": true,
+          "preserve": {
+            "n": 9007199254740993,
+            "empty": null
+          }
+        }
+      }
+    }
+  ],
+  "stateNotation": "Input/action strings in vectors name retained declarations. Actual clients issue bound opaque handles. This metadata is not the presentation API. Each vector uses a fresh isolated scenario.",
+  "validSubmissions": [
+    {
+      "request": "review-01",
+      "state": {
+        "review": {
+          "action": "cover-a"
+        }
+      },
+      "answer": {
+        "draft": "A",
+        "revision": 9007199254740993,
+        "extra": {
+          "flag": false,
+          "empty": null
+        }
+      }
+    },
+    {
+      "request": "review-01",
+      "state": {
+        "review": {
+          "action": "cover-b"
+        }
+      },
+      "answer": {
+        "draft": "B",
+        "magnitude": 1e1000
+      }
+    },
+    {
+      "request": "review-01",
+      "state": {
+        "review": {
+          "action": "note",
+          "text": ""
+        }
+      },
+      "answer": ""
+    },
+    {
+      "request": "review-01",
+      "state": {
+        "review": {
+          "action": "note",
+          "text": "false"
+        }
+      },
+      "answer": "false"
+    },
+    {
+      "request": "review-01",
+      "state": {
+        "review": {
+          "action": "note",
+          "text": "null"
+        }
+      },
+      "answer": "null"
+    },
+    {
+      "request": "review-01",
+      "state": {
+        "review": {
+          "action": "note",
+          "text": "  Café 👩🏽‍💻\n  "
+        }
+      },
+      "answer": "  Café 👩🏽‍💻\n  "
+    },
+    {
+      "request": "facilities-01",
+      "state": {
+        "location": {
+          "point": {
+            "x": 240,
+            "y": 610
+          }
+        },
+        "note": {
+          "text": "  Near the door\n  "
+        }
+      },
+      "answer": {
+        "point": {
+          "x": 240,
+          "y": 610
+        },
+        "note": "  Near the door\n  ",
+        "drawingRevision": 9007199254740993
+      }
+    },
+    {
+      "request": "facilities-01",
+      "state": {
+        "location": {
+          "point": {
+            "x": 0,
+            "y": 1000
+          }
+        },
+        "note": {
+          "text": ""
+        }
+      },
+      "answer": {
+        "point": {
+          "x": 0,
+          "y": 1000
+        },
+        "note": "",
+        "drawingRevision": 9007199254740993
+      }
+    }
+  ],
+  "invalidSubmissions": [
+    {
+      "request": "review-01",
+      "state": {},
+      "reason": "no selected response"
+    },
+    {
+      "request": "review-01",
+      "state": {
+        "review": {
+          "action": "note"
+        }
+      },
+      "reason": "missing text is not empty"
+    },
+    {
+      "request": "review-01",
+      "state": {
+        "review": {
+          "action": "cover-a",
+          "text": "override"
+        }
+      },
+      "reason": "extra text on literal response"
+    },
+    {
+      "request": "facilities-01",
+      "state": {
+        "note": {
+          "text": ""
+        }
+      },
+      "reason": "missing point"
+    },
+    {
+      "request": "facilities-01",
+      "state": {
+        "location": {
+          "point": {
+            "x": 1001,
+            "y": 0
+          }
+        },
+        "note": {
+          "text": ""
+        }
+      },
+      "reason": "out-of-range point"
+    },
+    {
+      "request": "facilities-01",
+      "state": {
+        "location": {
+          "point": {
+            "x": 0.5,
+            "y": 10
+          }
+        },
+        "note": {
+          "text": ""
+        }
+      },
+      "reason": "fractional point"
+    },
+    {
+      "request": "facilities-01",
+      "state": {
+        "location": {
+          "point": {
+            "x": 240,
+            "y": 610,
+            "z": 0
+          }
+        },
+        "note": {
+          "text": ""
+        }
+      },
+      "reason": "extra point member"
+    },
+    {
+      "request": "facilities-01",
+      "state": {
+        "location": {
+          "point": {
+            "x": 240,
+            "y": 610
+          }
+        }
+      },
+      "reason": "missing note is not initialized empty string"
+    }
+  ],
+  "terminalContexts": [
+    {
+      "request": "facilities-01",
+      "state": "answered",
+      "evidence": "own original-op server success",
+      "answer": {
+        "point": {
+          "x": 240,
+          "y": 610
+        },
+        "note": "  Near the door\n  ",
+        "drawingRevision": 9007199254740993
+      },
+      "scene": "answeredWithResult",
+      "point": {
+        "x": 240,
+        "y": 610
+      }
+    },
+    {
+      "request": "facilities-01",
+      "state": "answered",
+      "evidence": "non-origin bare closure, own intent unconfirmed",
+      "scene": "resolved",
+      "ownOutcome": "unconfirmed"
+    },
+    {
+      "request": "facilities-01",
+      "state": "answered",
+      "evidence": "authorized origin answer",
+      "answer": null,
+      "scene": "resolved"
+    },
+    {
+      "request": "facilities-01",
+      "state": "answered",
+      "evidence": "authorized origin answer",
+      "answer": {
+        "point": {
+          "x": 240,
+          "y": 610,
+          "extra": 1
+        }
+      },
+      "scene": "resolved"
+    },
+    {
+      "request": "facilities-01",
+      "state": "cleared",
+      "evidence": "authoritative terminal",
+      "scene": "resolvedByState.cleared"
+    },
+    {
+      "request": "review-01",
+      "state": "answered",
+      "evidence": "non-origin bare closure",
+      "scene": "resolved"
+    },
+    {
+      "request": "facilities-01",
+      "state": "pending",
+      "evidence": "local receipt only",
+      "answer": {
+        "point": {
+          "x": 240,
+          "y": 610
+        },
+        "note": "  Near the door\n  ",
+        "drawingRevision": 9007199254740993
+      },
+      "scene": "open read-only"
+    }
+  ],
+  "pointVectors": [
+    {
+      "bounds": [
+        20,
+        40,
+        200,
+        100
+      ],
+      "pointer": [
+        68,
+        101
+      ],
+      "expected": {
+        "x": 240,
+        "y": 610
+      }
+    },
+    {
+      "bounds": [
+        40,
+        80,
+        400,
+        200
+      ],
+      "pointer": [
+        136,
+        202
+      ],
+      "expected": {
+        "x": 240,
+        "y": 610
+      }
+    },
+    {
+      "normalized": [
+        "0.2405",
+        "0.6105"
+      ],
+      "expected": {
+        "x": 241,
+        "y": 611
+      }
+    },
+    {
+      "normalized": [
+        "0.2404",
+        "0.6104"
+      ],
+      "expected": {
+        "x": 240,
+        "y": 610
+      }
+    },
+    {
+      "initialPointerOutside": true,
+      "expected": "point remains absent"
+    },
+    {
+      "capturedDragNormalized": [
+        "-0.1",
+        "1.1"
+      ],
+      "expected": {
+        "x": 0,
+        "y": 1000
+      }
+    },
+    {
+      "assistiveAction": "Set point",
+      "expected": {
+        "x": 500,
+        "y": 500
+      }
+    }
+  ],
+  "additionalCases": [
+    "Unknown member in inactive terminal branch: whole-document unsupported",
+    "Duplicate grammar object key: no last-key-wins interpretation",
+    "Constructor literal null with no inputs and explicit Send returns null; never auto-submit",
+    "Object constructor empty key and array constructor preserve types/order",
+    "Unknown members inside literal data remain data",
+    "Oversized expanded result frame retains draft; no intent/transmission",
+    "Cross-account/item/document selector fails even with matching input IDs",
+    "Original-op retry after bare closure retains unconfirmed outcome until actual evidence",
+    "All four permanent terminals, P4 replay relabel and no reopening/loop remain",
+    "Legacy actions/1 vectors from immutable M2 r1 are compatibility regressions only"
+  ]
+}

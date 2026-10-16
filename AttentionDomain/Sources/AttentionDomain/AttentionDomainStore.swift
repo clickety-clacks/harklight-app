@@ -1,0 +1,1091 @@
+import CryptoKit
+import Foundation
+
+#if canImport(Darwin)
+import Darwin
+#endif
+
+public protocol AttentionStatePersistence: AnyObject, Sendable {
+    func load(identity: ProfileIdentity) throws -> Data?
+    func commit(_ data: Data, identity: ProfileIdentity) throws
+}
+
+public final class MemoryAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+    private let lock = NSLock()
+    private var files: [String: Data] = [:]
+    private var failNextWrite = false
+
+    public init() {}
+
+    public func failNextCommit() {
+        lock.lock()
+        defer { lock.unlock() }
+        failNextWrite = true
+    }
+
+    public func load(identity: ProfileIdentity) throws -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return files[identity.storageKey]
+    }
+
+    public func commit(_ data: Data, identity: ProfileIdentity) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        if failNextWrite {
+            failNextWrite = false
+            throw AttentionStoreError.persistence("Injected durable-write failure.")
+        }
+        files[identity.storageKey] = data
+    }
+}
+
+public final class FileAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+    public let directoryURL: URL
+    private let fileManager: FileManager
+
+    public init(directoryURL: URL, fileManager: FileManager = .default) {
+        self.directoryURL = directoryURL
+        self.fileManager = fileManager
+    }
+
+    public static func applicationSupport() throws -> FileAttentionStatePersistence {
+        guard let supportURL = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                        in: .userDomainMask).first else {
+            throw AttentionStoreError.persistence("Application Support is unavailable.")
+        }
+        return FileAttentionStatePersistence(directoryURL: supportURL.appendingPathComponent("Attention", isDirectory: true))
+    }
+
+    public func load(identity: ProfileIdentity) throws -> Data? {
+        let url = fileURL(for: identity)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        do {
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            guard data.count <= 64 * 1_048_576 else {
+                throw AttentionStoreError.persistence("The profile store exceeds its recovery size limit.")
+            }
+            return data
+        } catch let error as AttentionStoreError {
+            throw error
+        } catch {
+            throw AttentionStoreError.persistence(error.localizedDescription)
+        }
+    }
+
+    public func commit(_ data: Data, identity: ProfileIdentity) throws {
+        let target = fileURL(for: identity)
+        let temporary = directoryURL.appendingPathComponent(".\(target.lastPathComponent).\(UUID().uuidString).tmp")
+        do {
+            try fileManager.createDirectory(at: directoryURL,
+                                            withIntermediateDirectories: true,
+                                            attributes: [.posixPermissions: 0o700])
+            try data.write(to: temporary, options: [.atomic])
+            let handle = try FileHandle(forWritingTo: temporary)
+            try handle.synchronize()
+            try handle.close()
+            try setPrivateAttributes(at: temporary)
+
+            #if canImport(Darwin)
+            let renameResult = temporary.path.withCString { source in
+                target.path.withCString { destination in
+                    Darwin.rename(source, destination)
+                }
+            }
+            guard renameResult == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            let directoryDescriptor = directoryURL.path.withCString { open($0, O_RDONLY) }
+            if directoryDescriptor >= 0 {
+                defer { _ = close(directoryDescriptor) }
+                guard fsync(directoryDescriptor) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+            }
+            #else
+            if fileManager.fileExists(atPath: target.path) {
+                _ = try fileManager.replaceItemAt(target, withItemAt: temporary)
+            } else {
+                try fileManager.moveItem(at: temporary, to: target)
+            }
+            #endif
+        } catch let error as AttentionStoreError {
+            try? fileManager.removeItem(at: temporary)
+            throw error
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw AttentionStoreError.persistence(error.localizedDescription)
+        }
+    }
+
+    private func fileURL(for identity: ProfileIdentity) -> URL {
+        directoryURL.appendingPathComponent("\(identity.storageKey).plist", isDirectory: false)
+    }
+
+    private func setPrivateAttributes(at url: URL) throws {
+        var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o600]
+        #if os(iOS)
+        attributes[.protectionKey] = FileProtectionType.complete
+        #endif
+        try fileManager.setAttributes(attributes, ofItemAtPath: url.path)
+    }
+}
+
+public final class AttentionDomainStore: @unchecked Sendable {
+    private let lock = NSRecursiveLock()
+    private let context: ProfileContext
+    private let persistence: any AttentionStatePersistence
+    private let maximumWireFrameBytes: Int
+    private var state: PersistedAttentionState
+    private var selectorBindings: [UUID: SelectorBinding] = [:]
+    private var changeObservers: [UUID: AsyncStream<UInt64>.Continuation] = [:]
+    private var isInvalidated = false
+
+    var profileContext: ProfileContext { context }
+
+    public init(context: ProfileContext,
+                persistence: any AttentionStatePersistence,
+                maximumWireFrameBytes: Int = 65_536) throws {
+        self.context = context
+        self.persistence = persistence
+        self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
+        if let data = try persistence.load(identity: context.identity) {
+            let loaded = try PropertyListDecoder().decode(PersistedAttentionState.self, from: data)
+            guard loaded.profileIdentity == context.identity else { throw AttentionStoreError.wrongAccount }
+            guard loaded.schemaVersion == PersistedAttentionState.currentSchemaVersion else {
+                throw AttentionStoreError.persistence("Unsupported local state schema \(loaded.schemaVersion).")
+            }
+            let requestKeys = Set(loaded.requests.keys)
+            let validRequestScope = requestKeys.allSatisfy { $0.accountScope == context.identity.personID }
+            let validDrafts = loaded.drafts.keys.allSatisfy { requestKeys.contains($0) }
+            let validSessions = loaded.fixtureSessions.keys.allSatisfy { requestKeys.contains($0) }
+            let validRemoteStates = loaded.remoteStates.keys.allSatisfy { requestKeys.contains($0) }
+            let validIntents = loaded.intents.allSatisfy { entry in
+                entry.key == entry.value.intentID && requestKeys.contains(entry.value.requestKey) &&
+                    entry.value.requestKey.accountScope == context.identity.personID
+            }
+            let validIntentIndex = loaded.intentByRequest.allSatisfy { entry in
+                loaded.intents[entry.value]?.requestKey == entry.key
+            } && Set(loaded.intentByRequest.values).count == loaded.intentByRequest.count
+            let validFences = (loaded.fencedIntents ?? [:]).allSatisfy { entry in
+                entry.value.accountScope == context.identity.personID && loaded.intents[entry.key] == nil
+            }
+            let validOutbox = Set(loaded.outboxOrder).count == loaded.outboxOrder.count &&
+                loaded.outboxOrder.allSatisfy { loaded.intents[$0] != nil }
+            guard validRequestScope, validDrafts, validSessions, validRemoteStates,
+                  validIntents, validIntentIndex, validFences, validOutbox else {
+                throw AttentionStoreError.persistence("The profile store contains cross-account or inconsistent request state.")
+            }
+            self.state = loaded
+        } else {
+            self.state = PersistedAttentionState(profileIdentity: context.identity)
+        }
+    }
+
+    public func invalidate() {
+        lock.lock()
+        defer { lock.unlock() }
+        isInvalidated = true
+        selectorBindings.removeAll()
+    }
+
+    public func registerFixtureRequests(_ requests: [StoredRequest], context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        var changed = false
+        var acceptanceOrder = next.requests.values.compactMap(\.acceptanceOrder).max() ?? 0
+        for request in requests {
+            try validate(request.key, in: context.identity)
+            if let existing = next.requests[request.key] {
+                guard existing.originalPayload.semanticallyEquals(request.originalPayload) else {
+                    throw AttentionStoreError.requestConflict
+                }
+                if existing.acceptanceOrder == nil {
+                    acceptanceOrder += 1
+                    next.requests[request.key] = existing.assigningAcceptanceOrder(acceptanceOrder)
+                    changed = true
+                }
+                continue
+            }
+            acceptanceOrder += 1
+            next.requests[request.key] = request.assigningAcceptanceOrder(acceptanceOrder)
+            let draft = RequestDraft(interface: request.interface)
+            next.drafts[request.key] = draft
+            next.fixtureSessions[request.key] = RequestSession(draft: draft)
+            next.remoteStates[request.key] = RemoteRequestState()
+            changed = true
+        }
+        if changed { try commit(next) }
+    }
+
+    public func resetFixtureState(_ requests: [StoredRequest], context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = PersistedAttentionState(profileIdentity: context.identity)
+        for (index, request) in requests.enumerated() {
+            try validate(request.key, in: context.identity)
+            next.requests[request.key] = request.assigningAcceptanceOrder(UInt64(index) + 1)
+            let draft = RequestDraft(interface: request.interface)
+            next.drafts[request.key] = draft
+            next.fixtureSessions[request.key] = RequestSession(draft: draft)
+            next.remoteStates[request.key] = RemoteRequestState()
+        }
+        selectorBindings.removeAll()
+        try commit(next)
+    }
+
+    public func selector(for requestKey: RequestKey, context suppliedContext: ProfileContext) throws -> BoundDocumentSelector {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(requestKey, in: context.identity)
+        guard let request = state.requests[requestKey] else { throw AttentionStoreError.requestMissing }
+        let id = UUID()
+        let submissionID = UUID()
+        selectorBindings[id] = SelectorBinding(requestKey: requestKey,
+                                               profileGeneration: context.generation,
+                                               descriptorFingerprint: fingerprint(request.answerDescription?.canonicalJSON ?? ""),
+                                               submissionFingerprint: fingerprint(submissionSignature(for: request.interface)),
+                                               opaqueSubmissionID: ExactText(submissionID.uuidString.lowercased()))
+        return BoundDocumentSelector(request: requestKey,
+                                     opaqueDocumentID: ExactText(id.uuidString.lowercased()),
+                                     opaqueSubmissionID: ExactText(submissionID.uuidString.lowercased()))
+    }
+
+    public func saveDraft(_ draft: RequestDraft,
+                          selector: BoundDocumentSelector,
+                          context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let request = try boundRequest(selector, context: suppliedContext)
+        let interface = request.interface
+        guard validateDraft(draft, for: interface) else { throw AttentionStoreError.invalidDraft }
+        guard state.remoteStates[request.key]?.isTerminal != true,
+              state.intentByRequest[request.key] == nil else {
+            throw AttentionStoreError.requestClosed
+        }
+        var next = state
+        next.drafts[request.key] = draft
+        if suppliedContext.transportMode == .fixture,
+           var session = next.fixtureSessions[request.key], case .open = session.lifecycle {
+            session.draft = draft
+            next.fixtureSessions[request.key] = session
+        }
+        try commit(next)
+    }
+
+    public func previewSubmission(_ typedSubmission: TypedSubmission,
+                                  draft: RequestDraft,
+                                  selector: BoundDocumentSelector,
+                                  context suppliedContext: ProfileContext) throws -> JSONValue {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let request = try boundRequest(selector, context: suppliedContext)
+        return try compose(typedSubmission, draft: draft, for: request)
+    }
+
+    @discardableResult
+    public func submit(intentID: UUID,
+                       typedSubmission: TypedSubmission,
+                       typedInputs: [TypedInputRecord] = [],
+                       draft: RequestDraft,
+                       selector: BoundDocumentSelector,
+                       context suppliedContext: ProfileContext) throws -> Submission {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let request = try boundRequest(selector, context: suppliedContext)
+        guard state.replayBarrier == nil else { throw AttentionStoreError.replayAlreadyActive }
+        guard isUUIDv4(intentID) else { throw AttentionStoreError.invalidSubmission }
+        guard validateDraft(draft, for: request.interface) else { throw AttentionStoreError.invalidDraft }
+        let answer = try compose(typedSubmission, draft: draft, for: request)
+        let descriptorFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
+        let normalizedInputs = normalizedSubmission(typedSubmission, interface: request.interface)
+        let contentFingerprint = fingerprint([
+            request.key.accountScope.rawValue,
+            request.key.senderID.rawValue,
+            request.key.messageID.rawValue,
+            descriptorFingerprint,
+            normalizedInputs.canonicalJSON,
+            answer.canonicalJSON
+        ].joined(separator: "\u{0}"))
+
+        if let existing = state.intents[intentID] {
+            guard existing.requestKey == request.key,
+                  existing.descriptorFingerprint == descriptorFingerprint,
+                  existing.contentFingerprint == contentFingerprint,
+                  existing.answer.semanticallyEquals(answer) else {
+                throw AttentionStoreError.intentConflict
+            }
+            return existing
+        }
+
+        // A durable fence wins over a submit that entered the HTTP handler late.
+        // A lookup miss alone cannot establish this ordering.
+        if state.fencedIntents?[intentID] != nil {
+            throw AttentionStoreError.intentConflict
+        }
+
+        if let activeID = state.intentByRequest[request.key] {
+            throw AttentionStoreError.competingIntent(activeID)
+        }
+        guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
+
+        let operationID = UUID()
+        let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID)
+        let frame = Data((operation.jsonString + "\n").utf8)
+        guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
+        let submission = Submission(requestKey: request.key,
+                                   answer: answer,
+                                   intentID: intentID,
+                                   operationID: operationID,
+                                   operation: operation,
+                                   typedInputs: typedInputs,
+                                   opaqueDocumentID: selector.opaqueDocumentID,
+                                   opaqueSubmissionID: selector.opaqueSubmissionID,
+                                   descriptorFingerprint: descriptorFingerprint,
+                                   contentFingerprint: contentFingerprint)
+
+        var next = state
+        next.drafts[request.key] = draft
+        next.intents[intentID] = submission
+        next.intentByRequest[request.key] = intentID
+        next.outboxOrder.append(intentID)
+        if suppliedContext.transportMode == .fixture {
+            next.fixtureSessions[request.key] = RequestSession(draft: draft, lifecycle: .pending(submission))
+        }
+        try commit(next)
+        return submission
+    }
+
+    public func lookupIntent(_ intentID: UUID, context suppliedContext: ProfileContext) throws -> Submission? {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        return state.intents[intentID]
+    }
+
+    /// Atomically proves that this intent did not commit and can never commit
+    /// later in this profile. If submit won first, return its exact receipt.
+    @discardableResult
+    public func fenceUncommittedIntent(_ intentID: UUID,
+                                       requestKey: RequestKey,
+                                       context suppliedContext: ProfileContext) throws -> Submission? {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(requestKey, in: suppliedContext.identity)
+        guard isUUIDv4(intentID), state.requests[requestKey] != nil else {
+            throw AttentionStoreError.invalidSubmission
+        }
+        if let existing = state.intents[intentID] {
+            guard existing.requestKey == requestKey else { throw AttentionStoreError.intentConflict }
+            return existing
+        }
+        if let fencedKey = state.fencedIntents?[intentID] {
+            guard fencedKey == requestKey else { throw AttentionStoreError.intentConflict }
+            return nil
+        }
+        var next = state
+        var fences = next.fencedIntents ?? [:]
+        fences[intentID] = requestKey
+        next.fencedIntents = fences
+        try commit(next)
+        return nil
+    }
+
+    public func retryOperation(_ intentID: UUID, context suppliedContext: ProfileContext) throws -> Submission? {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard state.outboxOrder.contains(intentID) else { return nil }
+        return state.intents[intentID]
+    }
+
+    public func recordAcceptedOperation(_ intentID: UUID,
+                                        operationID: UUID,
+                                        terminalSequence: UInt64,
+                                        context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard var intent = state.intents[intentID] else { throw AttentionStoreError.intentMissing }
+        guard intent.operationID == operationID else { throw AttentionStoreError.intentConflict }
+        intent.disposition = .accepted(sequence: terminalSequence)
+        var next = state
+        next.intents[intentID] = intent
+        next.outboxOrder.removeAll(where: { $0 == intentID })
+        if var published = next.replayPublishedIntents {
+            published[intentID] = intent
+            next.replayPublishedIntents = published
+        }
+        try commit(next)
+    }
+
+    public func recordClosedOperation(_ intentID: UUID,
+                                      operationID: UUID,
+                                      sequence: UInt64,
+                                      state terminalState: TerminalState,
+                                      authorizedOriginAnswer: JSONValue?,
+                                      context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard var intent = state.intents[intentID] else { throw AttentionStoreError.intentMissing }
+        guard intent.operationID == operationID else { throw AttentionStoreError.intentConflict }
+        if let old = state.remoteStates[intent.requestKey]?.state, old != terminalState {
+            throw AttentionStoreError.eventConflict(sequence)
+        }
+        let effectiveAuthorizedAnswer = authorizedOriginAnswer ?? state.remoteStates[intent.requestKey]?.authorizedOriginAnswer
+        if case .accepted = intent.disposition {
+            // A later closed response cannot erase confirmed success for this exact operation.
+        } else {
+            intent.disposition = .terminal(state: terminalState,
+                                           sequence: sequence,
+                                           authorizedAnswer: effectiveAuthorizedAnswer)
+        }
+        var next = state
+        next.intents[intentID] = intent
+        next.outboxOrder.removeAll(where: { $0 == intentID })
+        next.remoteStates[intent.requestKey] = RemoteRequestState(state: terminalState,
+                                                                  authorizedOriginAnswer: effectiveAuthorizedAnswer,
+                                                                  classification: state.remoteStates[intent.requestKey]?.classification,
+                                                                  eventSequence: sequence)
+        if var published = next.replayPublishedIntents {
+            published[intentID] = intent
+            next.replayPublishedIntents = published
+        }
+        if var publishedStates = next.replayPublishedStates {
+            publishedStates[intent.requestKey] = next.remoteStates[intent.requestKey]
+            next.replayPublishedStates = publishedStates
+        }
+        try commit(next)
+    }
+
+    public func recordFixtureTerminal(_ terminal: FixtureTerminal,
+                                      for requestKey: RequestKey,
+                                      context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard var session = state.fixtureSessions[requestKey] else { throw AttentionStoreError.requestMissing }
+        guard case let .pending(submission) = session.lifecycle else { throw AttentionStoreError.requestClosed }
+        session.lifecycle = .terminal(terminal, submission)
+        var next = state
+        next.fixtureSessions[requestKey] = session
+        try commit(next)
+    }
+
+    public func apply(_ event: RelayEvent, context suppliedContext: ProfileContext) throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+
+        if event.sequence <= state.cursor {
+            guard let previous = state.appliedEvents[event.sequence],
+                  previous.hasSameSemanticContent(as: event) else {
+                try recordRepair(.conflictingEvent(sequence: event.sequence))
+                throw AttentionStoreError.eventConflict(event.sequence)
+            }
+            if case let .delivery(request, classification) = event.body,
+               state.remoteStates[request.key]?.classification != classification {
+                var next = state
+                next.appliedEvents[event.sequence] = event
+                if let old = next.remoteStates[request.key] {
+                    next.remoteStates[request.key] = RemoteRequestState(state: old.state,
+                                                                        authorizedOriginAnswer: old.authorizedOriginAnswer,
+                                                                        classification: classification,
+                                                                        eventSequence: old.eventSequence)
+                }
+                try commit(next)
+            }
+            return state.cursor
+        }
+
+        let expected = state.cursor + 1
+        guard event.sequence == expected else {
+            try recordRepair(.eventGap(expected: expected, received: event.sequence))
+            throw AttentionStoreError.eventGap(expected: expected, received: event.sequence)
+        }
+        if let barrier = state.replayBarrier, event.sequence > barrier {
+            try recordRepair(.eventGap(expected: barrier, received: event.sequence))
+            throw AttentionStoreError.eventGap(expected: barrier, received: event.sequence)
+        }
+
+        var next = state
+        switch event.body {
+        case let .delivery(request, classification):
+            try validate(request.key, in: context.identity)
+            if let existing = next.requests[request.key] {
+                guard existing.originalPayload.semanticallyEquals(request.originalPayload) else {
+                    try recordRepair(.conflictingEvent(sequence: event.sequence))
+                    throw AttentionStoreError.eventConflict(event.sequence)
+                }
+                if existing.acceptanceOrder == nil {
+                    let priorOrder = firstDeliverySequence(for: request.key, in: next.appliedEvents)
+                    next.requests[request.key] = existing.assigningAcceptanceOrder(priorOrder ?? event.sequence)
+                }
+            } else {
+                next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
+                next.drafts[request.key] = RequestDraft(interface: request.interface)
+            }
+            let previous = next.remoteStates[request.key]
+            next.remoteStates[request.key] = RemoteRequestState(state: previous?.state,
+                                                                authorizedOriginAnswer: previous?.authorizedOriginAnswer,
+                                                                classification: classification,
+                                                                eventSequence: event.sequence)
+        case let .originReference(requestKey):
+            try validate(requestKey, in: context.identity)
+            guard next.requests[requestKey] != nil else {
+                try recordRepair(.missingOriginContent(sequence: event.sequence, requestKey: requestKey))
+                throw AttentionStoreError.missingOriginContent(requestKey)
+            }
+            let previous = next.remoteStates[requestKey] ?? RemoteRequestState()
+            next.remoteStates[requestKey] = RemoteRequestState(state: previous.state,
+                                                               authorizedOriginAnswer: previous.authorizedOriginAnswer,
+                                                               classification: nil,
+                                                               eventSequence: event.sequence)
+        case let .terminal(requestKey, terminalState, authorizedOriginAnswer):
+            try validate(requestKey, in: context.identity)
+            guard next.requests[requestKey] != nil else {
+                try recordRepair(.missingOriginContent(sequence: event.sequence, requestKey: requestKey))
+                throw AttentionStoreError.missingOriginContent(requestKey)
+            }
+            let previous = next.remoteStates[requestKey] ?? RemoteRequestState()
+            if let oldState = previous.state, oldState != terminalState {
+                try recordRepair(.conflictingEvent(sequence: event.sequence))
+                throw AttentionStoreError.eventConflict(event.sequence)
+            }
+            let effectiveAuthorizedAnswer = authorizedOriginAnswer ?? previous.authorizedOriginAnswer
+            next.remoteStates[requestKey] = RemoteRequestState(state: terminalState,
+                                                               authorizedOriginAnswer: effectiveAuthorizedAnswer,
+                                                               classification: previous.classification,
+                                                               eventSequence: event.sequence)
+            if let intentID = next.intentByRequest[requestKey], var intent = next.intents[intentID] {
+                if case .accepted = intent.disposition {
+                    // A later lifecycle event does not erase evidence that this exact operation won.
+                } else {
+                    intent.disposition = .terminal(state: terminalState,
+                                                   sequence: event.sequence,
+                                                   authorizedAnswer: effectiveAuthorizedAnswer)
+                    next.intents[intentID] = intent
+                }
+                next.outboxOrder.removeAll(where: { $0 == intentID })
+            }
+        }
+        next.appliedEvents[event.sequence] = event
+        next.cursor = event.sequence
+        next.repairIssues.removeAll { issue in
+            switch issue {
+            case let .eventGap(_, received): return received <= event.sequence + 1
+            case let .missingOriginContent(sequence, _): return sequence == event.sequence
+            case let .conflictingEvent(sequence): return sequence == event.sequence
+            }
+        }
+        try commit(next)
+        return state.cursor
+    }
+
+    public func applyRelayEvent(_ event: RelayEvent,
+                                context suppliedContext: ProfileContext) -> ApplyEventResult {
+        let prior = try? snapshot(context: suppliedContext)
+        let wasRepeat = event.sequence <= (prior?.cursor ?? 0)
+        let priorClassification: RemoteDeliveryClassification?
+        if case let .delivery(request, _) = event.body {
+            priorClassification = prior?.remoteStates[request.key]?.classification
+        } else {
+            priorClassification = nil
+        }
+
+        do {
+            let cursor = try apply(event, context: suppliedContext)
+            if wasRepeat {
+                let changed: Bool
+                if case let .delivery(_, classification) = event.body {
+                    changed = priorClassification != classification
+                } else {
+                    changed = false
+                }
+                return .compatibleRepeat(contiguousCursor: cursor, classificationChanged: changed)
+            }
+            guard try snapshot(context: suppliedContext).replayBarrier == nil else {
+                return .committed(contiguousCursor: cursor, publishable: nil)
+            }
+            let port = AttentionDomainPort(store: self)
+            let published = try port.observe(context: port.context)
+            return .committed(contiguousCursor: cursor, publishable: published)
+        } catch let error as AttentionStoreError {
+            switch error {
+            case let .eventGap(expected, _):
+                return .gap(expected: expected)
+            case .eventConflict:
+                return .conflict
+            default:
+                return .repairRequired
+            }
+        } catch {
+            return .repairRequired
+        }
+    }
+
+    public func beginReplay(through highWaterSequence: UInt64,
+                            context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        if let activeBarrier = state.replayBarrier {
+            if activeBarrier == highWaterSequence { return }
+            guard highWaterSequence == UInt64.max else { throw AttentionStoreError.replayAlreadyActive }
+            // A prior bounded client may have crashed with a finite barrier.
+            // Preserve its last published view while streaming the remainder.
+            var promoted = state
+            promoted.replayBarrier = UInt64.max
+            try commit(promoted)
+            return
+        }
+        guard highWaterSequence >= state.cursor else {
+            throw AttentionStoreError.replayIncomplete(expected: highWaterSequence, actual: state.cursor)
+        }
+        var next = state
+        next.replayBarrier = highWaterSequence
+        next.replayPublishedRequests = state.requests
+        next.replayPublishedStates = state.remoteStates
+        next.replayPublishedIntents = state.intents
+        try commit(next)
+    }
+
+    public func finishReplay(at resyncedSequence: UInt64,
+                             context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard let barrier = state.replayBarrier else { throw AttentionStoreError.replayNotActive }
+        guard (barrier == resyncedSequence || barrier == UInt64.max),
+              state.cursor == resyncedSequence else {
+            throw AttentionStoreError.replayIncomplete(expected: barrier, actual: state.cursor)
+        }
+        var next = state
+        next.replayBarrier = nil
+        next.replayPublishedRequests = nil
+        next.replayPublishedStates = nil
+        next.replayPublishedIntents = nil
+        try commit(next)
+    }
+
+    public func resolveOriginReference(sequence: UInt64,
+                                       request: StoredRequest,
+                                       context suppliedContext: ProfileContext) throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        try validate(request.key, in: context.identity)
+        guard sequence == state.cursor + 1,
+              state.repairIssues.contains(.missingOriginContent(sequence: sequence, requestKey: request.key)) else {
+            throw AttentionStoreError.missingOriginContent(request.key)
+        }
+        var next = state
+        if let existing = next.requests[request.key] {
+            guard existing.originalPayload.semanticallyEquals(request.originalPayload) else {
+                throw AttentionStoreError.requestConflict
+            }
+        } else {
+            next.requests[request.key] = request
+            next.drafts[request.key] = RequestDraft(interface: request.interface)
+        }
+        next.appliedEvents[sequence] = RelayEvent(sequence: sequence, body: .originReference(request.key))
+        next.remoteStates[request.key] = RemoteRequestState(state: next.remoteStates[request.key]?.state,
+                                                            authorizedOriginAnswer: next.remoteStates[request.key]?.authorizedOriginAnswer,
+                                                            classification: nil,
+                                                            eventSequence: sequence)
+        next.cursor = sequence
+        next.repairIssues.removeAll { $0 == .missingOriginContent(sequence: sequence, requestKey: request.key) }
+        try commit(next)
+        return state.cursor
+    }
+
+    public func snapshot(context suppliedContext: ProfileContext) throws -> AttentionStoreSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let publishedRequests = state.replayPublishedRequests ?? state.requests
+        let visibleKeys = Set(publishedRequests.keys)
+        let visibleDrafts = state.drafts.filter { visibleKeys.contains($0.key) }
+        let visibleSessions = state.fixtureSessions.filter { visibleKeys.contains($0.key) }
+        let sortedOutbox = state.outboxOrder.compactMap { state.intents[$0] }
+        return AttentionStoreSnapshot(requests: publishedRequests,
+                                      drafts: visibleDrafts,
+                                      intents: state.replayPublishedIntents ?? state.intents,
+                                      outbox: sortedOutbox,
+                                      remoteStates: state.replayPublishedStates ?? state.remoteStates,
+                                      fixtureSessions: visibleSessions,
+                                      revision: state.revision,
+                                      cursor: state.cursor,
+                                      replayBarrier: state.replayBarrier,
+                                      repairIssues: state.repairIssues)
+    }
+
+    public func revisions(context suppliedContext: ProfileContext,
+                          after _: UInt64) throws -> AsyncStream<UInt64> {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let id = UUID()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            changeObservers[id] = continuation
+            continuation.yield(state.revision)
+            continuation.onTermination = { [weak self] _ in
+                self?.removeObserver(id)
+            }
+        }
+    }
+
+    private func removeObserver(_ id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        changeObservers.removeValue(forKey: id)
+    }
+
+    private func firstDeliverySequence(for requestKey: RequestKey,
+                                       in events: [UInt64: RelayEvent]) -> UInt64? {
+        events.compactMap { sequence, event in
+            guard case let .delivery(request, _) = event.body,
+                  request.key == requestKey else { return nil }
+            return sequence
+        }.min()
+    }
+
+    private func boundRequest(_ selector: BoundDocumentSelector,
+                              context suppliedContext: ProfileContext) throws -> StoredRequest {
+        guard selector.request.accountScope == context.identity.personID,
+              let id = UUID(uuidString: selector.opaqueDocumentID.rawValue),
+              let binding = selectorBindings[id],
+              binding.profileGeneration == context.generation,
+              binding.requestKey == selector.request,
+              binding.opaqueSubmissionID == selector.opaqueSubmissionID else {
+            throw AttentionStoreError.selectorExpired
+        }
+        guard let request = state.requests[selector.request] else { throw AttentionStoreError.requestMissing }
+        let currentFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
+        guard currentFingerprint == binding.descriptorFingerprint,
+              fingerprint(submissionSignature(for: request.interface)) == binding.submissionFingerprint else {
+            throw AttentionStoreError.selectorExpired
+        }
+        return request
+    }
+
+    private func validate(_ suppliedContext: ProfileContext) throws {
+        guard !isInvalidated,
+              suppliedContext.identity == context.identity,
+              suppliedContext.generation == context.generation,
+              suppliedContext.transportMode == context.transportMode else {
+            throw AttentionStoreError.staleProfile
+        }
+    }
+
+    private func validate(_ requestKey: RequestKey, in identity: ProfileIdentity) throws {
+        guard requestKey.accountScope == identity.personID else { throw AttentionStoreError.wrongAccount }
+    }
+
+    private func commit(_ proposed: PersistedAttentionState) throws {
+        var next = proposed
+        next.revision = state.revision &+ 1
+        do {
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            let bytes = try encoder.encode(next)
+            try persistence.commit(bytes, identity: context.identity)
+            state = next
+            for observer in Array(changeObservers.values) {
+                observer.yield(state.revision)
+            }
+        } catch {
+            if let bytes = try? persistence.load(identity: context.identity),
+               let recovered = try? PropertyListDecoder().decode(PersistedAttentionState.self, from: bytes),
+               recovered.profileIdentity == context.identity {
+                state = recovered
+            }
+            if let storeError = error as? AttentionStoreError { throw storeError }
+            throw AttentionStoreError.persistence(error.localizedDescription)
+        }
+    }
+
+    private func recordRepair(_ issue: StoreRepairIssue) throws {
+        guard !state.repairIssues.contains(issue) else { return }
+        var next = state
+        next.repairIssues.append(issue)
+        try commit(next)
+    }
+
+    private func validateDraft(_ draft: RequestDraft, for interface: RequestInterface) -> Bool {
+        switch interface {
+        case let .sender(document):
+            guard draft.inputs.count == document.inputs.count,
+                  Set(draft.inputs.keys) == Set(document.inputs.map(\.id)),
+                  !draft.compatibility.hasEdits else { return false }
+            for input in document.inputs {
+                guard let value = draft.inputs[input.id] else { return false }
+                switch input.kind {
+                case let .response(actions):
+                    guard value.text == nil, value.point == nil,
+                          value.horizontalText == nil, value.verticalText == nil,
+                          value.textByActionID.keys.allSatisfy({ id in
+                              actions.contains(where: { $0.id == id && $0.kind == .text })
+                          }),
+                          value.selectedActionID.map({ id in actions.contains(where: { $0.id == id }) }) ?? true else { return false }
+                case .text:
+                    guard value.text != nil, value.selectedActionID == nil, value.point == nil,
+                          value.horizontalText == nil, value.verticalText == nil,
+                          value.textByActionID.isEmpty else { return false }
+                case .point:
+                    guard value.selectedActionID == nil, value.text == nil, value.textByActionID.isEmpty else { return false }
+                    if value.point == nil {
+                        guard value.horizontalText == nil, value.verticalText == nil else { return false }
+                    } else if value.horizontalText == nil || value.verticalText == nil {
+                        return false
+                    }
+                }
+            }
+            return true
+        case let .compatibility(form):
+            guard draft.inputs.isEmpty,
+                  draft.compatibility.textByActionID.keys.allSatisfy({ id in form.action(withID: id)?.kind == .text }),
+                  draft.compatibility.selectedActionID.map({ form.action(withID: $0) != nil }) ?? true else { return false }
+            return true
+        case .unsupported:
+            return draft.inputs.isEmpty && !draft.compatibility.hasEdits
+        }
+    }
+
+    private func compose(_ typedSubmission: TypedSubmission,
+                        draft: RequestDraft,
+                        for request: StoredRequest) throws -> JSONValue {
+        switch (request.interface, typedSubmission) {
+        case let (.sender(document), .senderInputs(inputs)):
+            guard inputs.count == document.inputs.count,
+                  Set(inputs.map(\.inputID)).count == inputs.count,
+                  Set(inputs.map(\.inputID)) == Set(document.inputs.map(\.id)) else {
+                throw AttentionStoreError.invalidSubmission
+            }
+            var composedDrafts = Dictionary(uniqueKeysWithValues: document.inputs.map {
+                ($0.id, InputDraft.initial(for: $0))
+            })
+            for input in inputs {
+                guard let descriptor = document.input(withID: input.inputID), var inputDraft = composedDrafts[input.inputID] else {
+                    throw AttentionStoreError.invalidSubmission
+                }
+                switch descriptor.kind {
+                case let .response(actions):
+                    guard let actionID = input.actionID,
+                          let action = actions.first(where: { $0.id == actionID }),
+                          input.point == nil else { throw AttentionStoreError.invalidSubmission }
+                    inputDraft.selectedActionID = actionID
+                    switch action.kind {
+                    case .value:
+                        guard input.text == nil else { throw AttentionStoreError.invalidSubmission }
+                    case .text:
+                        guard let text = input.text else { throw AttentionStoreError.invalidSubmission }
+                        inputDraft.textByActionID[actionID] = text
+                    }
+                case .text:
+                    guard input.actionID == nil, input.point == nil, let text = input.text else {
+                        throw AttentionStoreError.invalidSubmission
+                    }
+                    inputDraft.text = text
+                case .point:
+                    guard input.actionID == nil, input.text == nil, let point = input.point,
+                          (0...1000).contains(point.x), (0...1000).contains(point.y) else {
+                        throw AttentionStoreError.invalidSubmission
+                    }
+                    inputDraft.point = point
+                    inputDraft.horizontalText = ExactText(String(point.x))
+                    inputDraft.verticalText = ExactText(String(point.y))
+                }
+                composedDrafts[input.inputID] = inputDraft
+            }
+            guard typedMatchesDraft(inputs, draft: draft, document: document),
+                  let answer = document.compose(drafts: composedDrafts, maximumBytes: maximumWireFrameBytes) else {
+                throw AttentionStoreError.invalidSubmission
+            }
+            return answer
+        case let (.compatibility(form), .compatibility(actionID, text)):
+            guard draft.inputs.isEmpty, draft.compatibility.selectedActionID == actionID,
+                  let action = form.action(withID: actionID),
+                  let answer = AnswerComposer.compose(action: action, editedText: text ?? ExactText("")) else {
+                throw AttentionStoreError.invalidSubmission
+            }
+            switch action.kind {
+            case .value:
+                guard text == nil else { throw AttentionStoreError.invalidSubmission }
+            case .text:
+                guard text != nil else { throw AttentionStoreError.invalidSubmission }
+            }
+            return answer
+        default:
+            throw AttentionStoreError.unsupportedInterface
+        }
+    }
+
+    private func typedMatchesDraft(_ submissions: [InputSubmission],
+                                   draft: RequestDraft,
+                                   document: SenderDocument) -> Bool {
+        for submission in submissions {
+            guard let descriptor = document.input(withID: submission.inputID),
+                  let saved = draft.inputs[submission.inputID] else { return false }
+            switch descriptor.kind {
+            case let .response(actions):
+                guard saved.selectedActionID == submission.actionID,
+                      let actionID = submission.actionID,
+                      let action = actions.first(where: { $0.id == actionID }) else { return false }
+                if case .text = action.kind {
+                    guard saved.textByActionID[actionID] == submission.text, submission.point == nil else { return false }
+                } else {
+                    guard submission.text == nil, submission.point == nil else { return false }
+                }
+            case .text:
+                guard saved.text == submission.text, submission.text != nil,
+                      submission.actionID == nil, submission.point == nil else { return false }
+            case .point:
+                guard saved.effectivePoint == submission.point, submission.point != nil,
+                      submission.actionID == nil, submission.text == nil else { return false }
+            }
+        }
+        return true
+    }
+
+    private func normalizedSubmission(_ submission: TypedSubmission, interface: RequestInterface) -> JSONValue {
+        switch (submission, interface) {
+        case let (.senderInputs(inputs), .sender(document)):
+            let inputOrder = Dictionary(uniqueKeysWithValues: document.inputs.enumerated().map { ($1.id, $0) })
+            let sorted = inputs.sorted { (inputOrder[$0.inputID] ?? .max) < (inputOrder[$1.inputID] ?? .max) }
+            return .array(sorted.map { item in
+                .object([
+                    JSONMember("input", .string(item.inputID)),
+                    JSONMember("action", item.actionID.map(JSONValue.string) ?? .null),
+                    JSONMember("text", item.text.map(JSONValue.string) ?? .null),
+                    JSONMember("point", item.point?.jsonValue ?? .null)
+                ])
+            })
+        case let (.compatibility(actionID, text), .compatibility):
+            return .object([
+                JSONMember("action", .string(actionID)),
+                JSONMember("text", text.map(JSONValue.string) ?? .null)
+            ])
+        default:
+            return .null
+        }
+    }
+
+    private func relayAnswerOperation(request: StoredRequest, answer: JSONValue, operationID: UUID) -> JSONValue {
+        .object([
+            JSONMember("v", .number(JSONNumber(lexeme: "1"))),
+            JSONMember("type", .string(ExactText("answer"))),
+            JSONMember("op_id", .string(ExactText(operationID.uuidString.lowercased()))),
+            JSONMember("sender_id", .string(request.key.senderID)),
+            JSONMember("message_id", .string(request.key.messageID)),
+            JSONMember("answer", answer)
+        ])
+    }
+
+    private func fingerprint(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func submissionSignature(for interface: RequestInterface) -> String {
+        func constructor(_ value: ResultConstructor) -> JSONValue {
+            switch value {
+            case let .literal(literal):
+                return .object([JSONMember("literal", literal)])
+            case let .input(id):
+                return .object([JSONMember("input", .string(id))])
+            case let .array(values):
+                return .array(values.map(constructor))
+            case let .object(members):
+                return .object(members.map { JSONMember(key: $0.name, value: constructor($0.value)) })
+            }
+        }
+
+        let signature: JSONValue
+        switch interface {
+        case let .sender(document):
+            signature = constructor(document.result)
+        case let .compatibility(form):
+            signature = .array(form.actions.map { action in
+                .object([
+                    JSONMember("id", .string(action.id)),
+                    JSONMember("kind", .string(ExactText(action.kind == .value ? "value" : "text"))),
+                    JSONMember("value", action.value ?? .null)
+                ])
+            })
+        case .unsupported:
+            signature = .null
+        }
+        return signature.canonicalJSON
+    }
+
+    private func isUUIDv4(_ value: UUID) -> Bool {
+        let bytes = withUnsafeBytes(of: value.uuid) { Array($0) }
+        return bytes.count == 16 && bytes[6] >> 4 == 4 && bytes[8] >> 6 == 2
+    }
+}
+
+private struct SelectorBinding {
+    let requestKey: RequestKey
+    let profileGeneration: UUID
+    let descriptorFingerprint: String
+    let submissionFingerprint: String
+    let opaqueSubmissionID: ExactText
+}
+
+private struct PersistedAttentionState: Codable {
+    static let currentSchemaVersion = 2
+
+    let schemaVersion: Int
+    let profileIdentity: ProfileIdentity
+    var revision: UInt64 = 0
+    var requests: [RequestKey: StoredRequest] = [:]
+    var drafts: [RequestKey: RequestDraft] = [:]
+    var fixtureSessions: [RequestKey: RequestSession] = [:]
+    var intents: [UUID: Submission] = [:]
+    // Optional permits decoding older schema-2 profile files unchanged.
+    var fencedIntents: [UUID: RequestKey]? = nil
+    var intentByRequest: [RequestKey: UUID] = [:]
+    var outboxOrder: [UUID] = []
+    var remoteStates: [RequestKey: RemoteRequestState] = [:]
+    var appliedEvents: [UInt64: RelayEvent] = [:]
+    var cursor: UInt64 = 0
+    var replayBarrier: UInt64?
+    var replayPublishedRequests: [RequestKey: StoredRequest]?
+    var replayPublishedStates: [RequestKey: RemoteRequestState]?
+    var replayPublishedIntents: [UUID: Submission]?
+    var repairIssues: [StoreRepairIssue] = []
+
+    init(profileIdentity: ProfileIdentity) {
+        self.schemaVersion = Self.currentSchemaVersion
+        self.profileIdentity = profileIdentity
+    }
+}
+
+private extension ProfileIdentity {
+    var storageKey: String {
+        let identityJSON = JSONValue.array([
+            .string(trustedRelayAuthority),
+            .string(personID),
+            .string(deviceID)
+        ]).canonicalJSON
+        return SHA256.hash(data: Data(identityJSON.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}

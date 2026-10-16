@@ -1,0 +1,66 @@
+{
+  "fixture_set": "attention-client.m2/1",
+  "account_scope": "sample-account",
+  "requests": [
+    {
+      "sender_id": "app://sample/review",
+      "message_id": "draft-42",
+      "created_at": 1791763200000,
+      "title": "Choose a sample draft",
+      "body": "Fictional request. Inspect the drafts, choose an answer, then use Send answer. This content is sample data: <script>alert('sample')</script>.",
+      "stake": "No real document changes.",
+      "by_when": 1791763200000,
+      "answer_ui": {
+        "schema": "attention-client.actions/1",
+        "actions": [
+          {"id": "use-a", "label": "Use draft A", "kind": "value", "value": {"draft": "A", "revision": 9007199254740993, "unknown": {"enabled": false, "note": null}}},
+          {"id": "use-b", "label": "Use draft B", "kind": "value", "value": {"draft": "B", "revision": 2}},
+          {"id": "note", "label": "Send a note", "kind": "text"}
+        ]
+      },
+      "open": {"argv": ["m2-inert-command-canary"], "terminal": false},
+      "callback": {"url": "https://example.invalid/m2-never-call"},
+      "default": {"action": "use-a", "at": 1791763200000},
+      "urgency": "now"
+    },
+    {
+      "sender_id": "app://sample/writing",
+      "message_id": "note-7",
+      "created_at": 1791763200001,
+      "title": "Write a sample reply",
+      "body": "Select Write a reply, edit the text, then explicitly send. An empty reply is a string too.",
+      "answer_ui": {
+        "schema": "attention-client.actions/1",
+        "actions": [{"id": "reply", "label": "Write a reply", "kind": "text"}]
+      }
+    },
+    {
+      "sender_id": "app://sample/custom",
+      "message_id": "custom-9",
+      "created_at": 1791763200002,
+      "title": "Inspect an unfamiliar sample form",
+      "body": "This fictional source supplied a form this prototype does not understand. Reading or copying its reference does not answer it.",
+      "answer_ui": {"custom": true, "unknown": {"value": 9007199254740993, "flags": [false, null]}}
+    }
+  ],
+  "value_conformance_vectors": [
+    9007199254740993,
+    12345678901234567890.1234567890123456789,
+    1e1000,
+    false,
+    0,
+    "0",
+    null,
+    [],
+    {},
+    {"nested": [false, null, {"unknown": 9007199254740993}]}
+  ],
+  "text_conformance_vectors": [
+    "false",
+    "null",
+    "9007199254740993",
+    "",
+    "Line 1\nLine 2",
+    "  Cafe\u0301 👩🏽‍💻  "
+  ]
+}
