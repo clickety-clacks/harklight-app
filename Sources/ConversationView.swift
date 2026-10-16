@@ -250,6 +250,7 @@ private struct ConversationUploadCleanupStatus: View {
                     Button("Refresh discussion history") { Task { await store.refreshDiscussionHistory() } }
                 }
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+            .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("conversation-upload-cleanup-status")
         }
     }
