@@ -33,6 +33,7 @@ struct LiveInboxSettings: View {
     let launch: NativeAppLaunch?
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingDisconnect = false
+    @State private var confirmingEndpointMigration = false
 
     private var record: NativeEnrollmentRecord? {
         store.isReadOnly ? launch?.disconnectedAccount?.record : launch?.activeEnrollmentRecord
@@ -117,9 +118,28 @@ struct LiveInboxSettings: View {
                     Section("Connection") {
                         Text("This phone is registered to this account.")
                             .foregroundStyle(.secondary)
+                        if launch?.canMigrateDirectEndpointToGibson == true {
+                            Button(launch?.isEndpointMigrationBusy == true ? "Checking Gibson…" : "Move connection to Gibson…") {
+                                confirmingEndpointMigration = true
+                            }
+                            .disabled(launch?.isEndpointMigrationBusy == true)
+                            .confirmationDialog("Move this connection?", isPresented: $confirmingEndpointMigration,
+                                                titleVisibility: .visible) {
+                                Button("Move connection to Gibson") {
+                                    Task { await launch?.migrateDirectEndpointToGibson() }
+                                }
+                                Button("Cancel", role: .cancel) {}
+                            } message: {
+                                Text("Harklight will verify the confirmed server address before switching. Your approved account, device identity, trust certificate, messages and drafts stay on this phone. This does not unregister or enroll the device. If verification fails, the current connection remains active.")
+                            }
+                        }
+                        if let message = launch?.endpointMigrationMessage {
+                            Text(message).font(.footnote).foregroundStyle(.secondary)
+                        }
                         Button("Disconnect this phone…", role: .destructive) {
                             confirmingDisconnect = true
                         }
+                        .disabled(launch?.isEndpointMigrationBusy == true)
                         .confirmationDialog("Disconnect this phone?", isPresented: $confirmingDisconnect,
                                             titleVisibility: .visible) {
                             Button("Disconnect this phone", role: .destructive) {

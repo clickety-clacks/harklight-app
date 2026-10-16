@@ -38,6 +38,8 @@ final class NativeAppLaunch {
     private(set) var isShowingDisconnectedArchive = false
     private(set) var disconnectMessage: String?
     private(set) var isDisconnectBusy = false
+    private(set) var endpointMigrationMessage: String?
+    private(set) var isEndpointMigrationBusy = false
     let guidedJoin: NativeGuidedJoinCoordinator
 
     @ObservationIgnored private let enrollment = NativeEnrollmentStore()
@@ -138,7 +140,7 @@ final class NativeAppLaunch {
     }
 
     func disconnectCurrentAccount() async {
-        guard !isDisconnectBusy, case let .live(presentation) = state,
+        guard !isDisconnectBusy, !isEndpointMigrationBusy, case let .live(presentation) = state,
               let record = try? enrollment.load(), record.isApproved else { return }
         disconnectMessage = nil
         do {
@@ -158,6 +160,56 @@ final class NativeAppLaunch {
             await retryDisconnectRemoval()
         } catch {
             disconnectMessage = "Harklight could not save the removal request. Nothing was sent; this account is still connected. Try again."
+        }
+    }
+
+    var canMigrateDirectEndpointToGibson: Bool {
+        guard case .live = state, !isEndpointMigrationBusy,
+              let record = activeEnrollmentRecord,
+              (try? NativeEndpointMigrationPolicy.candidate(from: record)) != nil,
+              hasNoRecordedDeparture else { return false }
+        return true
+    }
+
+    private var hasNoRecordedDeparture: Bool {
+        do {
+            switch try guidedJoinStore.departure() {
+            case .none: return true
+            case .some: return false
+            }
+        } catch {
+            // A storage error must not make endpoint migration appear safe
+            // while an uncertain removal may still be recorded.
+            return false
+        }
+    }
+
+    /// Switches only the approved endpoint. The current relay remains active
+    /// until the new hostname passes the same CA and device-identity checks.
+    func migrateDirectEndpointToGibson() async {
+        guard canMigrateDirectEndpointToGibson,
+              let record = try? enrollment.load(), record == activeEnrollmentRecord,
+              let migrated = try? NativeEndpointMigrationPolicy.candidate(from: record),
+              let relayURL = URL(string: "wss://\(NativeEndpointMigrationPolicy.gibsonHost):\(NativeEndpointMigrationPolicy.gibsonRelayPort)/relay") else {
+            endpointMigrationMessage = "This saved enrollment cannot use the approved server address. Your current connection is unchanged."
+            return
+        }
+        let generation = activationGeneration
+        isEndpointMigrationBusy = true
+        endpointMigrationMessage = nil
+        defer { isEndpointMigrationBusy = false }
+        do {
+            try await NativeRelayLifecycle.shared.migrateEndpoint(to: relayURL) {
+                guard self.activationGeneration == generation else { throw NativeRelayCoreError.inactive }
+                try self.enrollment.commitGibsonEndpointMigration(from: record, to: migrated)
+            }
+            guard activationGeneration == generation else { return }
+            activeEnrollmentRecord = migrated
+            endpointMigrationMessage = "The approved server address is saved. This account, device identity, trust certificate and local history are unchanged."
+            Task { await refreshLive() }
+        } catch {
+            guard activationGeneration == generation else { return }
+            endpointMigrationMessage = "Gibson could not be verified, so Harklight kept the existing connection and server address. Try again when the new endpoint is available."
         }
     }
 
@@ -232,7 +284,7 @@ final class NativeAppLaunch {
     private func makeDisconnectedPresentation(for departure: NativeAccountDeparture) throws -> LivePresentationStore {
         guard let personID = departure.record.personID else { throw NativeEnrollmentError.invalidIdentity }
         let context = ProfileContext(identity: ProfileIdentity(
-            trustedRelayAuthority: ExactText(departure.record.host),
+            trustedRelayAuthority: ExactText(departure.record.profileAuthority),
             personID: ExactText(personID),
             deviceID: ExactText(departure.record.deviceID)), transportMode: .relay)
         let persistence = try FileAttentionStatePersistence.applicationSupport()

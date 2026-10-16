@@ -42,6 +42,108 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(target.receivedRequest, "The authenticated request must not reach a redirected endpoint")
     }
 
+    func testGibsonEndpointMigrationKeepsTheApprovedProfileAndTrust() throws {
+        let namespace = "Harklight.endpoint-migration-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let tlsFixture = try LocalEnrollmentTLS(expectedDevice: identity.deviceID)
+        defer { tlsFixture.close() }
+        let original = NativeEnrollmentRecord(
+            host: NativeEndpointMigrationPolicy.sourceHost,
+            enrollmentPort: 18_444,
+            relayPort: 18_443,
+            trustedRootDER: tlsFixture.rootDER,
+            identityLabel: identity.label,
+            deviceLabel: "My phone",
+            deviceID: identity.deviceID,
+            approvalCode: "ABCDEF2345",
+            statusSecret: String(repeating: "a", count: 64),
+            expiresAt: 2_000,
+            statusExpiresAt: 3_000,
+            personID: "same-person")
+        let enrollment = NativeEnrollmentStore(service: namespace)
+        try enrollment.retainApprovedGuided(original, expectedPersonID: "same-person",
+                                           expectedDeviceID: identity.deviceID)
+
+        let encodedLegacyRecord = try JSONEncoder().encode(original)
+        var legacyObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encodedLegacyRecord) as? [String: Any])
+        legacyObject.removeValue(forKey: "localProfileAuthority")
+        let decodedLegacyRecord = try JSONDecoder().decode(
+            NativeEnrollmentRecord.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject))
+        XCTAssertEqual(decodedLegacyRecord.profileAuthority, NativeEndpointMigrationPolicy.sourceHost,
+                       "Older saved enrollments keep their original profile authority")
+
+        XCTAssertEqual(NativeEndpointMigrationPolicy.pinnedRootSHA256,
+                       "a550a50ddc8c5286a403b5f71fd7ff2c74f6c862815def1c0666bea2500cf7ea")
+        XCTAssertThrowsError(try NativeEndpointMigrationPolicy.candidate(from: original),
+                             "A test CA cannot authorize a production endpoint move")
+        var wrongEndpoint = original
+        wrongEndpoint.host = "unapproved.example"
+        XCTAssertThrowsError(try NativeEndpointMigrationPolicy.candidate(
+            from: wrongEndpoint, acceptedRootSHA256: NativeEndpointMigrationPolicy.rootSHA256(original.trustedRootDER)))
+        var wrongAuthority = original
+        wrongAuthority.localProfileAuthority = "unapproved.example"
+        XCTAssertThrowsError(try NativeEndpointMigrationPolicy.candidate(
+            from: wrongAuthority, acceptedRootSHA256: NativeEndpointMigrationPolicy.rootSHA256(original.trustedRootDER)))
+        let fixtureFingerprint = NativeEndpointMigrationPolicy.rootSHA256(original.trustedRootDER)
+        let migrated = try NativeEndpointMigrationPolicy.candidate(from: original,
+                                                                    acceptedRootSHA256: fixtureFingerprint)
+        XCTAssertEqual(migrated.host, NativeEndpointMigrationPolicy.gibsonHost)
+        XCTAssertEqual(migrated.enrollmentPort, NativeEndpointMigrationPolicy.gibsonEnrollmentPort)
+        XCTAssertEqual(migrated.relayPort, NativeEndpointMigrationPolicy.gibsonRelayPort)
+        XCTAssertEqual(migrated.profileAuthority, NativeEndpointMigrationPolicy.sourceHost)
+        XCTAssertEqual(migrated.personID, original.personID)
+        XCTAssertEqual(migrated.deviceID, original.deviceID)
+        XCTAssertEqual(migrated.identityLabel, original.identityLabel)
+        XCTAssertEqual(migrated.trustedRootDER, original.trustedRootDER)
+
+        var wrongReplacement = migrated
+        wrongReplacement.host = "unapproved.example"
+        XCTAssertThrowsError(try enrollment.commitGibsonEndpointMigration(
+            from: original, to: wrongReplacement, acceptedRootSHA256: fixtureFingerprint))
+
+        try enrollment.commitGibsonEndpointMigration(from: original, to: migrated,
+                                                     acceptedRootSHA256: fixtureFingerprint)
+        let stored = try XCTUnwrap(enrollment.load())
+        XCTAssertEqual(stored, migrated)
+        let material = try enrollment.material(from: stored)
+        XCTAssertEqual(material.context.identity.trustedRelayAuthority.rawValue,
+                       NativeEndpointMigrationPolicy.sourceHost)
+        XCTAssertEqual(material.context.identity.personID.rawValue, original.personID)
+        XCTAssertEqual(material.context.identity.deviceID.rawValue, original.deviceID)
+        XCTAssertEqual(material.relayURL.host, NativeEndpointMigrationPolicy.gibsonHost)
+        XCTAssertEqual(material.relayURL.port, NativeEndpointMigrationPolicy.gibsonRelayPort)
+        XCTAssertEqual(material.trustedRootDER, original.trustedRootDER)
+        var retainedCertificate: SecCertificate?
+        XCTAssertEqual(SecIdentityCopyCertificate(material.keychainIdentity, &retainedCertificate), errSecSuccess)
+        XCTAssertEqual(SecCertificateCopyData(try XCTUnwrap(retainedCertificate)) as Data,
+                       identity.certificateDER)
+    }
+
+    func testConversationOriginUsesTheNewEndpointWithoutChangingProfileAuthority() throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(NativeEndpointMigrationPolicy.sourceHost),
+            personID: ExactText("same-person"), deviceID: ExactText("same-device")), transportMode: .relay)
+        let wire = try ConversationWire(profile: context,
+                                        endpointHost: NativeEndpointMigrationPolicy.gibsonHost)
+        let accepted = Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-conversation-sync\",\"origin_https_port\":52117}\n".utf8)
+        let origin = try XCTUnwrap(wire.originEndpoint(accepted))
+        XCTAssertEqual(origin.host, NativeEndpointMigrationPolicy.gibsonHost)
+        XCTAssertEqual(origin.port, 52_117, "The origin TLS port remains relay-discovered")
+        XCTAssertEqual(context.identity.trustedRelayAuthority.rawValue,
+                       NativeEndpointMigrationPolicy.sourceHost)
+
+        let mismatchedOrigin = try XCTUnwrap(URL(string: "https://\(NativeEndpointMigrationPolicy.sourceHost):18447/origin/v1"))
+        XCTAssertThrowsError(try ConversationFileWire(profile: context, originURL: mismatchedOrigin,
+                                                       endpointHost: NativeEndpointMigrationPolicy.gibsonHost))
+    }
+
     func testJoinRefusesPlaintextBeforeSendingAnInvitation() async throws {
         let server = try LocalEnrollmentTLS(expectedDevice: nil)
         defer { server.close() }
