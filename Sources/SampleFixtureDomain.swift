@@ -78,6 +78,14 @@ final class SampleFixtureDomain {
                 try apply(.availability(sessionHandle: handle, .gone))
                 try apply(.terminal(turn: ExactText(message.id + "-terminal"), author: .origin, state: .cleared))
             }
+            if message.id == "sample-approval-1" {
+                var answer = RequestDraft(interface: request.interface)
+                answer.inputs[ExactText("answer")]?.selectedActionID = message.options.first.map { ExactText($0.id) }
+                try domain.saveDraft(answer, selector: domain.selector(for: key, context: context), context: context)
+                try domain.saveConversationDraft(ConversationDraft(binding: binding,
+                    text: ExactText("Please keep this unsent note.")), context: context)
+                try apply(.retraction(turn: ExactText(message.id + "-retracted"), terminalSequence: 1))
+            }
         }
         try viewModel.refreshFromDurableStore()
     }

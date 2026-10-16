@@ -48,7 +48,9 @@ struct ConversationPanel: View {
                             ForEach(thread.turns) { turn in
                                 ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
                                     sender: sender, local: store.isLocalExample,
-                                    replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue }, inspect: { fileError = nil; inspectedFile = $0 })
+                                    replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue },
+                                    retracted: thread.isRetracted && thread.terminalTurn == turn.id,
+                                    inspect: { fileError = nil; inspectedFile = $0 })
                                     .id(turn.id)
                             }
                         }.padding(.horizontal)
@@ -58,7 +60,7 @@ struct ConversationPanel: View {
                     }
                 }
                 if let terminal = thread.terminal {
-                    Label("Request \(terminal.rawValue)", systemImage: "checkmark.circle")
+                    Label(thread.isRetracted ? "Retracted" : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
                 }
                 HStack {
@@ -224,6 +226,7 @@ private struct ConversationTurnView: View {
     let sender: String
     let local: Bool
     let replyContext: String?
+    let retracted: Bool
     let inspect: (ConversationFile) -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -239,7 +242,7 @@ private struct ConversationTurnView: View {
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 if turn.kind == .revision { Text(turn.binding.revision == 1 ? "Original question" : "Updated").font(.caption.weight(.semibold)) }
-                if turn.kind == .terminal { Text("Request closed").font(.caption.weight(.semibold)) }
+                if turn.kind == .terminal { Text(retracted ? "Retracted" : "Request closed").font(.caption.weight(.semibold)) }
                 if let status = turn.resultStatus {
                     Text("Original answer result: " + status.rawValue).font(.caption.weight(.semibold))
                 }

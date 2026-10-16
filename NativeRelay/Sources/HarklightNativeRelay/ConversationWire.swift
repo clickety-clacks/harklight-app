@@ -177,6 +177,10 @@ public struct ConversationWire: Sendable {
         case "availability":
             guard value.uniqueValue(named: "event_id") == nil else { throw RelayWireError.invalidFrame }
             fact = .availabilityRecord(sessionHandle: handle, state: try availability(value), support: value.uniqueValue(named: "listening_support"))
+        case "retraction":
+            guard try text(value, "author") == "origin", try text(value, "terminal_state") == "retracted",
+                  try integer(value, "terminal_seq") > 0 else { throw RelayWireError.invalidFrame }
+            fact = .retraction(turn: ExactText(try text(value, "event_id")), terminalSequence: try integer(value, "terminal_seq"))
         default: throw RelayWireError.unsupportedEvent
         }
         return ConversationEvent(sequence: sequence, binding: binding, fact: fact)
@@ -190,11 +194,17 @@ public struct ConversationWire: Sendable {
             guard let parsed = ConversationAuthor(rawValue: raw.rawValue) else { throw RelayWireError.invalidFrame }
             author = parsed
         } else { author = nil }
+        let reason = try optionalText(value, "terminal_reason")
+        if let reason {
+            guard reason == ExactText("retracted"), author == .origin,
+                  try text(value, "type") == "lifecycle", try text(value, "state") == "cleared",
+                  try optionalText(value, "event_id") != nil else { throw RelayWireError.invalidFrame }
+        }
         return RelayConversationMetadata(revision: revision, sessionHandle: try optionalText(value, "session_handle"),
             eventID: try optionalText(value, "event_id"),
             availability: value.uniqueValue(named: "availability") == nil ? nil : try availability(value),
             listeningSupport: value.uniqueValue(named: "listening_support"), author: author,
-            files: value.uniqueValue(named: "files") == nil ? nil : try files(value))
+            files: value.uniqueValue(named: "files") == nil ? nil : try files(value), terminalReason: reason)
     }
     private func availability(_ value: JSONValue) throws -> ConversationAvailability {
         switch try text(value, "availability") {

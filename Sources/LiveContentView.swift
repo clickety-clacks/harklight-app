@@ -54,8 +54,12 @@ struct LiveRequestDetail: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-update-fact")
                 }
-                Text(LiveLifecycleTitle(request.lifecycleStatus).label)
+                Text(store.isRetracted(request.key) ? "Retracted" : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                     .font(.caption).foregroundStyle(.secondary)
+                if store.isRetracted(request.key) {
+                    Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if deferred {
                     HStack {
                         Label("Not now", systemImage: "clock")

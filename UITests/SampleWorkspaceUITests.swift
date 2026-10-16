@@ -224,6 +224,30 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("sender-updated-earlier-question-and-draft", app)
     }
 
+    func testRetractedItemKeepsItsSelectedChoiceHistoryAndUnsentDiscussion() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--conversation-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let search = app.searchFields.firstMatch
+        search.tap(); search.typeText("Archive\n")
+        let row = app.buttons["request-row-sample-approval-1"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        XCTAssertTrue(row.label.contains("Retracted"))
+        row.tap()
+        XCTAssertTrue(app.staticTexts["Retracted"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent."].exists)
+        capture("sender-retracted-retained-request", app)
+        app.buttons["Chat"].tap()
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "Please keep this unsent note.")
+        XCTAssertFalse(composer.isEnabled)
+        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        capture("sender-retracted-history-and-unsent-note", app)
+    }
+
     func testConversationRevisionFileFactsAndClosureUseTheOrdinaryApp() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

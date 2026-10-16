@@ -325,6 +325,7 @@ final class LivePresentationStore {
     func hasAcceptedUpdate(for key: RequestKey) -> Bool {
         conversationThreads[key]?.acceptedUpdates.isEmpty == false
     }
+    func isRetracted(_ key: RequestKey) -> Bool { conversationThreads[key]?.isRetracted == true }
 
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
 
@@ -438,7 +439,8 @@ final class LivePresentationStore {
         presentation.requests.map {
             InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
                 sender: $0.key.senderID.rawValue,
-                status: (hasAcceptedUpdate(for: $0.key) ? "Updated · " : "") + String(localized: LiveLifecycleTitle($0.lifecycleStatus).label),
+                status: (hasAcceptedUpdate(for: $0.key) ? "Updated · " : "") +
+                    (isRetracted($0.key) ? "Retracted" : String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)),
                 bodyText: $0.body?.rawValue ?? "")
         }
     }

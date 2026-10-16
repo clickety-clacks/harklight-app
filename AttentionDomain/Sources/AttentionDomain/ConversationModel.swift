@@ -144,6 +144,8 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         case fileTransfer(turn: ExactText, file: ExactText, ConversationFileTransfer)
         case fileUse(turn: ExactText, file: ExactText, ConversationFileUse)
         case terminal(turn: ExactText, author: ConversationAuthor, state: TerminalState)
+        /// Reference to the same ordinary terminal, never another ordinary event.
+        case retraction(turn: ExactText, terminalSequence: UInt64)
     }
 
     public init(sequence: UInt64, binding: ConversationBinding, fact: Fact) {
@@ -168,6 +170,9 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var listeningSupport: JSONValue?
     public var redactedRevisions: Set<UInt64>?
     public var terminalAuthor: ConversationAuthor?
+    public var retraction: ConversationRetraction?
+
+    public var isRetracted: Bool { retraction != nil }
 
     public var revisionNumbers: [UInt64] { Set(revisions.keys).union(redactedRevisions ?? []).sorted() }
     /// Accepted sender facts remain available under their original request,
@@ -190,12 +195,42 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         }
     }
 
+    mutating func recordRetraction(turn: ExactText, sequence: UInt64, revision: UInt64) throws {
+        guard !turn.rawValue.isEmpty, sequence > 0, revision > 0,
+              terminal == nil || terminal == .cleared,
+              terminalTurn == nil || terminalTurn == turn else { throw ConversationError.conflict }
+        let fact = ConversationRetraction(turn: turn, terminalSequence: sequence, revision: revision)
+        guard retraction == nil || retraction == fact else { throw ConversationError.conflict }
+        retraction = fact
+        terminal = .cleared
+        terminalTurn = turn
+        terminalAuthor = .origin
+        if !turns.contains(where: { $0.id == turn }) {
+            turns.append(ConversationTurn(id: turn, binding: ConversationBinding(request: request, revision: revision),
+                author: .origin, sessionHandle: sessionHandle, text: ExactText(""), kind: .terminal))
+            facts[turn] = ConversationTurnFacts()
+            orderTurns()
+        }
+        for revision in drafts.keys {
+            if var draft = drafts[revision], case .saved = draft.disposition {
+                draft.disposition = .rejected(ExactText("Not delivered: request retracted"))
+                drafts[revision] = draft
+            }
+        }
+    }
+
     init(request: RequestKey, sessionHandle: ExactText, revision: UInt64, payload: JSONValue) {
         self.request = request
         self.sessionHandle = sessionHandle
         self.revisions = [revision: payload]
         self.currentRevision = revision
     }
+}
+
+public struct ConversationRetraction: Equatable, Codable, Sendable {
+    public let turn: ExactText
+    public let terminalSequence: UInt64
+    public let revision: UInt64
 }
 
 public enum ConversationError: Error, Equatable, Sendable {
@@ -319,6 +354,8 @@ struct ConversationState: Codable {
                         thread.drafts[revision] = draft
                     }
                 }
+            case let .retraction(turn, sequence):
+                try thread.recordRetraction(turn: turn, sequence: sequence, revision: binding.revision)
             case let .delivered(turn):
                 try requireTurn(turn, binding: binding, in: thread)
                 thread.facts[turn, default: ConversationTurnFacts()].delivered = true

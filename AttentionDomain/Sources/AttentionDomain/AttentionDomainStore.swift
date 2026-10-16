@@ -682,6 +682,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     thread.orderTurns()
                 }
             }
+            if event.conversation?.terminalReason == ExactText("retracted") {
+                guard terminal == .cleared, event.conversation?.author == .origin,
+                      let id = event.conversation?.eventID, let revision = event.conversation?.revision else {
+                    throw ConversationError.invalidBinding
+                }
+                try thread.recordRetraction(turn: id, sequence: event.sequence, revision: revision)
+            }
             for revision in thread.drafts.keys {
                 guard var draft = thread.drafts[revision] else { continue }
                 if case .saved = draft.disposition {
@@ -875,7 +882,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     next.fixtureSessions[key] = fixture
                 }
             }
-            if let id = next.intentByRequest[key], var intent = next.intents[id] {
+            if current.terminal == nil, let id = next.intentByRequest[key], var intent = next.intents[id] {
                 if case .accepted = intent.disposition { throw ConversationError.conflict }
                 // An authoritative newer open question proves an earlier final answer did not close it.
                 intent.disposition = .lost
@@ -890,6 +897,23 @@ public final class AttentionDomainStore: @unchecked Sendable {
             next.remoteStates[key] = RemoteRequestState(state: terminal,
                 authorizedOriginAnswer: previous.authorizedOriginAnswer, classification: previous.classification,
                 eventSequence: previous.eventSequence)
+            next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
+        }
+        if case let .retraction(_, sequence) = event.fact, next.requests[key] != nil {
+            // This projection references the one ordinary terminal. It closes
+            // action locally without advancing or fabricating its ordinary cursor.
+            let previous = next.remoteStates[key] ?? RemoteRequestState()
+            guard previous.state == nil || previous.state == .cleared else { throw ConversationError.conflict }
+            next.remoteStates[key] = RemoteRequestState(state: .cleared,
+                authorizedOriginAnswer: previous.authorizedOriginAnswer, classification: previous.classification,
+                eventSequence: sequence)
+            if let id = next.intentByRequest[key], var intent = next.intents[id] {
+                if case .accepted = intent.disposition {} else {
+                    intent.disposition = .terminal(state: .cleared, sequence: sequence,
+                        authorizedAnswer: previous.authorizedOriginAnswer)
+                    next.intents[id] = intent
+                }
+            }
             next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
         }
         next.conversation = conversation

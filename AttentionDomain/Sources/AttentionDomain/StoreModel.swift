@@ -298,17 +298,19 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
     public let availability: ConversationAvailability?
     public let listeningSupport: JSONValue?
     public let author: ConversationAuthor?
+    public let terminalReason: ExactText?
     public let files: [ConversationFile]?
 
     public init(revision: UInt64, sessionHandle: ExactText? = nil, eventID: ExactText? = nil,
                 availability: ConversationAvailability? = nil, listeningSupport: JSONValue? = nil,
-                author: ConversationAuthor? = nil, files: [ConversationFile]? = nil) {
+                author: ConversationAuthor? = nil, files: [ConversationFile]? = nil, terminalReason: ExactText? = nil) {
         self.revision = revision
         self.sessionHandle = sessionHandle
         self.eventID = eventID
         self.availability = availability
         self.listeningSupport = listeningSupport
         self.author = author
+        self.terminalReason = terminalReason
         self.files = files
     }
 
@@ -316,7 +318,8 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
         revision == old.revision && (old.sessionHandle == nil || old.sessionHandle == sessionHandle) &&
         (old.eventID == nil || old.eventID == eventID) && (old.availability == nil || old.availability == availability) &&
         (old.listeningSupport == nil || old.listeningSupport == listeningSupport) &&
-        (old.author == nil || old.author == author) && (old.files == nil || old.files == files)
+        (old.author == nil || old.author == author) && (old.files == nil || old.files == files) &&
+        (old.terminalReason == nil || old.terminalReason == terminalReason)
     }
 }
 
