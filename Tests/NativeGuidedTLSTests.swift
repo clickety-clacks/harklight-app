@@ -228,7 +228,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Saved request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"approve","label":"Approve","kind":"value","value":"approve"}]}}"#.utf8))
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message),
-            conversation: RelayConversationMetadata(revision: 4, sessionHandle: ExactText("session"))),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
             context: context)
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
@@ -237,7 +237,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                                                             inputs: [.compatibilityValue(action: ExactText("approve"))]))
         let original = try XCTUnwrap(store.snapshot(context: context).outbox.first)
         XCTAssertEqual(originalReceipt.opID, original.operationID)
-        XCTAssertEqual(original.requestRevision, 4)
+        XCTAssertEqual(original.requestRevision, 1)
 
         let session = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
         let core = try NativeRelayCore(store: store, context: context, session: session)
