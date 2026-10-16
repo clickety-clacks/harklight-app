@@ -297,6 +297,21 @@ public final class AttentionDomainPort: @unchecked Sendable {
         )
     }
 
+    public func conversations(context suppliedContext: PortContext) throws -> ConversationSnapshot {
+        try validate(suppliedContext)
+        return try store.conversationSnapshot(context: profileContext)
+    }
+
+    public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) throws {
+        try validate(suppliedContext)
+        try store.saveConversationDraft(draft, context: profileContext)
+    }
+
+    public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws -> UUID {
+        try validate(suppliedContext)
+        return try store.prepareDiscussion(binding, context: profileContext)
+    }
+
     public func observe(context suppliedContext: PortContext) throws -> PresentationSnapshot {
         try validate(suppliedContext)
         return try presentation(from: store.snapshot(context: profileContext), selectorFor: nil)
