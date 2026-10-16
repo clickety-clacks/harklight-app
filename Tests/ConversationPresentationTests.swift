@@ -139,4 +139,32 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: olderURL), bytes)
     }
 
+    func testShakeExamplesIncludeRevisionArchiveDistinctFileFactsAndClosureWithoutOperations() throws {
+        let library = SampleLibrary()
+        library.populate()
+        let fixture = try XCTUnwrap(library.fixture)
+        let revised = try XCTUnwrap(library.responses["sample-approval-2"])
+        let revision = try XCTUnwrap(fixture.viewModel.conversation(for: revised.key))
+        XCTAssertEqual(revision.currentRevision, 2)
+        XCTAssertNotNil(revision.answerDrafts?[1]?.inputs[ExactText("answer")]?.selectedActionID)
+        XCTAssertTrue(fixture.viewModel.request(for: revised.key)?.body?.rawValue.contains("review before publication") == true)
+        let files = try XCTUnwrap(library.responses["sample-information-2"])
+        let fileThread = try XCTUnwrap(fixture.viewModel.conversation(for: files.key))
+        let turn = try XCTUnwrap(fileThread.turns.last)
+        let file = try XCTUnwrap(turn.files.first)
+        XCTAssertEqual(fileThread.facts[turn.id]?.fileTransfers[file.id], .transferred)
+        XCTAssertEqual(fileThread.facts[turn.id]?.fileUses[file.id], .unusable(reason: ExactText("Fictional unsupported format")))
+        let closed = try XCTUnwrap(library.responses["sample-completed-2"])
+        XCTAssertEqual(fixture.viewModel.conversation(for: closed.key)?.terminal, .cleared)
+        XCTAssertEqual(fixture.viewModel.conversation(for: closed.key)?.terminalAuthor, .origin)
+        XCTAssertTrue(closed.isClosed)
+        let before = try fixture.domain.conversationSnapshot(context: fixture.context)
+        library.populate()
+        XCTAssertEqual(try fixture.domain.conversationSnapshot(context: fixture.context).cursor, before.cursor)
+        let state = try fixture.domain.snapshot(context: fixture.context)
+        XCTAssertTrue(state.intents.isEmpty)
+        XCTAssertTrue(state.outbox.isEmpty)
+        XCTAssertThrowsError(try fixture.domain.prepareDiscussion(ConversationBinding(request: revised.key, revision: 2), context: fixture.context))
+    }
+
 }

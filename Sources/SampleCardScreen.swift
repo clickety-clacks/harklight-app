@@ -129,7 +129,7 @@ struct SampleCardScreen: View {
                     response.finished = true
                     response.deferred = false
                 }
-                .labelStyle(.iconOnly).disabled(!canFinish || response.finished)
+                .labelStyle(.iconOnly).disabled(!canFinish || response.finished || response.isClosed)
                 .accessibilityIdentifier("sample-finish")
             }
             ToolbarItemGroup(placement: .bottomBar) {
@@ -197,7 +197,7 @@ struct SampleCardContent: View {
                 .background(message.kind.isNotice ? message.kind.color.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 14))
                 .padding(.horizontal, 22)
             SampleRequestControls(message: message, response: response, enlarge: enlarge)
-                .disabled(response.finished && message.kind != .pictureChoice)
+                .disabled(response.isClosed || (response.finished && message.kind != .pictureChoice))
         }
         .padding(.vertical, 24)
     }

@@ -299,12 +299,13 @@ struct ConversationState: Codable {
                 guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
                 thread.availability = availability
                 thread.listeningSupport = support
-            case let .terminal(turn, _, state):
+            case let .terminal(turn, author, state):
                 if let terminal = thread.terminal {
                     guard terminal == state, thread.terminalTurn == turn else { throw ConversationError.conflict }
                 }
                 thread.terminal = state
                 thread.terminalTurn = turn
+                thread.terminalAuthor = author
                 for revision in thread.drafts.keys {
                     guard var draft = thread.drafts[revision] else { continue }
                     // Ambiguous submissions stay reconcilable with their original operation identity.

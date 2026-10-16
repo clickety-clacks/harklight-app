@@ -1,5 +1,6 @@
 import Foundation
 import AttentionDomain
+import CryptoKit
 
 /// Local examples use the existing sender descriptor grammar, domain registration,
 /// memory persistence, projection and ordinary app view model. No wire schema changes.
@@ -26,9 +27,10 @@ final class SampleFixtureDomain {
             let key = key(for: message)
             let binding = ConversationBinding(request: key, revision: 1)
             let handle = ExactText("local-session-" + message.id)
-            func apply(_ fact: ConversationEvent.Fact) throws {
+            func apply(_ fact: ConversationEvent.Fact, revision: UInt64 = 1) throws {
                 sequence += 1
-                try domain.applyConversation(ConversationEvent(sequence: sequence, binding: binding, fact: fact), context: context)
+                try domain.applyConversation(ConversationEvent(sequence: sequence,
+                    binding: ConversationBinding(request: key, revision: revision), fact: fact), context: context)
             }
             guard let request = requests[key] else { throw ConversationError.missingRequest }
             try apply(.request(sessionHandle: handle, payload: request.originalPayload))
@@ -47,6 +49,34 @@ final class SampleFixtureDomain {
                 try apply(.delivered(turn: person.id))
                 try apply(.turn(reply))
                 try apply(.acted(turn: person.id, by: reply.id))
+            }
+            if message.id == "sample-approval-2" {
+                var answer = RequestDraft(interface: request.interface)
+                answer.inputs[ExactText("answer")]?.selectedActionID = message.options.first.map { ExactText($0.id) }
+                try domain.saveDraft(answer, selector: domain.selector(for: key, context: context), context: context)
+                let members = request.originalPayload.objectMembers ?? []
+                let payload = JSONValue.object(members.map { member in
+                    member.key == ExactText("body") ? JSONMember("body", .string(ExactText(message.body + " The local request now asks for a review before publication."))) : member
+                })
+                let revised = ConversationTurn(id: ExactText(message.id + "-revision"),
+                    binding: ConversationBinding(request: key, revision: 2), author: .origin,
+                    sessionHandle: handle, text: ExactText("Please review before publishing. The earlier answer draft is retained."), kind: .revision)
+                try apply(.revision(revised, payload: payload), revision: 2)
+            }
+            if message.id == "sample-information-2" {
+                let bytes = Data("Fictional local file; no upload or service call occurred.".utf8)
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                let file = ConversationFile(id: ExactText("example.txt"), name: ExactText("example.txt"), byteCount: UInt64(bytes.count),
+                    sha256: ExactText(digest), content: .inline(bytes))
+                let turn = ConversationTurn(id: ExactText(message.id + "-file"), binding: binding, author: .person,
+                    sessionHandle: handle, text: ExactText("This local file demonstrates distinct transfer and use facts."), files: [file])
+                try apply(.turn(turn))
+                try apply(.fileTransfer(turn: turn.id, file: file.id, .transferred))
+                try apply(.fileUse(turn: turn.id, file: file.id, .unusable(reason: ExactText("Fictional unsupported format"))))
+            }
+            if message.id == "sample-completed-2" {
+                try apply(.availability(sessionHandle: handle, .gone))
+                try apply(.terminal(turn: ExactText(message.id + "-terminal"), author: .origin, state: .cleared))
             }
         }
         try viewModel.refreshFromDurableStore()
@@ -102,8 +132,8 @@ final class SampleFixtureDomain {
         case .note, .error, .warning, .information, .completed:
             break
         }
-        // Notes are actual domain text drafts. Notice kinds remain open local
-        // examples, not fabricated terminal states or accepted receipts.
+        // Notes are actual domain text drafts. Conversation closure examples are
+        // applied separately as typed local facts, never accepted answer receipts.
         text("note", "Note")
         let nodes: [[String: Any]] = inputs.map { input in
             let kind = input["kind"] as? String

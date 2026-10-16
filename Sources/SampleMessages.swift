@@ -84,6 +84,10 @@ final class SampleResponse {
     }
 
     private var draft: RequestDraft? { viewModel.request(for: key)?.draft }
+    var isClosed: Bool {
+        guard let status = viewModel.request(for: key)?.lifecycleStatus else { return false }
+        return status != .open && status != .pending
+    }
     var choices: Set<String> {
         get {
             if message.kind == .multipleChoice {
