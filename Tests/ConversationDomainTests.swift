@@ -101,6 +101,87 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertNil(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
     }
 
+    func testOrdinaryMetadataBootstrapsConversationAndTerminalBeforeHistoryDoesNotLoseHistory() throws {
+        let context = context()
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let first = binding(context)
+        let original = try JSONValue.parse(Data(#"{"title":"Original"}"#.utf8))
+        let request = StoredRequest(key: first.request, originalPayload: original)
+        try store.apply(RelayEvent(sequence: 1, body: .delivery(request, .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"),
+                availability: .listening)), context: context)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0,
+                       "Ordinary metadata must not fabricate a conversation sequence")
+        try store.saveConversationDraft(ConversationDraft(binding: first, text: ExactText("Keep draft")), context: context)
+        try store.apply(RelayEvent(sequence: 2, body: .terminal(first.request, .answered, nil),
+            conversation: RelayConversationMetadata(revision: 2, eventID: ExactText("terminal-4"))), context: context)
+        let earlier = ConversationTurn(id: ExactText("discussion-2"), binding: first, author: .person,
+            sessionHandle: ExactText("session"), text: ExactText("Earlier discussion"))
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: first, fact: .turn(earlier)), context: context)
+        let revised = try JSONValue.parse(Data(#"{"title":"Revised"}"#.utf8))
+        let second = binding(context, 2)
+        let revision = ConversationTurn(id: ExactText("revision-3"), binding: second, author: .origin,
+            sessionHandle: ExactText("session"), text: ExactText(""), inReplyTo: earlier.id, kind: .revision)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: second,
+            fact: .revision(revision, payload: revised)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: second,
+            fact: .delivered(turn: ExactText("terminal-4"))), context: context)
+        XCTAssertThrowsError(try store.saveConversationDraft(ConversationDraft(binding: second,
+            text: ExactText("Cannot submit after closure")), context: context))
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let snapshot = try restored.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(snapshot.threads[first.request])
+        XCTAssertEqual(snapshot.cursor, 3)
+        XCTAssertEqual(try restored.snapshot(context: context).cursor, 2)
+        XCTAssertEqual(thread.currentRevision, 2)
+        XCTAssertEqual(thread.revisions[1], original)
+        XCTAssertEqual(thread.revisions[2], revised)
+        XCTAssertEqual(thread.turns.map(\.id), [earlier.id, revision.id])
+        XCTAssertEqual(thread.terminal, .answered)
+        XCTAssertEqual(thread.facts[ExactText("terminal-4")]?.delivered, true)
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("Keep draft"))
+    }
+
+    func testOldOrdinaryReplayCanGainMetadataWithoutChangingItsCursorOrDraft() throws {
+        let context = context()
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let first = binding(context)
+        let request = StoredRequest(key: first.request,
+            originalPayload: try JSONValue.parse(Data(#"{"title":"Original"}"#.utf8)))
+        try store.apply(RelayEvent(sequence: 1, body: .delivery(request, .message)), context: context)
+        let before = try store.snapshot(context: context)
+        try store.apply(RelayEvent(sequence: 1, body: .delivery(request, .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))), context: context)
+        let after = try store.snapshot(context: context)
+        XCTAssertEqual(after.cursor, before.cursor)
+        XCTAssertEqual(after.drafts, before.drafts)
+        XCTAssertEqual(after.intents, before.intents)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[first.request]?.sessionHandle, ExactText("session"))
+    }
+
+    func testAcceptedFilesMatchOriginalBytesRatherThanLocalCopyIdentity() throws {
+        let context = context()
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let first = binding(context)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: first,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        let bytes = Data([0, 255, 0, 2])
+        let digest = ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+        let local = ConversationFile(id: ExactText("picker-uuid"), name: ExactText("original.bin"),
+            byteCount: 4, sha256: digest, content: .localFile(ExactText("retained-copy")))
+        try store.saveConversationDraft(ConversationDraft(binding: first, text: ExactText("Exact bytes"), files: [local]), context: context)
+        let operation = try store.prepareDiscussion(first, context: context)
+        let acceptedFile = ConversationFile(id: ExactText("original.bin"), name: local.name,
+            byteCount: 4, sha256: digest, content: .inline(bytes))
+        let accepted = ConversationTurn(id: ExactText("feed-2"), binding: first, author: .person,
+            sessionHandle: ExactText("session"), text: ExactText("Exact bytes"), operationID: operation, files: [acceptedFile])
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: first, fact: .turn(accepted)), context: context)
+        XCTAssertNil(try store.conversationSnapshot(context: context).threads[first.request]?.drafts[1])
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[first.request]?.turns.first?.files, [acceptedFile])
+    }
+
     func testGapConflictAndFailedPersistenceCannotAdvanceConversationOrLegacyCursor() throws {
         let context = context()
         let persistence = MemoryAttentionStatePersistence()

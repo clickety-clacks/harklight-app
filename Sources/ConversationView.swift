@@ -216,7 +216,16 @@ private struct ConversationTurnView: View {
             if let replyContext {
                 Text("Replying to: " + replyContext).lineLimit(2).font(.caption2).foregroundStyle(.secondary)
             }
-            Text(turn.text.rawValue).textSelection(.enabled)
+            if turn.contentRedacted == true {
+                Text("Person-authored content is not included in this device projection.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                if turn.kind == .revision { Text("Question revised").font(.caption.weight(.semibold)) }
+                if let status = turn.resultStatus {
+                    Text("Original answer result: " + status.rawValue).font(.caption.weight(.semibold))
+                }
+                if !turn.text.rawValue.isEmpty { Text(turn.text.rawValue).textSelection(.enabled) }
+            }
             ForEach(turn.files) { file in
                 Button { inspect(file) } label: { Label(file.name.rawValue, systemImage: "doc") }.font(.caption)
                 if turn.author == .person {

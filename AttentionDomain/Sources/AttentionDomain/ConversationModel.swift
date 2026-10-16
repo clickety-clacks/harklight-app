@@ -68,10 +68,17 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
     public let inReplyTo: ExactText?
     public let operationID: UUID?
     public let files: [ConversationFile]
+    /// Origin-device projections deliberately omit person-authored content.
+    public let contentRedacted: Bool?
+    public let kind: Kind?
+    public let resultStatus: ExactText?
+
+    public enum Kind: String, Codable, Sendable { case discussion, reply, revision, result, terminal }
 
     public init(id: ExactText, binding: ConversationBinding, author: ConversationAuthor,
                 sessionHandle: ExactText, text: ExactText, inReplyTo: ExactText? = nil,
-                operationID: UUID? = nil, files: [ConversationFile] = []) {
+                operationID: UUID? = nil, files: [ConversationFile] = [],
+                contentRedacted: Bool? = nil, kind: Kind? = nil, resultStatus: ExactText? = nil) {
         self.id = id
         self.binding = binding
         self.author = author
@@ -80,6 +87,9 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
         self.inReplyTo = inReplyTo
         self.operationID = operationID
         self.files = files
+        self.contentRedacted = contentRedacted
+        self.kind = kind
+        self.resultStatus = resultStatus
     }
 }
 
@@ -122,6 +132,8 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
 
     public enum Fact: Equatable, Codable, Sendable {
         case request(sessionHandle: ExactText, payload: JSONValue)
+        /// One server revision frame, one transaction and one sequence number.
+        case revision(ConversationTurn, payload: JSONValue)
         case turn(ConversationTurn)
         case delivered(turn: ExactText)
         case acted(turn: ExactText, by: ExactText)
@@ -150,6 +162,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var availability: ConversationAvailability = .unsupported(reason: ExactText("No listening support recorded"))
     public var terminal: TerminalState?
     public var terminalTurn: ExactText?
+    public var listeningSupport: JSONValue?
 
     init(request: RequestKey, sessionHandle: ExactText, revision: UInt64, payload: JSONValue) {
         self.request = request
@@ -189,14 +202,20 @@ struct ConversationState: Codable {
             throw ConversationError.gap(expected: cursor == UInt64.max ? cursor : cursor + 1, received: event.sequence)
         }
         let binding = event.binding
-        if case let .request(handle, payload) = event.fact {
+        let question: (ExactText, JSONValue)?
+        switch event.fact {
+        case let .request(handle, payload): question = (handle, payload)
+        case let .revision(turn, payload): question = (turn.sessionHandle, payload)
+        default: question = nil
+        }
+        if let (handle, payload) = question {
             guard !handle.rawValue.isEmpty else { throw ConversationError.invalidBinding }
             if var thread = threads[binding.request] {
                 guard thread.sessionHandle == handle else { throw ConversationError.conflict }
                 if let old = thread.revisions[binding.revision] {
                     guard old == payload else { throw ConversationError.conflict }
                 } else {
-                    guard thread.terminal == nil, binding.revision == thread.currentRevision + 1 else {
+                    guard binding.revision == thread.currentRevision + 1 else {
                         throw ConversationError.staleRevision(current: thread.currentRevision)
                     }
                     thread.revisions[binding.revision] = payload
@@ -208,19 +227,24 @@ struct ConversationState: Codable {
                 threads[binding.request] = ConversationThread(request: binding.request,
                     sessionHandle: handle, revision: binding.revision, payload: payload)
             }
-        } else {
+        }
+        // A revision also carries its immutable turn, but never consumes a second sequence.
+        let appliesTurn: Bool
+        if case .revision = event.fact { appliesTurn = true } else { appliesTurn = question == nil }
+        if appliesTurn {
             guard var thread = threads[binding.request], thread.revisions[binding.revision] != nil else {
                 throw ConversationError.missingRequest
             }
             switch event.fact {
             case .request: break
-            case let .turn(turn):
+            case let .turn(turn), let .revision(turn, _):
                 guard turn.binding == binding, turn.sessionHandle == thread.sessionHandle,
                       !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
                 if let old = thread.turns.first(where: { $0.id == turn.id }) {
                     guard old == turn else { throw ConversationError.conflict }
                 } else {
-                    guard thread.terminal == nil else { throw ConversationError.closed }
+                    // Ordinary replay can close the request before older conversation history arrives.
+                    // Authoritative historical entries remain applicable; local submission checks closure.
                     thread.turns.append(turn)
                     thread.facts[turn.id] = ConversationTurnFacts()
                 }
@@ -229,7 +253,8 @@ struct ConversationState: Codable {
                     switch draft.disposition {
                     case let .submitting(savedID) where savedID == operationID,
                          let .outcomeUnknown(savedID) where savedID == operationID:
-                        guard draft.text == turn.text, draft.files == turn.files else { throw ConversationError.conflict }
+                        guard turn.contentRedacted != true, draft.text == turn.text,
+                              Self.sameOriginalFiles(draft.files, turn.files) else { throw ConversationError.conflict }
                         thread.drafts.removeValue(forKey: binding.revision)
                     default: break
                     }
@@ -276,8 +301,14 @@ struct ConversationState: Codable {
         cursor = event.sequence
     }
 
+    static func sameOriginalFiles(_ left: [ConversationFile], _ right: [ConversationFile]) -> Bool {
+        left.count == right.count && zip(left, right).allSatisfy {
+            $0.name == $1.name && $0.byteCount == $1.byteCount && $0.sha256 == $1.sha256
+        }
+    }
+
     private func requireTurn(_ id: ExactText, binding: ConversationBinding, in thread: ConversationThread) throws {
-        guard thread.turns.contains(where: { $0.id == id && $0.binding.request == binding.request }) else {
+        guard thread.terminalTurn == id || thread.turns.contains(where: { $0.id == id && $0.binding.request == binding.request }) else {
             throw ConversationError.invalidBinding
         }
     }

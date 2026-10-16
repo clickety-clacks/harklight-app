@@ -258,10 +258,12 @@ public enum RelayEventBody: Equatable, Codable, Sendable {
 public struct RelayEvent: Equatable, Codable, Sendable {
     public let sequence: UInt64
     public let body: RelayEventBody
+    public let conversation: RelayConversationMetadata?
 
-    public init(sequence: UInt64, body: RelayEventBody) {
+    public init(sequence: UInt64, body: RelayEventBody, conversation: RelayConversationMetadata? = nil) {
         self.sequence = sequence
         self.body = body
+        self.conversation = conversation
     }
 
     public func hasSameSemanticContent(as other: RelayEvent) -> Bool {
@@ -284,6 +286,25 @@ public struct RelayEvent: Equatable, Codable, Sendable {
         case let (.some(left), .some(right)): return left.semanticallyEquals(right)
         default: return false
         }
+    }
+}
+
+/// Additive ordinary-stream metadata initializes or closes a conversation without
+/// borrowing a conversation sequence number or changing the sender's message JSON.
+public struct RelayConversationMetadata: Equatable, Codable, Sendable {
+    public let revision: UInt64
+    public let sessionHandle: ExactText?
+    public let eventID: ExactText?
+    public let availability: ConversationAvailability?
+    public let listeningSupport: JSONValue?
+
+    public init(revision: UInt64, sessionHandle: ExactText? = nil, eventID: ExactText? = nil,
+                availability: ConversationAvailability? = nil, listeningSupport: JSONValue? = nil) {
+        self.revision = revision
+        self.sessionHandle = sessionHandle
+        self.eventID = eventID
+        self.availability = availability
+        self.listeningSupport = listeningSupport
     }
 }
 

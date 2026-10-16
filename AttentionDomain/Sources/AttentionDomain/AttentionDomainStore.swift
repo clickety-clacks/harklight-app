@@ -510,6 +510,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 try recordRepair(.conflictingEvent(sequence: event.sequence))
                 throw AttentionStoreError.eventConflict(event.sequence)
             }
+            if let metadata = event.conversation {
+                if let previous = state.appliedEvents[event.sequence]?.conversation, previous != metadata {
+                    throw ConversationError.conflict
+                }
+                var next = state
+                try applyOrdinaryConversationMetadata(event, to: &next)
+                if state.appliedEvents[event.sequence]?.conversation == nil {
+                    next.appliedEvents[event.sequence] = event
+                    try commit(next)
+                }
+            }
             if case let .delivery(request, classification) = event.body,
                state.remoteStates[request.key]?.classification != classification {
                 var next = state
@@ -598,6 +609,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 next.outboxOrder.removeAll(where: { $0 == intentID })
             }
         }
+        try applyOrdinaryConversationMetadata(event, to: &next)
         next.appliedEvents[event.sequence] = event
         next.cursor = event.sequence
         next.repairIssues.removeAll { issue in
@@ -609,6 +621,48 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         try commit(next)
         return state.cursor
+    }
+
+    private func applyOrdinaryConversationMetadata(_ event: RelayEvent, to next: inout PersistedAttentionState) throws {
+        var conversation = next.conversation ?? ConversationState()
+        switch event.body {
+        case let .delivery(request, _):
+            guard let metadata = event.conversation else { return }
+            guard metadata.revision == 1, let handle = metadata.sessionHandle, !handle.rawValue.isEmpty else {
+                throw ConversationError.invalidBinding
+            }
+            if let prior = conversation.threads[request.key] {
+                guard prior.sessionHandle == handle,
+                      prior.revisions[1]?.semanticallyEquals(request.originalPayload) == true else {
+                    throw ConversationError.conflict
+                }
+            } else {
+                var thread = ConversationThread(request: request.key, sessionHandle: handle,
+                    revision: 1, payload: request.originalPayload)
+                if let availability = metadata.availability { thread.availability = availability }
+                thread.listeningSupport = metadata.listeningSupport
+                thread.terminal = next.remoteStates[request.key]?.state
+                conversation.threads[request.key] = thread
+            }
+        case let .terminal(key, terminal, _):
+            guard var thread = conversation.threads[key] else { return }
+            guard thread.terminal == nil || thread.terminal == terminal else { throw ConversationError.conflict }
+            thread.terminal = terminal
+            if let eventID = event.conversation?.eventID {
+                guard thread.terminalTurn == nil || thread.terminalTurn == eventID else { throw ConversationError.conflict }
+                thread.terminalTurn = eventID
+            }
+            for revision in thread.drafts.keys {
+                guard var draft = thread.drafts[revision] else { continue }
+                if case .saved = draft.disposition {
+                    draft.disposition = .rejected(ExactText("Not delivered: request closed"))
+                    thread.drafts[revision] = draft
+                }
+            }
+            conversation.threads[key] = thread
+        case .originReference: return
+        }
+        next.conversation = conversation
     }
 
     public func applyRelayEvent(_ event: RelayEvent,
@@ -770,13 +824,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(event.binding.request, in: context.identity)
-        if case let .turn(turn) = event.fact { try validateConversationFiles(turn.files) }
+        switch event.fact {
+        case let .turn(turn), let .revision(turn, _): try validateConversationFiles(turn.files)
+        default: break
+        }
         var next = state
         var conversation = next.conversation ?? ConversationState()
         try conversation.apply(event)
         if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
         let key = event.binding.request
-        if case .request = event.fact, let previous = state.conversation?.threads[key],
+        if let previous = state.conversation?.threads[key],
            let current = conversation.threads[key], current.currentRevision != previous.currentRevision,
            let payload = current.revisions[current.currentRevision] {
             var archived = previous.answerDrafts ?? [:]
@@ -830,6 +887,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
               thread.revisions[draft.binding.revision] != nil else { throw ConversationError.missingRequest }
+        guard thread.terminal == nil else { throw ConversationError.closed }
         if let previous = thread.drafts[draft.binding.revision] {
             switch previous.disposition {
             case .submitting, .outcomeUnknown: throw ConversationError.pendingSubmission
