@@ -102,7 +102,7 @@ private struct ConversationComposer: View {
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var frozen: Bool {
-        switch draft.disposition { case .submitting, .outcomeUnknown: return true; default: return false }
+        switch draft.disposition { case .submitting, .outcomeUnknown, .acceptedPendingReplay: return true; default: return false }
     }
 
     var body: some View {
@@ -149,11 +149,11 @@ private struct ConversationComposer: View {
             .padding(12).glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
             .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
             Button { store.sendDiscussion(for: key, revision: revision) } label: {
-                Image(systemName: "arrow.up").font(.headline)
+                Image(systemName: frozen ? "arrow.clockwise" : "arrow.up").font(.headline)
             }
             .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
-            .accessibilityLabel(store.isLocalExample ? "Send locally" : "Send message")
-            .disabled(frozen || thread?.terminal != nil || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
+            .accessibilityLabel(store.isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
+            .disabled(store.isSendingDiscussion || thread?.terminal != nil || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
         }
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {
@@ -195,6 +195,7 @@ private struct ConversationDraftStatus: View {
         case .saved: EmptyView()
         case .submitting: Text("Submitting · saved draft retained").font(.caption)
         case .outcomeUnknown: Text("Submission unconfirmed · saved draft retained").font(.caption)
+        case .acceptedPendingReplay: Text("Accepted · awaiting synchronized history").font(.caption)
         case let .rejected(reason): Text(reason.rawValue).font(.caption).foregroundStyle(.secondary)
         }
     }

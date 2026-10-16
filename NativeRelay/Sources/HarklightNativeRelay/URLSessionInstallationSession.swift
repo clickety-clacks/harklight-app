@@ -25,7 +25,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// A keychain-backed installation certificate and an enrollment-approved relay
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
-public actor URLSessionInstallationSession: AuthenticatedConversationSession {
+public actor URLSessionInstallationSession: AuthenticatedConversationFileSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession

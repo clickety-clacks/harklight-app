@@ -112,6 +112,7 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
         case saved
         case submitting(UUID)
         case outcomeUnknown(UUID)
+        case acceptedPendingReplay(operation: UUID, turn: ExactText)
         case rejected(ExactText)
     }
 
@@ -279,9 +280,12 @@ struct ConversationState: Codable {
                 }
                 // Only an exact accepted operation clears its frozen draft.
                 if let draft = thread.drafts[binding.revision], let operationID = turn.operationID {
+                    if case let .acceptedPendingReplay(savedID, savedTurn) = draft.disposition,
+                       savedID == operationID, savedTurn != turn.id { throw ConversationError.conflict }
                     switch draft.disposition {
                     case let .submitting(savedID) where savedID == operationID,
-                         let .outcomeUnknown(savedID) where savedID == operationID:
+                         let .outcomeUnknown(savedID) where savedID == operationID,
+                         let .acceptedPendingReplay(savedID, _) where savedID == operationID:
                         guard turn.contentRedacted != true, draft.text == turn.text,
                               Self.sameOriginalFiles(draft.files, turn.files) else { throw ConversationError.conflict }
                         thread.drafts.removeValue(forKey: binding.revision)

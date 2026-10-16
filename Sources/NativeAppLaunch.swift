@@ -1,4 +1,5 @@
 import AttentionDomain
+import HarklightNativeRelay
 import Foundation
 import CryptoKit
 import Observation
@@ -275,6 +276,7 @@ final class NativeAppLaunch {
 final class LivePresentationStore {
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     private(set) var conversationError: String?
+    private(set) var isSendingDiscussion = false
     private(set) var presentation: PresentationSnapshot
     private(set) var selectedRequestKey: RequestKey?
     private(set) var observationError: String?
@@ -287,6 +289,7 @@ final class LivePresentationStore {
     @ObservationIgnored private let port: AttentionDomainPort
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
+    @ObservationIgnored private let profileContext: ProfileContext
     @ObservationIgnored private var observation: Task<Void, Never>?
 
     convenience init(store: AttentionDomainStore, context: ProfileContext) throws {
@@ -302,6 +305,7 @@ final class LivePresentationStore {
 
     private init(store: AttentionDomainStore, context: ProfileContext, permitsDelivery: Bool) throws {
         self.permitsDelivery = permitsDelivery
+        self.profileContext = context
         _ = try store.snapshot(context: context)
         let port = AttentionDomainPort(store: store)
         let snapshot = try port.observe(context: port.context)
@@ -347,8 +351,31 @@ final class LivePresentationStore {
         do {
             let binding = ConversationBinding(request: key, revision: revision)
             if permitsDelivery {
-                // No operation is minted until this connection implements the agreed projection and submission wire.
-                conversationError = "Conversation delivery is not available on this connection. Your draft is saved."
+                guard !isSendingDiscussion, let files = conversationFiles else { return }
+                isSendingDiscussion = true
+                conversationError = nil
+                Task { [weak self] in
+                    guard let self else { return }
+                    defer { isSendingDiscussion = false }
+                    do {
+                        let result = try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: profileContext) { file in
+                            try files.fileURL(for: file)
+                        }
+                        try refreshFromDurableStore()
+                        switch result {
+                        case .accepted: conversationError = nil
+                        case let .rejected(reason): conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
+                        case .unresolved: conversationError = "Submission unconfirmed. Retry uses the same saved operation."
+                        }
+                    } catch {
+                        try? refreshFromDurableStore()
+                        if (error as? ConversationError) == .emptyDraft {
+                            conversationError = "Add a message before sending these files. Your draft is retained."
+                        } else {
+                            conversationError = "Discussion could not be confirmed (\(error)). Your saved text and files are retained."
+                        }
+                    }
+                }
                 return
             }
             try port.appendFixtureDiscussion(binding, context: port.context)

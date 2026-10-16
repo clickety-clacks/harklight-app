@@ -25,13 +25,13 @@ public struct ConversationWire: Sendable {
     /// The caller has already frozen this exact draft operation durably. Upload
     /// references may replace local-copy representations, never original bytes.
     public func discussion(_ draft: ConversationDraft, operationID: UUID,
-                           preparedFiles: [ConversationFile], limits: ConversationFileLimits) throws -> Data {
+                           preparedFiles: [ConversationFile], limits: ConversationFileLimits?) throws -> Data {
         guard draft.binding.request.accountScope == profile.identity.personID,
               draft.binding.revision > 0,
               !draft.text.rawValue.isEmpty,
               draft.files.count == preparedFiles.count else { throw RelayWireError.invalidFrame }
         switch draft.disposition {
-        case let .submitting(id), let .outcomeUnknown(id):
+        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
             guard id == operationID else { throw ConversationError.conflict }
         default: throw ConversationError.invalidBinding
         }
@@ -46,6 +46,7 @@ public struct ConversationWire: Sendable {
             var fields = [JSONMember("name", .string(prepared.name))]
             switch prepared.content {
             case let .inline(bytes):
+                guard let limits else { throw ConversationError.uploadRequired(prepared.name) }
                 guard UInt64(bytes.count) == prepared.byteCount,
                       inlineBytes <= limits.inlineDecodedBytes,
                       prepared.byteCount <= limits.inlineDecodedBytes - inlineBytes,

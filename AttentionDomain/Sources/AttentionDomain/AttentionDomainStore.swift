@@ -918,7 +918,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard thread.terminal == nil else { throw ConversationError.closed }
         if let previous = thread.drafts[draft.binding.revision] {
             switch previous.disposition {
-            case .submitting, .outcomeUnknown: throw ConversationError.pendingSubmission
+            case .submitting, .outcomeUnknown, .acceptedPendingReplay: throw ConversationError.pendingSubmission
             default: break
             }
         }
@@ -965,7 +965,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw ConversationError.emptyDraft
         }
         switch draft.disposition {
-        case let .submitting(id), let .outcomeUnknown(id): return id
+        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _): return id
         case .saved, .rejected: break
         }
         let operation = UUID()
@@ -993,6 +993,29 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         // Rejection and unknown outcomes retain text, selected files and addressed revision.
         draft.disposition = rejection.map { .rejected($0) } ?? .outcomeUnknown(operation)
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func markDiscussionAccepted(_ binding: ConversationBinding, operation: UUID, turn: ExactText,
+                                        context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay, !turn.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        switch draft.disposition {
+        case let .submitting(id), let .outcomeUnknown(id):
+            guard id == operation else { throw ConversationError.conflict }
+        case let .acceptedPendingReplay(id, priorTurn):
+            guard id == operation, priorTurn == turn else { throw ConversationError.conflict }
+        default: throw ConversationError.conflict
+        }
+        draft.disposition = .acceptedPendingReplay(operation: operation, turn: turn)
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation

@@ -18,6 +18,13 @@ public protocol AuthenticatedConversationSession: AuthenticatedInstallationSessi
     func acknowledgeConversation(_ request: Data) async throws
 }
 
+public protocol AuthenticatedConversationFileSession: AuthenticatedConversationSession {
+    func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits
+    func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
+                                operationID: UUID, limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile
+    func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult
+}
+
 public enum OriginalOperationResult: Equatable, Sendable {
     case accepted(operationID: UUID, terminalSequence: UInt64)
     case unresolved
@@ -50,6 +57,91 @@ public actor NativeRelayCore {
     public func conversationOriginURL() throws -> URL? {
         try validate()
         return discoveredOriginURL
+    }
+
+    public func submitDiscussion(_ binding: ConversationBinding,
+        retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
+        guard !busy else { throw NativeRelayCoreError.inactive }
+        busy = true
+        defer { busy = false }
+        try validate()
+        guard let transport = session as? any AuthenticatedConversationFileSession,
+              let draft = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+            throw ConversationError.missingRequest
+        }
+        if case let .acceptedPendingReplay(_, turn) = draft.disposition {
+            try await replayConversationAndAcknowledge(using: transport)
+            return .accepted(turnID: turn)
+        }
+        guard !draft.text.rawValue.isEmpty else { throw ConversationError.emptyDraft }
+        let wasUncertain: Bool
+        switch draft.disposition {
+        case .submitting, .outcomeUnknown: wasUncertain = true
+        default: wasUncertain = false
+        }
+        let operation = try store.prepareDiscussion(binding, context: context)
+        guard let frozen = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+            throw ConversationError.missingRequest
+        }
+        let frame: Data
+        do {
+            var prepared: [ConversationFile] = []
+            var limits: ConversationFileLimits?
+            if !frozen.files.isEmpty {
+                guard let endpoint = discoveredOriginURL else {
+                    throw ConversationError.uploadRequired(frozen.files[0].name)
+                }
+                let published = try await transport.conversationFileLimits(originURL: endpoint)
+                try validate()
+                limits = published
+                let tiers = try published.tiers(for: frozen.files)
+                for (file, tier) in zip(frozen.files, tiers) {
+                    if case .uploaded = file.content { prepared.append(file); continue }
+                    if tier == .upload {
+                        let source = try await retainedFile(file)
+                        let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
+                            operationID: operation, limits: published, originURL: endpoint)
+                        try validate()
+                        prepared.append(uploaded)
+                    } else {
+                        let bytes: Data
+                        if case let .inline(inline) = file.content { bytes = inline }
+                        else {
+                            let source = try await retainedFile(file)
+                            bytes = try Data(contentsOf: source)
+                        }
+                        prepared.append(ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
+                            sha256: file.sha256, content: .inline(bytes)))
+                    }
+                }
+            }
+            frame = try ConversationWire(profile: context).discussion(frozen, operationID: operation,
+                preparedFiles: prepared, limits: limits)
+        } catch {
+            // No discussion frame has been sent by this attempt. A previous
+            // ambiguous attempt must still keep its exact operation frozen.
+            // Keep all original bytes/draft; unreferenced uploads do not submit a turn.
+            let names = frozen.files.map { $0.name.rawValue }.joined(separator: ", ")
+            try store.markDiscussionOutcome(binding, operation: operation,
+                rejection: wasUncertain ? nil : ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
+                context: context)
+            throw error
+        }
+        try validate()
+        let result = await transport.sendDiscussion(frame, operationID: operation)
+        try validate()
+        switch result {
+        case let .accepted(turn):
+            try store.markDiscussionAccepted(binding, operation: operation, turn: turn, context: context)
+            // The accepted turn is durable even if replay temporarily fails. A later
+            // refresh joins it; the send response cannot move a replay cursor.
+            try? await replayConversationAndAcknowledge(using: transport)
+        case let .rejected(reason):
+            try store.markDiscussionOutcome(binding, operation: operation, rejection: reason, context: context)
+        case .unresolved:
+            try store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+        }
+        return result
     }
 
     private struct ConversationReplayProgress {
