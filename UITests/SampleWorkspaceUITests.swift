@@ -224,6 +224,39 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("sender-updated-earlier-question-and-draft", app)
     }
 
+    func testCompactBackLeavesMessageButClosingChatDoesNotAbandonItsUpload() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--conversation-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let search = app.searchFields.firstMatch
+        search.tap(); search.typeText("welcome\n")
+        let row = app.buttons["request-row-sample-review-2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        app.buttons["Chat"].tap()
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
+        app.buttons["Close"].tap()
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Closing chat alone does not leave its message")
+        app.buttons["Close"].tap()
+        let back = app.buttons["BackButton"].exists ? app.buttons["BackButton"] : app.buttons["Back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "Keep this file note.")
+        XCTAssertTrue(app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        capture("compact-back-upload-cleanup-retained-draft", app)
+    }
+
     func testNavigationKeepsUnsubmittedUploadCleanupTruthfulAcrossAdaptiveRebuild() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
