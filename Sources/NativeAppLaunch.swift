@@ -31,6 +31,8 @@ final class NativeAppLaunch {
     private(set) var enrollmentMessage: String?
     private(set) var isEnrollmentBusy = false
     private(set) var isEnrollmentExpired = false
+    private(set) var foregroundConnectProgress: NativeForegroundConnectProgress?
+    private(set) var foregroundConnectDiagnostic: NativeForegroundConnectDiagnostic?
     let guidedJoin: NativeGuidedJoinCoordinator
 
     @ObservationIgnored private let enrollment = NativeEnrollmentStore()
@@ -51,11 +53,21 @@ final class NativeAppLaunch {
             let material = try self.enrollment.material(from: record)
             try await self.activate(material)
             let epoch = self.activationGeneration
-            let reached = await NativeRelayLifecycle.shared.confirmForegroundProgress(for: material.context)
+            let connect = await NativeRelayLifecycle.shared.confirmForegroundProgress(for: material.context) { [weak self] progress in
+                guard let self else { return }
+                self.foregroundConnectProgress = progress
+                self.foregroundConnectDiagnostic = NativeForegroundConnectDiagnostic(
+                    progress: progress,
+                    operationSnapshot: NativeRelayLifecycle.shared.foregroundOperationDiagnostics(for: material.context))
+                if case let .live(presentation) = self.state {
+                    presentation.connectionWarning = progress.outcome == .confirmed ? nil : progress.message
+                }
+            }
             guard self.activationGeneration == epoch else { return false }
+            let reached = connect.outcome == .confirmed
             if reached { try self.enrollment.markForegroundRelayConfirmed(for: record.deviceID) }
             if case let .live(presentation) = self.state {
-                presentation.connectionWarning = reached ? nil : "The server cannot be reached. Saved requests and answers remain on this device."
+                presentation.connectionWarning = reached ? nil : connect.message
             }
             return reached
         }
@@ -256,6 +268,11 @@ final class NativeAppLaunch {
         let result = await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
         guard case let .live(current) = state, current === presentation else { return }
         presentation.applyRefreshResult(result)
+    }
+
+    func retryForegroundConnection() async {
+        guard case .live = state else { return }
+        await guidedJoin.retryApprovedConnection()
     }
 }
 

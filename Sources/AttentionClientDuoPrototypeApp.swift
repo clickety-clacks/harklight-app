@@ -27,7 +27,7 @@ struct AttentionClientDuoPrototypeApp: App {
                     case let .fixture(store):
                         ContentView(store: store, samples: samples)
                     case let .live(store):
-                        LiveContentView(store: store, samples: samples)
+                        LiveContentView(store: store, samples: samples, launch: launch)
                     } }
                 }
                 .task {
@@ -44,10 +44,8 @@ struct AttentionClientDuoPrototypeApp: App {
                 guard scenePhase == .active else { return }
                 while !Task.isCancelled {
                     await launch.refreshLive()
-                    if launch.guidedJoin.isShowing &&
-                        [.pending, .approvalExpired, .unreachable, .approvedFinishing].contains(launch.guidedJoin.screen) {
-                        await launch.guidedJoin.retry()
-                    }
+                    await launch.guidedJoin.retryAutomaticallyIfNeeded(
+                        foregroundOutcome: launch.foregroundConnectProgress?.outcome)
                     try? await Task.sleep(for: .seconds(15))
                 }
             }

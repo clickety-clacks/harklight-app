@@ -13,6 +13,23 @@ public enum InstallationTransportError: Error {
     case acknowledgementBehind
 }
 
+/// Observable transport facts for a foreground connection attempt. Offering a
+/// client identity is deliberately distinct from evidence that the peer
+/// accepted it; a successful WebSocket open is the next observable boundary.
+public enum NativeRelayProgressEvent: Equatable, Sendable {
+    case serverTrustValidated
+    case serverTrustRejected
+    case clientIdentityOffered
+    case clientIdentityChallengeRejected
+    case webSocketOpened
+    case relayAdmitted
+    /// The client is about to request replay; this does not prove the relay
+    /// received or admitted that request.
+    case nativeSyncReplayRequested
+    case nativeSyncResynced
+    case nativeSyncAcknowledged
+}
+
 /// Security.framework keychain identities are immutable references usable by
 /// URLSession's delegate queue. The native enrollment owner retains custody of
 /// the private key; only this reference crosses the actor boundary.
@@ -31,11 +48,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
     private let profileContext: ProfileContext
+    private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
 
     public init(profile: ProfileContext,
                 relayURL: URL,
                 clientIdentity: TrustedKeychainIdentity,
-                trustedRootDER: Data) throws {
+                trustedRootDER: Data,
+                onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in }) throws {
         guard profile.transportMode == .relay,
               relayURL.scheme == "wss",
               relayURL.path == "/relay",
@@ -59,7 +78,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
         authenticatedIdentity = profile.identity
         profileContext = profile
-        let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root)
+        self.onProgress = onProgress
+        let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root,
+                                         onProgress: onProgress)
         self.delegate = delegate
         let configuration = URLSessionConfiguration.ephemeral
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
@@ -98,6 +119,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     throw InstallationTransportError.unexpectedServerFrame
                 }
                 accepted = true
+                if ref == "native-sync" { onProgress(.relayAdmitted) }
             } else if (event == "conversation" && ordinary) || (event == "delivery" && conversation) {
                 continue
             }
@@ -360,15 +382,23 @@ public enum DeviceCertificateBinding {
     }
 }
 
-private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, URLSessionWebSocketDelegate, @unchecked Sendable {
     private let host: String
     private let identity: SecIdentity
     private let root: SecCertificate
+    private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
 
-    init(host: String, identity: SecIdentity, root: SecCertificate) {
+    init(host: String, identity: SecIdentity, root: SecCertificate,
+         onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void) {
         self.host = host
         self.identity = identity
         self.root = root
+        self.onProgress = onProgress
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+                    didOpenWithProtocol protocol: String?) {
+        onProgress(.webSocketOpened)
     }
 
     func urlSession(_ session: URLSession,
@@ -386,9 +416,13 @@ private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, @unchec
         switch challenge.protectionSpace.authenticationMethod {
         case NSURLAuthenticationMethodClientCertificate:
             guard challenge.protectionSpace.host == host else {
+                onProgress(.clientIdentityChallengeRejected)
                 completionHandler(.cancelAuthenticationChallenge, nil)
                 return
             }
+            // This reports the local credential choice only; it is not remote
+            // evidence that the peer accepted the identity.
+            onProgress(.clientIdentityOffered)
             completionHandler(.useCredential,
                               URLCredential(identity: identity, certificates: nil, persistence: .forSession))
         case NSURLAuthenticationMethodServerTrust:
@@ -398,9 +432,11 @@ private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, @unchec
                   SecTrustSetAnchorCertificates(trust, [root] as CFArray) == errSecSuccess,
                   SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
                   SecTrustEvaluateWithError(trust, nil) else {
+                onProgress(.serverTrustRejected)
                 completionHandler(.cancelAuthenticationChallenge, nil)
                 return
             }
+            onProgress(.serverTrustValidated)
             completionHandler(.useCredential, URLCredential(trust: trust))
         default:
             completionHandler(.performDefaultHandling, nil)

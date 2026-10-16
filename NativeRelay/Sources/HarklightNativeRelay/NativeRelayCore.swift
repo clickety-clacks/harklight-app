@@ -52,6 +52,7 @@ public actor NativeRelayCore {
     private let context: ProfileContext
     private let session: any AuthenticatedInstallationSession
     private let wire: RelayWire
+    private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private var active = true
     private var busy = false
     private var activeReplay: ReplayProgress?
@@ -205,7 +206,8 @@ public actor NativeRelayCore {
 
     public init(store: AttentionDomainStore,
                 context: ProfileContext,
-                session: any AuthenticatedInstallationSession) throws {
+                session: any AuthenticatedInstallationSession,
+                onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in }) throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
@@ -214,6 +216,7 @@ public actor NativeRelayCore {
         self.store = store
         self.context = context
         self.session = session
+        self.onProgress = onProgress
         self.wire = try RelayWire(profile: context)
     }
 
@@ -300,15 +303,23 @@ public actor NativeRelayCore {
     }
 
     private func replayAndAcknowledge(since cursor: UInt64) async throws -> UInt64 {
+        // This is a local intent signal only; relay admission is observed
+        // later from the session's authenticated response.
+        onProgress(.nativeSyncReplayRequested)
         var high = try await replay(since: cursor)
+        onProgress(.nativeSyncResynced)
         do {
             try await session.acknowledge(wire.acknowledge(high))
+            onProgress(.nativeSyncAcknowledged)
         } catch InstallationTransportError.acknowledgementBehind {
             // C may have durably committed a prior replay whose ACK never
             // reached the server. Re-present the server's complete streamed
             // history so this session may ACK contiguously from its cursor.
+            onProgress(.nativeSyncReplayRequested)
             high = try await replay(since: 0)
+            onProgress(.nativeSyncResynced)
             try await session.acknowledge(wire.acknowledge(high))
+            onProgress(.nativeSyncAcknowledged)
         }
         return high
     }
