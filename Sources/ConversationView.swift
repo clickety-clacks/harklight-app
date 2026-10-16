@@ -1,6 +1,7 @@
 import AttentionDomain
 import SwiftUI
 import UniformTypeIdentifiers
+import QuickLook
 
 @MainActor
 struct ConversationPanel: View {
@@ -10,6 +11,9 @@ struct ConversationPanel: View {
     let title: String
     @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
+    @State private var previewURL: URL?
+    @State private var openingFile = false
+    @State private var fileError: String?
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     private var thread: ConversationThread? { store.conversation(for: key) }
@@ -37,7 +41,7 @@ struct ConversationPanel: View {
                             ForEach(thread.turns) { turn in
                                 ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
                                     sender: sender, local: store.isLocalExample,
-                                    replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue }, inspect: { inspectedFile = $0 })
+                                    replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue }, inspect: { fileError = nil; inspectedFile = $0 })
                                     .id(turn.id)
                             }
                         }.padding(.horizontal)
@@ -66,7 +70,7 @@ struct ConversationPanel: View {
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
-                ConversationComposer(store: store, key: key, revision: revision, inspect: { inspectedFile = $0 })
+                ConversationComposer(store: store, key: key, revision: revision, inspect: { fileError = nil; inspectedFile = $0 })
                     .padding(verticalSizeClass == .compact ? 4 : 12)
             } else {
                 ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right",
@@ -81,10 +85,23 @@ struct ConversationPanel: View {
                     LabeledContent("Original bytes", value: String(file.byteCount))
                     Text("SHA-256").font(.headline)
                     Text(file.sha256.rawValue).font(.caption.monospaced()).textSelection(.enabled)
+                    if !store.isLocalExample {
+                        Button(openingFile ? "Opening…" : "Open file") {
+                            openingFile = true
+                            fileError = nil
+                            Task {
+                                defer { openingFile = false }
+                                do { previewURL = try await store.prepareConversationPreview(file) }
+                                catch { fileError = "\(file.name.rawValue) could not be opened (\(error)). Its saved metadata and draft are retained." }
+                            }
+                        }.disabled(openingFile)
+                    }
+                    if let fileError { Text(fileError).font(.caption).foregroundStyle(.secondary) }
                     Text("Transfer and agent-reported use are separate facts. A completed transfer does not establish that the agent read this file.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { inspectedFile = nil } } }
+                .quickLookPreview($previewURL)
             }
         }
     }

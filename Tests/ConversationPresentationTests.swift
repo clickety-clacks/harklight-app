@@ -98,4 +98,45 @@ final class ConversationPresentationTests: XCTestCase {
             personID: ExactText("other-person"), deviceID: identity.deviceID), root: root)
         XCTAssertNotEqual(other.directory, storage.directory)
     }
+    func testInlinePreviewRetainsExactBytesAndAccountRemovalLeavesAnotherAccountUntouched() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let firstIdentity = ProfileIdentity(trustedRelayAuthority: ExactText("relay"), personID: ExactText("first"), deviceID: ExactText("device"))
+        let secondIdentity = ProfileIdentity(trustedRelayAuthority: ExactText("relay"), personID: ExactText("second"), deviceID: ExactText("device"))
+        let first = try ConversationFileStorage(identity: firstIdentity, root: root)
+        let second = try ConversationFileStorage(identity: secondIdentity, root: root)
+        let bytes = Data("Exact original file text\n".utf8)
+        let digest = ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+        let file = ConversationFile(id: ExactText("note"), name: ExactText("note.txt"), byteCount: UInt64(bytes.count), sha256: digest, content: .inline(bytes))
+        let firstURL = try XCTUnwrap(first.cachedPreview(for: file))
+        let secondURL = try XCTUnwrap(second.cachedPreview(for: file))
+        XCTAssertEqual(firstURL.lastPathComponent, "note.txt")
+        XCTAssertEqual(try Data(contentsOf: firstURL), bytes)
+        XCTAssertEqual(try first.cachedPreview(for: file), firstURL)
+        try first.removeAccountFiles()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstURL.path))
+        XCTAssertEqual(try Data(contentsOf: secondURL), bytes)
+    }
+
+    func testRetainedCopiesKeepTheirBasenameAndOlderCopyReferencesRemainReadable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay"), personID: ExactText("person"), deviceID: ExactText("device"))
+        let storage = try ConversationFileStorage(identity: identity, root: root)
+        let source = root.appendingPathComponent("original.txt")
+        let bytes = Data("Original picker bytes".utf8)
+        try bytes.write(to: source)
+        let retained = try storage.retain(source)
+        let retainedURL = try XCTUnwrap(storage.cachedPreview(for: retained))
+        XCTAssertEqual(retainedURL.lastPathComponent, "original.txt")
+        let olderURL = storage.directory.appendingPathComponent("older-copy")
+        try bytes.write(to: olderURL)
+        let older = ConversationFile(id: ExactText("older"), name: ExactText("original.txt"), byteCount: retained.byteCount,
+            sha256: retained.sha256, content: .localFile(ExactText("older-copy")))
+        XCTAssertEqual(try storage.cachedPreview(for: older), olderURL)
+        XCTAssertEqual(try Data(contentsOf: olderURL), bytes)
+    }
+
 }

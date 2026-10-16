@@ -81,7 +81,11 @@ final class NativeAppLaunch {
         guidedJoin.didRemoveCurrentAccount = { [weak self] in
             guard let self else { return }
             self.activationGeneration = UUID()
-            if case let .live(previous) = self.state { previous.stopObserving() }
+            if case let .live(previous) = self.state {
+                previous.stopObserving()
+                do { try previous.removeAccountConversationFiles() }
+                catch { self.enrollmentMessage = "The account was removed, but its local conversation file copies could not be removed (\(error))." }
+            }
             self.state = .enrollmentRequired
             await NativeRelayLifecycle.shared.deactivate()
         }
@@ -322,6 +326,19 @@ final class LivePresentationStore {
 
     func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
         try? port.inspectAnswerDraft(context: port.context, request: key, revision: revision)
+    }
+
+    func removeAccountConversationFiles() throws {
+        try conversationFiles?.removeAccountFiles()
+    }
+
+    func prepareConversationPreview(_ file: ConversationFile) async throws -> URL {
+        guard permitsDelivery, let files = conversationFiles else { throw AttentionStoreError.fixtureOnlyOperation }
+        if let cached = try files.cachedPreview(for: file) { return cached }
+        let destination = try files.previewDestination(for: file)
+        try await NativeRelayLifecycle.shared.fetchConversationFile(file, to: destination, expected: profileContext)
+        try files.verify(destination, for: file)
+        return destination
     }
 
     func reportConversationImportError(_ error: String) {
