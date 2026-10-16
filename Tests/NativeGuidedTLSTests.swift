@@ -202,10 +202,12 @@ final class NativeGuidedTLSTests: XCTestCase {
             operationSnapshot: NativeForegroundOperationSnapshot(available: true,
                 operations: [NativeForegroundOperationDiagnostic(submission: submission,
                                                                   receiptState: "pending_unconfirmed")]),
-            appVersion: "4.8.2", buildNumber: "1087")
+            appVersion: "4.8.2", buildNumber: "1087",
+            executableSHA256: String(repeating: "a", count: 64))
 
         XCTAssertTrue(diagnostic.shareText.contains("app_version=4.8.2"))
         XCTAssertTrue(diagnostic.shareText.contains("app_build=1087"))
+        XCTAssertTrue(diagnostic.shareText.contains("app_executable_sha256=\(String(repeating: "a", count: 64))"))
         XCTAssertTrue(diagnostic.shareText.contains("attempt_id=\(progress.attemptID!.uuidString.lowercased())"))
         XCTAssertTrue(diagnostic.shareText.contains("last_confirmed_phase=native_sync_resynced"))
         XCTAssertTrue(diagnostic.shareText.contains("error_class=foreground_deadline"))
@@ -216,6 +218,14 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "The allowlisted report must not serialize answer or operation payload content.")
         XCTAssertFalse(diagnostic.shareText.contains("private-account"),
                        "The report must not include the account/person identifier.")
+
+        let bundleDiagnostic = NativeForegroundConnectDiagnostic(
+            progress: progress,
+            operationSnapshot: .unavailable,
+            bundle: .main)
+        XCTAssertEqual(bundleDiagnostic.executableSHA256.count, 64)
+        XCTAssertTrue(bundleDiagnostic.executableSHA256.allSatisfy(\.isHexDigit))
+        XCTAssertTrue(bundleDiagnostic.shareText.contains("app_executable_sha256=\(bundleDiagnostic.executableSHA256)"))
     }
 
     func testUncertainRetrySendsOnlyTheSameSavedOperationAndBinding() async throws {

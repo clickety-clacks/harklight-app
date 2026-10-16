@@ -1,4 +1,5 @@
 import AttentionDomain
+import CryptoKit
 import Foundation
 import HarklightNativeRelay
 import Security
@@ -177,26 +178,35 @@ struct NativeForegroundOperationSnapshot: Equatable, Sendable {
 struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
     let appVersion: String
     let buildNumber: String
+    let executableSHA256: String
     let progress: NativeForegroundConnectProgress
     let operationSnapshot: NativeForegroundOperationSnapshot
+
+    private static let mainExecutableSHA256 = executableSHA256(for: Bundle.main.executableURL)
 
     init(progress: NativeForegroundConnectProgress,
          operationSnapshot: NativeForegroundOperationSnapshot,
          appVersion: String,
-         buildNumber: String) {
+         buildNumber: String,
+         executableSHA256: String = "unavailable") {
         self.progress = progress
         self.operationSnapshot = operationSnapshot
         self.appVersion = appVersion
         self.buildNumber = buildNumber
+        self.executableSHA256 = executableSHA256
     }
 
     init(progress: NativeForegroundConnectProgress,
          operationSnapshot: NativeForegroundOperationSnapshot,
          bundle: Bundle = .main) {
+        let executableSHA256 = bundle.bundleURL.standardizedFileURL == Bundle.main.bundleURL.standardizedFileURL
+            ? Self.mainExecutableSHA256
+            : Self.executableSHA256(for: bundle.executableURL)
         self.init(progress: progress,
                   operationSnapshot: operationSnapshot,
                   appVersion: Self.bundleValue("CFBundleShortVersionString", bundle: bundle),
-                  buildNumber: Self.bundleValue("CFBundleVersion", bundle: bundle))
+                  buildNumber: Self.bundleValue("CFBundleVersion", bundle: bundle),
+                  executableSHA256: executableSHA256)
     }
 
     var shareText: String {
@@ -220,6 +230,7 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             "Harklight connection diagnostics",
             "app_version=\(appVersion)",
             "app_build=\(buildNumber)",
+            "app_executable_sha256=\(executableSHA256)",
             "attempt_id=\(progress.attemptID?.uuidString.lowercased() ?? "unavailable")",
             "outcome=\(outcome)",
             "last_confirmed_phase=\(stage)",
@@ -254,6 +265,11 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
     private static func escapedIdentifier(_ value: String) -> String {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "unavailable"
+    }
+
+    static func executableSHA256(for url: URL?) -> String {
+        guard let url, let bytes = try? Data(contentsOf: url, options: .mappedIfSafe) else { return "unavailable" }
+        return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 }
 
