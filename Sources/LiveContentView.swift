@@ -6,18 +6,21 @@ struct LiveContentView: View {
     let store: LivePresentationStore
     let samples: SampleLibrary
     let launch: NativeAppLaunch?
+    let archiveDeparture: NativeAccountDeparture?
 
     init(store: LivePresentationStore,
          samples: SampleLibrary,
-         launch: NativeAppLaunch? = nil) {
+         launch: NativeAppLaunch? = nil,
+         archiveDeparture: NativeAccountDeparture? = nil) {
         self.store = store
         self.samples = samples
         self.launch = launch
+        self.archiveDeparture = archiveDeparture
     }
 
     var body: some View {
         let progress = launch?.foregroundConnectProgress
-        let showsRecovery = progress.map { $0.outcome != .confirmed } ?? false
+        let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
         VStack(spacing: 0) {
             if showsRecovery, let progress, let launch {
                 LiveConnectionRecoveryBanner(
@@ -35,10 +38,15 @@ struct LiveContentView: View {
                         ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
                     }
                 },
+                settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
+                                                      archiveDeparture: archiveDeparture) },
                 warnings: [store.observationError, store.notificationWarning,
                            showsRecovery ? nil : store.connectionWarning,
-                           store.pushRegistrationWarning].compactMap { $0 },
-                conversationStore: store)
+                           store.pushRegistrationWarning, launch?.archiveCatalogWarning,
+                           launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
+                    .compactMap { $0 },
+                conversationStore: store,
+                showsLocalExamples: !store.isReadOnly)
         }
     }
 }
@@ -87,6 +95,173 @@ private struct LiveConnectionRecoveryBanner: View {
     }
 }
 
+@MainActor
+struct LiveInboxSettings: View {
+    let store: LivePresentationStore
+    let samples: SampleLibrary
+    let launch: NativeAppLaunch?
+    let archiveDeparture: NativeAccountDeparture?
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmingDisconnect = false
+    @State private var confirmingEndpointMigration = false
+
+    private var record: NativeEnrollmentRecord? {
+        if store.isReadOnly { return archiveDeparture?.record ?? launch?.disconnectedAccount?.record }
+        return launch?.activeEnrollmentRecord
+    }
+
+    private var pendingAnswerCount: Int {
+        store.presentation.requests.filter { $0.lifecycleStatus == .pending }.count
+    }
+
+    private var editedDraftCount: Int {
+        store.presentation.requests.filter { $0.draft.hasEdits }.count
+    }
+
+    private var disconnectDisclosure: String {
+        let account = record?.accountDisplayName ?? "this account"
+        let drafts = editedDraftCount == 0
+            ? "Saved messages, drafts, receipts and local attachment copies stay on this phone."
+            : "Saved messages, \(editedDraftCount) edited \(editedDraftCount == 1 ? "draft" : "drafts"), receipts and local attachment copies stay on this phone."
+        let pending = pendingAnswerCount == 0
+            ? nil
+            : "Pending answers stop retrying; some may already have reached the server."
+        return (["Disconnect this phone from \(account)?",
+                 "Your account and other devices remain active, and server history stays.",
+                 drafts,
+                 "This phone stops sending and receiving through its current registration. You’ll need an invitation and normal approval to connect again.",
+                 pending].compactMap { $0 }).joined(separator: " ")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let record {
+                    Section("Account") {
+                        LabeledContent("Account", value: record.accountDisplayName ?? "Current account")
+                        LabeledContent("Server", value: record.serverDisplayName ?? record.host)
+                    }
+                }
+                if let launch {
+                    let otherArchives = launch.availableDisconnectedAccounts
+                        .filter { $0.archiveID != archiveDeparture?.archiveID }
+                    if !otherArchives.isEmpty {
+                        Section("Saved accounts") {
+                            ForEach(otherArchives, id: \.archiveID) { departure in
+                                Button {
+                                    launch.showArchivedAccount(departure)
+                                    dismiss()
+                                } label: {
+                                    Label(departure.record.accountDisplayName ?? "Disconnected account",
+                                          systemImage: "lock")
+                                }
+                                .accessibilityHint("Open this account’s saved messages and discussion read-only")
+                            }
+                        }
+                    }
+                }
+                if store.isReadOnly {
+                    Section("Connection") {
+                        if let archiveDeparture {
+                            Label("Disconnected · Read-only", systemImage: "lock")
+                            Text("These saved messages, discussion history, drafts and local files belong to this account. They are read-only and are not shared with another account.")
+                                .foregroundStyle(.secondary)
+                            if launch?.activeEnrollmentRecord != nil {
+                                Button("Return to current account") {
+                                    launch?.showCurrentAccount()
+                                    dismiss()
+                                }
+                            } else if launch?.selectedArchivedAccount != nil {
+                                Button("Return to connection status") {
+                                    launch?.leaveSelectedArchive()
+                                    dismiss()
+                                }
+                            } else if archiveDeparture.removed {
+                                Button("Connect with an invitation") {
+                                    launch?.beginReconnect()
+                                }
+                            } else {
+                                Button(launch?.isDisconnectBusy == true ? "Retrying removal…" : "Retry removal") {
+                                    Task { await launch?.retryDisconnectRemoval() }
+                                }
+                                .disabled(launch?.isDisconnectBusy == true)
+                            }
+                        } else if let departure = launch?.disconnectedAccount, departure.replacement == nil {
+                            Label(departure.removed ? "Disconnected" : "Removal not confirmed",
+                                  systemImage: departure.removed ? "wifi.slash" : "exclamationmark.triangle")
+                            Text(departure.removed
+                                 ? "This phone is disconnected. Its saved messages and drafts are read-only. The account, other devices and server history remain."
+                                 : (launch?.disconnectMessage ?? "This phone is disconnected locally. The server has not confirmed removal; the original account identity is kept for retry."))
+                                .foregroundStyle(.secondary)
+                            if departure.removed {
+                                Button("Connect with an invitation") { launch?.beginReconnect() }
+                            } else {
+                                Button(launch?.isDisconnectBusy == true ? "Retrying removal…" : "Retry removal") {
+                                    Task { await launch?.retryDisconnectRemoval() }
+                                }
+                                .disabled(launch?.isDisconnectBusy == true)
+                            }
+                        } else {
+                            Label("Read-only saved messages", systemImage: "lock")
+                            Text("These messages remain associated with their original account. Connect only with an invitation for that account to resume them.")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else if launch != nil {
+                    Section("Connection") {
+                        Text("This phone is registered to this account.")
+                            .foregroundStyle(.secondary)
+                        if launch?.canMigrateDirectEndpointToGibson == true {
+                            Button(launch?.isEndpointMigrationBusy == true ? "Checking Gibson…" : "Move connection to Gibson…") {
+                                confirmingEndpointMigration = true
+                            }
+                            .disabled(launch?.isEndpointMigrationBusy == true)
+                            .confirmationDialog("Move this connection?", isPresented: $confirmingEndpointMigration,
+                                                titleVisibility: .visible) {
+                                Button("Move connection to Gibson") {
+                                    Task { await launch?.migrateDirectEndpointToGibson() }
+                                }
+                                Button("Cancel", role: .cancel) {}
+                            } message: {
+                                Text("Harklight will verify the confirmed server address before switching. Your approved account, device identity, trust certificate, messages and drafts stay on this phone. This does not unregister or enroll the device. If verification fails, the current connection remains active.")
+                            }
+                        }
+                        if let message = launch?.endpointMigrationMessage {
+                            Text(message).font(.footnote).foregroundStyle(.secondary)
+                        }
+                        Button("Disconnect this phone…", role: .destructive) {
+                            confirmingDisconnect = true
+                        }
+                        .disabled(launch?.isEndpointMigrationBusy == true)
+                        .confirmationDialog("Disconnect this phone?", isPresented: $confirmingDisconnect,
+                                            titleVisibility: .visible) {
+                            Button("Disconnect this phone", role: .destructive) {
+                                Task { await launch?.disconnectCurrentAccount() }
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text(disconnectDisclosure)
+                        }
+                        if let message = launch?.disconnectMessage {
+                            Text(message).font(.footnote).foregroundStyle(.red)
+                        }
+                    }
+                }
+                if !store.isReadOnly {
+                    Section("Local examples") {
+                    Text("Shake to add fictional messages to your inbox. Their answers, chat and attachments stay on this device and disappear when the app closes.")
+                    Button("Add example messages") { samples.populate(); dismiss() }
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button("Done", systemImage: "checkmark") { dismiss() }.labelStyle(.iconOnly)
+            } }
+        }
+    }
+}
+
 struct LiveRequestDetail: View {
     let request: PresentedRequest
     let store: LivePresentationStore
@@ -95,7 +270,8 @@ struct LiveRequestDetail: View {
     @State private var chatPresented = false
 
     var canAnswer: Bool {
-        guard request.lifecycleStatus == .open, request.intentReceipt == nil else { return false }
+        guard !store.isReadOnly, request.lifecycleStatus == .open,
+              request.intentReceipt == nil else { return false }
         switch request.projection {
         case .sender: return true
         case let .compatibility(actions): return !actions.isEmpty
@@ -155,6 +331,7 @@ struct LiveRequestDetail: View {
                 if request.lifecycleStatus == .pending {
                     Button("Retry delivery") { store.retryPendingDelivery() }
                         .buttonStyle(.bordered)
+                        .disabled(store.isReadOnly)
                 }
                 if let actionError = store.actionError {
                     Label(actionError, systemImage: "exclamationmark.triangle")
@@ -191,6 +368,7 @@ struct LiveRequestDetail: View {
             }
             ToolbarItemGroup(placement: .bottomBar) {
                 Button("Later", systemImage: "clock") { deferred.toggle() }.labelStyle(.iconOnly)
+                    .disabled(store.isReadOnly)
                 Spacer()
                 Button("Chat", systemImage: "bubble.left.and.bubble.right") {
                     if context.canInlineChat { context.openChat?() } else { chatPresented = true }

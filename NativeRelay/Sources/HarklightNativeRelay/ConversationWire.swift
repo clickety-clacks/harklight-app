@@ -12,9 +12,11 @@ public enum DiscussionOperationResult: Equatable, Sendable {
 /// sequence is never an ordinary delivery/lifecycle sequence.
 public struct ConversationWire: Sendable {
     public let profile: ProfileContext
-    public init(profile: ProfileContext) throws {
+    public let endpointHost: String
+    public init(profile: ProfileContext, endpointHost: String? = nil) throws {
         guard profile.transportMode == .relay else { throw RelayWireError.wrongActor }
         self.profile = profile
+        self.endpointHost = endpointHost ?? profile.identity.trustedRelayAuthority.rawValue
     }
     public func open(since cursor: UInt64) -> Data {
         Data("{\"v\":1,\"type\":\"conversation_open\",\"since\":\(cursor),\"ref\":\"native-conversation-sync\"}\n".utf8)
@@ -89,7 +91,7 @@ public struct ConversationWire: Sendable {
         guard port > 0, port <= 65_535 else { throw RelayWireError.invalidFrame }
         var components = URLComponents()
         components.scheme = "https"
-        components.host = profile.identity.trustedRelayAuthority.rawValue
+        components.host = endpointHost
         components.port = Int(port)
         components.path = "/origin/v1"
         guard let url = components.url else { throw InstallationTransportError.invalidEndpoint }

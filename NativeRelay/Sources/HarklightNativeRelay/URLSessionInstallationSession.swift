@@ -44,6 +44,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
 public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
+    public nonisolated let relayEndpointHost: String
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
@@ -63,7 +64,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
               relayURL.user == nil,
               relayURL.password == nil,
               let host = relayURL.host,
-              host == profile.identity.trustedRelayAuthority.rawValue else {
+              !host.isEmpty,
+              host == profile.identity.trustedRelayAuthority.rawValue ||
+                HarklightDirectEndpointMigration.allows(profile: profile.identity,
+                                                        endpointHost: host.lowercased(),
+                                                        trustedRootDER: trustedRootDER) else {
             throw InstallationTransportError.invalidEndpoint
         }
         guard let root = SecCertificateCreateWithData(nil, trustedRootDER as CFData) else {
@@ -77,6 +82,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             throw InstallationTransportError.wrongDeviceIdentity
         }
         authenticatedIdentity = profile.identity
+        relayEndpointHost = host.lowercased()
         profileContext = profile
         self.onProgress = onProgress
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root,
@@ -84,6 +90,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         self.delegate = delegate
         let configuration = URLSessionConfiguration.ephemeral
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 20
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
@@ -98,6 +106,17 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     public func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await replay(request, ref: "native-conversation-sync", event: "conversation", end: "conversation_resynced", consume: consume)
+    }
+
+    /// Confirms the candidate TLS/WebSocket endpoint without sending an app
+    /// frame. Endpoint migration uses this before replacing a working session.
+    public func verifyEndpoint() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            task.sendPing { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            }
+        }
     }
 
     private func replay(_ request: Data, ref: String, event: String, end: String,
@@ -211,7 +230,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 return .rejected(reason: ExactText("The saved discussion operation does not match its frame"))
             }
             try await send(frame)
-            let wire = try ConversationWire(profile: profileContext)
+            let wire = try ConversationWire(profile: profileContext, endpointHost: relayEndpointHost)
             while true {
                 let incoming = try await receive()
                 let kind = try JSONValue.parse(incoming).uniqueValue(named: "type")?.stringValue?.rawValue
@@ -268,14 +287,16 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     public func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
                                            originURL: URL) async throws -> ConversationUploadDiscardResult {
-        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL,
+                                            endpointHost: relayEndpointHost)
         let (data, response) = try await urlSession.data(for: wire.discardRequest(cleanup))
         guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
         return try wire.decodeDiscard(data, status: http.statusCode)
     }
 
     public func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {
-        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL,
+                                            endpointHost: relayEndpointHost)
         let (data, response) = try await urlSession.data(for: wire.limitsRequest())
         guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
         return try wire.decodeLimits(data, status: http.statusCode)
@@ -289,7 +310,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         if let cap = limits.uploadCap, file.byteCount > cap {
             throw ConversationError.uploadCapExceeded(file: file.name, cap: cap)
         }
-        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL,
+                                            endpointHost: relayEndpointHost)
         try wire.verify(source, file: file)
         let request = try wire.uploadRequest(file: file, binding: binding, operationID: operationID)
         let (data, response) = try await urlSession.upload(for: request, fromFile: source)
@@ -298,7 +320,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func fetchConversationFile(_ file: ConversationFile, to destination: URL, originURL: URL) async throws {
-        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL,
+                                            endpointHost: relayEndpointHost)
         let (temporary, response) = try await urlSession.download(for: wire.fetchRequest(file))
         defer { try? FileManager.default.removeItem(at: temporary) }
         guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
