@@ -129,11 +129,12 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let setPoint = app.buttons["set-point"]
         XCTAssertTrue(setPoint.waitForExistence(timeout: 5))
         setPoint.tap()
-        replaceText(in: app.textFields["coordinate-horizontal"], with: "240")
-        replaceText(in: app.textFields["coordinate-vertical"], with: "610")
+        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-horizontal"], with: "240")
+        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-vertical"], with: "610")
 
         let note = app.textViews["text-input-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
+        revealOutcomeEditor(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
 
@@ -242,6 +243,31 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         field.typeText(value)
     }
 
+    private func revealOutcomeEditor(_ editor: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        for _ in 0..<8 {
+            let keyboard = app.keyboards.firstMatch
+            let bottom = keyboard.exists ? keyboard.frame.minY : app.frame.maxY - 80
+            let frame = editor.frame
+            if editor.isHittable && frame.minY >= 100 && frame.maxY < bottom - 44 { return }
+            let direction: CGFloat = frame.minY < 100 ? 1 : -1
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0))
+                .withOffset(CGVector(dx: 0, dy: bottom - 160))
+            let end = start.withOffset(CGVector(dx: 0, dy: direction * 120))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        XCTFail("The ordinary card must reveal the editor above its bars and keyboard.\n\(app.debugDescription)")
+    }
+
+    private func replaceOutcomeCoordinate(in app: XCUIApplication, field: XCUIElement, with value: String) {
+        revealOutcomeEditor(field, in: app)
+        let existing = field.value as? String ?? ""
+        field.tap()
+        if !existing.isEmpty { field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.count)) }
+        field.typeText(value)
+        XCTAssertEqual(field.value as? String, value)
+    }
+
     private func submitFacilitiesAnswer(in app: XCUIApplication,
                                         horizontal: String,
                                         vertical: String) {
@@ -249,10 +275,11 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let setPoint = app.buttons["set-point"]
         XCTAssertTrue(setPoint.waitForExistence(timeout: 5))
         setPoint.tap()
-        replaceText(in: app.textFields["coordinate-horizontal"], with: horizontal)
-        replaceText(in: app.textFields["coordinate-vertical"], with: vertical)
+        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-horizontal"], with: horizontal)
+        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-vertical"], with: vertical)
         let note = app.textViews["text-input-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
+        revealOutcomeEditor(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
         let send = app.buttons["send-answer"]
