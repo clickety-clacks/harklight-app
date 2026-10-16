@@ -62,6 +62,7 @@ private struct RequestDetailContent: View {
     let context: InboxCardContext
     @State private var instructionsExpanded = false
     @State private var isShowingRequestDetails = false
+    @State private var fixtureOutcomePresented = false
 
     private var status: RequestStatusPresentation {
         RequestStatusPresentation(lifecycle: session.lifecycle)
@@ -154,6 +155,23 @@ private struct RequestDetailContent: View {
             ToolbarItem(placement: .bottomBar) {
                 Button("Cancel draft", systemImage: "arrow.uturn.backward") { store.cancelDraft(for: request.key) }
                     .labelStyle(.iconOnly).disabled(!session.draft.hasEdits)
+            }
+            if case .pending = session.lifecycle {
+                ToolbarItem(placement: .bottomBar) {
+                    Button("Fixture outcome", systemImage: "testtube.2") { fixtureOutcomePresented = true }
+                        .accessibilityIdentifier("fixture-outcome-button")
+                        .confirmationDialog("Apply a local fixture outcome", isPresented: $fixtureOutcomePresented, titleVisibility: .visible) {
+                            ForEach([DemoTerminalScenario.ownOperationAccepted, .answerOutcomeUnconfirmed]) { scenario in
+                                Button(scenario.simulationTitle) {
+                                    _ = store.simulateTerminal(for: request.key, scenario: scenario)
+                                }
+                                .accessibilityIdentifier("fixture-outcome-\(scenario.rawValue)")
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("Fictional outcome only. Nothing is delivered to a relay or source.")
+                        }
+                }
             }
         }
         .scrollDismissesKeyboard(.interactively)
