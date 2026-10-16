@@ -193,7 +193,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                       "The ordinary pending fixture card must expose its local outcome control.")
         XCTAssertTrue(outcomeButton.isHittable)
         outcomeButton.tap()
-        let outcome = app.buttons["fixture-outcome-" + scenario]
+        let outcome = app.buttons.matching(identifier: "fixture-outcome-" + scenario).firstMatch
         XCTAssertTrue(outcome.waitForExistence(timeout: 5))
         XCTAssertTrue(outcome.isEnabled && outcome.isHittable,
                       "Apply the local outcome through the ordinary card's native dialog.")
