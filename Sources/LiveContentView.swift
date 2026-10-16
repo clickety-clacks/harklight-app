@@ -50,8 +50,8 @@ struct LiveInboxSettings: View {
     private var disconnectDisclosure: String {
         let account = record?.accountDisplayName ?? "this account"
         let drafts = editedDraftCount == 0
-            ? "Saved messages, drafts and receipts stay on this phone."
-            : "Saved messages, \(editedDraftCount) edited \(editedDraftCount == 1 ? "draft" : "drafts") and receipts stay on this phone."
+            ? "Saved messages, drafts, receipts and local attachment copies stay on this phone."
+            : "Saved messages, \(editedDraftCount) edited \(editedDraftCount == 1 ? "draft" : "drafts"), receipts and local attachment copies stay on this phone."
         let pending = pendingAnswerCount == 0
             ? nil
             : "Pending answers stop retrying; some may already have reached the server."

@@ -124,6 +124,19 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(SecIdentityCopyCertificate(material.keychainIdentity, &retainedCertificate), errSecSuccess)
         XCTAssertEqual(SecCertificateCopyData(try XCTUnwrap(retainedCertificate)) as Data,
                        identity.certificateDER)
+
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Harklight.endpoint-migration-files." + UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: storageRoot) }
+        let sourceFile = storageRoot.appendingPathComponent("saved-attachment.txt")
+        let savedBytes = Data("retained local attachment".utf8)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        try savedBytes.write(to: sourceFile)
+        let originalFiles = try ConversationFileStorage(identity: material.context.identity, root: storageRoot)
+        let retainedFile = try originalFiles.retain(sourceFile)
+        let reopenedFiles = try ConversationFileStorage(identity: material.context.identity, root: storageRoot)
+        XCTAssertEqual(try Data(contentsOf: reopenedFiles.fileURL(for: retainedFile)), savedBytes,
+                       "The stable profile authority keeps local attachment copies reachable")
     }
 
     func testConversationOriginUsesTheNewEndpointWithoutChangingProfileAuthority() throws {

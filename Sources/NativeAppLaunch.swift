@@ -87,8 +87,6 @@ final class NativeAppLaunch {
             self.activationGeneration = UUID()
             if case let .live(previous) = self.state {
                 previous.stopObserving()
-                do { try previous.removeAccountConversationFiles() }
-                catch { self.enrollmentMessage = "The account was removed, but its local conversation file copies could not be removed (\(error))." }
             }
             self.state = .enrollmentRequired
             self.activeEnrollmentRecord = nil
@@ -557,10 +555,6 @@ final class LivePresentationStore {
 
     func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
         try? port.inspectAnswerDraft(context: port.context, request: key, revision: revision)
-    }
-
-    func removeAccountConversationFiles() throws {
-        try conversationFiles?.removeAccountFiles()
     }
 
     func prepareConversationPreview(_ file: ConversationFile) async throws -> URL {
