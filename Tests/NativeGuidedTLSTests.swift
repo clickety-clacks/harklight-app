@@ -337,13 +337,12 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         let original = try makeRecord("Original", "person-original")
         let replacement = try makeRecord("Replacement", "person-replacement")
+        let originalNamespace = service + ".Original"
+        let replacementNamespace = service + ".Replacement"
         defer {
-            for record in [original, replacement] {
-                if let label = record.identityLabel {
-                    SecItemDelete([kSecClass as String: kSecClassCertificate,
-                                   kSecAttrLabel as String: label] as CFDictionary)
-                }
-                let namespace = service + "." + record.deviceLabel
+            for (record, namespace) in [(original, originalNamespace), (replacement, replacementNamespace)] {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: record.identityLabel] as CFDictionary)
                 SecItemDelete([kSecClass as String: kSecClassKey,
                                kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
             }
