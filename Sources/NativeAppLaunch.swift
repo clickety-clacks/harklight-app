@@ -300,6 +300,14 @@ final class LivePresentationStore {
 
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
 
+    func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
+        try? port.inspectAnswerDraft(context: port.context, request: key, revision: revision)
+    }
+
+    func reportConversationImportError(_ error: String) {
+        conversationError = "The selected file could not be opened: " + error + ". Your saved draft is retained."
+    }
+
     func conversationDraft(for key: RequestKey, revision: UInt64) -> ConversationDraft {
         conversationThreads[key]?.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
     }

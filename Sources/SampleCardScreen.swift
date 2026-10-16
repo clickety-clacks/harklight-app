@@ -11,6 +11,9 @@ struct InboxCardContext {
     let total: Int
     let previous: InboxCardPreview?
     let next: InboxCardPreview?
+    var inlineChat = false
+    var canInlineChat = false
+    var openChat: (() -> Void)? = nil
     let move: (Int) -> Void
     static var standalone: InboxCardContext {
         InboxCardContext(position: 1, total: 1, previous: nil, next: nil, move: { _ in })

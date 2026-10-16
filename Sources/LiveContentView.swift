@@ -17,7 +17,8 @@ struct LiveContentView: View {
                 }
             },
             warnings: [store.observationError, store.notificationWarning,
-                       store.connectionWarning, store.pushRegistrationWarning].compactMap { $0 })
+                       store.connectionWarning, store.pushRegistrationWarning].compactMap { $0 },
+            conversationStore: store)
     }
 }
 
@@ -48,6 +49,9 @@ struct LiveRequestDetail: View {
                 MessageHeading(sender: request.key.senderID.rawValue,
                                initials: String(request.key.senderID.rawValue.prefix(2)).uppercased(),
                                title: request.title?.rawValue ?? request.key.senderID.rawValue)
+                if let thread = store.conversation(for: request.key), thread.currentRevision > 1 {
+                    Text("Question version \(thread.currentRevision)").font(.caption).foregroundStyle(.secondary)
+                }
                 Text(LiveLifecycleTitle(request.lifecycleStatus).label)
                     .font(.caption).foregroundStyle(.secondary)
                 if deferred {
@@ -117,7 +121,9 @@ struct LiveRequestDetail: View {
             ToolbarItemGroup(placement: .bottomBar) {
                 Button("Later", systemImage: "clock") { deferred.toggle() }.labelStyle(.iconOnly)
                 Spacer()
-                Button("Chat", systemImage: "bubble.left.and.bubble.right") { chatPresented = true }
+                Button("Chat", systemImage: "bubble.left.and.bubble.right") {
+                    if context.canInlineChat { context.openChat?() } else { chatPresented = true }
+                }
                     .labelStyle(.iconOnly)
                     .popover(isPresented: $chatPresented, arrowEdge: .bottom) {
                         NavigationStack {
@@ -133,6 +139,30 @@ struct LiveRequestDetail: View {
                         .presentationCompactAdaptation(.sheet)
                         .presentationDetents([.medium, .large])
                     }
+            }
+        }
+        .onChange(of: context.inlineChat) { _, inline in
+            if inline { chatPresented = false }
+        }
+    }
+}
+
+@MainActor
+struct HistoricalAnswerDraftView: View {
+    let request: PresentedRequest
+    let store: LivePresentationStore
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(request.title?.rawValue ?? "Earlier question").font(.headline)
+            if let body = request.body { Text(body.rawValue).font(.caption) }
+            Text("Not delivered · this selection belongs to the earlier question").font(.caption).foregroundStyle(.secondary)
+            switch request.projection {
+            case let .sender(sender):
+                LiveProjectedSceneView(request: request, sender: sender, node: sender.scene, store: store, readOnly: true)
+            case let .compatibility(actions):
+                LiveCompatibilityActions(request: request, actions: actions, store: store, readOnly: true)
+            case .unsupported:
+                Text("This saved answer format cannot be displayed.").font(.caption)
             }
         }
     }

@@ -29,6 +29,11 @@ struct ConversationPanel: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
+                            if let earlier = store.historicalAnswerDraft(for: key, revision: revision) {
+                                DisclosureGroup("Earlier answer draft · not delivered") {
+                                    HistoricalAnswerDraftView(request: earlier, store: store)
+                                }
+                            }
                             ForEach(thread.turns) { turn in
                                 ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
                                     sender: sender, local: store.isLocalExample,
@@ -49,7 +54,7 @@ struct ConversationPanel: View {
                     if thread.revisions.count > 1 {
                         Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
                             ForEach(thread.revisions.keys.sorted(), id: \.self) { value in
-                                Text("Version \(value)\(thread.drafts[value] == nil ? "" : " · draft")").tag(value)
+                                Text("Version \(value)\(thread.drafts[value] == nil && thread.answerDrafts?[value] == nil ? "" : " · draft")").tag(value)
                             }
                         }.pickerStyle(.menu).font(.caption)
                     }
@@ -154,6 +159,8 @@ private struct ConversationComposer: View {
             if case let .success(urls) = result {
                 let addressedRevision = revision
                 Task { await store.importConversationFiles(urls, for: key, revision: addressedRevision) }
+            } else if case let .failure(error) = result {
+                store.reportConversationImportError(error.localizedDescription)
             }
         }
     }

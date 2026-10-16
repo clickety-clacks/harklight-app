@@ -302,6 +302,16 @@ public final class AttentionDomainPort: @unchecked Sendable {
         return try store.conversationSnapshot(context: profileContext)
     }
 
+    public func inspectAnswerDraft(context suppliedContext: PortContext, request key: RequestKey,
+                                   revision: UInt64) throws -> PresentedRequest? {
+        try validate(suppliedContext)
+        let snapshot = try store.snapshot(context: profileContext)
+        guard let thread = snapshot.conversationThreads[key], let payload = thread.revisions[revision],
+              let draft = thread.answerDrafts?[revision], let stored = snapshot.requests[key] else { return nil }
+        return try present(StoredRequest(key: key, originalPayload: payload), acceptanceOrder: stored.acceptanceOrder ?? 0,
+            draft: draft, session: nil, remote: nil, submission: nil, selector: nil)
+    }
+
     public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) throws {
         try validate(suppliedContext)
         try store.saveConversationDraft(draft, context: profileContext)
