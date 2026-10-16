@@ -92,6 +92,7 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: NO
+        TEST_TARGET_NAME: HarklightConversationUITestHost
 schemes:
   AttentionClientDuoPrototype:
     build:
