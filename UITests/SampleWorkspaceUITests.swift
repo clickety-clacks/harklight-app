@@ -245,6 +245,11 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "Please keep this unsent note.")
         XCTAssertFalse(composer.isEnabled)
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        app.buttons["conversation-earlier-answer"].tap()
+        XCTAssertTrue(app.staticTexts["Saved answer · request retracted. Its original wording and choices are retained."].waitForExistence(timeout: 5))
+        let savedChoice = app.buttons.containing(.staticText, identifier: "Archive").firstMatch
+        XCTAssertTrue(savedChoice.exists)
+        XCTAssertEqual(savedChoice.value as? String, "Selected")
         capture("sender-retracted-history-and-unsent-note", app)
     }
 

@@ -688,6 +688,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     throw ConversationError.invalidBinding
                 }
                 try thread.recordRetraction(turn: id, sequence: event.sequence, revision: revision)
+                if let saved = next.drafts[key] {
+                    var archived = thread.answerDrafts ?? [:]
+                    archived[thread.currentRevision] = saved
+                    thread.answerDrafts = archived
+                }
             }
             for revision in thread.drafts.keys {
                 guard var draft = thread.drafts[revision] else { continue }
@@ -907,6 +912,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
             next.remoteStates[key] = RemoteRequestState(state: .cleared,
                 authorizedOriginAnswer: previous.authorizedOriginAnswer, classification: previous.classification,
                 eventSequence: sequence)
+            if let saved = next.drafts[key], let revision = conversation.threads[key]?.currentRevision {
+                var archived = conversation.threads[key]?.answerDrafts ?? [:]
+                archived[revision] = saved
+                conversation.threads[key]?.answerDrafts = archived
+            }
             if let id = next.intentByRequest[key], var intent = next.intents[id] {
                 if case .accepted = intent.disposition {} else {
                     intent.disposition = .terminal(state: .cleared, sequence: sequence,

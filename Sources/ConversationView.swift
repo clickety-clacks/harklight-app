@@ -41,8 +41,8 @@ struct ConversationPanel: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
                             if let earlier = store.historicalAnswerDraft(for: key, revision: revision) {
-                                DisclosureGroup("Earlier answer draft · not delivered") {
-                                    HistoricalAnswerDraftView(request: earlier, store: store)
+                                DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
+                                    HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
                                 }.accessibilityIdentifier("conversation-earlier-answer")
                             }
                             ForEach(thread.turns) { turn in

@@ -157,11 +157,13 @@ struct LiveRequestDetail: View {
 struct HistoricalAnswerDraftView: View {
     let request: PresentedRequest
     let store: LivePresentationStore
+    var retracted = false
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(request.title?.rawValue ?? "Earlier question").font(.headline)
             if let body = request.body { Text(body.rawValue).font(.caption) }
-            Text("Not delivered · this selection belongs to the earlier question").font(.caption).foregroundStyle(.secondary)
+            Text(retracted ? "Saved answer · request retracted. Its original wording and choices are retained." : "Not delivered · this selection belongs to the earlier question")
+                .font(.caption).foregroundStyle(.secondary)
             switch request.projection {
             case let .sender(sender):
                 LiveProjectedSceneView(request: request, sender: sender, node: sender.scene, store: store, readOnly: true)
@@ -245,7 +247,9 @@ private struct LiveProjectedInputView: View {
     let store: LivePresentationStore
     let readOnly: Bool
 
-    private var draft: InputDraft? { store.request(for: request.key)?.draft.inputs[input.id] }
+    private var draft: InputDraft? {
+        readOnly ? request.draft.inputs[input.id] : store.request(for: request.key)?.draft.inputs[input.id]
+    }
 
     var body: some View {
         switch input.kind {
@@ -259,7 +263,7 @@ private struct LiveProjectedInputView: View {
                    let action = actions.first(where: { $0.id == selected }),
                    action.kind == .text {
                     TextEditor(text: Binding(
-                        get: { store.request(for: request.key)?.draft.inputs[input.id]?.textByActionID[selected]?.rawValue ?? "" },
+                        get: { draft?.textByActionID[selected]?.rawValue ?? "" },
                         set: { store.updateText($0, input: input.id, action: selected, for: request.key) }
                     ))
                     .frame(minHeight: 120)
@@ -271,7 +275,7 @@ private struct LiveProjectedInputView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(input.label.rawValue).font(.headline)
                 TextEditor(text: Binding(
-                    get: { store.request(for: request.key)?.draft.inputs[input.id]?.text?.rawValue ?? "" },
+                    get: { draft?.text?.rawValue ?? "" },
                     set: { store.updateText($0, input: input.id, action: nil, for: request.key) }
                 ))
                 .frame(minHeight: 120)
@@ -323,7 +327,7 @@ private struct LiveProjectedInputView: View {
     private func pointBinding(horizontal: Bool) -> Binding<Int> {
         Binding(
             get: {
-                let point = store.request(for: request.key)?.draft.inputs[input.id]?.effectivePoint
+                let point = draft?.effectivePoint
                 return horizontal ? (point?.x ?? 500) : (point?.y ?? 500)
             },
             set: { value in
@@ -345,7 +349,7 @@ private struct LiveCompatibilityActions: View {
     let readOnly: Bool
 
     private var selected: ExactText? {
-        store.request(for: request.key)?.draft.compatibility.selectedActionID
+        readOnly ? request.draft.compatibility.selectedActionID : store.request(for: request.key)?.draft.compatibility.selectedActionID
     }
 
     var body: some View {
@@ -365,7 +369,7 @@ private struct LiveCompatibilityActions: View {
                let action = actions.first(where: { $0.id == selected }),
                action.kind == .text {
                 TextEditor(text: Binding(
-                    get: { store.request(for: request.key)?.draft.compatibility.textByActionID[selected]?.rawValue ?? "" },
+                    get: { (readOnly ? request.draft.compatibility : store.request(for: request.key)?.draft.compatibility)?.textByActionID[selected]?.rawValue ?? "" },
                     set: { store.updateCompatibilityText($0, action: selected, for: request.key) }
                 ))
                 .frame(minHeight: 120)
