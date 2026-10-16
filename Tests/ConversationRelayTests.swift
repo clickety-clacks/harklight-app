@@ -11,17 +11,24 @@ final class ConversationRelayTests: XCTestCase {
         var ordinaryACKs: [Data] = []
         var conversationACKs: [Data] = []
         var onConversationACK: (() throws -> Void)?
+        var onConversationOpen: (() -> Void)?
+        var rejectFirstConversationACK = false
         init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
         func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             for frame in ordinary { try await consume(frame) }
         }
         func acknowledge(_ request: Data) async throws { ordinaryACKs.append(request) }
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+            onConversationOpen?()
             for frame in conversation { try await consume(frame) }
         }
         func acknowledgeConversation(_ request: Data) async throws {
             try onConversationACK?()
             conversationACKs.append(request)
+            if rejectFirstConversationACK {
+                rejectFirstConversationACK = false
+                throw InstallationTransportError.acknowledgementBehind
+            }
         }
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult { .unresolved }
     }
@@ -94,6 +101,33 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, gap ? 0 : 1)
             XCTAssertTrue(session.conversationACKs.isEmpty)
         }
+    }
+    func testFailedConversationPersistenceLeavesItsCursorUnacknowledged() async throws {
+        let (context, persistence, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("discussion", sequence: 1, fields: #""author":"person","event_id":"2","text":"Explain""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        session.onConversationOpen = { persistence.failNextCommit() }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        do { _ = try await core.resyncAndDrainOutbox(); XCTFail("Failed durability must stop ACK") }
+        catch {}
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0)
+        XCTAssertTrue(session.conversationACKs.isEmpty)
+    }
+    func testLostConversationACKReplaysExactHistoryWithoutChangingOrdinaryCursor() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("discussion", sequence: 1, fields: #""author":"person","event_id":"2","text":"Explain""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        session.rejectFirstConversationACK = true
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.conversationACKs.count, 2)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads.values.first?.turns.count, 1)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(session.ordinaryACKs.count, 1)
     }
     func testInlineOriginalBytesAndIndependentFileFactsDecodeWithoutInferringUse() throws {
         let (context, _, _, _) = try setup()
