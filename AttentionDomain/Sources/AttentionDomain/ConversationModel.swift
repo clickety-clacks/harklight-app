@@ -125,6 +125,41 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     }
 }
 
+/// Upload identity is independent of turn and cursor identity. Keep attempts even
+/// after a rejected draft is edited, so departure can account for every group.
+public struct ConversationUploadGroup: Equatable, Codable, Sendable {
+    public let operationID: UUID
+    public let binding: ConversationBinding
+    public var originals: [ConversationFile]
+    public var uploaded: [ConversationFile]
+    public var cleanupID: UUID?
+}
+
+public struct ConversationUploadCleanup: Equatable, Codable, Sendable, Identifiable {
+    public let id: UUID
+    public let binding: ConversationBinding
+    public let uploadOperations: [UUID]
+    public var outcome: Outcome
+
+    public enum Outcome: Equatable, Codable, Sendable {
+        case pending
+        case unknown(ExactText)
+        /// Acknowledges request-scope cleanup, not deletion of a particular file.
+        case acknowledged(ConversationUploadDiscardResult)
+    }
+}
+
+public struct ConversationUploadDiscardResult: Equatable, Codable, Sendable {
+    public enum State: String, Codable, Sendable { case discarded, committed }
+    public let state: State
+    public let discarded: UInt64
+
+    public init(state: State, discarded: UInt64) {
+        self.state = state
+        self.discarded = discarded
+    }
+}
+
 /// Each projection entry carries exactly one fact. Receipt, action and file use are never inferred.
 public struct ConversationEvent: Equatable, Codable, Sendable {
     public let sequence: UInt64
@@ -171,6 +206,8 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var redactedRevisions: Set<UInt64>?
     public var terminalAuthor: ConversationAuthor?
     public var retraction: ConversationRetraction?
+    public var uploadGroups: [UUID: ConversationUploadGroup]?
+    public var uploadCleanups: [UUID: ConversationUploadCleanup]?
 
     public var isRetracted: Bool { retraction != nil }
 

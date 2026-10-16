@@ -25,7 +25,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// A keychain-backed installation certificate and an enrollment-approved relay
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
-public actor URLSessionInstallationSession: AuthenticatedConversationFileSession {
+public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
@@ -242,6 +242,14 @@ public actor URLSessionInstallationSession: AuthenticatedConversationFileSession
     public func close() {
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
+    }
+
+    public func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
+                                           originURL: URL) async throws -> ConversationUploadDiscardResult {
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let (data, response) = try await urlSession.data(for: wire.discardRequest(cleanup))
+        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+        return try wire.decodeDiscard(data, status: http.statusCode)
     }
 
     public func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {

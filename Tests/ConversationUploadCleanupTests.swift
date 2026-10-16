@@ -1,0 +1,85 @@
+import AttentionDomain
+import HarklightNativeRelay
+import XCTest
+
+final class ConversationUploadCleanupTests: XCTestCase {
+    private func setup() throws -> (ProfileContext, MemoryAttentionStatePersistence, AttentionDomainStore, ConversationBinding) {
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+        try store.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key,
+            originalPayload: .object([JSONMember("title", .string(ExactText("Keep this request")))])), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
+        return (context, persistence, store, ConversationBinding(request: key, revision: 1))
+    }
+    private func file(_ name: String) -> ConversationFile {
+        ConversationFile(id: ExactText(name), name: ExactText(name), byteCount: 300_000,
+            sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText(name)))
+    }
+    func testDepartureRetainsEveryUploadAttemptAndUnknownCleanupWithoutChangingTextOrCursors() throws {
+        let (context, persistence, store, binding) = try setup()
+        let first = file("first.bin"), second = file("second.bin")
+        try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Keep exact text"), files: [first]), context: context)
+        let operation1 = try store.prepareDiscussion(binding, context: context)
+        try store.registerConversationUpload(first, binding: binding, operation: operation1, context: context)
+        try store.markDiscussionOutcome(binding, operation: operation1, rejection: ExactText("Storage unavailable"), context: context)
+        try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Keep exact text"), files: [second]), context: context)
+        let operation2 = try store.prepareDiscussion(binding, context: context)
+        try store.registerConversationUpload(second, binding: binding, operation: operation2, context: context)
+        try store.markDiscussionOutcome(binding, operation: operation2, rejection: nil, context: context)
+        // Rebuild/restoration and transport uncertainty alone do not request cleanup.
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?.isEmpty ?? true)
+        let cleanup = try XCTUnwrap(restored.abandonConversationUploads(for: binding.request, context: context).first)
+        XCTAssertEqual(Set(cleanup.uploadOperations), Set([operation1, operation2]))
+        XCTAssertNotEqual(cleanup.id, operation1)
+        XCTAssertNotEqual(cleanup.id, operation2)
+        try restored.recordConversationCleanup(cleanup.id, request: binding.request,
+            outcome: .unknown(ExactText("Offline")), context: context)
+        let retryStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let retry = try XCTUnwrap(retryStore.abandonConversationUploads(for: binding.request, context: context).first)
+        XCTAssertEqual(retry.id, cleanup.id)
+        XCTAssertEqual(retry.binding, binding)
+        XCTAssertEqual(retry.outcome, .unknown(ExactText("Offline")))
+        XCTAssertThrowsError(try retryStore.prepareDiscussion(binding, context: context))
+        let thread = try XCTUnwrap(retryStore.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("Keep exact text"))
+        XCTAssertEqual(thread.drafts[1]?.disposition, .outcomeUnknown(operation2))
+        XCTAssertEqual(try retryStore.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(try retryStore.conversationSnapshot(context: context).cursor, 0)
+        XCTAssertTrue(try retryStore.snapshot(context: context).outbox.isEmpty)
+    }
+    func testAcknowledgedRequestScopeCleanupRequiresReselectionAndUsesExactOriginWire() throws {
+        let (context, persistence, store, binding) = try setup()
+        let original = file("reselect.bin")
+        try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Text remains"), files: [original]), context: context)
+        let operation = try store.prepareDiscussion(binding, context: context)
+        try store.registerConversationUpload(original, binding: binding, operation: operation, context: context)
+        try store.markDiscussionOutcome(binding, operation: operation, rejection: ExactText("Not submitted"), context: context)
+        let cleanup = try XCTUnwrap(store.abandonConversationUploads(for: binding.request, context: context).first)
+        let wire = try ConversationFileWire(profile: context, originURL: URL(string: "https://relay.example:9443/origin/v1")!)
+        let request = try wire.discardRequest(cleanup)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/origin/v1")
+        let body = try JSONValue.parse(XCTUnwrap(request.httpBody))
+        XCTAssertEqual(body.uniqueValue(named: "type"), .string(ExactText("discard_uploads")))
+        XCTAssertEqual(body.uniqueValue(named: "revision")?.integerValue, 1)
+        XCTAssertNil(body.uniqueValue(named: "request_revision"))
+        XCTAssertEqual(body.uniqueValue(named: "op_id"), .string(ExactText(cleanup.id.uuidString.lowercased())))
+        let mixed = try wire.decodeDiscard(Data(#"{"v":1,"type":"ok","state":"committed","discarded":1}"#.utf8), status: 200)
+        XCTAssertEqual(mixed, ConversationUploadDiscardResult(state: .committed, discarded: 1))
+        let zero = try wire.decodeDiscard(Data(#"{"v":1,"type":"ok","state":"discarded","discarded":0}"#.utf8), status: 200)
+        XCTAssertEqual(zero.discarded, 0)
+        try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .acknowledged(mixed), context: context)
+        try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .unknown(ExactText("Late failure")), context: context)
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.uploadCleanups?[cleanup.id]?.outcome, .acknowledged(mixed))
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("Text remains"))
+        XCTAssertTrue(thread.drafts[1]?.files.isEmpty == true)
+        XCTAssertTrue(try restored.abandonConversationUploads(for: binding.request, context: context).isEmpty)
+        XCTAssertThrowsError(try wire.decodeDiscard(Data(#"{"v":1,"type":"ok","discarded":0}"#.utf8), status: 200))
+    }
+}

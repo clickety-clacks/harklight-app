@@ -998,8 +998,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
+        guard !(thread.uploadCleanups ?? [:]).values.contains(where: {
+            guard $0.binding == binding else { return false }
+            if case .acknowledged = $0.outcome { return false }; return true
+        }) else { throw ConversationError.pendingSubmission }
         switch draft.disposition {
-        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _): return id
+        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
+            guard thread.uploadGroups?[id]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
+            return id
         case .saved, .rejected: break
         }
         let operation = UUID()
@@ -1009,6 +1015,113 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.conversation = conversation
         try commit(next)
         return operation
+    }
+
+    /// Called before starting an upload, not after its response: navigation may
+    /// happen while the transfer is suspended or its result is unknown.
+    public func registerConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
+        operation: UUID, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        switch draft.disposition {
+        case let .submitting(id), let .outcomeUnknown(id):
+            guard id == operation else { throw ConversationError.conflict }
+        default: throw ConversationError.pendingSubmission
+        }
+        guard draft.files.contains(file) else { throw ConversationError.fileMismatch }
+        var group = thread.uploadGroups?[operation] ?? ConversationUploadGroup(operationID: operation,
+            binding: binding, originals: [], uploaded: [], cleanupID: nil)
+        guard group.binding == binding, group.cleanupID == nil else { throw ConversationError.pendingSubmission }
+        if !group.originals.contains(file) { group.originals.append(file) }
+        thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func recordConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
+        operation: UUID, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var group = thread.uploadGroups?[operation], group.binding == binding,
+              let original = group.originals.first(where: { $0.id == file.id }),
+              original.name == file.name, original.byteCount == file.byteCount,
+              original.sha256 == file.sha256, case .uploaded = file.content else { throw ConversationError.fileMismatch }
+        if let prior = group.uploaded.first(where: { $0.id == file.id }), prior != file { throw ConversationError.conflict }
+        if !group.uploaded.contains(file) { group.uploaded.append(file) }
+        thread.uploadGroups?[operation] = group
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        // Retain the actual returned reference, but never promote an abandoned
+        // transfer to readiness or continue its submission.
+        guard group.cleanupID == nil else { throw ConversationError.pendingSubmission }
+    }
+
+    /// Explicit navigation only. Neither replay nor connection lifecycle calls
+    /// this mutation. Each revision gets one stable cleanup command across all
+    /// its uncommitted upload groups; retries preserve that command identity.
+    public func abandonConversationUploads(for request: RequestKey,
+        context suppliedContext: ProfileContext) throws -> [ConversationUploadCleanup] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[request] else { return [] }
+        let committed = Set(thread.turns.compactMap(\.operationID))
+        let groups = (thread.uploadGroups ?? [:]).values.filter { $0.cleanupID == nil && !committed.contains($0.operationID) }
+        for revision in Set(groups.map { $0.binding.revision }) {
+            let operations = groups.filter { $0.binding.revision == revision }.map(\.operationID)
+                .sorted { $0.uuidString < $1.uuidString }
+            let cleanup = ConversationUploadCleanup(id: UUID(), binding: ConversationBinding(request: request, revision: revision),
+                uploadOperations: operations, outcome: .pending)
+            thread.uploadCleanups = (thread.uploadCleanups ?? [:]).merging([cleanup.id: cleanup]) { _, new in new }
+            for operation in operations { thread.uploadGroups?[operation]?.cleanupID = cleanup.id }
+        }
+        conversation.threads[request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return (thread.uploadCleanups ?? [:]).values.filter {
+            if case .acknowledged = $0.outcome { return false }; return true
+        }
+    }
+
+    public func recordConversationCleanup(_ id: UUID, request: RequestKey,
+        outcome: ConversationUploadCleanup.Outcome, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[request],
+              var cleanup = thread.uploadCleanups?[id] else { throw ConversationError.missingRequest }
+        // A late failure must not undo an already acknowledged cleanup.
+        if case .acknowledged = cleanup.outcome { return }
+        cleanup.outcome = outcome
+        thread.uploadCleanups?[id] = cleanup
+        if case .acknowledged = outcome, var draft = thread.drafts[cleanup.binding.revision] {
+            switch draft.disposition {
+            case .saved, .rejected:
+                let abandoned = Set(cleanup.uploadOperations.flatMap { thread.uploadGroups?[$0]?.originals.map(\.id) ?? [] })
+                draft.files.removeAll { abandoned.contains($0.id) }
+                draft.disposition = .rejected(ExactText("Not delivered. Reselect files to upload again; text draft retained."))
+                thread.drafts[cleanup.binding.revision] = draft
+            case .submitting, .outcomeUnknown, .acceptedPendingReplay:
+                break // Original ambiguous/accepted operation stays frozen for reconciliation.
+            }
+        }
+        conversation.threads[request] = thread
+        next.conversation = conversation
+        try commit(next)
     }
 
     public func markDiscussionOutcome(_ binding: ConversationBinding, operation: UUID,

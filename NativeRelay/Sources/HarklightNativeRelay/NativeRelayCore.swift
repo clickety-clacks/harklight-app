@@ -25,6 +25,11 @@ public protocol AuthenticatedConversationFileSession: AuthenticatedConversationS
     func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult
 }
 
+public protocol AuthenticatedConversationCleanupSession: AuthenticatedConversationFileSession {
+    func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
+                                    originURL: URL) async throws -> ConversationUploadDiscardResult
+}
+
 public enum OriginalOperationResult: Equatable, Sendable {
     case accepted(operationID: UUID, terminalSequence: UInt64)
     case unresolved
@@ -57,6 +62,35 @@ public actor NativeRelayCore {
     public func conversationOriginURL() throws -> URL? {
         try validate()
         return discoveredOriginURL
+    }
+
+    /// Independent of the send/replay busy flag: departure can fence an upload
+    /// while it is awaiting HTTP. This method never submits a discussion.
+    public func discardAbandonedUploads(for request: RequestKey) async throws {
+        try validate()
+        let pending = (try store.conversationSnapshot(context: context).threads[request]?.uploadCleanups ?? [:]).values
+            .filter { if case .acknowledged = $0.outcome { return false }; return true }
+        for cleanup in pending {
+            do {
+                guard let endpoint = discoveredOriginURL,
+                      let transport = session as? any AuthenticatedConversationCleanupSession else {
+                    throw NativeRelayCoreError.inactive
+                }
+                let result = try await transport.discardConversationUploads(cleanup, originURL: endpoint)
+                try validate()
+                try store.recordConversationCleanup(cleanup.id, request: request,
+                    outcome: .acknowledged(result), context: context)
+            } catch {
+                try store.recordConversationCleanup(cleanup.id, request: request,
+                    outcome: .unknown(ExactText(String(describing: error))), context: context)
+                throw error
+            }
+        }
+    }
+
+    private func validateUploadOperation(_ binding: ConversationBinding, operation: UUID) throws {
+        let thread = try store.conversationSnapshot(context: context).threads[binding.request]
+        guard thread?.uploadGroups?[operation]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
     }
 
     public func submitDiscussion(_ binding: ConversationBinding,
@@ -98,10 +132,13 @@ public actor NativeRelayCore {
                 for (file, tier) in zip(frozen.files, tiers) {
                     if case .uploaded = file.content { prepared.append(file); continue }
                     if tier == .upload {
+                        try store.registerConversationUpload(file, binding: binding, operation: operation, context: context)
                         let source = try await retainedFile(file)
+                        try validateUploadOperation(binding, operation: operation)
                         let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
                             operationID: operation, limits: published, originURL: endpoint)
                         try validate()
+                        try store.recordConversationUpload(uploaded, binding: binding, operation: operation, context: context)
                         prepared.append(uploaded)
                     } else {
                         let bytes: Data
@@ -128,6 +165,7 @@ public actor NativeRelayCore {
             throw error
         }
         try validate()
+        try validateUploadOperation(binding, operation: operation)
         let result = await transport.sendDiscussion(frame, operationID: operation)
         try validate()
         switch result {

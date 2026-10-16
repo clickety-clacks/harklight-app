@@ -36,6 +36,34 @@ public struct ConversationFileWire: Sendable {
         else { cap = try integer(value, "upload_cap_bytes_per_file") }
         return ConversationFileLimits(inlineDecodedBytes: inline, uploadCap: cap)
     }
+    public func discardRequest(_ cleanup: ConversationUploadCleanup) throws -> URLRequest {
+        let binding = cleanup.binding
+        guard binding.request.accountScope == profile.identity.personID, binding.revision > 0 else {
+            throw RelayWireError.invalidFrame
+        }
+        var request = URLRequest(url: originURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let frame = JSONValue.object([
+            JSONMember("v", .number(JSONNumber(lexeme: "1"))),
+            JSONMember("type", .string(ExactText("discard_uploads"))),
+            JSONMember("ref", .string(ExactText("native-upload-cleanup"))),
+            JSONMember("op_id", .string(ExactText(cleanup.id.uuidString.lowercased()))),
+            JSONMember("sender_id", .string(binding.request.senderID)),
+            JSONMember("message_id", .string(binding.request.messageID)),
+            JSONMember("revision", .number(JSONNumber(lexeme: String(binding.revision))))
+        ])
+        request.httpBody = Data(frame.jsonString.utf8)
+        return request
+    }
+    public func decodeDiscard(_ data: Data, status: Int) throws -> ConversationUploadDiscardResult {
+        let value = try response(data, status: status)
+        guard let raw = value.uniqueValue(named: "state")?.stringValue,
+              let state = ConversationUploadDiscardResult.State(rawValue: raw.rawValue) else {
+            throw RelayWireError.invalidFrame
+        }
+        return ConversationUploadDiscardResult(state: state, discarded: try integer(value, "discarded"))
+    }
     public func uploadRequest(file: ConversationFile, binding: ConversationBinding, operationID: UUID) throws -> URLRequest {
         guard binding.request.accountScope == profile.identity.personID, binding.revision > 0,
               !file.name.rawValue.isEmpty else { throw RelayWireError.invalidFrame }
