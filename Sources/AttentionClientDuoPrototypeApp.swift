@@ -17,31 +17,25 @@ struct AttentionClientDuoPrototypeApp: App {
         WindowGroup {
             ShakeHostingView(onShake: { samples.populate() }) {
                 Group {
-                    if case let .disconnected(store) = launch.state {
-                        if launch.guidedJoin.isShowing {
-                            NativeEnrollmentView(launch: launch)
-                        } else if let store {
-                            LiveContentView(store: store, samples: samples, launch: launch)
-                        } else {
-                            DisconnectedAccountRecoveryView(launch: launch)
-                        }
-                    } else if launch.isShowingDisconnectedArchive,
+                    if launch.guidedJoin.isShowing {
+                        NativeEnrollmentView(launch: launch)
+                    } else if launch.canOpenDisconnectedArchive && launch.isShowingDisconnectedArchive,
                               let archive = launch.disconnectedArchive {
                         LiveContentView(store: archive, samples: samples, launch: launch)
-                    } else if launch.guidedJoin.isShowing {
-                        NativeEnrollmentView(launch: launch)
-                    } else { switch launch.state {
-                    case .enrollmentRequired:
-                        NativeEnrollmentView(launch: launch)
-                    case let .enrollmentPending(record):
-                        NativeEnrollmentView(launch: launch, pending: record)
-                    case let .fixture(store):
-                        ContentView(store: store, samples: samples)
-                    case let .live(store):
+                    } else if let store = launch.inboxPresentation {
                         LiveContentView(store: store, samples: samples, launch: launch)
-                    case .disconnected:
-                        DisconnectedAccountRecoveryView(launch: launch)
-                    } }
+                    } else {
+                        switch launch.state {
+                        case .enrollmentRequired:
+                            NativeEnrollmentView(launch: launch)
+                        case let .enrollmentPending(record):
+                            NativeEnrollmentView(launch: launch, pending: record)
+                        case let .fixture(store):
+                            ContentView(store: store, samples: samples)
+                        case .live, .disconnected:
+                            DisconnectedAccountRecoveryView(launch: launch)
+                        }
+                    }
                 }
                 .task {
                     if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }

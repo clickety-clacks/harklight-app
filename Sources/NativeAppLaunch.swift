@@ -211,6 +211,13 @@ final class NativeAppLaunch {
         disconnectedArchive != nil && disconnectedAccount?.removed == true && activeEnrollmentRecord != nil
     }
 
+    var inboxPresentation: LivePresentationStore? {
+        switch state {
+        case let .live(presentation), let .disconnected(presentation): presentation
+        default: nil
+        }
+    }
+
     func showDisconnectedArchive() {
         guard canOpenDisconnectedArchive else { return }
         isShowingDisconnectedArchive = true
