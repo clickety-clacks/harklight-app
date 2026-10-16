@@ -116,11 +116,12 @@ struct InboxRequestRow: Identifiable {
 /// One ordinary inbox for admitted requests and additive local examples.
 /// Source-bound selections retain the correct domain/view-model action owner.
 @MainActor
-struct HarklightInbox<RequestDetail: View>: View {
+struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let requests: [InboxRequestRow]
     let samples: SampleLibrary
     let selectRequest: (RequestKey) -> Void
     @ViewBuilder let requestDetail: (RequestKey, InboxCardContext) -> RequestDetail
+    @ViewBuilder let settingsContent: () -> SettingsContent
     var warnings: [String] = []
     var conversationStore: LivePresentationStore? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -260,7 +261,7 @@ struct HarklightInbox<RequestDetail: View>: View {
             }
         }
         .background(WorkspaceWindowReader { windowSize = $0 })
-        .sheet(isPresented: $settings) { InboxSettings(samples: samples) }
+        .sheet(isPresented: $settings, content: settingsContent)
         .tint(.blue)
     }
 }

@@ -43,7 +43,7 @@ struct NativeJoinAttempt: Codable, Equatable {
 
 struct NativeAccountDeparture: Codable {
     let record: NativeEnrollmentRecord
-    let replacement: NativeJoinInvitation
+    let replacement: NativeJoinInvitation?
     var removed: Bool
 }
 
@@ -348,26 +348,41 @@ final class NativeGuidedJoinStore {
     func departure() throws -> NativeAccountDeparture? {
         guard let data = try loadData(account: "guided-departure") else { return nil }
         let value = try JSONDecoder().decode(NativeAccountDeparture.self, from: data)
-        try value.replacement.validate()
+        try value.replacement?.validate()
         return value
     }
 
-    func removeCurrentAccount(_ record: NativeEnrollmentRecord, replacement: NativeJoinInvitation) async throws {
-        try replacement.validate()
-        guard let current = try enrollment.load(), sameInstallation(current, record) else {
-            throw NativeJoinError.superseded
-        }
-        var departure = NativeAccountDeparture(record: record, replacement: replacement, removed: false)
+    /// Writes the exact original installation before local transport is stopped
+    /// or a removal request can reach the server.
+    func prepareAccountDeparture(_ record: NativeEnrollmentRecord,
+                                 replacement: NativeJoinInvitation? = nil) throws -> NativeAccountDeparture {
+        try replacement?.validate()
+        let current = try enrollment.load()
         if let saved = try self.departure() {
-            guard sameInstallation(saved.record, record), saved.replacement == replacement else {
+            if sameInstallation(saved.record, record), saved.replacement == replacement {
+                return saved
+            }
+            // Once a prior standalone removal is confirmed, a later approved
+            // installation can begin its own removal without reviving the old
+            // registration. The single durable slot now records the current
+            // operation; its account data remains in its original profile file.
+            guard saved.replacement == nil, saved.removed,
+                  let current, current.isApproved, sameInstallation(current, record) else {
                 throw NativeJoinError.superseded
             }
-            departure = saved
         }
+        guard let current, current.isApproved, sameInstallation(current, record) else {
+            throw NativeJoinError.superseded
+        }
+        let departure = NativeAccountDeparture(record: record, replacement: replacement, removed: false)
+        try saveData(JSONEncoder().encode(departure), account: "guided-departure")
+        return departure
+    }
+
+    func removeCurrentAccount(_ record: NativeEnrollmentRecord,
+                              replacement: NativeJoinInvitation? = nil) async throws {
+        var departure = try prepareAccountDeparture(record, replacement: replacement)
         if !departure.removed {
-            // Persist the original target before sending, so a lost reply or
-            // process restart retries using the old device's retained key.
-            try saveData(JSONEncoder().encode(departure), account: "guided-departure")
             let material = try enrollment.material(from: record)
             guard let url = URL(string: "https://\(record.host):\(record.enrollmentPort)/device/remove") else {
                 throw NativeJoinError.invalidResponse
@@ -377,7 +392,7 @@ final class NativeGuidedJoinStore {
                                                   identity: material.keychainIdentity)
             guard let latest = try enrollment.load(), sameInstallation(latest, record),
                   let operation = try self.departure(), sameInstallation(operation.record, record),
-                  operation.replacement == replacement else { throw NativeJoinError.superseded }
+                  operation.replacement == replacement, !operation.removed else { throw NativeJoinError.superseded }
             try acceptStatus(reply.statusCode, data: reply.data)
             let receipt = try JSONDecoder().decode(RemovalReply.self, from: reply.data)
             guard receipt.state == "removed", NativeAuthorityBinding.samePerson(receipt.personID, record.personID),
@@ -400,7 +415,9 @@ final class NativeGuidedJoinStore {
                 // The next prepared request can be durable before the old
                 // receipt's deletion commits. Recover that exact successor,
                 // never delete its key/request or reset an unrelated account.
-                guard attempt.invitation == departure.replacement else { throw NativeJoinError.superseded }
+                if let replacement = departure.replacement {
+                    guard attempt.invitation == replacement else { throw NativeJoinError.superseded }
+                }
                 if let current = try enrollment.load() {
                     guard current.isApproved, current.deviceID == attempt.deviceID,
                           NativeAuthorityBinding.samePerson(current.personID, attempt.invitation.personID),
@@ -412,14 +429,14 @@ final class NativeGuidedJoinStore {
                     }
                     _ = try enrollment.material(from: current)
                 }
-                try deleteData(account: "guided-departure")
+                if departure.replacement != nil { try deleteData(account: "guided-departure") }
                 return
             }
             try deleteData(account: "guided-request")
         }
         try enrollment.clearAfterConfirmedRemoval(of: departure.record)
-        // Keep the committed receipt until the next deliberate Join. If the
-        // process stops here it restores the replacement confirmation.
+        // Keep the committed receipt until the next deliberate Join. A
+        // standalone departure also uses it to reopen the old account locally.
     }
 
     func dismissConfirmedDeparture() throws {
@@ -568,7 +585,7 @@ final class NativeGuidedJoinStore {
 
     private func save(_ attempt: NativeJoinAttempt) throws {
         try saveData(JSONEncoder().encode(attempt), account: "guided-request")
-        if let departure = try departure(), departure.removed {
+        if let departure = try departure(), departure.removed, departure.replacement != nil {
             try deleteData(account: "guided-departure")
         }
     }

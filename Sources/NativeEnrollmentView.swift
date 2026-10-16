@@ -18,6 +18,10 @@ struct NativeEnrollmentView: View {
                             .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                     }
                     content
+                    if launch.canReturnToDisconnectedAccount {
+                        Button("Back to saved messages") { launch.cancelReconnect() }
+                            .buttonStyle(.bordered)
+                    }
                     if flow.canOpenInvitationEntry {
                         Button("Use another invitation") { flow.openInvitationEntry() }.buttonStyle(.bordered)
                     }

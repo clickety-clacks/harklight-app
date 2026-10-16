@@ -25,30 +25,48 @@ final class NativeAppLaunch {
         case enrollmentPending(NativeEnrollmentRecord)
         case fixture(PrototypeStore)
         case live(LivePresentationStore)
+        case disconnected(LivePresentationStore?)
     }
 
     private(set) var state: State
     private(set) var enrollmentMessage: String?
     private(set) var isEnrollmentBusy = false
     private(set) var isEnrollmentExpired = false
+    private(set) var activeEnrollmentRecord: NativeEnrollmentRecord?
+    private(set) var disconnectedAccount: NativeAccountDeparture?
+    private(set) var disconnectedArchive: LivePresentationStore?
+    private(set) var isShowingDisconnectedArchive = false
+    private(set) var disconnectMessage: String?
+    private(set) var isDisconnectBusy = false
     let guidedJoin: NativeGuidedJoinCoordinator
 
     @ObservationIgnored private let enrollment = NativeEnrollmentStore()
+    @ObservationIgnored private let guidedJoinStore: NativeGuidedJoinStore
     @ObservationIgnored private let notifications = NativeNotificationPermission.system
     @ObservationIgnored private var didRestore = false
     @ObservationIgnored private var activationGeneration = UUID()
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
-        guidedJoin = NativeGuidedJoinCoordinator(deviceName: UIDevice.current.name, isShowing: !fixture)
+        let joinStore = NativeGuidedJoinStore()
+        guidedJoinStore = joinStore
+        let savedDeparture = fixture ? nil : (try? joinStore.departure())
+        let standaloneDeparture = savedDeparture.flatMap { $0.replacement == nil ? $0 : nil }
+        guidedJoin = NativeGuidedJoinCoordinator(store: joinStore,
+                                                 deviceName: UIDevice.current.name,
+                                                 isShowing: !fixture && standaloneDeparture == nil)
         if fixture {
             state = .fixture(PrototypeStore.loadFromBundle())
+        } else if let standaloneDeparture {
+            state = .disconnected(nil)
+            disconnectedAccount = standaloneDeparture
         } else {
             state = .enrollmentRequired
         }
         guidedJoin.connectApproved = { [weak self] record in
             guard let self else { return false }
             let material = try self.enrollment.material(from: record)
+            self.activeEnrollmentRecord = record
             try await self.activate(material)
             let epoch = self.activationGeneration
             let reached = await NativeRelayLifecycle.shared.confirmForegroundProgress(for: material.context)
@@ -71,6 +89,7 @@ final class NativeAppLaunch {
                 catch { self.enrollmentMessage = "The account was removed, but its local conversation file copies could not be removed (\(error))." }
             }
             self.state = .enrollmentRequired
+            self.activeEnrollmentRecord = nil
             await NativeRelayLifecycle.shared.deactivate()
         }
     }
@@ -79,7 +98,157 @@ final class NativeAppLaunch {
         guard !didRestore else { return }
         didRestore = true
         if case .fixture = state { return }
+        if let departure = try? guidedJoinStore.departure(),
+           departure.replacement == nil {
+            disconnectedAccount = departure
+            let attempt = try? guidedJoinStore.loadAttempt()
+            let active = try? enrollment.load()
+            let hasNewRegistration = departure.removed &&
+                ((attempt.map { $0.deviceID != departure.record.deviceID } ?? false) ||
+                 (active.map { $0.isApproved && $0.deviceID != departure.record.deviceID } ?? false))
+            if hasNewRegistration {
+                if let archive = try? makeDisconnectedPresentation(for: departure) {
+                    archive.enterReadOnlyMode()
+                    disconnectedArchive = archive
+                    state = .disconnected(archive)
+                }
+                disconnectMessage = nil
+                activeEnrollmentRecord = active ?? nil
+                guidedJoin.restoreAfterStandaloneRemoval()
+                await guidedJoin.restore()
+                return
+            }
+            if departure.removed {
+                try? guidedJoinStore.finishConfirmedDeparture(departure)
+                disconnectedAccount = try? guidedJoinStore.departure() ?? departure
+            }
+            let archive = try? makeDisconnectedPresentation(for: departure)
+            archive?.enterReadOnlyMode()
+            disconnectedArchive = archive
+            isShowingDisconnectedArchive = archive != nil
+            if case let .live(previous) = state { previous.stopObserving() }
+            activeEnrollmentRecord = nil
+            state = .disconnected(archive)
+            disconnectMessage = disconnectedStatusMessage(for: departure, presentation: archive)
+            guidedJoin.holdForDisconnectedAccount(departure)
+            await NativeRelayLifecycle.shared.deactivate()
+            return
+        }
         await guidedJoin.restore()
+    }
+
+    func disconnectCurrentAccount() async {
+        guard !isDisconnectBusy, case let .live(presentation) = state,
+              let record = try? enrollment.load(), record.isApproved else { return }
+        disconnectMessage = nil
+        do {
+            try guidedJoin.prepareStandaloneRemoval(record)
+            let departure = try guidedJoinStore.departure() ??
+                NativeAccountDeparture(record: record, replacement: nil, removed: false)
+            disconnectedAccount = departure
+            disconnectedArchive = presentation
+            isShowingDisconnectedArchive = true
+            presentation.enterReadOnlyMode()
+            if case let .live(current) = state, current === presentation {
+                state = .disconnected(presentation)
+            }
+            activeEnrollmentRecord = nil
+            activationGeneration = UUID()
+            await NativeRelayLifecycle.shared.deactivate()
+            await retryDisconnectRemoval()
+        } catch {
+            disconnectMessage = "Harklight could not save the removal request. Nothing was sent; this account is still connected. Try again."
+        }
+    }
+
+    func retryDisconnectRemoval() async {
+        guard !isDisconnectBusy, case .disconnected = state,
+              let departure = disconnectedAccount,
+              departure.replacement == nil, !departure.removed else { return }
+        isDisconnectBusy = true
+        defer { isDisconnectBusy = false }
+        disconnectMessage = nil
+        await NativeRelayLifecycle.shared.deactivate()
+        do {
+            try await guidedJoin.removeStandaloneAccount()
+            disconnectedAccount = try guidedJoinStore.departure() ?? departure
+            disconnectMessage = disconnectedStatusMessage(for: disconnectedAccount ?? departure,
+                                                         presentation: disconnectedStore)
+        } catch {
+            disconnectedAccount = (try? guidedJoinStore.departure()) ?? departure
+            disconnectMessage = disconnectedStatusMessage(for: disconnectedAccount ?? departure,
+                                                         presentation: disconnectedStore)
+        }
+    }
+
+    func beginReconnect() {
+        guard !isDisconnectBusy, disconnectedAccount?.removed == true else { return }
+        guidedJoin.beginReconnect()
+    }
+
+    func cancelReconnect() {
+        guard !isDisconnectBusy, case .disconnected = state else { return }
+        guidedJoin.returnToDisconnectedAccount()
+    }
+
+    func receiveInvitation(_ url: URL) async {
+        if case .disconnected = state, let departure = disconnectedAccount {
+            guard departure.removed else {
+                disconnectMessage = "Removal is still unconfirmed. Retry it with the original server before connecting again."
+                return
+            }
+            guidedJoin.beginReconnect()
+        }
+        await guidedJoin.receive(url)
+    }
+
+    var canReturnToDisconnectedAccount: Bool {
+        if case .disconnected = state { return disconnectedAccount?.removed == true }
+        return false
+    }
+
+    var canOpenDisconnectedArchive: Bool {
+        disconnectedArchive != nil && disconnectedAccount?.removed == true && activeEnrollmentRecord != nil
+    }
+
+    func showDisconnectedArchive() {
+        guard canOpenDisconnectedArchive else { return }
+        isShowingDisconnectedArchive = true
+    }
+
+    func showCurrentAccount() {
+        guard canOpenDisconnectedArchive else { return }
+        isShowingDisconnectedArchive = false
+    }
+
+    private func makeDisconnectedPresentation(for departure: NativeAccountDeparture) throws -> LivePresentationStore {
+        guard let personID = departure.record.personID else { throw NativeEnrollmentError.invalidIdentity }
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(departure.record.host),
+            personID: ExactText(personID),
+            deviceID: ExactText(departure.record.deviceID)), transportMode: .relay)
+        let persistence = try FileAttentionStatePersistence.applicationSupport()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        return try LivePresentationStore(disconnectedStore: store, context: context)
+    }
+
+    private var disconnectedStore: LivePresentationStore? {
+        if case let .disconnected(presentation) = state { return presentation }
+        return nil
+    }
+
+    private func disconnectedStatusMessage(for departure: NativeAccountDeparture,
+                                           presentation: LivePresentationStore?) -> String {
+        let account = departure.record.accountDisplayName ?? "this account"
+        let server = departure.record.serverDisplayName ?? departure.record.host
+        if departure.removed {
+            return "This phone is disconnected from \(account) on \(server). Saved messages, drafts and receipts remain read-only on this phone. Other devices and server history are unchanged."
+        }
+        let pendingAnswers = presentation?.presentation.requests.filter { $0.lifecycleStatus == .pending }.count ?? 0
+        let pending = pendingAnswers > 0
+            ? " Pending answers are no longer retrying; some may already have reached the server."
+            : ""
+        return "This phone is disconnected locally from \(account) on \(server), but server removal is not confirmed. Its original identity and saved messages, drafts and receipts are kept for retry.\(pending)"
     }
 
     func beginEnrollment(host: String,
@@ -191,6 +360,7 @@ final class NativeAppLaunch {
         }
         let generation = UUID()
         activationGeneration = generation
+        disconnectMessage = nil
         isEnrollmentExpired = false
         if case let .live(previous) = state { previous.stopObserving() }
         state = .enrollmentRequired
@@ -214,6 +384,7 @@ final class NativeAppLaunch {
         guard activationGeneration == generation else { return }
         presentation.startObserving()
         state = .live(presentation)
+        isShowingDisconnectedArchive = false
         Task { [weak self] in
             guard let self else { return }
             await notifications.resume { self.activationGeneration == generation }
@@ -281,6 +452,7 @@ final class LivePresentationStore {
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
+    private(set) var isReadOnly: Bool
     @ObservationIgnored private var observation: Task<Void, Never>?
 
     convenience init(store: AttentionDomainStore, context: ProfileContext) throws {
@@ -291,12 +463,19 @@ final class LivePresentationStore {
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
     convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
-        try self.init(store: store, context: context, permitsDelivery: false)
+        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false)
     }
 
-    private init(store: AttentionDomainStore, context: ProfileContext, permitsDelivery: Bool) throws {
+    convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext) throws {
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true)
+    }
+
+    private init(store: AttentionDomainStore, context: ProfileContext,
+                 permitsDelivery: Bool, isReadOnly: Bool = false) throws {
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
+        self.isReadOnly = isReadOnly
         _ = try store.snapshot(context: context)
         let port = AttentionDomainPort(store: store)
         let snapshot = try port.observe(context: port.context)
@@ -583,7 +762,7 @@ final class LivePresentationStore {
     }
 
     func updateLocalExampleAnnotation(_ text: String, point: PointValue?, for key: RequestKey) {
-        guard !permitsDelivery else { return }
+        guard !permitsDelivery, !isReadOnly else { return }
         let input = ExactText("point")
         editDraft(for: key) { draft in
             draft.inputs[ExactText("annotation")]?.text = ExactText(text)
@@ -597,6 +776,7 @@ final class LivePresentationStore {
     /// before any network send. A persisted receipt prevents a second intent.
     @discardableResult
     func submit(_ key: RequestKey) throws -> IntentReceipt {
+        guard !isReadOnly else { throw LiveReplyError.disconnected }
         guard permitsDelivery else { throw LiveReplyError.localExample }
         let request = try inspectedRequest(key)
         guard request.lifecycleStatus == .open,
@@ -615,7 +795,7 @@ final class LivePresentationStore {
     }
 
     func submitFromUser(_ key: RequestKey) {
-        guard permitsDelivery else { return }
+        guard permitsDelivery, !isReadOnly else { return }
         do {
             _ = try submit(key)
             retryPendingDelivery()
@@ -640,7 +820,7 @@ final class LivePresentationStore {
     }
 
     func retryPendingDelivery() {
-        guard permitsDelivery else { return }
+        guard permitsDelivery, !isReadOnly else { return }
         Task {
             let result = await NativeRelayLifecycle.shared.refreshAfterAnswerStored()
             applyRefreshResult(result)
@@ -657,6 +837,7 @@ final class LivePresentationStore {
     }
 
     private func editDraft(for key: RequestKey, _ change: (inout RequestDraft) -> Void) {
+        guard !isReadOnly else { return }
         do {
             let request = try inspectedRequest(key)
             guard request.lifecycleStatus == .open,
@@ -672,6 +853,12 @@ final class LivePresentationStore {
             actionError = "Your edit could not be saved."
             try? refreshFromDurableStore()
         }
+    }
+
+    func enterReadOnlyMode() {
+        isReadOnly = true
+        observation?.cancel()
+        observation = nil
     }
 
     private func inspectedRequest(_ key: RequestKey) throws -> PresentedRequest {
@@ -776,6 +963,7 @@ final class LivePresentationStore {
 
 private enum LiveReplyError: Error {
     case localExample
+    case disconnected
     case notOpen
     case incomplete
     case unsupported

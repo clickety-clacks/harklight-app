@@ -17,7 +17,18 @@ struct AttentionClientDuoPrototypeApp: App {
         WindowGroup {
             ShakeHostingView(onShake: { samples.populate() }) {
                 Group {
-                    if launch.guidedJoin.isShowing {
+                    if case let .disconnected(store) = launch.state {
+                        if launch.guidedJoin.isShowing {
+                            NativeEnrollmentView(launch: launch)
+                        } else if let store {
+                            LiveContentView(store: store, samples: samples, launch: launch)
+                        } else {
+                            DisconnectedAccountRecoveryView(launch: launch)
+                        }
+                    } else if launch.isShowingDisconnectedArchive,
+                              let archive = launch.disconnectedArchive {
+                        LiveContentView(store: archive, samples: samples, launch: launch)
+                    } else if launch.guidedJoin.isShowing {
                         NativeEnrollmentView(launch: launch)
                     } else { switch launch.state {
                     case .enrollmentRequired:
@@ -27,7 +38,9 @@ struct AttentionClientDuoPrototypeApp: App {
                     case let .fixture(store):
                         ContentView(store: store, samples: samples)
                     case let .live(store):
-                        LiveContentView(store: store, samples: samples)
+                        LiveContentView(store: store, samples: samples, launch: launch)
+                    case .disconnected:
+                        DisconnectedAccountRecoveryView(launch: launch)
                     } }
                 }
                 .task {
@@ -38,7 +51,7 @@ struct AttentionClientDuoPrototypeApp: App {
             // their own system safe areas, including the software keyboard.
             .ignoresSafeArea(.container)
             .task { await launch.restoreInstallation() }
-            .onOpenURL { url in Task { await launch.guidedJoin.receive(url) } }
+            .onOpenURL { url in Task { await launch.receiveInvitation(url) } }
             .task(id: scenePhase) {
                 launch.guidedJoin.invalidateApprovalObservation()
                 guard scenePhase == .active else { return }
@@ -50,6 +63,28 @@ struct AttentionClientDuoPrototypeApp: App {
                     }
                     try? await Task.sleep(for: .seconds(15))
                 }
+            }
+        }
+    }
+}
+
+@MainActor
+private struct DisconnectedAccountRecoveryView: View {
+    let launch: NativeAppLaunch
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Saved messages are unavailable", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(launch.disconnectMessage ?? "The disconnected account’s local messages could not be opened. The original account identity is retained.")
+        } actions: {
+            if launch.disconnectedAccount?.removed == true {
+                Button("Connect with an invitation") { launch.beginReconnect() }
+                    .buttonStyle(.borderedProminent)
+            } else {
+                Button("Retry removal") { Task { await launch.retryDisconnectRemoval() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(launch.isDisconnectBusy)
             }
         }
     }

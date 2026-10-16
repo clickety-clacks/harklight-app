@@ -890,6 +890,75 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertNil(try reopened.approvedRecord(), "Old removal proof does not approve the replacement")
     }
 
+    func testStandaloneDisconnectSurvivesLostReplyAndReconnectCreatesFreshIdentity() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let (original, record) = try await approvedInstallation(fixture, store: store, transport: transport)
+        var removalCalls = 0
+        transport.removalHandler = { url, body, root, identity in
+            XCTAssertEqual(url.path, "/device/remove")
+            XCTAssertEqual(root, record.trustedRootDER)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+            XCTAssertEqual(fields, ["expected_device_id": original.deviceID])
+            let saved = try XCTUnwrap(store.departure())
+            XCTAssertNil(saved.replacement, "Standalone removal must not require another invitation")
+            XCTAssertFalse(saved.removed, "The intent is durable before the server call")
+            var certificate: SecCertificate?
+            XCTAssertEqual(SecIdentityCopyCertificate(identity, &certificate), errSecSuccess)
+            XCTAssertTrue(DeviceCertificateBinding.matches(
+                SecCertificateCopyData(try XCTUnwrap(certificate)) as Data,
+                expectedDeviceID: original.deviceID))
+            removalCalls += 1
+            if removalCalls == 1 { throw URLError(.networkConnectionLost) }
+            return try response(["state": "removed", "person_id": fixture.invitation.personID,
+                                 "device_id": original.deviceID, "enrollment_revision": 3])
+        }
+
+        try store.prepareAccountDeparture(record)
+        XCTAssertEqual(removalCalls, 0, "Preparing the durable intent does not contact the server")
+        do {
+            try await store.removeCurrentAccount(record)
+            XCTFail("The first removal reply is lost")
+        } catch is URLError {}
+        XCTAssertEqual(try store.approvedRecord(), record)
+        XCTAssertFalse(try XCTUnwrap(store.departure()).removed)
+
+        let reopened = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let blockedFlow = NativeGuidedJoinCoordinator(store: reopened, deviceName: "My phone", isShowing: false)
+        await blockedFlow.receive(fixture.url(try fixture.invitationWith(token: String(repeating: "2", count: 64))))
+        XCTAssertFalse(blockedFlow.isShowing, "A new invitation cannot bypass unconfirmed removal")
+        XCTAssertEqual(removalCalls, 1)
+        XCTAssertEqual(try reopened.approvedRecord(), record)
+
+        try await reopened.removeCurrentAccount(record)
+        let receipt = try XCTUnwrap(reopened.departure())
+        XCTAssertTrue(receipt.removed)
+        XCTAssertNil(receipt.replacement)
+        XCTAssertNil(try reopened.approvedRecord())
+        XCTAssertEqual(removalCalls, 2)
+
+        let next = try reopened.prepare(fixture.invitationWith(token: String(repeating: "3", count: 64)),
+                                        deviceLabel: "My phone")
+        fixture.retainForCleanup(next)
+        XCTAssertNotEqual(next.deviceID, original.deviceID,
+                          "A confirmed removal is followed by a new installation identity")
+        XCTAssertEqual(try reopened.departure()?.record.deviceID, original.deviceID,
+                       "The disconnected profile remains associated with its original device and data")
+
+        transport.handler = { _, _, _ in
+            try response(["state": "approved", "person_id": fixture.invitation.personID,
+                          "device_id": next.deviceID])
+        }
+        _ = try await reopened.checkApproval()
+        let nextRecord = try XCTUnwrap(reopened.approvedRecord())
+        try reopened.prepareAccountDeparture(nextRecord)
+        XCTAssertEqual(try reopened.departure()?.record.deviceID, next.deviceID,
+                       "A later disconnect belongs to the newly approved installation")
+        XCTAssertFalse(try XCTUnwrap(reopened.departure()).removed)
+    }
+
     func testFullInvitationPasteChecksDestinationBeforeAJoinAndReadsDisplayOnlyLabels() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
@@ -976,6 +1045,19 @@ final class NativeGuidedJoinTests: XCTestCase {
             guard let removalHandler else { throw NativeJoinError.unavailable }
             return try await removalHandler(url, body, rootDER, identity)
         }
+    }
+
+    private func approvedInstallation(_ fixture: Fixture,
+                                      store: NativeGuidedJoinStore,
+                                      transport: FakeTransport) async throws -> (NativeJoinAttempt, NativeEnrollmentRecord) {
+        let attempt = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(attempt)
+        transport.handler = { _, _, _ in
+            try response(["state": "approved", "person_id": fixture.invitation.personID,
+                          "device_id": attempt.deviceID])
+        }
+        _ = try await store.checkApproval()
+        return (attempt, try XCTUnwrap(store.approvedRecord()))
     }
 
     private final class Fixture {
