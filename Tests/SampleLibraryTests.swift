@@ -1,0 +1,149 @@
+import XCTest
+import SwiftUI
+import AttentionDomain
+@testable import AttentionClientDuoPrototype
+
+@MainActor
+final class SampleLibraryTests: XCTestCase {
+    func testAnnotationUndoReversesTheLatestActionAcrossTools() throws {
+        let library = SampleLibrary()
+        library.populate()
+        let response = try XCTUnwrap(library.responses["sample-point-0"])
+        response.addStroke([SampleMark(x: 0.1, y: 0.1), SampleMark(x: 0.8, y: 0.8)])
+        response.addMark(SampleMark(x: 0.4, y: 0.4))
+        response.undoAnnotation()
+        XCTAssertTrue(response.marks.isEmpty)
+        XCTAssertEqual(response.strokes.count, 1)
+        response.undoAnnotation()
+        XCTAssertTrue(response.strokes.isEmpty)
+    }
+    func testShakePopulatesEveryKindAndPreservesEditsOnRepeat() throws {
+        let library = SampleLibrary()
+        let controller = ShakeHostingController(rootView: Text("Messages"), onShake: { library.populate() })
+        controller.motionEnded(.motionShake, with: nil)
+        XCTAssertFalse(library.messages.isEmpty)
+        for kind in SampleKind.allCases {
+            XCTAssertGreaterThanOrEqual(library.messages.filter { $0.kind == kind }.count, 3)
+        }
+        let first = try XCTUnwrap(library.messages.first)
+        let response = try XCTUnwrap(library.responses[first.id])
+        response.choose("keep", multiple: false)
+        response.text = "Keep this draft"
+        response.chatDraft = "A local conversation"
+        response.sendLocalChat()
+        let ids = library.messages.map(\.id)
+        controller.motionEnded(.motionShake, with: nil)
+        XCTAssertEqual(library.messages.map(\.id), ids)
+        XCTAssertTrue(library.responses[first.id] === response)
+        XCTAssertEqual(response.text, "Keep this draft")
+        XCTAssertEqual(response.choices, ["keep"])
+        XCTAssertEqual(response.chat.last?.text, "A local conversation")
+    }
+
+    func testSampleActionsLeaveRealRequestsAndIdentityUntouched() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("real-message"))
+        let payload = try JSONValue.parse(Data(#"{"sender_id":"sender","message_id":"real-message","created_at":1,"title":"Keep this real message"}"#.utf8))
+        _ = try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let presentation = try LivePresentationStore(store: domain, context: context)
+        let before = presentation.presentation
+        let library = SampleLibrary()
+        library.populate()
+        for response in library.responses.values {
+            response.choose("example", multiple: false)
+            response.finished = true
+            response.deferred = true
+            response.chatDraft = "Never deliver this"
+            response.attachments = ["Local photo"]
+            response.sendLocalChat()
+        }
+        library.populate()
+        try presentation.refreshFromDurableStore()
+        XCTAssertEqual(presentation.presentation, before)
+        XCTAssertEqual(presentation.selectedRequest?.key, key)
+    }
+
+    func testEveryExampleTraversesDomainProjectionAndOrdinaryViewModelWithoutSubmission() throws {
+        let library = SampleLibrary()
+        library.populate()
+        XCTAssertNil(library.loadError)
+        let fixture = try XCTUnwrap(library.fixture)
+        XCTAssertEqual(fixture.viewModel.presentation.requests.count, 45)
+        for message in library.messages {
+            let response = try XCTUnwrap(library.responses[message.id])
+            let projected = try XCTUnwrap(fixture.viewModel.request(for: response.key))
+            guard case .sender = projected.projection else { return XCTFail("Unrecognized fixture descriptor") }
+            XCTAssertEqual(projected.title?.rawValue, message.title)
+            library.select(message.id)
+            XCTAssertEqual(fixture.viewModel.selectedRequestKey, response.key)
+            if let option = message.options.first {
+                response.choose(option.id, multiple: message.kind == .multipleChoice)
+            }
+            response.text = "A domain draft"
+            if message.kind == .textChoice {
+                response.ownAnswer = true
+                response.text = "My own domain answer"
+            }
+            if message.kind == .value { response.number = 42 }
+            if message.kind == .point { response.addMark(SampleMark(x: 0.25, y: 0.75)) }
+            response.finished = true
+            // Even an erroneous submit/retry callback cannot create an intent.
+            XCTAssertThrowsError(try fixture.viewModel.submit(response.key))
+            fixture.viewModel.submitFromUser(response.key)
+        }
+        fixture.viewModel.retryPendingDelivery()
+        let snapshot = try fixture.domain.snapshot(context: fixture.context)
+        XCTAssertTrue(snapshot.intents.isEmpty)
+        let restored = try LivePresentationStore(localFixtureStore: fixture.domain, context: fixture.context)
+        for message in library.messages {
+            let request = try XCTUnwrap(restored.request(for: fixture.key(for: message)))
+            XCTAssertNil(request.intentReceipt)
+            XCTAssertEqual(request.lifecycleStatus, .open)
+            XCTAssertEqual(request.draft.inputs[ExactText("note")]?.text, ExactText("A domain draft"))
+            switch message.kind {
+            case .textChoice:
+                XCTAssertEqual(request.draft.inputs[ExactText("answer")]?.selectedActionID, ExactText("own"))
+                XCTAssertEqual(request.draft.inputs[ExactText("answer")]?.textByActionID[ExactText("own")], ExactText("My own domain answer"))
+            case .multipleChoice:
+                XCTAssertEqual(request.draft.inputs[ExactText(message.options[0].id)]?.selectedActionID, ExactText("yes"))
+                XCTAssertEqual(request.draft.inputs[ExactText(message.options[1].id)]?.selectedActionID, ExactText("no"))
+            case .value:
+                XCTAssertEqual(request.draft.inputs[ExactText("value")]?.text, ExactText("42.0"))
+            case .point:
+                XCTAssertEqual(request.draft.inputs[ExactText("point")]?.effectivePoint, PointValue(x: 250, y: 750))
+            case .instructions:
+                XCTAssertEqual(request.draft.inputs[ExactText("answer")]?.selectedActionID, ExactText("done"))
+            default: break
+            }
+        }
+        for message in library.messages where [.approval, .review, .multipleChoice, .colorChoice, .soundChoice].contains(message.kind) {
+            let response = try XCTUnwrap(library.responses[message.id])
+            response.ownAnswer = true
+            response.choices = []
+            response.text = "An alternative for " + message.id
+            XCTAssertTrue(response.ownAnswer)
+            let request = try XCTUnwrap(fixture.viewModel.request(for: response.key))
+            XCTAssertEqual(request.draft.inputs[ExactText("answer")]?.selectedActionID, ExactText("own"))
+            XCTAssertEqual(request.draft.inputs[ExactText("answer")]?.textByActionID[ExactText("own")]?.rawValue,
+                "An alternative for " + message.id)
+        }
+        library.populate()
+        XCTAssertEqual(fixture.viewModel.presentation.requests.count, 45)
+        XCTAssertTrue(try fixture.domain.snapshot(context: fixture.context).intents.isEmpty)
+    }
+
+    func testReorderKeepsSelectionAndUsesCurrentNeighbors() throws {
+        let library = SampleLibrary()
+        library.populate()
+        let first = try XCTUnwrap(library.messages.first)
+        library.select(first.id)
+        library.demonstrateReorder()
+        XCTAssertEqual(library.selectedID, first.id)
+        XCTAssertEqual(library.lastViewedID, first.id)
+        XCTAssertEqual(library.messages.last?.id, first.id)
+        XCTAssertNil(library.neighbor(of: first.id, direction: 1))
+        XCTAssertEqual(library.neighbor(of: first.id, direction: -1)?.id, library.messages.dropLast().last?.id)
+    }
+}

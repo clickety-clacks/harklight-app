@@ -4,63 +4,24 @@ import AttentionDomain
 @MainActor
 struct ContentView: View {
     let store: PrototypeStore
+    let samples: SampleLibrary
     @AccessibilityFocusState private var accessibilityFocus: AttentionAccessibilityFocus?
-    @State private var preferredCompactColumn: NavigationSplitViewColumn = .detail
-    @State private var isShowingDemoControls = false
-    @State private var demoControlsTarget: RequestKey?
 
     var body: some View {
-        Group {
-            if let loadError = store.loadError {
-                ContentUnavailableView(loadError, systemImage: "exclamationmark.triangle")
-            } else {
-                NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
-                    RequestListView(store: store) {
-                        demoControlsTarget = store.selectedRequestKey
-                        preferredCompactColumn = .detail
-                        isShowingDemoControls = true
-                    }
-                } detail: {
-                    NavigationStack {
-                        if let key = store.selectedRequestKey {
-                            RequestDetailView(store: store,
-                                              requestKey: key,
-                                              accessibilityFocus: $accessibilityFocus)
-                                .id(key)
-                        } else {
-                            ContentUnavailableView("Select a request", systemImage: "tray")
-                        }
-                    }
-                }
-                .navigationSplitViewStyle(.balanced)
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if let persistenceError = store.persistenceError {
-                        Label("Local change was not saved: \(persistenceError)", systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal)
-                            .padding(.vertical, 8)
-                            .background(.yellow.opacity(0.16))
-                    }
-                }
-                .fullScreenCover(isPresented: $isShowingDemoControls) {
-                    NavigationStack {
-                        DemoControlsView(store: store,
-                                         initialTarget: demoControlsTarget,
-                                         accessibilityFocus: $accessibilityFocus) { targetKey in
-                            store.selectRequest(targetKey)
-                            preferredCompactColumn = .detail
-                            isShowingDemoControls = false
-                            Task { @MainActor in
-                                await Task.yield()
-                                accessibilityFocus = .requestHeading
-                            }
-                        }
-                    }
-                }
-            }
+        if let loadError = store.loadError {
+            ContentUnavailableView(loadError, systemImage: "exclamationmark.triangle")
+        } else {
+            HarklightInbox(
+                requests: (store.openRequests + store.resolvedRequests).map {
+                    InboxRequestRow(key: $0.key, title: $0.title.rawValue, sender: $0.key.senderID.rawValue,
+                                    status: store.statusLabel(for: $0.key), bodyText: $0.body?.rawValue ?? "")
+                }, samples: samples, selectRequest: { store.selectRequest($0) },
+                requestDetail: { key, context in
+                    RequestDetailView(store: store, requestKey: key,
+                                      accessibilityFocus: $accessibilityFocus, context: context)
+                },
+                warnings: [store.persistenceError].compactMap { $0 })
         }
-        .tint(.blue)
     }
 }
 
@@ -73,72 +34,11 @@ private enum AttentionAccessibilityFocus: Hashable {
 }
 
 @MainActor
-private struct RequestListView: View {
-    let store: PrototypeStore
-    let onShowDemoControls: () -> Void
-
-    var body: some View {
-        List(selection: Binding(
-            get: { store.selectedRequestKey },
-            set: { store.selectRequest($0) }
-        )) {
-            Section("Open") {
-                ForEach(store.openRequests) { request in
-                    RequestRow(title: request.title.rawValue,
-                               status: store.statusLabel(for: request.key),
-                               accessibilityID: "request-row-\(request.key.messageID.rawValue)")
-                        .tag(request.key)
-                }
-            }
-
-            if !store.resolvedRequests.isEmpty {
-                Section("Resolved") {
-                    ForEach(store.resolvedRequests) { request in
-                        RequestRow(title: request.title.rawValue,
-                                   status: store.statusLabel(for: request.key),
-                                   accessibilityID: "request-row-\(request.key.messageID.rawValue)")
-                            .tag(request.key)
-                    }
-                }
-            }
-        }
-        .navigationTitle("Requests")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(action: onShowDemoControls) {
-                    Label("Demo controls", systemImage: "slider.horizontal.3")
-                }
-                .accessibilityIdentifier("demo-controls-button")
-            }
-        }
-    }
-}
-
-private struct RequestRow: View {
-    let title: String
-    let status: String
-    let accessibilityID: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.headline)
-            if status != "Open" {
-                Text(status)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tint)
-            }
-        }
-        .padding(.vertical, 3)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier(accessibilityID)
-    }
-}
-
-@MainActor
 private struct RequestDetailView: View {
     let store: PrototypeStore
     let requestKey: RequestKey
     let accessibilityFocus: AccessibilityFocusState<AttentionAccessibilityFocus?>.Binding
+    let context: InboxCardContext
 
     var body: some View {
         if let request = store.request(for: requestKey),
@@ -146,7 +46,7 @@ private struct RequestDetailView: View {
             RequestDetailContent(request: request,
                                 session: session,
                                 store: store,
-                                accessibilityFocus: accessibilityFocus)
+                                accessibilityFocus: accessibilityFocus, context: context)
         } else {
             ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
         }
@@ -159,6 +59,7 @@ private struct RequestDetailContent: View {
     let session: RequestSession
     let store: PrototypeStore
     let accessibilityFocus: AccessibilityFocusState<AttentionAccessibilityFocus?>.Binding
+    let context: InboxCardContext
     @State private var instructionsExpanded = false
     @State private var isShowingRequestDetails = false
 
@@ -181,9 +82,9 @@ private struct RequestDetailContent: View {
     }
 
     var body: some View {
-        ScrollView {
+        MessageCardSurface(context: context) {
             VStack(alignment: .leading, spacing: 20) {
-                RequestOverviewSection(title: request.title.rawValue,
+                RequestOverviewSection(title: request.title.rawValue, sender: request.key.senderID.rawValue,
                                        status: status,
                                        accessibilityFocus: accessibilityFocus,
                                        onShowDetails: { isShowingRequestDetails = true })
@@ -237,19 +138,23 @@ private struct RequestDetailContent: View {
                                                 onReturnToList: { store.selectRequest(nil) })
                 }
 
-                if isOpen {
-                    switch request.interface {
-                    case .sender, .compatibility:
-                        AppActionRow(requestKey: request.key, hasDraft: session.draft.hasEdits, store: store)
-                    case .unsupported:
-                        EmptyView()
-                    }
-                }
+
 
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: 680, alignment: .leading)
             .padding()
             .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Send answer", systemImage: "checkmark") { store.sendSelectedAnswer(for: request.key) }
+                    .labelStyle(.iconOnly).disabled(!store.canSend(for: request.key))
+                    .accessibilityIdentifier("send-answer")
+            }
+            ToolbarItem(placement: .bottomBar) {
+                Button("Cancel draft", systemImage: "arrow.uturn.backward") { store.cancelDraft(for: request.key) }
+                    .labelStyle(.iconOnly).disabled(!session.draft.hasEdits)
+            }
         }
         .scrollDismissesKeyboard(.interactively)
         .navigationBarTitleDisplayMode(.inline)
@@ -279,36 +184,19 @@ private struct RequestDetailContent: View {
 
 private struct RequestOverviewSection: View {
     let title: String
+    let sender: String
     let status: RequestStatusPresentation
     let accessibilityFocus: AccessibilityFocusState<AttentionAccessibilityFocus?>.Binding
     let onShowDetails: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 14) {
-                    titleHeading
-                        .layoutPriority(1)
-                    Spacer(minLength: 8)
-                    statusButton
-                }
-                .frame(minWidth: 560, alignment: .leading)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    titleHeading
-                    statusButton
-                }
-            }
+            MessageHeading(sender: sender, initials: String(sender.prefix(2)).uppercased(), title: title)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityFocused(accessibilityFocus, equals: .requestHeading)
+                .accessibilityIdentifier("request-heading")
+            statusButton
         }
-    }
-
-    private var titleHeading: some View {
-        Text(title)
-            .font(.largeTitle.weight(.semibold))
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityAddTraits(.isHeader)
-            .accessibilityFocused(accessibilityFocus, equals: .requestHeading)
-            .accessibilityIdentifier("request-heading")
     }
 
     private var statusButton: some View {
@@ -954,18 +842,8 @@ private struct ResponseInputView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if layout == .cards {
-                AdaptiveGridLayout(maxColumns: 2, minimumItemWidth: 138, spacing: 10) {
-                    ForEach(actions) { action in
-                        actionButton(action)
-                    }
-                }
-            } else {
-                VStack(spacing: 10) {
-                    ForEach(actions) { action in
-                        actionButton(action)
-                    }
-                }
+            VStack(spacing: 10) {
+                ForEach(actions) { action in actionButton(action) }
             }
 
             if let selectedActionID,
@@ -997,26 +875,13 @@ private struct ResponseInputView: View {
                    let illustration = document.illustration(withID: id) {
                     SenderIllustrationCanvas(illustration: illustration, point: nil)
                 }
-                HStack(alignment: .top, spacing: 9) {
-                    Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                        .accessibilityHidden(true)
-                    Text(action.label.rawValue)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                MessageChoiceLabel(title: action.label.rawValue, detail: "",
+                                   selected: selected, multiple: false, suggested: false)
             }
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .padding(10)
-            .contentShape(RoundedRectangle(cornerRadius: 10))
-            .background(selected ? Color.accentColor.opacity(0.12) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
         .disabled(readOnly)
-        .overlay(RoundedRectangle(cornerRadius: 10)
-            .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.3)))
         .accessibilityLabel(action.label.rawValue)
         .accessibilityValue(selected ? "Selected" : "Not selected")
         .accessibilityAddTraits(selected ? .isSelected : [])

@@ -266,18 +266,37 @@ final class LivePresentationStore {
     var connectionWarning: String?
 
     @ObservationIgnored private let port: AttentionDomainPort
+    private let permitsDelivery: Bool
     @ObservationIgnored private var observation: Task<Void, Never>?
 
-    init(store: AttentionDomainStore, context: ProfileContext) throws {
-        guard context.transportMode == .relay else {
-            throw AttentionStoreError.fixtureOnlyOperation
-        }
+    convenience init(store: AttentionDomainStore, context: ProfileContext) throws {
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        try self.init(store: store, context: context, permitsDelivery: true)
+    }
+
+    /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
+    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext) throws {
+        guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        try self.init(store: store, context: context, permitsDelivery: false)
+    }
+
+    private init(store: AttentionDomainStore, context: ProfileContext, permitsDelivery: Bool) throws {
+        self.permitsDelivery = permitsDelivery
         _ = try store.snapshot(context: context)
         let port = AttentionDomainPort(store: store)
         let snapshot = try port.observe(context: port.context)
         self.port = port
         self.presentation = snapshot
         self.selectedRequestKey = snapshot.requests.first?.key
+    }
+
+    var inboxRows: [InboxRequestRow] {
+        presentation.requests.map {
+            InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
+                sender: $0.key.senderID.rawValue,
+                status: String(localized: LiveLifecycleTitle($0.lifecycleStatus).label),
+                bodyText: $0.body?.rawValue ?? "")
+        }
     }
 
     var openRequests: [PresentedRequest] {
@@ -337,10 +356,22 @@ final class LivePresentationStore {
         }
     }
 
+    func updateLocalExampleAnnotation(_ text: String, point: PointValue?, for key: RequestKey) {
+        guard !permitsDelivery else { return }
+        let input = ExactText("point")
+        editDraft(for: key) { draft in
+            draft.inputs[ExactText("annotation")]?.text = ExactText(text)
+            draft.inputs[input]?.point = point
+            draft.inputs[input]?.horizontalText = point.map { ExactText(String($0.x)) }
+            draft.inputs[input]?.verticalText = point.map { ExactText(String($0.y)) }
+        }
+    }
+
     /// C composes the exact answer and durably stores one original operation
     /// before any network send. A persisted receipt prevents a second intent.
     @discardableResult
     func submit(_ key: RequestKey) throws -> IntentReceipt {
+        guard permitsDelivery else { throw LiveReplyError.localExample }
         let request = try inspectedRequest(key)
         guard request.lifecycleStatus == .open,
               request.intentReceipt == nil,
@@ -358,6 +389,7 @@ final class LivePresentationStore {
     }
 
     func submitFromUser(_ key: RequestKey) {
+        guard permitsDelivery else { return }
         do {
             _ = try submit(key)
             retryPendingDelivery()
@@ -382,6 +414,7 @@ final class LivePresentationStore {
     }
 
     func retryPendingDelivery() {
+        guard permitsDelivery else { return }
         Task {
             let result = await NativeRelayLifecycle.shared.refreshAfterAnswerStored()
             applyRefreshResult(result)
@@ -514,6 +547,7 @@ final class LivePresentationStore {
 }
 
 private enum LiveReplyError: Error {
+    case localExample
     case notOpen
     case incomplete
     case unsupported
