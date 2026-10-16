@@ -153,7 +153,7 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertEqual(result.operationID, operationID)
             XCTAssertEqual(result.inReplyTo, ExactText("answer-2"))
             XCTAssertEqual(result.resultStatus, ExactText("received"))
-            XCTAssertEqual(try store.snapshot(context: context).cursor, ordinaryACKCount)
+            XCTAssertEqual(try store.snapshot(context: context).cursor, UInt64(ordinaryACKCount))
         }
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
