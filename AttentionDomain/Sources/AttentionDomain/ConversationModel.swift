@@ -226,6 +226,24 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         ])
     }
 
+    mutating func settleAbandonedDraft(revision: UInt64) {
+        guard var draft = drafts[revision] else { return }
+        switch draft.disposition {
+        case .saved, .rejected: break
+        default: return // Keep ambiguous and accepted operations exact for replay.
+        }
+        let abandoned = (uploadGroups ?? [:]).values.filter { group in
+            guard group.binding.revision == revision, let id = group.cleanupID,
+                  let cleanup = uploadCleanups?[id], case .acknowledged = cleanup.outcome else { return false }
+            return true
+        }
+        let ids = Set(abandoned.flatMap { $0.originals.map(\.id) })
+        guard !ids.isEmpty else { return }
+        draft.files.removeAll { ids.contains($0.id) }
+        draft.disposition = .rejected(ExactText("Not delivered. Reselect files to upload again; text draft retained."))
+        drafts[revision] = draft
+    }
+
     mutating func orderTurns() {
         if turns.allSatisfy({ UInt64($0.id.rawValue) != nil }) {
             turns.sort { UInt64($0.id.rawValue)! < UInt64($1.id.rawValue)! }

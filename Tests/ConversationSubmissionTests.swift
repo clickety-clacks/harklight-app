@@ -3,13 +3,16 @@ import HarklightNativeRelay
 import XCTest
 
 final class ConversationSubmissionTests: XCTestCase {
-    private final class Session: AuthenticatedConversationFileSession, @unchecked Sendable {
+    private final class Session: AuthenticatedConversationCleanupSession, @unchecked Sendable {
         let authenticatedIdentity: ProfileIdentity
         var result: DiscussionOperationResult = .unresolved
         var sent: [(Data, UUID)] = []
         var turn: Data?
         var failReplay = false
         var failUpload = false
+        var uploadHook: (@Sendable () async throws -> Void)?
+        var cleanupRequests: [ConversationUploadCleanup] = []
+        var failCleanup = false
         var cap: UInt64?
         let uploadID = UUID().uuidString.lowercased()
         init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
@@ -37,8 +40,14 @@ final class ConversationSubmissionTests: XCTestCase {
         }
         func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
                                     operationID: UUID, limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
+            try await uploadHook?()
             if failUpload { throw ConversationFileTransportError.server(status: 503, reason: ExactText("Upload interrupted")) }
             return ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount, sha256: file.sha256, content: .uploaded(ExactText(uploadID)))
+        }
+        func discardConversationUploads(_ cleanup: ConversationUploadCleanup, originURL: URL) async throws -> ConversationUploadDiscardResult {
+            cleanupRequests.append(cleanup)
+            if failCleanup { throw InstallationTransportError.unexpectedServerFrame }
+            return ConversationUploadDiscardResult(state: .discarded, discarded: 1)
         }
         func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
             sent.append((frame, operationID))
@@ -135,4 +144,49 @@ final class ConversationSubmissionTests: XCTestCase {
         XCTAssertThrowsError(try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Replacement")), context: context))
         XCTAssertEqual(session.sent.count, 1)
     }
+    func testDepartureDuringUploadPreventsLateReadinessAndSendWithoutLosingText() async throws {
+        let file = ConversationFile(id: ExactText("retained"), name: ExactText("large.bin"), byteCount: 300_000,
+            sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("retained")))
+        let (context, persistence, domain, binding, session, core) = try await setup(files: [file])
+        session.uploadHook = {
+            let cleanup = try domain.abandonConversationUploads(for: binding.request, context: context)
+            XCTAssertEqual(cleanup.count, 1)
+            try await core.discardAbandonedUploads(for: binding.request)
+        }
+        do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Departure must prevent send") }
+        catch { XCTAssertEqual(error as? ConversationError, .pendingSubmission) }
+        XCTAssertTrue(session.sent.isEmpty)
+        XCTAssertEqual(session.cleanupRequests.count, 1)
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("Exact original text"))
+        XCTAssertTrue(thread.drafts[1]?.files.isEmpty == true, "Late preparation rejection must settle already acknowledged cleanup")
+        XCTAssertEqual(thread.uploadGroups?.values.first?.uploaded.count, 1, "Retain the late response as an unready reference, not acceptance")
+        XCTAssertTrue(try restored.snapshot(context: context).intents.isEmpty)
+        XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
+    }
+
+    func testUnknownCleanupRetriesOnlyItsStableCommandWithoutResendingDiscussion() async throws {
+        let file = ConversationFile(id: ExactText("retained"), name: ExactText("large.bin"), byteCount: 300_000,
+            sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("retained")))
+        let (context, persistence, domain, binding, session, core) = try await setup(files: [file])
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        let operation = try XCTUnwrap(session.sent.first?.1)
+        let cleanup = try XCTUnwrap(domain.abandonConversationUploads(for: binding.request, context: context).first)
+        session.failCleanup = true
+        do { try await core.discardAbandonedUploads(for: binding.request); XCTFail("Unknown cleanup must remain unknown") } catch {}
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        guard case .unknown = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?[cleanup.id]?.outcome) else {
+            return XCTFail("Offline response cannot acknowledge deletion")
+        }
+        session.failCleanup = false
+        try await core.discardAbandonedUploads(for: binding.request)
+        XCTAssertEqual(session.cleanupRequests.map(\.id), [cleanup.id, cleanup.id])
+        XCTAssertEqual(session.cleanupRequests.map(\.binding), [binding, binding])
+        XCTAssertEqual(session.sent.count, 1, "Cleanup retries never resend the ambiguous original discussion")
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.disposition, .outcomeUnknown(operation))
+        do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Abandoned operation must not resend") } catch {}
+        XCTAssertEqual(session.sent.count, 1)
+    }
+
 }

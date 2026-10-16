@@ -984,6 +984,30 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try commit(next)
     }
 
+    /// A typed local upload example, with no delivery operation or transport.
+    public func stageFixtureConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
+        text: ExactText, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
+        try validateConversationFiles([file])
+        let operation = UUID()
+        let uploaded = ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
+            sha256: file.sha256, content: .uploaded(ExactText(UUID().uuidString.lowercased())))
+        thread.drafts[binding.revision] = ConversationDraft(binding: binding, text: text, files: [file],
+            disposition: .rejected(ExactText("Local example · upload not submitted")))
+        let group = ConversationUploadGroup(operationID: operation, binding: binding,
+            originals: [file], uploaded: [uploaded], cleanupID: nil)
+        thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
     /// Freeze a durable operation before transport. Local examples may edit drafts,
     /// but cannot enter this submission path or acquire a delivery operation.
     public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws -> UUID {
@@ -1002,14 +1026,24 @@ public final class AttentionDomainStore: @unchecked Sendable {
             guard $0.binding == binding else { return false }
             if case .acknowledged = $0.outcome { return false }; return true
         }) else { throw ConversationError.pendingSubmission }
+        let operation: UUID
         switch draft.disposition {
         case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
             guard thread.uploadGroups?[id]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
-            return id
-        case .saved, .rejected: break
+            operation = id
+        case .saved, .rejected:
+            operation = UUID()
+            draft.disposition = .submitting(operation)
         }
-        let operation = UUID()
-        draft.disposition = .submitting(operation)
+        // Register planned upload-tier files before awaiting limits or disk/HTTP.
+        // Departure during that preparation must fence this original operation too.
+        let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
+        let uploads = zip(draft.files, tiers).filter { $0.1 == .upload }.map { $0.0 }
+        if !uploads.isEmpty, thread.uploadGroups?[operation] == nil {
+            let group = ConversationUploadGroup(operationID: operation, binding: binding,
+                originals: uploads, uploaded: [], cleanupID: nil)
+            thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
+        }
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation
@@ -1074,7 +1108,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[request] else { return [] }
         let committed = Set(thread.turns.compactMap(\.operationID))
@@ -1100,7 +1133,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[request],
               var cleanup = thread.uploadCleanups?[id] else { throw ConversationError.missingRequest }
@@ -1108,17 +1140,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         if case .acknowledged = cleanup.outcome { return }
         cleanup.outcome = outcome
         thread.uploadCleanups?[id] = cleanup
-        if case .acknowledged = outcome, var draft = thread.drafts[cleanup.binding.revision] {
-            switch draft.disposition {
-            case .saved, .rejected:
-                let abandoned = Set(cleanup.uploadOperations.flatMap { thread.uploadGroups?[$0]?.originals.map(\.id) ?? [] })
-                draft.files.removeAll { abandoned.contains($0.id) }
-                draft.disposition = .rejected(ExactText("Not delivered. Reselect files to upload again; text draft retained."))
-                thread.drafts[cleanup.binding.revision] = draft
-            case .submitting, .outcomeUnknown, .acceptedPendingReplay:
-                break // Original ambiguous/accepted operation stays frozen for reconciliation.
-            }
-        }
+        if case .acknowledged = outcome { thread.settleAbandonedDraft(revision: cleanup.binding.revision) }
         conversation.threads[request] = thread
         next.conversation = conversation
         try commit(next)
@@ -1141,6 +1163,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         // Rejection and unknown outcomes retain text, selected files and addressed revision.
         draft.disposition = rejection.map { .rejected($0) } ?? .outcomeUnknown(operation)
         thread.drafts[binding.revision] = draft
+        thread.settleAbandonedDraft(revision: binding.revision)
         conversation.threads[binding.request] = thread
         next.conversation = conversation
         try commit(next)

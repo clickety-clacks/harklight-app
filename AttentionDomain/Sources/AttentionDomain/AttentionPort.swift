@@ -322,6 +322,20 @@ public final class AttentionDomainPort: @unchecked Sendable {
         try store.appendFixtureDiscussion(binding, context: profileContext)
     }
 
+    public func abandonConversationUploads(for request: RequestKey, context suppliedContext: PortContext) throws -> [ConversationUploadCleanup] {
+        try validate(suppliedContext)
+        return try store.abandonConversationUploads(for: request, context: profileContext)
+    }
+
+    public func markConversationCleanupUnknown(for request: RequestKey, reason: ExactText, context suppliedContext: PortContext) throws {
+        try validate(suppliedContext)
+        let pending = try store.conversationSnapshot(context: profileContext).threads[request]?.uploadCleanups ?? [:]
+        for cleanup in pending.values {
+            if case .acknowledged = cleanup.outcome { continue }
+            try store.recordConversationCleanup(cleanup.id, request: request, outcome: .unknown(reason), context: profileContext)
+        }
+    }
+
     public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws -> UUID {
         try validate(suppliedContext)
         return try store.prepareDiscussion(binding, context: profileContext)

@@ -69,6 +69,7 @@ struct ConversationPanel: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }.padding(.horizontal)
                 ConversationDraftStatus(disposition: draft.disposition)
+                ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
@@ -131,7 +132,7 @@ private struct ConversationComposer: View {
             } label: { Image(systemName: "plus") }
                 .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
                 .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
-                .disabled(frozen || thread?.terminal != nil)
+                .disabled(frozen || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision))
                 .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
                     Button("Sample photo") { addExample("Photo") }
                     Button("Sample file") { addExample("Document") }
@@ -150,6 +151,10 @@ private struct ConversationComposer: View {
                                             Text(file.name.rawValue).lineLimit(1)
                                         }
                                     }.font(.caption)
+                                    .disabled(store.uploadNeedsReselection(file, for: key, revision: revision))
+                                    if store.uploadNeedsReselection(file, for: key, revision: revision) {
+                                        Text("Not ready · reselect after cleanup").font(.caption2).foregroundStyle(.secondary)
+                                    }
                                     Button("Remove", systemImage: "xmark.circle.fill") {
                                         store.updateConversation(for: key, revision: revision,
                                             files: draft.files.filter { $0.id != file.id })
@@ -172,7 +177,7 @@ private struct ConversationComposer: View {
             }
             .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
             .accessibilityLabel(store.isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
-            .disabled(store.isSendingDiscussion || thread?.terminal != nil || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
+            .disabled(store.isSendingDiscussion || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
         }
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {
@@ -203,6 +208,49 @@ private struct ConversationAvailabilityLabel: View {
         case let .notListening(time): Text(prefix + "Agent not listening" + (time.map { " since " + $0.rawValue } ?? "")).font(.caption2).foregroundStyle(.secondary)
         case .gone: Text(prefix + "Originating session gone · request remains available").font(.caption2).foregroundStyle(.secondary)
         case let .unsupported(reason): Text(prefix + "Listening unsupported · " + reason.rawValue).font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+}
+
+@MainActor
+private struct ConversationUploadCleanupStatus: View {
+    let store: LivePresentationStore
+    let key: RequestKey
+    let revision: UInt64
+    private var cleanups: [ConversationUploadCleanup] {
+        (store.conversation(for: key)?.uploadCleanups ?? [:]).values
+            .filter { $0.binding.revision == revision }.sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+    var body: some View {
+        if !cleanups.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(cleanups) { cleanup in
+                    switch cleanup.outcome {
+                    case .pending:
+                        Text("Upload cleanup pending. Deletion is not confirmed; your text draft is retained.")
+                    case .unknown:
+                        Text("Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained.")
+                    case let .acknowledged(result):
+                        Text("Cleanup acknowledged: \(result.discarded) unsubmitted uploads removed. Reselect unready files to upload again.")
+                        if result.state == .committed {
+                            Text("Committed file references remain available in history. This result does not identify individual files.")
+                        }
+                    }
+                }
+                if store.hasPendingUploadCleanup(for: key, revision: revision), store.isLocalExample {
+                    Text("Local example · cleanup is unconfirmed; no service is contacted.")
+                }
+                if store.hasPendingUploadCleanup(for: key, revision: revision), !store.isLocalExample {
+                    Button("Retry upload cleanup") { Task { await store.retryUploadCleanup(for: key) } }
+                        .disabled(store.retryingCleanupRequests.contains(key))
+                        .accessibilityIdentifier("conversation-retry-cleanup")
+                }
+                if store.hasAbandonedDiscussion(for: key, revision: revision) {
+                    Text("The earlier submission is unconfirmed. Refresh history to reconcile its original operation; it will not be resent.")
+                    Button("Refresh discussion history") { Task { await store.refreshDiscussionHistory() } }
+                }
+            }.font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+            .accessibilityIdentifier("conversation-upload-cleanup-status")
         }
     }
 }

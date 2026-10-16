@@ -1,6 +1,7 @@
 import AttentionDomain
 import HarklightNativeRelay
 import XCTest
+@testable import AttentionClientDuoPrototype
 
 final class ConversationUploadCleanupTests: XCTestCase {
     private func setup() throws -> (ProfileContext, MemoryAttentionStatePersistence, AttentionDomainStore, ConversationBinding) {
@@ -82,4 +83,30 @@ final class ConversationUploadCleanupTests: XCTestCase {
         XCTAssertTrue(try restored.abandonConversationUploads(for: binding.request, context: context).isEmpty)
         XCTAssertThrowsError(try wire.decodeDiscard(Data(#"{"v":1,"type":"ok","discarded":0}"#.utf8), status: 200))
     }
+    @MainActor
+    func testActualMessageDepartureDiffersFromSelectionRebuildAndKeepsOfflineCleanupRecoverable() async throws {
+        let (context, persistence, domain, binding) = try setup()
+        let original = file("unsubmitted.bin")
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Keep exact draft"), files: [original]), context: context)
+        let operation = try domain.prepareDiscussion(binding, context: context)
+        try domain.markDiscussionOutcome(binding, operation: operation, rejection: ExactText("Not sent"), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        model.selectRequest(binding.request)
+        model.selectRequest(binding.request)
+        try model.refreshFromDurableStore()
+        model.navigateMessage(from: binding.request, to: binding.request)
+        XCTAssertTrue(try domain.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?.isEmpty ?? true)
+        model.navigateMessage(from: binding.request, to: nil)
+        XCTAssertTrue(model.hasPendingUploadCleanup(for: binding.request, revision: 1))
+        XCTAssertTrue(model.uploadNeedsReselection(original, for: binding.request, revision: 1))
+        let cleanup = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?.values.first)
+        await model.retryUploadCleanup(for: binding.request) // Unconfigured disposable profile: no service can be contacted.
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let pending = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?[cleanup.id])
+        guard case .unknown = pending.outcome else { return XCTFail("Offline cleanup must not become confirmed") }
+        XCTAssertEqual(pending.uploadOperations, [operation])
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.text, ExactText("Keep exact draft"))
+        XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
+    }
+
 }

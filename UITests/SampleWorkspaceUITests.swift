@@ -224,6 +224,43 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("sender-updated-earlier-question-and-draft", app)
     }
 
+    func testNavigationKeepsUnsubmittedUploadCleanupTruthfulAcrossAdaptiveRebuild() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--conversation-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let search = app.searchFields.firstMatch
+        search.tap(); search.typeText("welcome\n")
+        let row = app.buttons["request-row-sample-review-2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        app.buttons["Chat"].tap()
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "Keep this file note.")
+        XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
+        capture("upload-before-message-departure", app)
+        let other = app.buttons["request-row-sample-review-0"]
+        XCTAssertTrue(other.waitForExistence(timeout: 5))
+        other.tap()
+        row.tap()
+        XCTAssertTrue(app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "Keep this file note.")
+        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        XCTAssertTrue(app.staticTexts["Not ready · reselect after cleanup"].exists)
+        XCTAssertTrue(app.staticTexts["Local example · cleanup is unconfirmed; no service is contacted."].exists)
+        capture("upload-return-unconfirmed-no-resend", app)
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "Keep this file note.")
+        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        capture("upload-cleanup-portrait-retained-draft", app)
+    }
+
     func testRetractedItemKeepsItsSelectedChoiceHistoryAndUnsentDiscussion() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

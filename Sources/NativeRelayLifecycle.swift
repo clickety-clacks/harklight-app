@@ -158,6 +158,13 @@ final class NativeRelayLifecycle {
         return try await core.submitDiscussion(binding, retainedFile: retainedFile)
     }
 
+    func discardAbandonedUploads(for request: RequestKey, expected: ProfileContext) async throws {
+        guard context == expected, let core else { throw NativeRelayCoreError.inactive }
+        // Do not wait for the active send flight: departure fences its upload.
+        try await core.discardAbandonedUploads(for: request)
+        guard context == expected else { throw NativeRelayCoreError.inactive }
+    }
+
     func fetchConversationFile(_ file: ConversationFile, to destination: URL, expected: ProfileContext) async throws {
         guard context == expected else { throw NativeRelayCoreError.inactive }
         _ = await refreshFlights.coalesced()
@@ -197,6 +204,15 @@ final class NativeRelayLifecycle {
         _ = try await core.resyncAndDrainOutbox()
         guard refreshGeneration == generation, self.context == context else { throw NativeRelayCoreError.inactive }
         confirmedRelayContext = context
+        if let configuration {
+            let threads = try configuration.store.conversationSnapshot(context: context).threads
+            for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {
+                if case .acknowledged = $0.outcome { return false }; return true
+            }) {
+                // Cleanup retry never resends a discussion or changes a replay cursor.
+                try? await core.discardAbandonedUploads(for: request)
+            }
+        }
         // Notification setup is a separate fact from the replay/answer receipt
         // already committed above. Its refusal cannot undo that success.
         return await NativeRelayRefreshResult.afterConfirmedRelay {
