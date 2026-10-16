@@ -5,13 +5,21 @@ import SwiftUI
 struct LiveContentView: View {
     let store: LivePresentationStore
     let samples: SampleLibrary
-    let launch: NativeAppLaunch
+    let launch: NativeAppLaunch?
+
+    init(store: LivePresentationStore,
+         samples: SampleLibrary,
+         launch: NativeAppLaunch? = nil) {
+        self.store = store
+        self.samples = samples
+        self.launch = launch
+    }
 
     var body: some View {
-        let progress = launch.foregroundConnectProgress
+        let progress = launch?.foregroundConnectProgress
         let showsRecovery = progress.map { $0.outcome != .confirmed } ?? false
         VStack(spacing: 0) {
-            if showsRecovery, let progress {
+            if showsRecovery, let progress, let launch {
                 LiveConnectionRecoveryBanner(
                     progress: progress,
                     diagnostic: launch.foregroundConnectDiagnostic,
