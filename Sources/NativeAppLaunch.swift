@@ -261,7 +261,7 @@ final class NativeAppLaunch {
     }
 
     func refreshLive() async {
-        guard case let .live(presentation) = state else { return }
+        guard case let .live(presentation) = state, !presentation.isLocalExample else { return }
         let result = await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
         guard case let .live(current) = state, current === presentation else { return }
         presentation.applyRefreshResult(result)
