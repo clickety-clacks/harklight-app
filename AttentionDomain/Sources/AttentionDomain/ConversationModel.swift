@@ -134,6 +134,7 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         case request(sessionHandle: ExactText, payload: JSONValue)
         /// One server revision frame, one transaction and one sequence number.
         case revision(ConversationTurn, payload: JSONValue)
+        case redactedRevision(ConversationTurn)
         case turn(ConversationTurn)
         case delivered(turn: ExactText)
         case acted(turn: ExactText, by: ExactText)
@@ -164,6 +165,24 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var terminal: TerminalState?
     public var terminalTurn: ExactText?
     public var listeningSupport: JSONValue?
+    public var redactedRevisions: Set<UInt64>?
+    public var terminalAuthor: ConversationAuthor?
+
+    public var revisionNumbers: [UInt64] { Set(revisions.keys).union(redactedRevisions ?? []).sorted() }
+    public var currentContentRedacted: Bool { redactedRevisions?.contains(currentRevision) == true }
+    public var currentQuestionPayload: JSONValue {
+        revisions[currentRevision] ?? .object([
+            JSONMember("title", .string(ExactText("Question content unavailable on this device"))),
+            JSONMember("body", .string(ExactText("The originating device's projection omits this question version. Earlier drafts remain inspectable."))),
+            JSONMember("answer_ui", .string(ExactText("Content redacted")))
+        ])
+    }
+
+    mutating func orderTurns() {
+        if turns.allSatisfy({ UInt64($0.id.rawValue) != nil }) {
+            turns.sort { UInt64($0.id.rawValue)! < UInt64($1.id.rawValue)! }
+        }
+    }
 
     init(request: RequestKey, sessionHandle: ExactText, revision: UInt64, payload: JSONValue) {
         self.request = request
@@ -203,6 +222,14 @@ struct ConversationState: Codable {
             throw ConversationError.gap(expected: cursor == UInt64.max ? cursor : cursor + 1, received: event.sequence)
         }
         let binding = event.binding
+        if case let .redactedRevision(turn) = event.fact {
+            guard var thread = threads[binding.request], turn.contentRedacted == true,
+                  turn.sessionHandle == thread.sessionHandle, turn.author == .origin,
+                  binding.revision == thread.currentRevision + 1 else { throw ConversationError.invalidBinding }
+            thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
+            thread.currentRevision = binding.revision
+            threads[binding.request] = thread
+        }
         let question: (ExactText, JSONValue)?
         switch event.fact {
         case let .request(handle, payload): question = (handle, payload)
@@ -233,12 +260,12 @@ struct ConversationState: Codable {
         let appliesTurn: Bool
         if case .revision = event.fact { appliesTurn = true } else { appliesTurn = question == nil }
         if appliesTurn {
-            guard var thread = threads[binding.request], thread.revisions[binding.revision] != nil else {
+            guard var thread = threads[binding.request], thread.revisionNumbers.contains(binding.revision) else {
                 throw ConversationError.missingRequest
             }
             switch event.fact {
             case .request: break
-            case let .turn(turn), let .revision(turn, _):
+            case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
                 guard turn.binding == binding, turn.sessionHandle == thread.sessionHandle,
                       !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
                 if let old = thread.turns.first(where: { $0.id == turn.id }) {
@@ -248,6 +275,7 @@ struct ConversationState: Codable {
                     // Authoritative historical entries remain applicable; local submission checks closure.
                     thread.turns.append(turn)
                     thread.facts[turn.id] = ConversationTurnFacts()
+                    thread.orderTurns()
                 }
                 // Only an exact accepted operation clears its frozen draft.
                 if let draft = thread.drafts[binding.revision], let operationID = turn.operationID {

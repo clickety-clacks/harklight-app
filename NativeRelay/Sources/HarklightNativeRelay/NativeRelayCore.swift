@@ -45,6 +45,12 @@ public actor NativeRelayCore {
     private var activeReplay: ReplayProgress?
     private var conversationReplay: ConversationReplayProgress?
     private var inspectedConversationMetadata = false
+    private var discoveredOriginURL: URL?
+
+    public func conversationOriginURL() throws -> URL? {
+        try validate()
+        return discoveredOriginURL
+    }
 
     private struct ConversationReplayProgress {
         var expected: UInt64
@@ -140,6 +146,7 @@ public actor NativeRelayCore {
         let wire = try ConversationWire(profile: context)
         if !replay.accepted {
             guard try wire.isOpenAccepted(frame) else { throw NativeRelayCoreError.invalidReplay }
+            discoveredOriginURL = try wire.originEndpoint(frame)
             replay.accepted = true
         } else if let high = try? wire.decodeResynced(frame) {
             guard high >= replay.durableCursor, high == replay.expected else { throw NativeRelayCoreError.invalidReplay }

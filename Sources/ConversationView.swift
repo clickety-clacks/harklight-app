@@ -51,9 +51,9 @@ struct ConversationPanel: View {
                         .font(.caption).padding(8)
                 }
                 HStack {
-                    if thread.revisions.count > 1 {
+                    if thread.revisionNumbers.count > 1 {
                         Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
-                            ForEach(thread.revisions.keys.sorted(), id: \.self) { value in
+                            ForEach(thread.revisionNumbers, id: \.self) { value in
                                 Text("Version \(value)\(thread.drafts[value] == nil && thread.answerDrafts?[value] == nil ? "" : " · draft")").tag(value)
                             }
                         }.pickerStyle(.menu).font(.caption)
@@ -220,7 +220,8 @@ private struct ConversationTurnView: View {
                 Text("Person-authored content is not included in this device projection.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                if turn.kind == .revision { Text("Question revised").font(.caption.weight(.semibold)) }
+                if turn.kind == .revision { Text(turn.binding.revision == 1 ? "Original question" : "Question revised").font(.caption.weight(.semibold)) }
+                if turn.kind == .terminal { Text("Request closed").font(.caption.weight(.semibold)) }
                 if let status = turn.resultStatus {
                     Text("Original answer result: " + status.rawValue).font(.caption.weight(.semibold))
                 }

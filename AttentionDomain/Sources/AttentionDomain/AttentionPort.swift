@@ -334,6 +334,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
     public func inspect(context suppliedContext: PortContext, request key: RequestKey) throws -> PresentationSnapshot {
         try validate(suppliedContext)
+        let snapshot = try store.snapshot(context: profileContext)
+        if snapshot.conversationThreads[key]?.currentContentRedacted == true {
+            return try presentation(from: snapshot, selectorFor: nil).filtering(to: key)
+        }
         let selector = try store.selector(for: key, context: profileContext)
         return try presentation(from: store.snapshot(context: profileContext), selectorFor: [key: selector])
             .filtering(to: key)

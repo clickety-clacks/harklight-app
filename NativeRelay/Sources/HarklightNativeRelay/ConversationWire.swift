@@ -80,6 +80,20 @@ public struct ConversationWire: Sendable {
         let value = try frame(bytes)
         return try text(value, "type") == "ok" && value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-conversation-sync"
     }
+    public func originEndpoint(_ bytes: Data) throws -> URL? {
+        guard try isOpenAccepted(bytes) else { throw RelayWireError.invalidFrame }
+        let value = try frame(bytes)
+        guard value.uniqueValue(named: "origin_https_port") != nil else { return nil }
+        let port = try integer(value, "origin_https_port")
+        guard port > 0, port <= 65_535 else { throw RelayWireError.invalidFrame }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = profile.identity.trustedRelayAuthority.rawValue
+        components.port = Int(port)
+        components.path = "/origin/v1"
+        guard let url = components.url else { throw InstallationTransportError.invalidEndpoint }
+        return url
+    }
     public func decodeDiscussionResult(_ bytes: Data) throws -> DiscussionOperationResult {
         let value = try frame(bytes)
         guard value.uniqueValue(named: "ref") == .string(ExactText("native-discussion")) else {
@@ -133,9 +147,11 @@ public struct ConversationWire: Sendable {
                 operationID: operation, files: try files(value), contentRedacted: redacted ? true : nil,
                 kind: turnKind, resultStatus: kind == "result" ? ExactText(try text(value, "status")) : nil)
             if kind == "revision" {
-                // Never reuse an earlier question as a newer redacted revision.
-                guard !redacted, let payload = value.uniqueValue(named: "message"), case .object = payload else { throw RelayWireError.unsupportedEvent }
-                fact = .revision(turn, payload: payload)
+                if redacted { fact = .redactedRevision(turn) }
+                else {
+                    guard let payload = value.uniqueValue(named: "message"), case .object = payload else { throw RelayWireError.invalidFrame }
+                    fact = .revision(turn, payload: payload)
+                }
             } else { fact = .turn(turn) }
         case "receipt":
             guard value.uniqueValue(named: "delivered") == .bool(true) else { throw RelayWireError.invalidFrame }
@@ -168,10 +184,16 @@ public struct ConversationWire: Sendable {
         guard value.uniqueValue(named: "request_revision") != nil else { return nil }
         let revision = try integer(value, "request_revision")
         guard revision > 0 else { throw RelayWireError.invalidFrame }
+        let author: ConversationAuthor?
+        if let raw = try optionalText(value, "author") {
+            guard let parsed = ConversationAuthor(rawValue: raw.rawValue) else { throw RelayWireError.invalidFrame }
+            author = parsed
+        } else { author = nil }
         return RelayConversationMetadata(revision: revision, sessionHandle: try optionalText(value, "session_handle"),
             eventID: try optionalText(value, "event_id"),
             availability: value.uniqueValue(named: "availability") == nil ? nil : try availability(value),
-            listeningSupport: value.uniqueValue(named: "listening_support"))
+            listeningSupport: value.uniqueValue(named: "listening_support"), author: author,
+            files: value.uniqueValue(named: "files") == nil ? nil : try files(value))
     }
     private func availability(_ value: JSONValue) throws -> ConversationAvailability {
         switch try text(value, "availability") {

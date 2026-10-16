@@ -248,6 +248,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(requestKey, in: context.identity)
+        guard state.conversation?.threads[requestKey]?.currentContentRedacted != true else {
+            throw AttentionStoreError.unsupportedInterface
+        }
         guard let request = effectiveRequest(for: requestKey) else { throw AttentionStoreError.requestMissing }
         let id = UUID()
         let submissionID = UUID()
@@ -511,12 +514,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 throw AttentionStoreError.eventConflict(event.sequence)
             }
             if let metadata = event.conversation {
-                if let previous = state.appliedEvents[event.sequence]?.conversation, previous != metadata {
+                if let previous = state.appliedEvents[event.sequence]?.conversation, !metadata.canEnrich(previous) {
                     throw ConversationError.conflict
                 }
                 var next = state
                 try applyOrdinaryConversationMetadata(event, to: &next)
-                if state.appliedEvents[event.sequence]?.conversation == nil {
+                if state.appliedEvents[event.sequence]?.conversation != metadata {
                     next.appliedEvents[event.sequence] = event
                     try commit(next)
                 }
@@ -562,7 +565,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             } else {
                 next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
                 let thread = next.conversation?.threads[request.key]
-                let currentPayload = thread.flatMap { $0.revisions[$0.currentRevision] } ?? request.originalPayload
+                let currentPayload = thread?.currentQuestionPayload ?? request.originalPayload
                 next.drafts[request.key] = RequestDraft(interface: StoredRequest(key: request.key, originalPayload: currentPayload).interface)
             }
             let previous = next.remoteStates[request.key]
@@ -626,31 +629,58 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private func applyOrdinaryConversationMetadata(_ event: RelayEvent, to next: inout PersistedAttentionState) throws {
         var conversation = next.conversation ?? ConversationState()
         switch event.body {
-        case let .delivery(request, _):
+        case .delivery, .originReference:
             guard let metadata = event.conversation else { return }
+            let request: StoredRequest
+            switch event.body {
+            case let .delivery(delivered, _): request = delivered
+            case let .originReference(key):
+                guard let retained = next.requests[key] else { throw AttentionStoreError.missingOriginContent(key) }
+                request = retained.acceptanceOrder == nil ? retained.assigningAcceptanceOrder(event.sequence) : retained
+                next.requests[key] = request
+            default: throw ConversationError.invalidBinding
+            }
             guard metadata.revision == 1, let handle = metadata.sessionHandle, !handle.rawValue.isEmpty else {
                 throw ConversationError.invalidBinding
             }
+            var thread: ConversationThread
             if let prior = conversation.threads[request.key] {
                 guard prior.sessionHandle == handle,
                       prior.revisions[1]?.semanticallyEquals(request.originalPayload) == true else {
                     throw ConversationError.conflict
                 }
+                thread = prior
             } else {
-                var thread = ConversationThread(request: request.key, sessionHandle: handle,
+                thread = ConversationThread(request: request.key, sessionHandle: handle,
                     revision: 1, payload: request.originalPayload)
                 if let availability = metadata.availability { thread.availability = availability }
                 thread.listeningSupport = metadata.listeningSupport
                 thread.terminal = next.remoteStates[request.key]?.state
-                conversation.threads[request.key] = thread
             }
+            if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
+            if let id = metadata.eventID, !thread.turns.contains(where: { $0.id == id }) {
+                try validateConversationFiles(metadata.files ?? [])
+                thread.turns.append(ConversationTurn(id: id, binding: ConversationBinding(request: request.key, revision: 1),
+                    author: .origin, sessionHandle: handle, text: ExactText(""), files: metadata.files ?? [], kind: .revision))
+                thread.facts[id, default: ConversationTurnFacts()] = thread.facts[id] ?? ConversationTurnFacts()
+                thread.orderTurns()
+            }
+            conversation.threads[request.key] = thread
         case let .terminal(key, terminal, _):
             guard var thread = conversation.threads[key] else { return }
             guard thread.terminal == nil || thread.terminal == terminal else { throw ConversationError.conflict }
             thread.terminal = terminal
+            if let author = event.conversation?.author { thread.terminalAuthor = author }
             if let eventID = event.conversation?.eventID {
                 guard thread.terminalTurn == nil || thread.terminalTurn == eventID else { throw ConversationError.conflict }
                 thread.terminalTurn = eventID
+                if let author = event.conversation?.author, !thread.turns.contains(where: { $0.id == eventID }) {
+                    thread.turns.append(ConversationTurn(id: eventID,
+                        binding: ConversationBinding(request: key, revision: event.conversation!.revision), author: author,
+                        sessionHandle: thread.sessionHandle, text: ExactText(""), files: event.conversation?.files ?? [], kind: .terminal))
+                    thread.facts[eventID, default: ConversationTurnFacts()] = thread.facts[eventID] ?? ConversationTurnFacts()
+                    thread.orderTurns()
+                }
             }
             for revision in thread.drafts.keys {
                 guard var draft = thread.drafts[revision] else { continue }
@@ -660,7 +690,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
             }
             conversation.threads[key] = thread
-        case .originReference: return
         }
         next.conversation = conversation
     }
@@ -825,7 +854,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try validate(suppliedContext)
         try validate(event.binding.request, in: context.identity)
         switch event.fact {
-        case let .turn(turn), let .revision(turn, _): try validateConversationFiles(turn.files)
+        case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn): try validateConversationFiles(turn.files)
         default: break
         }
         var next = state
@@ -834,13 +863,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
         if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
         let key = event.binding.request
         if let previous = state.conversation?.threads[key],
-           let current = conversation.threads[key], current.currentRevision != previous.currentRevision,
-           let payload = current.revisions[current.currentRevision] {
+           let current = conversation.threads[key], current.currentRevision != previous.currentRevision {
             var archived = previous.answerDrafts ?? [:]
             if let draft = state.drafts[key] { archived[previous.currentRevision] = draft }
             conversation.threads[key]?.answerDrafts = archived
             if next.requests[key] != nil {
-                let fresh = RequestDraft(interface: StoredRequest(key: key, originalPayload: payload).interface)
+                let fresh = RequestDraft(interface: StoredRequest(key: key, originalPayload: current.currentQuestionPayload).interface)
                 next.drafts[key] = fresh
                 if var fixture = next.fixtureSessions[key], case .open = fixture.lifecycle {
                     fixture.draft = fresh
@@ -1036,9 +1064,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     private func effectiveRequest(for key: RequestKey) -> StoredRequest? {
         guard let original = state.requests[key] else { return nil }
-        guard let thread = state.conversation?.threads[key],
-              let payload = thread.revisions[thread.currentRevision] else { return original }
-        let current = StoredRequest(key: key, originalPayload: payload)
+        guard let thread = state.conversation?.threads[key] else { return original }
+        let current = StoredRequest(key: key, originalPayload: thread.currentQuestionPayload)
         return original.acceptanceOrder.map { current.assigningAcceptanceOrder($0) } ?? current
     }
 
