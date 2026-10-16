@@ -153,6 +153,15 @@ struct NativeForegroundOperationDiagnostic: Equatable, Sendable {
         requestRevision = submission.requestRevision
         self.receiptState = receiptState
     }
+
+    init(operationID: UUID, senderID: String, messageID: String,
+         requestRevision: UInt64?, receiptState: String) {
+        self.operationID = operationID
+        self.senderID = senderID
+        self.messageID = messageID
+        self.requestRevision = requestRevision
+        self.receiptState = receiptState
+    }
 }
 
 struct NativeForegroundOperationSnapshot: Equatable, Sendable {
