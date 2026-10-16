@@ -303,7 +303,9 @@ public actor NativeRelayCore {
     }
 
     private func replayAndAcknowledge(since cursor: UInt64) async throws -> UInt64 {
-        onProgress(.nativeSyncRequestStarted)
+        // This is a local intent signal only; relay admission is observed
+        // later from the session's authenticated response.
+        onProgress(.nativeSyncReplayRequested)
         var high = try await replay(since: cursor)
         onProgress(.nativeSyncResynced)
         do {
@@ -313,7 +315,7 @@ public actor NativeRelayCore {
             // C may have durably committed a prior replay whose ACK never
             // reached the server. Re-present the server's complete streamed
             // history so this session may ACK contiguously from its cursor.
-            onProgress(.nativeSyncRequestStarted)
+            onProgress(.nativeSyncReplayRequested)
             high = try await replay(since: 0)
             onProgress(.nativeSyncResynced)
             try await session.acknowledge(wire.acknowledge(high))

@@ -82,7 +82,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         let id: UUID
         let lastConfirmedStage: Stage?
         let webSocketOpenObserved: Bool
-        let nativeSyncRequestStarted: Bool
+        let nativeSyncReplayRequested: Bool
         let issue: Issue?
         let failureClass: FailureClass?
     }
@@ -124,7 +124,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var attemptID: UUID? = nil
     var failureClass: FailureClass? = nil
     var transportAttemptID: UUID? = nil
-    var nativeSyncRequestStarted = false
+    var nativeSyncReplayRequested = false
     var previousTransportAttempt: PreviousTransportAttempt? = nil
 
     var message: String {
@@ -244,7 +244,7 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             "outcome=\(outcome)",
             "last_confirmed_phase=\(stage)",
             "transport_attempt_id=\(progress.transportAttemptID?.uuidString.lowercased() ?? "unavailable")",
-            "native_sync_request_started=\(progress.nativeSyncRequestStarted ? "yes" : "no")",
+            "native_sync_replay_requested_locally=\(progress.nativeSyncReplayRequested ? "yes" : "no")",
             "websocket_open_observed=\(websocket)",
             "issue=\(issue)",
             "error_class=\(failure)"
@@ -253,7 +253,7 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             lines.append("previous_transport_attempt_id=\(previous.id.uuidString.lowercased())")
             lines.append("previous_last_confirmed_phase=\(previous.lastConfirmedStage?.diagnosticValue ?? "none_confirmed")")
             lines.append("previous_websocket_open_observed=\(previous.webSocketOpenObserved ? "yes" : "no")")
-            lines.append("previous_native_sync_request_started=\(previous.nativeSyncRequestStarted ? "yes" : "no")")
+            lines.append("previous_native_sync_replay_requested_locally=\(previous.nativeSyncReplayRequested ? "yes" : "no")")
             lines.append("previous_issue=\(Self.issueValue(previous.issue))")
             lines.append("previous_error_class=\(previous.failureClass?.diagnosticValue ?? "none_observed")")
         }
@@ -354,7 +354,7 @@ final class ForegroundConnectDeadline {
                 id: priorID,
                 lastConfirmedStage: progress.lastConfirmedStage,
                 webSocketOpenObserved: progress.webSocketOpenObserved,
-                nativeSyncRequestStarted: progress.nativeSyncRequestStarted,
+                nativeSyncReplayRequested: progress.nativeSyncReplayRequested,
                 issue: progress.issue,
                 failureClass: progress.failureClass)
         }
@@ -362,7 +362,7 @@ final class ForegroundConnectDeadline {
         progress.transportAttemptID = transportAttemptID
         progress.lastConfirmedStage = nil
         progress.webSocketOpenObserved = false
-        progress.nativeSyncRequestStarted = false
+        progress.nativeSyncReplayRequested = false
         progress.issue = nil
         progress.failureClass = nil
         progress.outcome = .connecting
@@ -389,9 +389,9 @@ final class ForegroundConnectDeadline {
             progress.webSocketOpenObserved = true
         case .relayAdmitted:
             candidate = .relayAdmitted; issue = nil
-        case .nativeSyncRequestStarted:
+        case .nativeSyncReplayRequested:
             candidate = nil; issue = nil
-            progress.nativeSyncRequestStarted = true
+            progress.nativeSyncReplayRequested = true
         case .nativeSyncResynced:
             candidate = .nativeSyncResynced; issue = nil
         case .nativeSyncAcknowledged:

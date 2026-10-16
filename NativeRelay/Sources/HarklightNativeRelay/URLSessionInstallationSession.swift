@@ -23,7 +23,9 @@ public enum NativeRelayProgressEvent: Equatable, Sendable {
     case clientIdentityChallengeRejected
     case webSocketOpened
     case relayAdmitted
-    case nativeSyncRequestStarted
+    /// The client is about to request replay; this does not prove the relay
+    /// received or admitted that request.
+    case nativeSyncReplayRequested
     case nativeSyncResynced
     case nativeSyncAcknowledged
 }

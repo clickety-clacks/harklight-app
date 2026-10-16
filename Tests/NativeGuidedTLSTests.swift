@@ -283,7 +283,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(high, 1)
         XCTAssertEqual(session.cursorAtAcknowledgement, 1,
                        "The event cursor must be durable before the ACK exchange begins.")
-        XCTAssertEqual(events.snapshot(), [.nativeSyncRequestStarted, .nativeSyncResynced, .nativeSyncAcknowledged])
+        XCTAssertEqual(events.snapshot(), [.nativeSyncReplayRequested, .nativeSyncResynced, .nativeSyncAcknowledged])
 
         let progress = ForegroundConnectDeadline()
         let transportAttemptID = UUID()
@@ -296,10 +296,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(progress.progress.webSocketOpenObserved)
         progress.observe(.relayAdmitted, transportAttemptID: transportAttemptID)
         XCTAssertEqual(progress.progress.lastConfirmedStage, .relayAdmitted)
-        progress.observe(.nativeSyncRequestStarted, transportAttemptID: transportAttemptID)
+        progress.observe(.nativeSyncReplayRequested, transportAttemptID: transportAttemptID)
         XCTAssertEqual(progress.progress.lastConfirmedStage, .relayAdmitted,
                        "A local replay request is not a remotely confirmed phase.")
-        XCTAssertTrue(progress.progress.nativeSyncRequestStarted)
+        XCTAssertTrue(progress.progress.nativeSyncReplayRequested)
         progress.observe(.nativeSyncResynced, transportAttemptID: transportAttemptID)
         progress.observe(.nativeSyncAcknowledged, transportAttemptID: transportAttemptID)
         XCTAssertEqual(progress.progress.lastConfirmedStage, .nativeSyncAcknowledged)
@@ -337,7 +337,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         deadline.observe(.clientIdentityOffered, transportAttemptID: firstTransportID)
         deadline.observe(.webSocketOpened, transportAttemptID: firstTransportID)
         deadline.observe(.relayAdmitted, transportAttemptID: firstTransportID)
-        deadline.observe(.nativeSyncRequestStarted, transportAttemptID: firstTransportID)
+        deadline.observe(.nativeSyncReplayRequested, transportAttemptID: firstTransportID)
         deadline.observe(.nativeSyncResynced, transportAttemptID: firstTransportID)
         deadline.observe(.nativeSyncAcknowledged, transportAttemptID: firstTransportID)
         deadline.recordFailure(URLError(.networkConnectionLost))
@@ -347,7 +347,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(deadline.progress.transportAttemptID, secondTransportID)
         XCTAssertNil(deadline.progress.lastConfirmedStage)
         XCTAssertFalse(deadline.progress.webSocketOpenObserved)
-        XCTAssertFalse(deadline.progress.nativeSyncRequestStarted)
+        XCTAssertFalse(deadline.progress.nativeSyncReplayRequested)
         XCTAssertEqual(deadline.progress.previousTransportAttempt?.id, firstTransportID)
         XCTAssertEqual(deadline.progress.previousTransportAttempt?.lastConfirmedStage, .nativeSyncAcknowledged)
         XCTAssertEqual(deadline.progress.previousTransportAttempt?.failureClass,
@@ -355,7 +355,7 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         // A local replay request cannot become a confirmed phase, and a
         // callback queued by the retired transport cannot contaminate the new one.
-        deadline.observe(.nativeSyncRequestStarted, transportAttemptID: secondTransportID)
+        deadline.observe(.nativeSyncReplayRequested, transportAttemptID: secondTransportID)
         XCTAssertNil(deadline.progress.lastConfirmedStage)
         deadline.observe(.webSocketOpened, transportAttemptID: firstTransportID)
         XCTAssertNil(deadline.progress.lastConfirmedStage)
