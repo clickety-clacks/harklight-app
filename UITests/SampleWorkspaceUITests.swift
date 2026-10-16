@@ -172,6 +172,33 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("composer-glass-local-result", app)
     }
 
+    func testOrdinaryConversationSharesAdaptivePanelWithoutLiveServices() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--conversation-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        let search = app.searchFields.firstMatch
+        search.tap(); search.typeText("Thursday\n")
+        let row = app.buttons["request-row-sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+        let composers = app.textFields.matching(identifier: "sample-chat-composer")
+        XCTAssertTrue(composers.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(composers.count, 1)
+        XCTAssertTrue(app.staticTexts["Could you explain the tradeoff?"].exists,
+                      "Ordinary request chat must project its domain history")
+        XCTAssertTrue(app.buttons["Add sample attachment"].isHittable)
+        capture("ordinary-conversation-portrait", app)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let singleComposer = expectation(for: NSPredicate(format: "count == 1"), evaluatedWith: composers)
+        wait(for: [singleComposer], timeout: 5)
+        XCTAssertTrue(app.buttons["Add sample attachment"].isHittable)
+        capture("ordinary-conversation-landscape", app)
+        XCUIDevice.shared.orientation = .portrait
+    }
+
     func testCorrectedInboxDuoOrientations() {
         let orientations: [(String, UIDeviceOrientation)] = [
             ("portrait", .portrait), ("landscape-left", .landscapeLeft),
