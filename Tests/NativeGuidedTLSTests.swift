@@ -222,7 +222,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let archive = try LivePresentationStore(disconnectedStore: domain, context: context)
         XCTAssertTrue(archive.isReadOnly)
         XCTAssertFalse(archive.isLocalExample, "A real account archive is not a fictional sample")
-        XCTAssertEqual(archive.conversation(for: key)?.turns.first?.text, turn.text)
+        XCTAssertEqual(archive.conversation(for: key)?.turns.first(where: { $0.id == turn.id })?.text, turn.text)
         XCTAssertEqual(archive.conversationDraft(for: key, revision: 1).text, savedDraft.text)
         let cachedURL = try await archive.prepareConversationPreview(localFile)
         XCTAssertEqual(cachedURL, try storage.fileURL(for: localFile),
