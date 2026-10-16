@@ -2,6 +2,12 @@ import AttentionDomain
 import CryptoKit
 import Foundation
 
+public enum DiscussionOperationResult: Equatable, Sendable {
+    case accepted(turnID: ExactText)
+    case rejected(reason: ExactText)
+    case unresolved
+}
+
 /// Independent projection on the existing authenticated relay. A conversation
 /// sequence is never an ordinary delivery/lifecycle sequence.
 public struct ConversationWire: Sendable {
@@ -16,9 +22,76 @@ public struct ConversationWire: Sendable {
     public func acknowledge(_ cursor: UInt64) -> Data {
         Data("{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":\(cursor),\"ref\":\"native-conversation-ack\"}\n".utf8)
     }
+    /// The caller has already frozen this exact draft operation durably. Upload
+    /// references may replace local-copy representations, never original bytes.
+    public func discussion(_ draft: ConversationDraft, operationID: UUID,
+                           preparedFiles: [ConversationFile], limits: ConversationFileLimits) throws -> Data {
+        guard draft.binding.request.accountScope == profile.identity.personID,
+              draft.binding.revision > 0,
+              !draft.text.rawValue.isEmpty,
+              draft.files.count == preparedFiles.count else { throw RelayWireError.invalidFrame }
+        switch draft.disposition {
+        case let .submitting(id), let .outcomeUnknown(id):
+            guard id == operationID else { throw ConversationError.conflict }
+        default: throw ConversationError.invalidBinding
+        }
+        var inlineBytes: UInt64 = 0
+        var names = Set<ExactText>()
+        var encoded: [JSONValue] = []
+        for (original, prepared) in zip(draft.files, preparedFiles) {
+            guard original.name == prepared.name, original.byteCount == prepared.byteCount,
+                  original.sha256 == prepared.sha256, names.insert(prepared.name).inserted else {
+                throw ConversationError.fileMismatch
+            }
+            var fields = [JSONMember("name", .string(prepared.name))]
+            switch prepared.content {
+            case let .inline(bytes):
+                guard UInt64(bytes.count) == prepared.byteCount,
+                      inlineBytes <= limits.inlineDecodedBytes,
+                      prepared.byteCount <= limits.inlineDecodedBytes - inlineBytes,
+                      SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == prepared.sha256.rawValue else {
+                    throw ConversationError.fileMismatch
+                }
+                inlineBytes += prepared.byteCount
+                fields.append(JSONMember("data_base64", .string(ExactText(bytes.base64EncodedString()))))
+            case let .uploaded(id):
+                guard UUID(uuidString: id.rawValue) != nil else { throw ConversationError.fileMismatch }
+                fields += [JSONMember("upload_id", .string(id)),
+                    JSONMember("size", .number(JSONNumber(lexeme: String(prepared.byteCount)))),
+                    JSONMember("sha256", .string(prepared.sha256))]
+            case .localFile: throw ConversationError.uploadRequired(prepared.name)
+            }
+            encoded.append(.object(fields))
+        }
+        let frame = JSONValue.object([
+            JSONMember("v", .number(JSONNumber(lexeme: "1"))), JSONMember("type", .string(ExactText("discussion"))),
+            JSONMember("ref", .string(ExactText("native-discussion"))),
+            JSONMember("op_id", .string(ExactText(operationID.uuidString.lowercased()))),
+            JSONMember("sender_id", .string(draft.binding.request.senderID)),
+            JSONMember("message_id", .string(draft.binding.request.messageID)),
+            JSONMember("request_revision", .number(JSONNumber(lexeme: String(draft.binding.revision)))),
+            JSONMember("text", .string(draft.text)), JSONMember("files", .array(encoded))
+        ])
+        let bytes = Data((frame.jsonString + "\n").utf8)
+        guard bytes.count <= 2 * 1024 * 1024 else { throw RelayWireError.invalidFrame }
+        return bytes
+    }
     public func isOpenAccepted(_ bytes: Data) throws -> Bool {
         let value = try frame(bytes)
         return try text(value, "type") == "ok" && value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-conversation-sync"
+    }
+    public func decodeDiscussionResult(_ bytes: Data) throws -> DiscussionOperationResult {
+        let value = try frame(bytes)
+        guard value.uniqueValue(named: "ref") == .string(ExactText("native-discussion")) else {
+            throw RelayWireError.invalidFrame
+        }
+        switch try text(value, "type") {
+        case "ok":
+            guard try integer(value, "seq") > 0 else { throw RelayWireError.invalidFrame }
+            return .accepted(turnID: ExactText(try text(value, "event_id")))
+        case "error": return .rejected(reason: ExactText(try text(value, "reason")))
+        default: throw RelayWireError.unsupportedEvent
+        }
     }
     public func decodeResynced(_ bytes: Data) throws -> UInt64 {
         let value = try frame(bytes)
@@ -116,14 +189,23 @@ public struct ConversationWire: Sendable {
         var total: UInt64 = 0
         for item in values {
             let name = ExactText(try text(item, "name"))
-            guard names.insert(name).inserted, try text(item, "tier") == "inline",
-                  let encoded = item.uniqueValue(named: "data_base64")?.stringValue?.rawValue,
-                  let bytes = Data(base64Encoded: encoded) else { throw RelayWireError.invalidFrame }
+            guard names.insert(name).inserted else { throw RelayWireError.invalidFrame }
             let size = try integer(item, "size"), digest = try text(item, "sha256")
-            guard size == UInt64(bytes.count), size <= 262_144 - total,
-                  SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == digest else { throw RelayWireError.invalidFrame }
-            total += size
-            result.append(ConversationFile(id: name, name: name, byteCount: size, sha256: ExactText(digest), content: .inline(bytes)))
+            let content: ConversationFile.Content
+            switch try text(item, "tier") {
+            case "inline":
+                guard let encoded = item.uniqueValue(named: "data_base64")?.stringValue?.rawValue,
+                      let bytes = Data(base64Encoded: encoded), size == UInt64(bytes.count), size <= 262_144 - total,
+                      SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == digest else { throw RelayWireError.invalidFrame }
+                total += size
+                content = .inline(bytes)
+            case "upload":
+                let id = try text(item, "upload_id")
+                guard UUID(uuidString: id) != nil else { throw RelayWireError.invalidFrame }
+                content = .uploaded(ExactText(id))
+            default: throw RelayWireError.unsupportedEvent
+            }
+            result.append(ConversationFile(id: name, name: name, byteCount: size, sha256: ExactText(digest), content: content))
         }
         return result
     }

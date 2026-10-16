@@ -30,6 +30,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationSession {
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
+    private let profileContext: ProfileContext
 
     public init(profile: ProfileContext,
                 relayURL: URL,
@@ -57,6 +58,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationSession {
             throw InstallationTransportError.wrongDeviceIdentity
         }
         authenticatedIdentity = profile.identity
+        profileContext = profile
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root)
         self.delegate = delegate
         let configuration = URLSessionConfiguration.ephemeral
@@ -178,6 +180,28 @@ public actor URLSessionInstallationSession: AuthenticatedConversationSession {
         }
     }
 
+    /// A send response is not a replay ACK and cannot advance either cursor.
+    public func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
+        do {
+            let outgoing = try JSONValue.parse(frame)
+            guard outgoing.uniqueValue(named: "type") == .string(ExactText("discussion")),
+                  outgoing.uniqueValue(named: "op_id")?.stringValue?.rawValue == operationID.uuidString.lowercased() else {
+                return .rejected(reason: ExactText("The saved discussion operation does not match its frame"))
+            }
+            try await send(frame)
+            let wire = try ConversationWire(profile: profileContext)
+            while true {
+                let incoming = try await receive()
+                let kind = try JSONValue.parse(incoming).uniqueValue(named: "type")?.stringValue?.rawValue
+                if kind == "delivery" || kind == "lifecycle" || kind == "conversation" { continue }
+                return try wire.decodeDiscussionResult(incoming)
+            }
+        } catch {
+            close()
+            return .unresolved
+        }
+    }
+
     /// The APNs address is a separate device binding, never answer content.
     /// The caller durably owns the operation ID and revision across retries.
     public func registerPush(address: String, operationID: UUID, revision: UInt64) async throws {
@@ -218,6 +242,45 @@ public actor URLSessionInstallationSession: AuthenticatedConversationSession {
     public func close() {
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
+    }
+
+    public func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let (data, response) = try await urlSession.data(for: wire.limitsRequest())
+        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+        return try wire.decodeLimits(data, status: http.statusCode)
+    }
+
+    /// Reuses the enrolled certificate/CA session and streams the retained file;
+    /// no discussion is submitted by a successful upload.
+    public func uploadConversationFile(_ file: ConversationFile, from source: URL,
+                                       binding: ConversationBinding, operationID: UUID,
+                                       limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
+        if let cap = limits.uploadCap, file.byteCount > cap {
+            throw ConversationError.uploadCapExceeded(file: file.name, cap: cap)
+        }
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        try wire.verify(source, file: file)
+        let request = try wire.uploadRequest(file: file, binding: binding, operationID: operationID)
+        let (data, response) = try await urlSession.upload(for: request, fromFile: source)
+        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+        return try wire.decodeUpload(data, status: http.statusCode, original: file)
+    }
+
+    public func fetchConversationFile(_ file: ConversationFile, to destination: URL, originURL: URL) async throws {
+        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+        let (temporary, response) = try await urlSession.download(for: wire.fetchRequest(file))
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+        guard http.statusCode == 200 else {
+            throw ConversationFileTransportError.server(status: http.statusCode, reason: ExactText("File could not be fetched"))
+        }
+        guard http.value(forHTTPHeaderField: "Content-Length") == String(file.byteCount),
+              http.value(forHTTPHeaderField: "X-Harklight-Sha256") == file.sha256.rawValue else {
+            throw ConversationError.fileMismatch
+        }
+        try wire.verify(temporary, file: file)
+        try FileManager.default.copyItem(at: temporary, to: destination)
     }
 
     private func send(_ frame: Data) async throws {
