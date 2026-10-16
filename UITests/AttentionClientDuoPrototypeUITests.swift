@@ -247,7 +247,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         for _ in 0..<8 {
             let keyboard = app.keyboards.firstMatch
-            let bottom = keyboard.exists ? keyboard.frame.minY : app.frame.maxY - 80
+            let keyboardTop = keyboard.exists ? keyboard.frame.minY : app.frame.maxY
+            let cancel = app.buttons["Cancel draft"]
+            let bottom = min(keyboardTop, cancel.exists ? cancel.frame.minY : app.frame.maxY - 80)
             let frame = editor.frame
             if editor.isHittable && frame.minY >= 100 && frame.maxY < bottom - 44 { return }
             let direction: CGFloat = frame.minY < 100 ? 1 : -1
