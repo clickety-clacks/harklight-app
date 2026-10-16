@@ -71,12 +71,13 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
         XCTAssertNil(thread.facts[ExactText("2")]?.actedBy)
     }
-    func testAgentAnswerOrdinaryAndProjectionFactsJoinBeforeTheirIndependentACKs() async throws {
+    func testOriginSourceResultCommitsBeforeItsACKAndKeepsAgentTerminalAsTheOnlyClosure() async throws {
         let (context, _, store, session) = try setup()
+        let operationID = UUID(uuidString: "83b3fc92-6f10-4d94-9fd5-62f9572e4f1a")!
         session.ordinary[2] = data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"request","origin":"origin","state":"answered","by":"agent_answer","request_revision":1,"event_id":"answer-2","author":"agent"}"#)
         session.ordinary.append(data(#"{"v":1,"type":"resynced","seq":2}"#))
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            event("result", sequence: 1, fields: #""author":"agent","event_id":"answer-2","text":"Agent answer","status":"accepted""#),
+            event("result", sequence: 1, fields: #""author":"origin","event_id":"source-result-3","in_reply_to":"answer-2","op_id":"83b3fc92-6f10-4d94-9fd5-62f9572e4f1a","status":"applied""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
         session.onOrdinaryACK = {
             let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
@@ -93,10 +94,15 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
             XCTAssertEqual(thread.terminal, .answered, "The conversation result must not create another closure.")
             XCTAssertEqual(thread.terminalAuthor, .agent)
-            XCTAssertEqual(thread.turns.count, 1)
-            XCTAssertEqual(thread.turns.first?.kind, .result)
-            XCTAssertEqual(thread.turns.first?.author, .agent)
-            XCTAssertEqual(thread.turns.first?.text, ExactText("Agent answer"))
+            XCTAssertEqual(thread.turns.filter { $0.kind == .terminal }.count, 1)
+            XCTAssertEqual(thread.turns.count, 2)
+            let result = try XCTUnwrap(thread.turns.first { $0.id == ExactText("source-result-3") })
+            XCTAssertEqual(result.kind, .result)
+            XCTAssertEqual(result.author, .origin)
+            XCTAssertEqual(result.text, ExactText(""))
+            XCTAssertEqual(result.inReplyTo, ExactText("answer-2"))
+            XCTAssertEqual(result.operationID, operationID)
+            XCTAssertEqual(result.resultStatus, ExactText("applied"))
         }
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
@@ -106,40 +112,66 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(session.conversationACKs.count, 1)
     }
 
-    func testProjectionFirstAgentResultSurvivesLaterOrdinaryLifecycleReplay() async throws {
+    func testStatusOnlyOriginResultReplaysBeforeLaterOrdinaryAnswerAndBothCursorsAdvance() async throws {
         let (context, _, store, session) = try setup()
-        let relayWire = try RelayWire(profile: context)
-        _ = try store.apply(relayWire.decodeEvent(session.ordinary[1]), context: context)
-        let result = event("result", sequence: 1,
-            fields: #""author":"agent","event_id":"answer-2","text":"Agent answer","status":"accepted""#)
-        _ = try store.applyConversation(try ConversationWire(profile: context).decodeEvent(result), context: context)
-        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync","seq":1}"#),
-            data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"request","origin":"origin","state":"answered","by":"agent_answer","request_revision":1,"event_id":"answer-2","author":"agent"}"#),
-            data(#"{"v":1,"type":"resynced","seq":2}"#)]
-        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+        let operationID = UUID(uuidString: "a60e2170-cc04-4577-999a-8d0a8cf1bbf8")!
+        let terminal = data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"request","origin":"origin","state":"answered","by":"agent_answer","request_revision":1,"event_id":"answer-2","author":"agent"}"#)
+        let result = event("result", sequence: 1, fields:
+            #""author":"origin","event_id":"source-result-3","in_reply_to":"answer-2","op_id":"a60e2170-cc04-4577-999a-8d0a8cf1bbf8","status":"received""#)
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#), result,
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        var ordinaryACKCount = 0
+        var conversationACKCount = 0
         session.onOrdinaryACK = {
-            let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
-            XCTAssertEqual(thread.terminal, .answered)
-            XCTAssertEqual(thread.terminalAuthor, .agent)
-            XCTAssertEqual(thread.turns.count, 1)
-            XCTAssertEqual(thread.turns.first?.kind, .result)
-            XCTAssertEqual(thread.turns.first?.text, ExactText("Agent answer"))
+            ordinaryACKCount += 1
+            let snapshot = try store.conversationSnapshot(context: context)
+            let thread = try XCTUnwrap(snapshot.threads.values.first)
+            XCTAssertEqual(try store.snapshot(context: context).cursor, ordinaryACKCount == 1 ? 1 : 2)
+            if ordinaryACKCount == 1 {
+                XCTAssertNil(thread.terminal)
+            } else {
+                XCTAssertEqual(thread.terminal, .answered)
+                XCTAssertEqual(thread.terminalTurn, ExactText("answer-2"))
+                XCTAssertEqual(thread.terminalAuthor, .agent)
+                XCTAssertEqual(thread.turns.filter { $0.kind == .terminal }.count, 1)
+                XCTAssertEqual(thread.turns.count, 2)
+                let result = try XCTUnwrap(thread.turns.first { $0.id == ExactText("source-result-3") })
+                XCTAssertEqual(result.operationID, operationID)
+                XCTAssertEqual(result.inReplyTo, ExactText("answer-2"))
+                XCTAssertEqual(result.resultStatus, ExactText("received"))
+            }
         }
         session.onConversationACK = {
+            conversationACKCount += 1
             let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
-            XCTAssertEqual(thread.terminal, .answered)
-            XCTAssertEqual(thread.terminalTurn, ExactText("answer-2"))
-            XCTAssertEqual(thread.turns.count, 1)
-            XCTAssertEqual(thread.turns.first?.author, .agent)
-            XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+            XCTAssertEqual(thread.terminal, conversationACKCount == 1 ? nil : .answered)
+            XCTAssertEqual(thread.turns.count, conversationACKCount == 1 ? 1 : 2)
+            let result = try XCTUnwrap(thread.turns.first { $0.id == ExactText("source-result-3") })
+            XCTAssertEqual(result.author, .origin)
+            XCTAssertEqual(result.text, ExactText(""))
+            XCTAssertEqual(result.operationID, operationID)
+            XCTAssertEqual(result.inReplyTo, ExactText("answer-2"))
+            XCTAssertEqual(result.resultStatus, ExactText("received"))
+            XCTAssertEqual(try store.snapshot(context: context).cursor, ordinaryACKCount)
         }
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        let high = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(high, 2)
-        XCTAssertEqual(session.ordinaryACKs.count, 1)
-        XCTAssertEqual(session.conversationACKs.count, 1)
+        let firstHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(firstHigh, 1)
+        XCTAssertEqual(ordinaryACKCount, 1)
+        XCTAssertEqual(conversationACKCount, 1)
+
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync","seq":1}"#), terminal,
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        let secondHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(secondHigh, 2)
+        XCTAssertEqual(ordinaryACKCount, 2)
+        XCTAssertEqual(conversationACKCount, 2)
+        XCTAssertEqual(session.ordinaryACKs.count, 2)
+        XCTAssertEqual(session.conversationACKs.count, 2)
     }
     func testLegacyDeliveryNeedsNoConversationProjection() async throws {
         let (context, _, store, session) = try setup()

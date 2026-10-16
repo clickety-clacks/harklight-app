@@ -80,13 +80,33 @@ targets:
     platform: iOS
     sources:
       - path: UITests
+        excludes:
+          - ConversationSampleUITests.swift
+    dependencies:
+      - target: AttentionClientDuoPrototype
+      - package: AttentionDomain
+        product: AttentionDomain
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        IPHONEOS_DEPLOYMENT_TARGET: "27.0"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGNING_ALLOWED: NO
+        TEST_TARGET_NAME: AttentionClientDuoPrototype
+  HarklightConversationUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests/ConversationSampleUITests.swift
     dependencies:
       - target: HarklightConversationUITestHost
       - package: AttentionDomain
         product: AttentionDomain
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.conversation.uitests
         GENERATE_INFOPLIST_FILE: YES
         IPHONEOS_DEPLOYMENT_TARGET: "27.0"
         SWIFT_VERSION: "6.0"
@@ -103,3 +123,4 @@ schemes:
       targets:
         - AttentionClientDuoPrototypeTests
         - AttentionClientDuoPrototypeUITests
+        - HarklightConversationUITests

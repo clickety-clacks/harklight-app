@@ -261,16 +261,8 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         guard turn.binding.request == request, turn.sessionHandle == sessionHandle,
               !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
         if let index = turns.firstIndex(where: { $0.id == turn.id }) {
-            let old = turns[index]
-            if old == turn { return }
-            // Ordinary lifecycle and conversation history are independent
-            // projections of one answer. Replace only its empty terminal join
-            // placeholder with the matching authored result turn.
-            guard old.kind == .terminal, (turn.kind == .result || turn.kind == .reply),
-                  old.binding == turn.binding, old.sessionHandle == turn.sessionHandle,
-                  old.author == turn.author, terminal != nil, terminalTurn == turn.id,
-                  terminalAuthor == turn.author else { throw ConversationError.conflict }
-            turns[index] = turn
+            guard turns[index] == turn else { throw ConversationError.conflict }
+            return
         } else {
             turns.append(turn)
         }
@@ -397,7 +389,8 @@ struct ConversationState: Codable {
                 // row; authoritative historical entries remain applicable.
                 try thread.merge(turn)
                 // Only an exact accepted operation clears its frozen draft.
-                if let draft = thread.drafts[binding.revision], let operationID = turn.operationID {
+                if let draft = thread.drafts[binding.revision], let operationID = turn.operationID,
+                   turn.kind != .result {
                     if case let .acceptedPendingReplay(savedID, savedTurn) = draft.disposition,
                        savedID == operationID, savedTurn != turn.id { throw ConversationError.conflict }
                     switch draft.disposition {

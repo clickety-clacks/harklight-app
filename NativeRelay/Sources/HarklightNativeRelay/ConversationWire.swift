@@ -138,15 +138,37 @@ public struct ConversationWire: Sendable {
                 guard let string = raw.stringValue?.rawValue, let id = UUID(uuidString: string) else { throw RelayWireError.invalidFrame }
                 operation = id
             } else { operation = nil }
+            let inReplyTo = try optionalText(value, "in_reply_to")
+            let eventID = ExactText(try text(value, "event_id"))
             let content: ExactText
-            if (kind == "discussion" || kind == "reply" || kind == "result") && !redacted {
-                guard let string = value.uniqueValue(named: "text")?.stringValue else { throw RelayWireError.invalidFrame }
-                content = string
-            } else { content = ExactText("") }
-            let turn = ConversationTurn(id: ExactText(try text(value, "event_id")), binding: binding,
-                author: author, sessionHandle: handle, text: content, inReplyTo: try optionalText(value, "in_reply_to"),
-                operationID: operation, files: try files(value), contentRedacted: redacted ? true : nil,
-                kind: turnKind, resultStatus: kind == "result" ? ExactText(try text(value, "status")) : nil)
+            let resultStatus: ExactText?
+            if kind == "result" {
+                // A source result is a status-only origin-feed entry. Its own
+                // event ID identifies this fact; in_reply_to names the answer
+                // it reports, and op_id identifies the origin operation.
+                guard author == .origin, value.uniqueValue(named: "text") == nil,
+                      let inReplyTo, !inReplyTo.rawValue.isEmpty, inReplyTo != eventID,
+                      operation != nil else {
+                    throw RelayWireError.invalidFrame
+                }
+                let status = try text(value, "status")
+                guard ["applied", "refused", "received"].contains(status) else {
+                    throw RelayWireError.invalidFrame
+                }
+                content = ExactText("")
+                resultStatus = ExactText(status)
+            } else {
+                if (kind == "discussion" || kind == "reply") && !redacted {
+                    guard let string = value.uniqueValue(named: "text")?.stringValue else { throw RelayWireError.invalidFrame }
+                    content = string
+                } else { content = ExactText("") }
+                resultStatus = nil
+            }
+            let turn = ConversationTurn(id: eventID, binding: binding,
+                author: author, sessionHandle: handle, text: content, inReplyTo: inReplyTo,
+                operationID: operation, files: try files(value),
+                contentRedacted: kind == "result" ? nil : redacted ? true : nil,
+                kind: turnKind, resultStatus: resultStatus)
             if kind == "revision" {
                 if redacted { fact = .redactedRevision(turn) }
                 else {
