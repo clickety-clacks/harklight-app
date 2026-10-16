@@ -32,12 +32,13 @@ public struct RelayWire {
         let key = try requestKey(value)
         let origin = try text(value, "origin")
         let isOrigin = origin == profile.identity.deviceID.rawValue
+        let conversation = try ConversationWire(profile: profile).ordinaryMetadata(value)
         switch try text(value, "type") {
         case "delivery":
             if isOrigin {
                 guard value.uniqueValue(named: "message") == nil,
                       value.uniqueValue(named: "as") == nil else { throw RelayWireError.invalidFrame }
-                return RelayEvent(sequence: seq, body: .originReference(key))
+                return RelayEvent(sequence: seq, body: .originReference(key), conversation: conversation)
             }
             guard let payload = value.uniqueValue(named: "message"),
                   case .object = payload,
@@ -45,7 +46,7 @@ public struct RelayWire {
                 throw RelayWireError.invalidFrame
             }
             return RelayEvent(sequence: seq,
-                              body: .delivery(StoredRequest(key: key, originalPayload: payload), classification))
+                              body: .delivery(StoredRequest(key: key, originalPayload: payload), classification), conversation: conversation)
         case "lifecycle":
             guard let state = TerminalState(rawValue: try text(value, "state")),
                   (isOrigin || value.uniqueValue(named: "answer") == nil) else {
@@ -53,7 +54,7 @@ public struct RelayWire {
             }
             // A present JSON null is distinct from an absent answer in the wire.
             return RelayEvent(sequence: seq,
-                              body: .terminal(key, state, value.uniqueValue(named: "answer")))
+                              body: .terminal(key, state, value.uniqueValue(named: "answer")), conversation: conversation)
         default:
             throw RelayWireError.unsupportedEvent
         }

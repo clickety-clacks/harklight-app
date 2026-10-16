@@ -138,6 +138,7 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         case delivered(turn: ExactText)
         case acted(turn: ExactText, by: ExactText)
         case availability(sessionHandle: ExactText, ConversationAvailability)
+        case availabilityRecord(sessionHandle: ExactText, state: ConversationAvailability, support: JSONValue?)
         case fileTransfer(turn: ExactText, file: ExactText, ConversationFileTransfer)
         case fileUse(turn: ExactText, file: ExactText, ConversationFileUse)
         case terminal(turn: ExactText, author: ConversationAuthor, state: TerminalState)
@@ -262,6 +263,10 @@ struct ConversationState: Codable {
             case let .availability(handle, availability):
                 guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
                 thread.availability = availability
+            case let .availabilityRecord(handle, availability, support):
+                guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
+                thread.availability = availability
+                thread.listeningSupport = support
             case let .terminal(turn, _, state):
                 if let terminal = thread.terminal {
                     guard terminal == state, thread.terminalTurn == turn else { throw ConversationError.conflict }

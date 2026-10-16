@@ -25,7 +25,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// A keychain-backed installation certificate and an enrollment-approved relay
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
-public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
+public actor URLSessionInstallationSession: AuthenticatedConversationSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
@@ -69,8 +69,16 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
         task.resume()
     }
 
-    public func resync(_ request: Data,
-                       consume: @Sendable (Data) async throws -> Void) async throws {
+    public func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        try await replay(request, ref: "native-sync", event: "delivery", end: "resynced", consume: consume)
+    }
+
+    public func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        try await replay(request, ref: "native-conversation-sync", event: "conversation", end: "conversation_resynced", consume: consume)
+    }
+
+    private func replay(_ request: Data, ref: String, event: String, end: String,
+                        consume: @Sendable (Data) async throws -> Void) async throws {
         try await send(request)
         var accepted = false
         while true {
@@ -78,24 +86,35 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
             let value = try JSONValue.parse(frame)
             let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
             if kind == "error" { throw InstallationTransportError.serverRejected }
+            let ordinary = kind == "delivery" || kind == "lifecycle"
+            let conversation = kind == "conversation"
             if !accepted {
-                // A subscribed socket may have a push from before this
-                // request. The explicit resync replays it durably below.
-                if kind == "delivery" || kind == "lifecycle" { continue }
-                guard kind == "ok",
-                      value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-sync" else {
+                // Incidental known projection frames remain in their own durable
+                // replay journal. This read cannot advance or ACK either cursor.
+                if ordinary || conversation { continue }
+                guard kind == "ok", value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref else {
                     throw InstallationTransportError.unexpectedServerFrame
                 }
                 accepted = true
+            } else if (event == "conversation" && ordinary) || (event == "delivery" && conversation) {
+                continue
             }
             try await consume(frame)
-            if kind == "resynced" { return }
+            if kind == end { return }
         }
     }
 
+    public func acknowledgeConversation(_ request: Data) async throws {
+        try await acknowledgeProjection(request, field: "conversation_seq", ref: "native-conversation-ack")
+    }
+
     public func acknowledge(_ request: Data) async throws {
+        try await acknowledgeProjection(request, field: "seq", ref: "native-ack")
+    }
+
+    private func acknowledgeProjection(_ request: Data, field: String, ref: String) async throws {
         let requestValue = try JSONValue.parse(request)
-        guard case let .number(expectedNumber)? = requestValue.uniqueValue(named: "seq"),
+        guard case let .number(expectedNumber)? = requestValue.uniqueValue(named: field),
               let expected = UInt64(expectedNumber.lexeme) else {
             throw InstallationTransportError.unexpectedServerFrame
         }
@@ -103,19 +122,19 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
         while true {
             let value = try JSONValue.parse(try await receive())
             switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
-            case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-ack":
-                guard case let .number(actualNumber)? = value.uniqueValue(named: "seq"),
+            case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref:
+                guard case let .number(actualNumber)? = value.uniqueValue(named: field),
                       UInt64(actualNumber.lexeme) == expected else {
                     throw InstallationTransportError.unexpectedServerFrame
                 }
                 return
             case "error":
-                if value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-ack",
+                if value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref,
                    value.uniqueValue(named: "reason")?.stringValue?.rawValue == "invalid_cursor" {
                     throw InstallationTransportError.acknowledgementBehind
                 }
                 throw InstallationTransportError.serverRejected
-            case "delivery", "lifecycle":
+            case "delivery", "lifecycle", "conversation":
                 // These remain on the server's replay journal until a future
                 // durable resync. They are never ACKed by this incidental read.
                 continue
@@ -150,7 +169,7 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
                 return .accepted(operationID: operationID, terminalSequence: sequence)
             case "error":
                 return .unresolved
-            case "delivery", "lifecycle":
+            case "delivery", "lifecycle", "conversation":
                 continue
             default:
                 close()
@@ -181,7 +200,7 @@ public actor URLSessionInstallationSession: AuthenticatedInstallationSession {
                         throw InstallationTransportError.unexpectedServerFrame
                     }
                     return
-                case "delivery", "lifecycle":
+                case "delivery", "lifecycle", "conversation":
                     continue
                 case "error":
                     throw InstallationTransportError.serverRejected

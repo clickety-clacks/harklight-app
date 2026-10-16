@@ -13,6 +13,11 @@ public protocol AuthenticatedInstallationSession: AnyObject, Sendable {
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult
 }
 
+public protocol AuthenticatedConversationSession: AuthenticatedInstallationSession {
+    func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws
+    func acknowledgeConversation(_ request: Data) async throws
+}
+
 public enum OriginalOperationResult: Equatable, Sendable {
     case accepted(operationID: UUID, terminalSequence: UInt64)
     case unresolved
@@ -38,6 +43,15 @@ public actor NativeRelayCore {
     private var active = true
     private var busy = false
     private var activeReplay: ReplayProgress?
+    private var conversationReplay: ConversationReplayProgress?
+    private var inspectedConversationMetadata = false
+
+    private struct ConversationReplayProgress {
+        var expected: UInt64
+        let durableCursor: UInt64
+        var accepted = false
+        var high: UInt64?
+    }
 
     private struct ReplayProgress {
         var expected: UInt64
@@ -73,8 +87,14 @@ public actor NativeRelayCore {
         busy = true
         defer { busy = false }
         try validate()
-        let before = try store.snapshot(context: context).cursor
+        let snapshot = try store.snapshot(context: context)
+        // An upgraded store can have ordinary delivery history predating the
+        // additive metadata. Replay enriches it without replacing drafts or cursor.
+        let enrich = session is any AuthenticatedConversationSession && !inspectedConversationMetadata &&
+            snapshot.conversationThreads.isEmpty && !snapshot.requests.isEmpty
+        let before = enrich ? 0 : snapshot.cursor
         var high = try await replayAndAcknowledge(since: before)
+        inspectedConversationMetadata = true
         let attempted = try await drainPending()
         if attempted > 0 {
             // The answer may have created a terminal event after the first
@@ -82,7 +102,58 @@ public actor NativeRelayCore {
             // an operation's receipt sequence cannot advance C's cursor.
             high = try await replayAndAcknowledge(since: store.snapshot(context: context).cursor)
         }
+        if try !store.conversationSnapshot(context: context).threads.isEmpty,
+           let conversationSession = session as? any AuthenticatedConversationSession {
+            try await replayConversationAndAcknowledge(using: conversationSession)
+        }
         return high
+    }
+
+    private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
+        let wire = try ConversationWire(profile: context)
+        var high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
+            using: transport, wire: wire)
+        do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
+        catch InstallationTransportError.acknowledgementBehind {
+            high = try await replayConversation(since: 0, using: transport, wire: wire)
+            try await transport.acknowledgeConversation(wire.acknowledge(high))
+        }
+    }
+
+    private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,
+                                    wire: ConversationWire) async throws -> UInt64 {
+        try validate()
+        conversationReplay = ConversationReplayProgress(expected: cursor,
+            durableCursor: try store.conversationSnapshot(context: context).cursor)
+        defer { conversationReplay = nil }
+        try await transport.openConversation(wire.open(since: cursor)) { frame in
+            try await self.consumeConversationReplay(frame)
+        }
+        try validate()
+        guard let high = conversationReplay?.high else { throw NativeRelayCoreError.invalidReplay }
+        return high
+    }
+
+    private func consumeConversationReplay(_ frame: Data) throws {
+        try validate()
+        guard var replay = conversationReplay, replay.high == nil else { throw NativeRelayCoreError.invalidReplay }
+        let wire = try ConversationWire(profile: context)
+        if !replay.accepted {
+            guard try wire.isOpenAccepted(frame) else { throw NativeRelayCoreError.invalidReplay }
+            replay.accepted = true
+        } else if let high = try? wire.decodeResynced(frame) {
+            guard high >= replay.durableCursor, high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
+            try store.finishConversationReplay(at: high, context: context)
+            replay.high = high
+        } else {
+            let event = try wire.decodeEvent(frame)
+            guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            _ = try store.applyConversation(event, context: context)
+            replay.expected = event.sequence
+        }
+        conversationReplay = replay
     }
 
     private func replayAndAcknowledge(since cursor: UInt64) async throws -> UInt64 {
