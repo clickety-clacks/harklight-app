@@ -307,6 +307,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
         try store.saveConversationDraft(draft, context: profileContext)
     }
 
+    public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws {
+        try validate(suppliedContext)
+        try store.appendFixtureDiscussion(binding, context: profileContext)
+    }
+
     public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws -> UUID {
         try validate(suppliedContext)
         return try store.prepareDiscussion(binding, context: profileContext)
@@ -528,7 +533,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),
                         session: snapshot.fixtureSessions[item.request.key],
                         remote: snapshot.remoteStates[item.request.key],
-                        submission: snapshot.intents.values.first(where: { $0.requestKey == item.request.key }),
+                        submission: snapshot.intents.values.first(where: {
+                            $0.requestKey == item.request.key &&
+                            $0.requestRevision == snapshot.conversationThreads[item.request.key]?.currentRevision
+                        }),
                         selector: selectors?[item.request.key])
         }
         return PresentationSnapshot(revision: snapshot.revision,
@@ -548,7 +556,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
-        case .some(.open):
+        case .some(.open) where remote?.isTerminal != true:
             status = .open
             receiptFacts = nil
         case .some(.pending(_)):
@@ -561,7 +569,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             receiptFacts = ReceiptPresentationFacts(evidenceLabel: terminal.evidenceLabel,
                                                     ownOutcome: terminal.ownOutcome,
                                                     originalOperationUncertainty: terminal.ownOutcome == .unconfirmed)
-        case .none:
+        case .some(.open), .none:
             if let terminal = remote?.state {
                 status = AppLifecycleStatus(rawValue: terminal.rawValue) ?? .open
                 let hasAcceptedIntent = submission.map { value in

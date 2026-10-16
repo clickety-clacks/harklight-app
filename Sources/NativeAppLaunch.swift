@@ -1,5 +1,6 @@
 import AttentionDomain
 import Foundation
+import CryptoKit
 import Observation
 import Security
 import UIKit
@@ -256,6 +257,8 @@ final class NativeAppLaunch {
 @MainActor
 @Observable
 final class LivePresentationStore {
+    private(set) var conversationThreads: [RequestKey: ConversationThread]
+    private(set) var conversationError: String?
     private(set) var presentation: PresentationSnapshot
     private(set) var selectedRequestKey: RequestKey?
     private(set) var observationError: String?
@@ -267,6 +270,7 @@ final class LivePresentationStore {
 
     @ObservationIgnored private let port: AttentionDomainPort
     private let permitsDelivery: Bool
+    @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private var observation: Task<Void, Never>?
 
     convenience init(store: AttentionDomainStore, context: ProfileContext) throws {
@@ -287,7 +291,75 @@ final class LivePresentationStore {
         let snapshot = try port.observe(context: port.context)
         self.port = port
         self.presentation = snapshot
+        self.conversationThreads = try port.conversations(context: port.context).threads
+        self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
+    }
+
+    var isLocalExample: Bool { !permitsDelivery }
+
+    func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
+
+    func conversationDraft(for key: RequestKey, revision: UInt64) -> ConversationDraft {
+        conversationThreads[key]?.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
+    }
+
+    func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
+                            files: [ConversationFile]? = nil) {
+        do {
+            var draft = conversationDraft(for: key, revision: revision)
+            if let text { draft.text = ExactText(text) }
+            if let files { draft.files = files }
+            draft.disposition = .saved
+            try port.saveConversationDraft(draft, context: port.context)
+            try refreshFromDurableStore()
+            conversationError = nil
+        } catch {
+            conversationError = "Your discussion edit could not be saved. Its earlier saved draft is retained."
+        }
+    }
+
+    func sendDiscussion(for key: RequestKey, revision: UInt64) {
+        do {
+            let binding = ConversationBinding(request: key, revision: revision)
+            if permitsDelivery {
+                // No operation is minted until this connection implements the agreed projection and submission wire.
+                conversationError = "Conversation delivery is not available on this connection. Your draft is saved."
+                return
+            }
+            try port.appendFixtureDiscussion(binding, context: port.context)
+            try refreshFromDurableStore()
+            conversationError = nil
+        } catch {
+            conversationError = "Not delivered: the discussion could not be submitted. Your draft is retained."
+        }
+    }
+
+    func addLocalAttachment(_ name: String, for key: RequestKey, revision: UInt64) {
+        guard !permitsDelivery else { return }
+        let bytes = Data(("Fictional local attachment: " + name).utf8)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let file = ConversationFile(id: ExactText(UUID().uuidString.lowercased()), name: ExactText(name),
+            byteCount: UInt64(bytes.count), sha256: ExactText(digest), content: .inline(bytes))
+        var files = conversationDraft(for: key, revision: revision).files
+        files.append(file)
+        updateConversation(for: key, revision: revision, files: files)
+    }
+
+    func importConversationFiles(_ urls: [URL], for key: RequestKey, revision: UInt64) async {
+        guard permitsDelivery, let conversationFiles else { return }
+        var files = conversationDraft(for: key, revision: revision).files
+        for url in urls {
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let file = try await Task.detached { try conversationFiles.retain(url) }.value
+                files.append(file)
+                updateConversation(for: key, revision: revision, files: files)
+            } catch {
+                conversationError = "\(url.lastPathComponent): the file could not be retained. Your text and other selected files remain saved."
+            }
+        }
     }
 
     var inboxRows: [InboxRequestRow] {
@@ -531,6 +603,8 @@ final class LivePresentationStore {
     }
 
     private func adopt(_ snapshot: PresentationSnapshot) {
+        do { conversationThreads = try port.conversations(context: port.context).threads }
+        catch { observationError = "The local conversation could not be refreshed." }
         presentation = snapshot
         if let key = actionErrorRequest,
            let current = snapshot.requests.first(where: { $0.key == key }),

@@ -120,11 +120,18 @@ struct LiveRequestDetail: View {
                 Button("Chat", systemImage: "bubble.left.and.bubble.right") { chatPresented = true }
                     .labelStyle(.iconOnly)
                     .popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                        ContentUnavailableView("Conversation is not available yet",
-                            systemImage: "bubble.left.and.bubble.right",
-                            description: Text("Your request and answer continue to use their existing delivery path."))
-                            .frame(idealWidth: 360, idealHeight: 300)
-                            .presentationCompactAdaptation(.sheet)
+                        NavigationStack {
+                            ConversationPanel(store: store, key: request.key,
+                                sender: request.key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                                .toolbar {
+                                    ToolbarItem(placement: .cancellationAction) {
+                                        Button("Close", systemImage: "xmark") { chatPresented = false }.labelStyle(.iconOnly)
+                                    }
+                                }
+                        }
+                        .frame(idealWidth: 380, idealHeight: 560)
+                        .presentationCompactAdaptation(.sheet)
+                        .presentationDetents([.medium, .large])
                     }
             }
         }

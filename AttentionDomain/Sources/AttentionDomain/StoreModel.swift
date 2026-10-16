@@ -106,6 +106,7 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
 }
 
 public struct Submission: Equatable, Codable, Sendable {
+    public let requestRevision: UInt64?
     public let requestKey: RequestKey
     public let answer: JSONValue
     public let intentID: UUID
@@ -132,7 +133,9 @@ public struct Submission: Equatable, Codable, Sendable {
                 opaqueSubmissionID: ExactText = ExactText(""),
                 descriptorFingerprint: String,
                 contentFingerprint: String,
-                disposition: IntentDisposition = .pending) {
+                disposition: IntentDisposition = .pending,
+                requestRevision: UInt64? = nil) {
+        self.requestRevision = requestRevision
         self.requestKey = requestKey
         self.answer = answer
         self.intentID = intentID
@@ -298,6 +301,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let outbox: [Submission]
     public let remoteStates: [RequestKey: RemoteRequestState]
     public let fixtureSessions: [RequestKey: RequestSession]
+    public let conversationThreads: [RequestKey: ConversationThread]
     public let cursor: UInt64
     public let replayBarrier: UInt64?
     public let repairIssues: [StoreRepairIssue]
@@ -311,7 +315,9 @@ public struct AttentionStoreSnapshot: Sendable {
                 revision: UInt64,
                 cursor: UInt64,
                 replayBarrier: UInt64?,
-                repairIssues: [StoreRepairIssue]) {
+                repairIssues: [StoreRepairIssue],
+                conversationThreads: [RequestKey: ConversationThread] = [:]) {
+        self.conversationThreads = conversationThreads
         self.requests = requests
         self.drafts = drafts
         self.intents = intents

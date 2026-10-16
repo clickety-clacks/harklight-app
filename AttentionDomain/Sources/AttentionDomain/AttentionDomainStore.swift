@@ -248,10 +248,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(requestKey, in: context.identity)
-        guard let request = state.requests[requestKey] else { throw AttentionStoreError.requestMissing }
+        guard let request = effectiveRequest(for: requestKey) else { throw AttentionStoreError.requestMissing }
         let id = UUID()
         let submissionID = UUID()
-        selectorBindings[id] = SelectorBinding(requestKey: requestKey,
+        selectorBindings[id] = SelectorBinding(requestRevision: state.conversation?.threads[requestKey]?.currentRevision,
+                                               requestKey: requestKey,
                                                profileGeneration: context.generation,
                                                descriptorFingerprint: fingerprint(request.answerDescription?.canonicalJSON ?? ""),
                                                submissionFingerprint: fingerprint(submissionSignature(for: request.interface)),
@@ -312,14 +313,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let answer = try compose(typedSubmission, draft: draft, for: request)
         let descriptorFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
         let normalizedInputs = normalizedSubmission(typedSubmission, interface: request.interface)
-        let contentFingerprint = fingerprint([
+        var fingerprintParts = [
             request.key.accountScope.rawValue,
             request.key.senderID.rawValue,
             request.key.messageID.rawValue,
             descriptorFingerprint,
             normalizedInputs.canonicalJSON,
             answer.canonicalJSON
-        ].joined(separator: "\u{0}"))
+        ]
+        if let revision = state.conversation?.threads[request.key]?.currentRevision {
+            fingerprintParts += ["request_revision", String(revision)]
+        }
+        let contentFingerprint = fingerprint(fingerprintParts.joined(separator: "\u{0}"))
 
         if let existing = state.intents[intentID] {
             guard existing.requestKey == request.key,
@@ -343,7 +348,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
 
         let operationID = UUID()
-        let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID)
+        let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID,
+                                             requestRevision: state.conversation?.threads[request.key]?.currentRevision)
         let frame = Data((operation.jsonString + "\n").utf8)
         guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
         let submission = Submission(requestKey: request.key,
@@ -355,7 +361,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    opaqueDocumentID: selector.opaqueDocumentID,
                                    opaqueSubmissionID: selector.opaqueSubmissionID,
                                    descriptorFingerprint: descriptorFingerprint,
-                                   contentFingerprint: contentFingerprint)
+                                   contentFingerprint: contentFingerprint,
+                                   requestRevision: state.conversation?.threads[request.key]?.currentRevision)
 
         var next = state
         next.drafts[request.key] = draft
@@ -725,7 +732,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        let publishedRequests = state.replayPublishedRequests ?? state.requests
+        let publishedRequests = (state.replayPublishedRequests ?? state.requests).mapValues { original in
+            effectiveRequest(for: original.key) ?? original
+        }
         let visibleKeys = Set(publishedRequests.keys)
         let visibleDrafts = state.drafts.filter { visibleKeys.contains($0.key) }
         let visibleSessions = state.fixtureSessions.filter { visibleKeys.contains($0.key) }
@@ -739,7 +748,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       revision: state.revision,
                                       cursor: state.cursor,
                                       replayBarrier: state.replayBarrier,
-                                      repairIssues: state.repairIssues)
+                                      repairIssues: state.repairIssues,
+                                      conversationThreads: state.conversation?.threads ?? [:])
     }
 
     public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
@@ -763,6 +773,36 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var conversation = next.conversation ?? ConversationState()
         try conversation.apply(event)
         if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
+        let key = event.binding.request
+        if case .request = event.fact, let previous = state.conversation?.threads[key],
+           let current = conversation.threads[key], current.currentRevision != previous.currentRevision,
+           let payload = current.revisions[current.currentRevision] {
+            var archived = previous.answerDrafts ?? [:]
+            if let draft = state.drafts[key] { archived[previous.currentRevision] = draft }
+            conversation.threads[key]?.answerDrafts = archived
+            let fresh = RequestDraft(interface: StoredRequest(key: key, originalPayload: payload).interface)
+            next.drafts[key] = fresh
+            if var fixture = next.fixtureSessions[key], case .open = fixture.lifecycle {
+                fixture.draft = fresh
+                next.fixtureSessions[key] = fixture
+            }
+            if let id = next.intentByRequest[key], var intent = next.intents[id] {
+                if case .accepted = intent.disposition { throw ConversationError.conflict }
+                // An authoritative newer open question proves an earlier final answer did not close it.
+                intent.disposition = .lost
+                next.intents[id] = intent
+                next.intentByRequest.removeValue(forKey: key)
+                next.outboxOrder.removeAll { $0 == id }
+            }
+        }
+        if case let .terminal(_, _, terminal) = event.fact {
+            let previous = next.remoteStates[key] ?? RemoteRequestState()
+            guard previous.state == nil || previous.state == terminal else { throw ConversationError.conflict }
+            next.remoteStates[key] = RemoteRequestState(state: terminal,
+                authorizedOriginAnswer: previous.authorizedOriginAnswer, classification: previous.classification,
+                eventSequence: previous.eventSequence)
+            next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
+        }
         next.conversation = conversation
         try commit(next)
         return conversation.cursor
@@ -796,6 +836,26 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try validateConversationFiles(draft.files)
         thread.drafts[draft.binding.revision] = draft
         conversation.threads[draft.binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, let thread = conversation.threads[binding.request],
+              let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        guard thread.terminal == nil else { throw ConversationError.closed }
+        guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
+            throw ConversationError.emptyDraft
+        }
+        let turn = ConversationTurn(id: ExactText(UUID().uuidString.lowercased()), binding: binding,
+            author: .person, sessionHandle: thread.sessionHandle, text: draft.text, files: draft.files)
+        try conversation.apply(ConversationEvent(sequence: conversation.cursor + 1, binding: binding, fact: .turn(turn)))
+        conversation.threads[binding.request]?.drafts.removeValue(forKey: binding.revision)
         next.conversation = conversation
         try commit(next)
     }
@@ -899,16 +959,25 @@ public final class AttentionDomainStore: @unchecked Sendable {
               let binding = selectorBindings[id],
               binding.profileGeneration == context.generation,
               binding.requestKey == selector.request,
+              binding.requestRevision == state.conversation?.threads[selector.request]?.currentRevision,
               binding.opaqueSubmissionID == selector.opaqueSubmissionID else {
             throw AttentionStoreError.selectorExpired
         }
-        guard let request = state.requests[selector.request] else { throw AttentionStoreError.requestMissing }
+        guard let request = effectiveRequest(for: selector.request) else { throw AttentionStoreError.requestMissing }
         let currentFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
         guard currentFingerprint == binding.descriptorFingerprint,
               fingerprint(submissionSignature(for: request.interface)) == binding.submissionFingerprint else {
             throw AttentionStoreError.selectorExpired
         }
         return request
+    }
+
+    private func effectiveRequest(for key: RequestKey) -> StoredRequest? {
+        guard let original = state.requests[key] else { return nil }
+        guard let thread = state.conversation?.threads[key],
+              let payload = thread.revisions[thread.currentRevision] else { return original }
+        let current = StoredRequest(key: key, originalPayload: payload)
+        return original.acceptanceOrder.map { current.assigningAcceptanceOrder($0) } ?? current
     }
 
     private func validate(_ suppliedContext: ProfileContext) throws {
@@ -1113,15 +1182,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
     }
 
-    private func relayAnswerOperation(request: StoredRequest, answer: JSONValue, operationID: UUID) -> JSONValue {
-        .object([
+    private func relayAnswerOperation(request: StoredRequest, answer: JSONValue, operationID: UUID, requestRevision: UInt64?) -> JSONValue {
+        var members = [
             JSONMember("v", .number(JSONNumber(lexeme: "1"))),
             JSONMember("type", .string(ExactText("answer"))),
             JSONMember("op_id", .string(ExactText(operationID.uuidString.lowercased()))),
             JSONMember("sender_id", .string(request.key.senderID)),
             JSONMember("message_id", .string(request.key.messageID)),
             JSONMember("answer", answer)
-        ])
+        ]
+        if let requestRevision { members.append(JSONMember("request_revision", .number(JSONNumber(lexeme: String(requestRevision))))) }
+        return .object(members)
     }
 
     private func fingerprint(_ value: String) -> String {
@@ -1167,6 +1238,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
 }
 
 private struct SelectorBinding {
+    let requestRevision: UInt64?
     let requestKey: RequestKey
     let profileGeneration: UUID
     let descriptorFingerprint: String

@@ -19,6 +19,36 @@ final class SampleFixtureDomain {
 
     func populate() throws {
         try domain.registerFixtureRequests(try SampleCatalog.messages.map { try record($0) }, context: context)
+        let requests = try domain.snapshot(context: context).requests
+        let existing = try domain.conversationSnapshot(context: context)
+        var sequence = existing.cursor
+        for message in SampleCatalog.messages where existing.threads[key(for: message)] == nil {
+            let key = key(for: message)
+            let binding = ConversationBinding(request: key, revision: 1)
+            let handle = ExactText("local-session-" + message.id)
+            func apply(_ fact: ConversationEvent.Fact) throws {
+                sequence += 1
+                try domain.applyConversation(ConversationEvent(sequence: sequence, binding: binding, fact: fact), context: context)
+            }
+            guard let request = requests[key] else { throw ConversationError.missingRequest }
+            try apply(.request(sessionHandle: handle, payload: request.originalPayload))
+            let availability: ConversationAvailability = message.id.hasSuffix("-1")
+                ? .unsupported(reason: ExactText("Fictional route without a listener"))
+                : message.id.hasSuffix("-2") ? .notListening(lastDetachedAt: nil) : .listening
+            try apply(.availability(sessionHandle: handle, availability))
+            if message.hasChat {
+                let person = ConversationTurn(id: ExactText(message.id + "-question"), binding: binding,
+                    author: .person, sessionHandle: handle, text: ExactText("Could you explain the tradeoff?"))
+                let reply = ConversationTurn(id: ExactText(message.id + "-reply"), binding: binding,
+                    author: .origin, sessionHandle: handle,
+                    text: ExactText("The first option favors speed; the second leaves more room to revise. This is an example conversation."),
+                    inReplyTo: person.id)
+                try apply(.turn(person))
+                try apply(.delivered(turn: person.id))
+                try apply(.turn(reply))
+                try apply(.acted(turn: person.id, by: reply.id))
+            }
+        }
         try viewModel.refreshFromDurableStore()
     }
 

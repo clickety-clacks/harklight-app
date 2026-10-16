@@ -146,6 +146,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var turns: [ConversationTurn] = []
     public var facts: [ExactText: ConversationTurnFacts] = [:]
     public var drafts: [UInt64: ConversationDraft] = [:]
+    public var answerDrafts: [UInt64: RequestDraft]?
     public var availability: ConversationAvailability = .unsupported(reason: ExactText("No listening support recorded"))
     public var terminal: TerminalState?
     public var terminalTurn: ExactText?
