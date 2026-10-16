@@ -137,6 +137,41 @@ final class SampleWorkspaceUITests: XCTestCase {
         add(attachment)
     }
 
+    func testComposerControlsFitSingleLineInput() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let search = app.searchFields.firstMatch
+        search.tap(); search.typeText("Thursday\n")
+        app.buttons["sample-information-0"].tap()
+        app.buttons["Chat"].tap()
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let surface = app.otherElements["sample-chat-input-surface"]
+        XCTAssertTrue(surface.exists, app.debugDescription)
+        let add = app.buttons["Add sample attachment"]
+        let send = app.buttons["Send locally"]
+        for button in [add, send] {
+            XCTAssertLessThanOrEqual(button.frame.height, surface.frame.height + 1,
+                                     "The complete circular control must fit the one-line input height")
+        }
+        print("COMPOSER_FRAMES input=\(surface.frame) add=\(add.frame) send=\(send.frame)")
+        capture("composer-glass-single-line", app)
+        add.tap()
+        let photo = app.buttons["Sample photo"]
+        XCTAssertTrue(photo.waitForExistence(timeout: 5))
+        XCTAssertTrue(photo.isHittable)
+        photo.tap()
+        composer.tap(); composer.typeText("A local note with a sample photo.")
+        XCTAssertTrue(send.isHittable, "The keyboard must leave the send control usable")
+        capture("composer-glass-attachment-keyboard", app)
+        send.tap()
+        XCTAssertTrue(app.staticTexts["A local note with a sample photo."].waitForExistence(timeout: 5))
+        capture("composer-glass-local-result", app)
+    }
+
     func testCorrectedInboxDuoOrientations() {
         let orientations: [(String, UIDeviceOrientation)] = [
             ("portrait", .portrait), ("landscape-left", .landscapeLeft),

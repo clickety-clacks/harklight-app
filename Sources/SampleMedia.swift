@@ -214,9 +214,10 @@ struct SampleChatComposer: View {
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
             Button { attachmentChoices = true } label: {
-                Image(systemName: "plus").frame(width: 44, height: 44)
+                Image(systemName: "plus")
             }
-            .buttonStyle(.glass).accessibilityLabel("Add sample attachment")
+            .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
+            .accessibilityLabel("Add sample attachment")
             .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
                 Button("Sample photo") { addAttachment("Photo") }
                 Button("Sample file") { addAttachment("Document") }
@@ -242,11 +243,14 @@ struct SampleChatComposer: View {
                 TextField("Write a message…", text: $response.chatDraft, axis: .vertical)
                     .lineLimit(1...5).accessibilityIdentifier("sample-chat-composer")
             }
-            .padding(12).background(.background, in: RoundedRectangle(cornerRadius: 20))
+            .padding(12)
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("sample-chat-input-surface")
             Button { response.sendLocalChat() } label: {
-                Image(systemName: "arrow.up").font(.headline).frame(width: 44, height: 44)
+                Image(systemName: "arrow.up").font(.headline)
             }
-            .buttonStyle(.glassProminent).buttonBorderShape(.circle)
+            .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
             .accessibilityLabel("Send locally")
             .disabled(response.chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && response.attachments.isEmpty)
         }
