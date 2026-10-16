@@ -65,7 +65,16 @@ final class NativeGuidedTLSTests: XCTestCase {
             statusSecret: String(repeating: "a", count: 64),
             expiresAt: 2_000,
             statusExpiresAt: 3_000,
-            personID: "same-person")
+            personID: "same-person",
+            pushBinding: NativePushBinding(
+                address: "push-address",
+                operationID: UUID(uuidString: "8D5441E6-1942-47B3-A872-6D9F070BA131")!,
+                revision: 7,
+                accepted: false),
+            serverDisplayName: "Original server",
+            accountDisplayName: "Original account",
+            notificationExplanationSeen: true,
+            foregroundRelayConfirmed: true)
         let enrollment = NativeEnrollmentStore(service: namespace)
         try enrollment.retainApprovedGuided(original, expectedPersonID: "same-person",
                                            expectedDeviceID: identity.deviceID)
@@ -92,12 +101,23 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertThrowsError(try NativeEndpointMigrationPolicy.candidate(
             from: wrongAuthority, acceptedRootSHA256: NativeEndpointMigrationPolicy.rootSHA256(original.trustedRootDER)))
         let fixtureFingerprint = NativeEndpointMigrationPolicy.rootSHA256(original.trustedRootDER)
+        var wrongPorts = original
+        wrongPorts.relayPort += 1
+        XCTAssertThrowsError(try NativeEndpointMigrationPolicy.candidate(
+            from: wrongPorts, acceptedRootSHA256: fixtureFingerprint))
         let migrated = try NativeEndpointMigrationPolicy.candidate(from: original,
                                                                     acceptedRootSHA256: fixtureFingerprint)
         XCTAssertEqual(migrated.host, NativeEndpointMigrationPolicy.gibsonHost)
-        XCTAssertEqual(migrated.enrollmentPort, NativeEndpointMigrationPolicy.gibsonEnrollmentPort)
-        XCTAssertEqual(migrated.relayPort, NativeEndpointMigrationPolicy.gibsonRelayPort)
+        XCTAssertEqual(migrated.enrollmentPort, original.enrollmentPort,
+                       "Migration retains the enrolled port tuple")
+        XCTAssertEqual(migrated.relayPort, original.relayPort,
+                       "Migration retains the enrolled port tuple")
         XCTAssertEqual(migrated.profileAuthority, NativeEndpointMigrationPolicy.sourceHost)
+        var expectedMigration = original
+        expectedMigration.host = NativeEndpointMigrationPolicy.gibsonHost
+        expectedMigration.localProfileAuthority = NativeEndpointMigrationPolicy.sourceHost
+        XCTAssertEqual(migrated, expectedMigration,
+                       "Only the transport hostname and explicit stable profile authority change")
         XCTAssertEqual(migrated.personID, original.personID)
         XCTAssertEqual(migrated.deviceID, original.deviceID)
         XCTAssertEqual(migrated.identityLabel, original.identityLabel)

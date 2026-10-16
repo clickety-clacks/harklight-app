@@ -3,7 +3,8 @@ import CryptoKit
 import Foundation
 
 /// The one same-identity endpoint alias approved for the existing native app.
-/// The stable profile authority remains unchanged; only the TLS hostname moves.
+/// The stable profile authority and saved ports remain unchanged; only the TLS
+/// hostname moves for the existing supported Racter enrollment.
 public enum HarklightDirectEndpointMigration {
     public static let profileAuthority = "racter.tail4105e8.ts.net"
     public static let endpointHost = "gibson.tail4105e8.ts.net"

@@ -103,14 +103,14 @@ enum NativeEndpointMigrationPolicy {
         guard record.isApproved,
               record.host == sourceHost,
               record.localProfileAuthority == nil || record.localProfileAuthority == sourceHost,
+              record.enrollmentPort == gibsonEnrollmentPort,
+              record.relayPort == gibsonRelayPort,
               rootHash == acceptedRootSHA256 else {
             throw NativeEnrollmentError.endpointMigrationNotAllowed
         }
         var migrated = record
         migrated.localProfileAuthority = record.profileAuthority
         migrated.host = gibsonHost
-        migrated.enrollmentPort = gibsonEnrollmentPort
-        migrated.relayPort = gibsonRelayPort
         return migrated
     }
 }
