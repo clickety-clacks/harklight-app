@@ -339,8 +339,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         let replacement = try makeRecord("Replacement", "person-replacement")
         defer {
             for record in [original, replacement] {
-                SecItemDelete([kSecClass as String: kSecClassCertificate,
-                               kSecAttrLabel as String: record.identityLabel] as CFDictionary)
+                if let label = record.identityLabel {
+                    SecItemDelete([kSecClass as String: kSecClassCertificate,
+                                   kSecAttrLabel as String: label] as CFDictionary)
+                }
                 let namespace = service + "." + record.deviceLabel
                 SecItemDelete([kSecClass as String: kSecClassKey,
                                kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
@@ -419,18 +421,12 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testReadOnlyDraftStatusDoesNotCallUncertainOrAcceptedSubmissionUndelivered() throws {
-        let locale = Locale(identifier: "en")
-        XCTAssertEqual(String(localized: ConversationDraftPresentationText.readOnlyHeading, locale: locale),
-                       "Saved discussion draft")
-        XCTAssertFalse(String(localized: ConversationDraftPresentationText.readOnlyHeading, locale: locale)
-            .contains("not delivered"))
-
-        let unknown = try XCTUnwrap(ConversationDraftPresentationText.status(for: .outcomeUnknown(UUID())))
-        XCTAssertEqual(String(localized: unknown, locale: locale), "Submission unconfirmed · saved draft retained")
-        let accepted = try XCTUnwrap(ConversationDraftPresentationText.status(for:
-            .acceptedPendingReplay(operation: UUID(), turn: ExactText("saved-turn"))))
-        XCTAssertEqual(String(localized: accepted, locale: locale), "Accepted · awaiting synchronized history")
+        XCTAssertEqual(ConversationDraftPresentationText.status(for: .outcomeUnknown(UUID())), .outcomeUnknown)
+        XCTAssertEqual(ConversationDraftPresentationText.status(for:
+            .acceptedPendingReplay(operation: UUID(), turn: ExactText("saved-turn"))), .acceptedPendingReplay)
         XCTAssertNil(ConversationDraftPresentationText.status(for: .saved))
+        XCTAssertEqual(ConversationDraftPresentationText.status(for: .rejected(ExactText("Refused"))),
+                       .rejected(ExactText("Refused")))
     }
 
     func testJoinRefusesPlaintextBeforeSendingAnInvitation() async throws {

@@ -153,13 +153,20 @@ private struct ReadOnlyConversationDraftView: View {
 enum ConversationDraftPresentationText {
     static let readOnlyHeading: LocalizedStringResource = "Saved discussion draft"
 
-    static func status(for disposition: ConversationDraft.Disposition) -> LocalizedStringResource? {
+    enum Status: Equatable {
+        case submitting
+        case outcomeUnknown
+        case acceptedPendingReplay
+        case rejected(ExactText)
+    }
+
+    static func status(for disposition: ConversationDraft.Disposition) -> Status? {
         switch disposition {
         case .saved: nil
-        case .submitting: "Submitting · saved draft retained"
-        case .outcomeUnknown: "Submission unconfirmed · saved draft retained"
-        case .acceptedPendingReplay: "Accepted · awaiting synchronized history"
-        case .rejected: nil
+        case .submitting: .submitting
+        case .outcomeUnknown: .outcomeUnknown
+        case .acceptedPendingReplay: .acceptedPendingReplay
+        case let .rejected(reason): .rejected(reason)
         }
     }
 }
@@ -314,9 +321,16 @@ private struct ConversationDraftStatus: View {
     let disposition: ConversationDraft.Disposition
     @ViewBuilder var body: some View {
         if let status = ConversationDraftPresentationText.status(for: disposition) {
-            Text(status).font(.caption).foregroundStyle(.secondary)
-        } else if case let .rejected(reason) = disposition {
-            Text(reason.rawValue).font(.caption).foregroundStyle(.secondary)
+            switch status {
+            case .submitting:
+                Text("Submitting · saved draft retained").font(.caption).foregroundStyle(.secondary)
+            case .outcomeUnknown:
+                Text("Submission unconfirmed · saved draft retained").font(.caption).foregroundStyle(.secondary)
+            case .acceptedPendingReplay:
+                Text("Accepted · awaiting synchronized history").font(.caption).foregroundStyle(.secondary)
+            case let .rejected(reason):
+                Text(reason.rawValue).font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }
