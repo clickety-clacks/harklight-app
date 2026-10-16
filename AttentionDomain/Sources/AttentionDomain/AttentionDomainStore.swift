@@ -1371,7 +1371,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
             RelayConversationMetadata(revision: old.revision, sessionHandle: old.sessionHandle,
                 eventID: old.eventID, availability: old.availability, listeningSupport: old.listeningSupport,
                 author: old.author,
-                files: try old.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
+                files: try old.files.map { files in
+                    try files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
+                },
                 terminalReason: old.terminalReason)
         }
         return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata)
