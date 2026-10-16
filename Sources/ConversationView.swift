@@ -128,7 +128,7 @@ private struct ReadOnlyConversationDraftView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Saved discussion draft · not delivered", systemImage: "lock")
+            Label(ConversationDraftPresentationText.readOnlyHeading, systemImage: "lock")
                 .font(.caption).foregroundStyle(.secondary)
             if !draft.text.rawValue.isEmpty {
                 Text(draft.text.rawValue)
@@ -147,6 +147,20 @@ private struct ReadOnlyConversationDraftView: View {
         }
         .padding(.horizontal)
         .accessibilityIdentifier("read-only-conversation-draft")
+    }
+}
+
+enum ConversationDraftPresentationText {
+    static let readOnlyHeading: LocalizedStringResource = "Saved discussion draft"
+
+    static func status(for disposition: ConversationDraft.Disposition) -> LocalizedStringResource? {
+        switch disposition {
+        case .saved: nil
+        case .submitting: "Submitting · saved draft retained"
+        case .outcomeUnknown: "Submission unconfirmed · saved draft retained"
+        case .acceptedPendingReplay: "Accepted · awaiting synchronized history"
+        case .rejected: nil
+        }
     }
 }
 
@@ -298,13 +312,11 @@ private struct ConversationUploadCleanupStatus: View {
 
 private struct ConversationDraftStatus: View {
     let disposition: ConversationDraft.Disposition
-    var body: some View {
-        switch disposition {
-        case .saved: EmptyView()
-        case .submitting: Text("Submitting · saved draft retained").font(.caption)
-        case .outcomeUnknown: Text("Submission unconfirmed · saved draft retained").font(.caption)
-        case .acceptedPendingReplay: Text("Accepted · awaiting synchronized history").font(.caption)
-        case let .rejected(reason): Text(reason.rawValue).font(.caption).foregroundStyle(.secondary)
+    @ViewBuilder var body: some View {
+        if let status = ConversationDraftPresentationText.status(for: disposition) {
+            Text(status).font(.caption).foregroundStyle(.secondary)
+        } else if case let .rejected(reason) = disposition {
+            Text(reason.rawValue).font(.caption).foregroundStyle(.secondary)
         }
     }
 }

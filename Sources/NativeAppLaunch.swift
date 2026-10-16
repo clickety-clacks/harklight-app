@@ -46,22 +46,32 @@ final class NativeAppLaunch {
     private(set) var isEndpointMigrationBusy = false
     let guidedJoin: NativeGuidedJoinCoordinator
 
-    @ObservationIgnored private let enrollment = NativeEnrollmentStore()
+    @ObservationIgnored private let enrollment: NativeEnrollmentStore
     @ObservationIgnored private let guidedJoinStore: NativeGuidedJoinStore
     @ObservationIgnored private let notifications = NativeNotificationPermission.system
     @ObservationIgnored private var didRestore = false
     @ObservationIgnored private var activationGeneration = UUID()
 
-    init(arguments: [String] = ProcessInfo.processInfo.arguments) {
+    init(arguments: [String] = ProcessInfo.processInfo.arguments,
+         enrollmentStore: NativeEnrollmentStore? = nil,
+         joinStore suppliedJoinStore: NativeGuidedJoinStore? = nil,
+         initialState: State? = nil,
+         initialEnrollmentRecord: NativeEnrollmentRecord? = nil,
+         initialArchivedDepartures: [NativeAccountDeparture] = []) {
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
-        let joinStore = NativeGuidedJoinStore()
+        enrollment = enrollmentStore ?? NativeEnrollmentStore()
+        let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
         guidedJoinStore = joinStore
+        activeEnrollmentRecord = initialEnrollmentRecord
+        archivedAccountDepartures = initialArchivedDepartures
         let savedDeparture = fixture ? nil : (try? joinStore.departure())
         let standaloneDeparture = savedDeparture.flatMap { $0.replacement == nil ? $0 : nil }
         guidedJoin = NativeGuidedJoinCoordinator(store: joinStore,
                                                  deviceName: UIDevice.current.name,
                                                  isShowing: !fixture && standaloneDeparture == nil)
-        if fixture {
+        if let initialState {
+            state = initialState
+        } else if fixture {
             state = .fixture(PrototypeStore.loadFromBundle())
         } else if let standaloneDeparture {
             state = .disconnected(nil)
@@ -95,6 +105,10 @@ final class NativeAppLaunch {
             self.state = .enrollmentRequired
             self.activeEnrollmentRecord = nil
             await NativeRelayLifecycle.shared.deactivate()
+            // Replacement removal commits the old account into the archive
+            // catalog before this callback. Refresh now so Settings can expose
+            // it in this process without waiting for another launch.
+            self.refreshArchivedAccounts()
         }
     }
 
@@ -333,7 +347,7 @@ final class NativeAppLaunch {
     }
 
     func showCurrentAccount() {
-        guard canOpenDisconnectedArchive else { return }
+        guard activeEnrollmentRecord != nil else { return }
         selectedArchivedAccount = nil
         selectedArchivedPresentation = nil
         isShowingDisconnectedArchive = false
