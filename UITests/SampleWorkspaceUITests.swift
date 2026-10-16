@@ -239,7 +239,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep the original mixed-result note.")
-        XCTAssertTrue(app.staticTexts["Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend."].exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label == %@",
+            "Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend.")).firstMatch.exists)
         XCTAssertTrue(app.staticTexts["Unidentified example.txt"].exists)
         XCTAssertTrue(app.staticTexts["Not ready · reselect after cleanup"].exists)
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
