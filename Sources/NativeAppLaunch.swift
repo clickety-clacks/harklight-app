@@ -344,6 +344,16 @@ final class LivePresentationStore {
     func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
                             files: [ConversationFile]? = nil) {
         do {
+            if let text, files == nil {
+                guard var thread = conversationThreads[key] else { throw ConversationError.missingRequest }
+                let binding = ConversationBinding(request: key, revision: revision)
+                let updated = try port.updateConversationDraftText(ExactText(text), for: binding,
+                    context: port.context)
+                thread.drafts[revision] = updated
+                conversationThreads[key] = thread
+                conversationError = nil
+                return
+            }
             var draft = conversationDraft(for: key, revision: revision)
             if let text { draft.text = ExactText(text) }
             if let files { draft.files = files }

@@ -978,6 +978,37 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try commit(next)
     }
 
+    /// Updates only the text of an existing draft. Its files were normalized
+    /// when they entered the store, so editing text must not walk them again.
+    @discardableResult
+    public func updateConversationDraftText(_ text: ExactText, for binding: ConversationBinding,
+                                           context suppliedContext: ProfileContext) throws -> ConversationDraft {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(binding.request, in: context.identity)
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
+        guard thread.terminal == nil else { throw ConversationError.closed }
+        var draft = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
+        guard draft.binding == binding else { throw ConversationError.invalidBinding }
+        switch draft.disposition {
+        case .submitting, .outcomeUnknown, .acceptedPendingReplay:
+            throw ConversationError.pendingSubmission
+        case .saved, .rejected:
+            break
+        }
+        draft.text = text
+        draft.disposition = .saved
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return draft
+    }
+
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -1005,6 +1036,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        let file = try Self.externalizingConversationFiles(in: file,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
               thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
@@ -1293,9 +1327,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     private func commit(_ proposed: PersistedAttentionState) throws {
-        var next = try Self.externalizingConversationFiles(in: proposed,
-            using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        // File payloads are normalized when events and drafts enter the state,
+        // and loaded state is normalized during initialization. Rewalking every
+        // retained conversation value here makes an unrelated text edit grow
+        // with conversation history.
+        var next = proposed
         next.revision = state.revision &+ 1
         do {
             let encoder = PropertyListEncoder()

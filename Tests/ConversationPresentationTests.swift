@@ -5,7 +5,7 @@ import XCTest
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
-    func testInlineTurnAndDraftBytesStayBehindAccountFileReferencesAcrossComposerWrites() throws {
+    func testInlineTurnAndDraftBytesStayBehindReferencesAcrossTextOnlyComposerWrites() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -32,8 +32,15 @@ final class ConversationPresentationTests: XCTestCase {
         let saved = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[request]?.drafts[1])
         let savedFile = try XCTUnwrap(saved.files.first)
         guard case .localFile = savedFile.content else { return XCTFail("Inline bytes must become an account-owned file reference.") }
-        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("After composer edit"), files: saved.files),
-            context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        model.updateConversation(for: request, revision: 1, text: "After composer edit")
+        XCTAssertNil(model.conversationError)
+        let firstEdit = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[request]?.drafts[1])
+        XCTAssertEqual(firstEdit.files, saved.files, "A text-only edit preserves the original file identity and reference.")
+        model.updateConversation(for: request, revision: 1, text: "After the next keystroke")
+        XCTAssertNil(model.conversationError)
+        let secondEdit = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[request]?.drafts[1])
+        XCTAssertEqual(secondEdit.files, saved.files, "Later text edits keep the same normalized file references.")
 
         let persisted = try XCTUnwrap(persistence.load(identity: identity))
         XCTAssertLessThan(persisted.count, bytes.count / 2, "Whole-state persistence must contain references, not copied inline payloads.")
@@ -50,7 +57,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(thread.turns.first?.binding, binding)
         XCTAssertEqual(thread.turns.first?.files.first?.id, inline.id)
         XCTAssertEqual(thread.turns.first?.files.first?.content, savedFile.content)
-        XCTAssertEqual(thread.drafts[1]?.text, ExactText("After composer edit"))
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("After the next keystroke"))
         XCTAssertEqual(thread.drafts[1]?.files.first?.content, savedFile.content)
         try restored.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn)), context: context)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 2,

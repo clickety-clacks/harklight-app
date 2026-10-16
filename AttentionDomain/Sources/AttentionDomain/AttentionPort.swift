@@ -317,6 +317,13 @@ public final class AttentionDomainPort: @unchecked Sendable {
         try store.saveConversationDraft(draft, context: profileContext)
     }
 
+    @discardableResult
+    public func updateConversationDraftText(_ text: ExactText, for binding: ConversationBinding,
+                                            context suppliedContext: PortContext) throws -> ConversationDraft {
+        try validate(suppliedContext)
+        return try store.updateConversationDraftText(text, for: binding, context: profileContext)
+    }
+
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws {
         try validate(suppliedContext)
         try store.appendFixtureDiscussion(binding, context: profileContext)
