@@ -49,6 +49,13 @@ final class SampleFixtureDomain {
                 try apply(.delivered(turn: person.id))
                 try apply(.turn(reply))
                 try apply(.acted(turn: person.id, by: reply.id))
+                if message.id == "sample-information-0" {
+                    let agentReply = ConversationTurn(id: ExactText(message.id + "-agent-answer"), binding: binding,
+                        author: .agent, sessionHandle: handle,
+                        text: ExactText("Agent example: the shorter path is faster, while the longer path is easier to revise."),
+                        inReplyTo: reply.id, kind: .reply)
+                    try apply(.turn(agentReply))
+                }
             }
             if message.id == "sample-approval-2" {
                 var answer = RequestDraft(interface: request.interface)

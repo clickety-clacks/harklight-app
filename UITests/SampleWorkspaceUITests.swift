@@ -189,7 +189,11 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(composers.count, 1)
         XCTAssertTrue(app.staticTexts["Could you explain the tradeoff?"].exists,
                       "Ordinary request chat must project its domain history")
+        XCTAssertTrue(app.staticTexts["Agent"].waitForExistence(timeout: 5),
+                      "An agent-authored answer must keep its distinct author in the ordinary conversation view")
+        XCTAssertTrue(app.staticTexts["Agent example: the shorter path is faster, while the longer path is easier to revise."].exists)
         XCTAssertTrue(app.buttons["Add sample attachment"].isHittable)
+        capture("ordinary-conversation-agent-answer", app)
         capture("ordinary-conversation-portrait", app)
         XCUIDevice.shared.orientation = .landscapeLeft
         let singleComposer = expectation(for: NSPredicate(format: "count == 1"), evaluatedWith: composers)
