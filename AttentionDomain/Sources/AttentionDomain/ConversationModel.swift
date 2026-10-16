@@ -170,6 +170,11 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var terminalAuthor: ConversationAuthor?
 
     public var revisionNumbers: [UInt64] { Set(revisions.keys).union(redactedRevisions ?? []).sorted() }
+    /// Accepted sender facts remain available under their original request,
+    /// revision and turn identities. Draft edits and replay do not create one.
+    public var acceptedUpdates: [ConversationTurn] {
+        turns.filter { $0.kind == .revision && $0.author == .origin && $0.binding.revision > 1 }
+    }
     public var currentContentRedacted: Bool { redactedRevisions?.contains(currentRevision) == true }
     public var currentQuestionPayload: JSONValue {
         revisions[currentRevision] ?? .object([

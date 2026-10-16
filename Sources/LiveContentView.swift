@@ -50,7 +50,9 @@ struct LiveRequestDetail: View {
                                initials: String(request.key.senderID.rawValue.prefix(2)).uppercased(),
                                title: request.title?.rawValue ?? request.key.senderID.rawValue)
                 if let thread = store.conversation(for: request.key), thread.currentRevision > 1 {
-                    Text("Question version \(thread.currentRevision)").font(.caption).foregroundStyle(.secondary)
+                    Text(store.hasAcceptedUpdate(for: request.key) ? "Updated · version \(thread.currentRevision)" : "Question version \(thread.currentRevision)")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("request-update-fact")
                 }
                 Text(LiveLifecycleTitle(request.lifecycleStatus).label)
                     .font(.caption).foregroundStyle(.secondary)

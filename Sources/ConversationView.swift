@@ -238,7 +238,7 @@ private struct ConversationTurnView: View {
                 Text("Person-authored content is not included in this device projection.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                if turn.kind == .revision { Text(turn.binding.revision == 1 ? "Original question" : "Question revised").font(.caption.weight(.semibold)) }
+                if turn.kind == .revision { Text(turn.binding.revision == 1 ? "Original question" : "Updated").font(.caption.weight(.semibold)) }
                 if turn.kind == .terminal { Text("Request closed").font(.caption.weight(.semibold)) }
                 if let status = turn.resultStatus {
                     Text("Original answer result: " + status.rawValue).font(.caption.weight(.semibold))

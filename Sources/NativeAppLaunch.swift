@@ -322,6 +322,10 @@ final class LivePresentationStore {
 
     var isLocalExample: Bool { !permitsDelivery }
 
+    func hasAcceptedUpdate(for key: RequestKey) -> Bool {
+        conversationThreads[key]?.acceptedUpdates.isEmpty == false
+    }
+
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
 
     func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
@@ -434,7 +438,7 @@ final class LivePresentationStore {
         presentation.requests.map {
             InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
                 sender: $0.key.senderID.rawValue,
-                status: String(localized: LiveLifecycleTitle($0.lifecycleStatus).label),
+                status: (hasAcceptedUpdate(for: $0.key) ? "Updated · " : "") + String(localized: LiveLifecycleTitle($0.lifecycleStatus).label),
                 bodyText: $0.body?.rawValue ?? "")
         }
     }

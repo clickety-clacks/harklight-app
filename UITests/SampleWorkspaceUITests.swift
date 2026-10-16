@@ -199,6 +199,31 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testAcceptedSenderUpdateIsVisibleInTheSameOrdinaryRequestAndHistory() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--conversation-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let field = app.searchFields.firstMatch
+        field.tap(); field.typeText("Archive\n")
+        let row = app.buttons["request-row-sample-approval-2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        XCTAssertTrue(row.label.contains("Updated"))
+        row.tap()
+        XCTAssertTrue(app.staticTexts["request-update-fact"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["request-update-fact"].label, "Updated · version 2")
+        capture("sender-updated-current-request", app)
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(app.staticTexts["Updated"].waitForExistence(timeout: 5))
+        app.buttons["conversation-revision-picker"].tap()
+        app.buttons["Version 1 · draft"].tap()
+        app.buttons["conversation-earlier-answer"].tap()
+        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["The new collection is ready. Choose what happens to the earlier sketches."].exists)
+        capture("sender-updated-earlier-question-and-draft", app)
+    }
+
     func testConversationRevisionFileFactsAndClosureUseTheOrdinaryApp() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
