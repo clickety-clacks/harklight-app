@@ -151,7 +151,9 @@ final class ConversationSubmissionTests: XCTestCase {
         session.uploadHook = {
             let cleanup = try domain.abandonConversationUploads(for: binding.request, context: context)
             XCTAssertEqual(cleanup.count, 1)
-            try await core.discardAbandonedUploads(for: binding.request)
+            async let navigation: Void = core.discardAbandonedUploads(for: binding.request)
+            async let refresh: Void = core.discardAbandonedUploads(for: binding.request)
+            _ = try await (navigation, refresh)
         }
         do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Departure must prevent send") }
         catch { XCTAssertEqual(error as? ConversationError, .pendingSubmission) }

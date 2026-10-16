@@ -58,6 +58,7 @@ public actor NativeRelayCore {
     private var conversationReplay: ConversationReplayProgress?
     private var inspectedConversationMetadata = false
     private var discoveredOriginURL: URL?
+    private var activeCleanupRequests: Set<UUID> = []
 
     public func conversationOriginURL() throws -> URL? {
         try validate()
@@ -71,6 +72,11 @@ public actor NativeRelayCore {
         let pending = (try store.conversationSnapshot(context: context).threads[request]?.uploadCleanups ?? [:]).values
             .filter { if case .acknowledged = $0.outcome { return false }; return true }
         for cleanup in pending {
+            // Foreground replay and explicit navigation may retry the same
+            // durable cleanup together. Keep one request in flight so a late
+            // duplicate cannot fence a newly reselected upload after success.
+            guard activeCleanupRequests.insert(cleanup.id).inserted else { continue }
+            defer { activeCleanupRequests.remove(cleanup.id) }
             do {
                 guard let endpoint = discoveredOriginURL,
                       let transport = session as? any AuthenticatedConversationCleanupSession else {
