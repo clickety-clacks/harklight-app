@@ -26,6 +26,388 @@ struct NativeRelayRefreshResult: Equatable, Sendable {
     }
 }
 
+struct NativeForegroundConnectProgress: Equatable, Sendable {
+    enum Stage: Equatable, Sendable {
+        case serverTrustValidated
+        case clientIdentityOffered
+        case webSocketOpened
+        case relayAdmitted
+        case nativeSyncReplayStarted
+        case nativeSyncResynced
+        case nativeSyncAcknowledged
+        case foregroundConfirmed
+
+        var label: String {
+            switch self {
+            case .serverTrustValidated: "The server certificate passed the saved host and CA check."
+            case .clientIdentityOffered: "The saved device certificate was selected for the challenge; server acceptance is not known yet."
+            case .webSocketOpened: "The WebSocket open event was received."
+            case .relayAdmitted: "The relay accepted the native sync request."
+            case .nativeSyncReplayStarted: "Native sync replay started."
+            case .nativeSyncResynced: "The replay reached its resynced marker and was saved locally."
+            case .nativeSyncAcknowledged: "The relay acknowledged the saved native sync cursor."
+            case .foregroundConfirmed: "Foreground connection is confirmed."
+            }
+        }
+
+        var rank: Int {
+            switch self {
+            case .serverTrustValidated: 1
+            case .clientIdentityOffered: 2
+            case .webSocketOpened: 3
+            case .relayAdmitted: 4
+            case .nativeSyncReplayStarted: 5
+            case .nativeSyncResynced: 6
+            case .nativeSyncAcknowledged: 7
+            case .foregroundConfirmed: 8
+            }
+        }
+    }
+
+    enum Issue: Equatable, Sendable {
+        case serverTrustRejected
+        case clientIdentityChallengeRejected
+
+        var message: String {
+            switch self {
+            case .serverTrustRejected:
+                "The server certificate did not pass the saved host and CA check."
+            case .clientIdentityChallengeRejected:
+                "The client could not offer its identity to the saved relay host."
+            }
+        }
+    }
+
+    enum Outcome: Equatable, Sendable { case connecting, incomplete, timedOut, confirmed }
+
+    enum FailureClass: Equatable, Sendable {
+        case foregroundDeadline
+        case serverTrustRejected
+        case clientIdentityChallengeRejected
+        case urlSession(code: Int)
+        case relayProtocol
+        case nativeSync
+        case unknown
+
+        var diagnosticValue: String {
+            switch self {
+            case .foregroundDeadline: "foreground_deadline"
+            case .serverTrustRejected: "server_trust_rejected"
+            case .clientIdentityChallengeRejected: "client_identity_challenge_rejected"
+            case let .urlSession(code): "url_session_error_code_\(code)"
+            case .relayProtocol: "relay_protocol_error"
+            case .nativeSync: "native_sync_error"
+            case .unknown: "unknown_error_class"
+            }
+        }
+
+        static func classify(_ error: Error) -> Self {
+            let value = error as NSError
+            if value.domain == NSURLErrorDomain { return .urlSession(code: value.code) }
+            if error is InstallationTransportError { return .relayProtocol }
+            if error is NativeRelayCoreError { return .nativeSync }
+            return .unknown
+        }
+    }
+
+    var lastConfirmedStage: Stage?
+    var webSocketOpenObserved: Bool
+    var issue: Issue?
+    var outcome: Outcome
+    var attemptID: UUID? = nil
+    var failureClass: FailureClass? = nil
+
+    var message: String {
+        let last = lastConfirmedStage?.label ?? "No connection milestone was confirmed."
+        switch outcome {
+        case .connecting:
+            return issue?.message ?? last
+        case .incomplete:
+            let issueText = issue.map { "\($0.message) " } ?? ""
+            let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
+            return "The connection was not confirmed. \(issueText)\(failureText)Last confirmed step: \(last) Try again with the same approved identity."
+        case .timedOut:
+            let setupLimit = !webSocketOpenObserved && issue == nil
+                ? "No WebSocket-open event arrived. Secure relay setup did not complete; this client cannot distinguish a TLS failure from a WebSocket-upgrade timeout. "
+                : ""
+            let issueText = issue.map { "\($0.message) " } ?? ""
+            let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
+            return "The connection timed out. \(issueText)\(setupLimit)\(failureText)Last confirmed step: \(last) Try again with the same approved identity. Saved profile, local content and pending operation state were preserved; any replay already saved remains saved."
+        case .confirmed:
+            return lastConfirmedStage?.label ?? "Foreground connection is confirmed."
+        }
+    }
+}
+
+struct NativeForegroundOperationDiagnostic: Equatable, Sendable {
+    let operationID: UUID
+    let senderID: String
+    let messageID: String
+    let requestRevision: UInt64?
+    let receiptState: String
+
+    init(submission: Submission, receiptState: String) {
+        operationID = submission.operationID
+        senderID = submission.requestKey.senderID.rawValue
+        messageID = submission.requestKey.messageID.rawValue
+        requestRevision = submission.requestRevision
+        self.receiptState = receiptState
+    }
+}
+
+struct NativeForegroundOperationSnapshot: Equatable, Sendable {
+    let available: Bool
+    let operations: [NativeForegroundOperationDiagnostic]
+
+    static let unavailable = Self(available: false, operations: [])
+}
+
+/// Explicitly shareable, allowlisted diagnostics for the current foreground
+/// attempt. It never serializes answers, request payloads, URLs, credentials,
+/// tokens, or keychain material.
+struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
+    let appVersion: String
+    let buildNumber: String
+    let progress: NativeForegroundConnectProgress
+    let operationSnapshot: NativeForegroundOperationSnapshot
+
+    init(progress: NativeForegroundConnectProgress,
+         operationSnapshot: NativeForegroundOperationSnapshot,
+         appVersion: String,
+         buildNumber: String) {
+        self.progress = progress
+        self.operationSnapshot = operationSnapshot
+        self.appVersion = appVersion
+        self.buildNumber = buildNumber
+    }
+
+    init(progress: NativeForegroundConnectProgress,
+         operationSnapshot: NativeForegroundOperationSnapshot,
+         bundle: Bundle = .main) {
+        self.init(progress: progress,
+                  operationSnapshot: operationSnapshot,
+                  appVersion: Self.bundleValue("CFBundleShortVersionString", bundle: bundle),
+                  buildNumber: Self.bundleValue("CFBundleVersion", bundle: bundle))
+    }
+
+    var shareText: String {
+        let stage = progress.lastConfirmedStage?.diagnosticValue ?? "none_confirmed"
+        let outcome: String
+        switch progress.outcome {
+        case .connecting: outcome = "connecting"
+        case .incomplete: outcome = "incomplete"
+        case .timedOut: outcome = "timed_out"
+        case .confirmed: outcome = "confirmed"
+        }
+        let issue: String
+        switch progress.issue {
+        case .serverTrustRejected: issue = "server_trust_rejected"
+        case .clientIdentityChallengeRejected: issue = "client_identity_challenge_rejected"
+        case nil: issue = "none_observed"
+        }
+        let failure = progress.failureClass?.diagnosticValue ?? "none_observed"
+        let websocket = progress.webSocketOpenObserved ? "yes" : "no"
+        var lines = [
+            "Harklight connection diagnostics",
+            "app_version=\(appVersion)",
+            "app_build=\(buildNumber)",
+            "attempt_id=\(progress.attemptID?.uuidString.lowercased() ?? "unavailable")",
+            "outcome=\(outcome)",
+            "last_confirmed_phase=\(stage)",
+            "websocket_open_observed=\(websocket)",
+            "issue=\(issue)",
+            "error_class=\(failure)"
+        ]
+        guard operationSnapshot.available else {
+            lines.append("queued_operation_state=unavailable; outcome remains unknown")
+            return lines.joined(separator: "\n")
+        }
+        guard !operationSnapshot.operations.isEmpty else {
+            lines.append("unresolved_original_operation_state=none_at_attempt_start")
+            return lines.joined(separator: "\n")
+        }
+        lines.append("unresolved_original_operation_count=\(operationSnapshot.operations.count)")
+        for operation in operationSnapshot.operations {
+            let sender = Self.escapedIdentifier(operation.senderID)
+            let message = Self.escapedIdentifier(operation.messageID)
+            let revision = operation.requestRevision.map { String($0) } ?? "unknown"
+            lines.append("operation_id=\(operation.operationID.uuidString.lowercased()) sender_id=\(sender) message_id=\(message) request_revision=\(revision) receipt_state=\(operation.receiptState)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func bundleValue(_ key: String, bundle: Bundle) -> String {
+        guard let value = bundle.object(forInfoDictionaryKey: key) as? String,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "unavailable" }
+        return value
+    }
+
+    private static func escapedIdentifier(_ value: String) -> String {
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "unavailable"
+    }
+}
+
+private extension NativeForegroundConnectProgress.Stage {
+    var diagnosticValue: String {
+        switch self {
+        case .serverTrustValidated: "server_trust_validated"
+        case .clientIdentityOffered: "client_identity_offered"
+        case .webSocketOpened: "websocket_opened"
+        case .relayAdmitted: "relay_admitted"
+        case .nativeSyncReplayStarted: "native_sync_replay_started"
+        case .nativeSyncResynced: "native_sync_resynced"
+        case .nativeSyncAcknowledged: "native_sync_acknowledged"
+        case .foregroundConfirmed: "foreground_confirmed"
+        }
+    }
+}
+
+/// Races one saved-identity foreground connect against a single deadline.
+/// Completing after timeout is ignored; the supplied timeout closure closes
+/// only the session generation that began this attempt.
+@MainActor
+final class ForegroundConnectDeadline {
+    private struct Attempt {
+        let id: UUID
+        let continuation: CheckedContinuation<NativeForegroundConnectProgress, Never>
+        let onProgress: @MainActor (NativeForegroundConnectProgress) -> Void
+        let onTimeout: @MainActor () async -> Void
+        var progress: NativeForegroundConnectProgress
+    }
+
+    private var attempt: Attempt?
+    private var timeoutTask: Task<Void, Never>?
+    private var operationTask: Task<Void, Never>?
+    private var acceptsEvents = false
+    private(set) var progress = NativeForegroundConnectProgress(lastConfirmedStage: nil,
+                                                                 webSocketOpenObserved: false,
+                                                                 issue: nil, outcome: .incomplete)
+
+    func beginSession() {
+        guard attempt == nil else { return }
+        progress = NativeForegroundConnectProgress(lastConfirmedStage: nil, webSocketOpenObserved: false,
+                                                   issue: nil, outcome: .connecting)
+        acceptsEvents = true
+    }
+
+    func observe(_ event: NativeRelayProgressEvent) {
+        guard acceptsEvents else { return }
+        let candidate: NativeForegroundConnectProgress.Stage?
+        let issue: NativeForegroundConnectProgress.Issue?
+        switch event {
+        case .serverTrustValidated:
+            candidate = .serverTrustValidated; issue = nil
+        case .serverTrustRejected:
+            candidate = nil; issue = .serverTrustRejected
+            progress.failureClass = .serverTrustRejected
+        case .clientIdentityOffered:
+            candidate = .clientIdentityOffered; issue = nil
+        case .clientIdentityChallengeRejected:
+            candidate = nil; issue = .clientIdentityChallengeRejected
+            progress.failureClass = .clientIdentityChallengeRejected
+        case .webSocketOpened:
+            candidate = .webSocketOpened; issue = nil
+            progress.webSocketOpenObserved = true
+        case .relayAdmitted:
+            candidate = .relayAdmitted; issue = nil
+        case .nativeSyncReplayStarted:
+            candidate = .nativeSyncReplayStarted; issue = nil
+        case .nativeSyncResynced:
+            candidate = .nativeSyncResynced; issue = nil
+        case .nativeSyncAcknowledged:
+            candidate = .nativeSyncAcknowledged; issue = nil
+        }
+        if let candidate,
+           progress.lastConfirmedStage.map({ candidate.rank >= $0.rank }) ?? true {
+            progress.lastConfirmedStage = candidate
+        }
+        progress.issue = issue
+        if issue == nil { progress.failureClass = nil }
+        progress.outcome = .connecting
+        if var active = attempt {
+            active.progress = progress
+            attempt = active
+            active.onProgress(progress)
+        }
+    }
+
+    func run(deadline: Duration,
+             operation: @escaping @MainActor () async -> Bool,
+             onTimeout: @escaping @MainActor () async -> Void,
+             onProgress: @escaping @MainActor (NativeForegroundConnectProgress) -> Void) async -> NativeForegroundConnectProgress {
+        guard attempt == nil else { return progress }
+        let id = UUID()
+        progress.attemptID = id
+        progress.failureClass = nil
+        return await withCheckedContinuation { continuation in
+            progress.outcome = .connecting
+            attempt = Attempt(id: id, continuation: continuation, onProgress: onProgress,
+                             onTimeout: onTimeout, progress: progress)
+            onProgress(progress)
+            timeoutTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: deadline) } catch { return }
+                await self?.expire(id)
+            }
+            operationTask = Task { @MainActor [weak self] in
+                let connected = await operation()
+                self?.finish(id, connected: connected)
+            }
+        }
+    }
+
+    func finishWithoutAttempt(confirmed: Bool) -> NativeForegroundConnectProgress {
+        guard attempt == nil else { return progress }
+        acceptsEvents = false
+        progress.outcome = confirmed ? .confirmed : .incomplete
+        return progress
+    }
+
+    func recordFailure(_ error: Error) {
+        guard acceptsEvents, attempt != nil else { return }
+        progress.failureClass = NativeForegroundConnectProgress.FailureClass.classify(error)
+        if var active = attempt {
+            active.progress = progress
+            attempt = active
+            active.onProgress(progress)
+        }
+    }
+
+    private func finish(_ id: UUID, connected: Bool) {
+        guard let active = attempt, active.id == id else { return }
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        operationTask = nil
+        attempt = nil
+        acceptsEvents = false
+        if connected {
+            progress.lastConfirmedStage = .foregroundConfirmed
+            progress.issue = nil
+            progress.failureClass = nil
+            progress.outcome = .confirmed
+        } else {
+            progress.outcome = .incomplete
+        }
+        active.onProgress(progress)
+        active.continuation.resume(returning: progress)
+    }
+
+    private func expire(_ id: UUID) async {
+        guard let active = attempt, active.id == id else { return }
+        attempt = nil
+        timeoutTask = nil
+        operationTask?.cancel()
+        operationTask = nil
+        acceptsEvents = false
+        progress = active.progress
+        progress.failureClass = .foregroundDeadline
+        progress.outcome = .timedOut
+        active.onProgress(progress)
+        await active.onTimeout()
+        active.continuation.resume(returning: progress)
+    }
+}
+
 /// App-owned wake boundary. A future enrollment/profile owner supplies the
 /// authenticated installation material and the SAME C store used by live UI.
 /// Fixture launch deliberately leaves this unconfigured.
@@ -37,6 +419,12 @@ final class NativeRelayLifecycle {
     private var transport: URLSessionInstallationSession?
     private var context: ProfileContext?
     private var confirmedRelayContext: ProfileContext?
+    private var requiresExplicitForegroundRetry = false
+    private let foregroundDeadline = ForegroundConnectDeadline()
+    private var foregroundDiagnosticContext: ProfileContext?
+    private var foregroundDiagnosticOperationsAtStart: [UUID: NativeForegroundOperationDiagnostic] = [:]
+    private var foregroundDiagnosticIntentIDs: [UUID: UUID] = [:]
+    private var foregroundDiagnosticSnapshotAvailable = false
     private var configuration: (store: AttentionDomainStore,
                                 context: ProfileContext,
                                 relayURL: URL,
@@ -49,7 +437,7 @@ final class NativeRelayLifecycle {
     }
     private let enrollment = NativeEnrollmentStore()
 
-    private init() {}
+    init() {}
 
     func activate(store: AttentionDomainStore,
                   context: ProfileContext,
@@ -57,20 +445,24 @@ final class NativeRelayLifecycle {
                   clientIdentity: SecIdentity,
                   trustedRootDER: Data) async throws {
         _ = try store.snapshot(context: context)
+        let generation = UUID()
         let nextTransport = try URLSessionInstallationSession(profile: context,
                                                               relayURL: relayURL,
                                                               clientIdentity: TrustedKeychainIdentity(clientIdentity),
-                                                              trustedRootDER: trustedRootDER)
+                                                              trustedRootDER: trustedRootDER,
+                                                              onProgress: progressHandler(generation: generation))
         let nextCore: NativeRelayCore
         do {
-            nextCore = try NativeRelayCore(store: store, context: context, session: nextTransport)
+            nextCore = try NativeRelayCore(store: store, context: context, session: nextTransport,
+                                           onProgress: progressHandler(generation: generation))
         } catch {
             await nextTransport.close()
             throw error
         }
-        let generation = UUID()
         refreshGeneration = generation
         refreshFlights.reset()
+        foregroundDeadline.beginSession()
+        requiresExplicitForegroundRetry = false
         let priorCore = core
         let priorTransport = transport
         core = nil
@@ -94,6 +486,7 @@ final class NativeRelayLifecycle {
     func deactivate() async {
         refreshGeneration = UUID()
         refreshFlights.reset()
+        requiresExplicitForegroundRetry = false
         let priorCore = core
         let priorTransport = transport
         core = nil
@@ -101,6 +494,10 @@ final class NativeRelayLifecycle {
         context = nil
         confirmedRelayContext = nil
         configuration = nil
+        foregroundDiagnosticContext = nil
+        foregroundDiagnosticOperationsAtStart = [:]
+        foregroundDiagnosticIntentIDs = [:]
+        foregroundDiagnosticSnapshotAvailable = false
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
     }
@@ -109,20 +506,88 @@ final class NativeRelayLifecycle {
     /// sender, message, cursor, operation or answer.
     @discardableResult
     func refreshFromTrustedRelay() async -> Bool {
-        await refreshResultFromTrustedRelay().relayConfirmed
+        guard !requiresExplicitForegroundRetry else { return false }
+        return await refreshResultFromTrustedRelay().relayConfirmed
     }
 
     func refreshResultFromTrustedRelay() async -> NativeRelayRefreshResult {
-        await refreshFlights.coalesced()
+        guard !requiresExplicitForegroundRetry else { return .unavailable }
+        return await refreshFlights.coalesced()
     }
 
     /// Enrollment readiness is actual authenticated replay progress. A later
     /// push-register failure must not hide a working foreground connection.
-    func confirmForegroundProgress(for expected: ProfileContext) async -> Bool {
-        guard context == expected else { return false }
+    func confirmForegroundProgress(for expected: ProfileContext,
+                                   deadline: Duration = .seconds(30),
+                                   onProgress: @escaping @MainActor (NativeForegroundConnectProgress) -> Void = { _ in }) async -> NativeForegroundConnectProgress {
+        guard context == expected else { return foregroundDeadline.finishWithoutAttempt(confirmed: false) }
+        foregroundDiagnosticContext = expected
+        if let configuration, configuration.context == expected,
+           let snapshot = try? configuration.store.snapshot(context: expected) {
+            foregroundDiagnosticSnapshotAvailable = true
+            var submissions = Dictionary(uniqueKeysWithValues: snapshot.intents.values
+                .filter { Self.isUnresolved($0, remoteStates: snapshot.remoteStates) }
+                .map { ($0.operationID, $0) })
+            for submission in snapshot.outbox { submissions[submission.operationID] = submission }
+            foregroundDiagnosticOperationsAtStart = Dictionary(uniqueKeysWithValues: submissions.values.map { submission in
+                let item = NativeForegroundOperationDiagnostic(submission: submission,
+                    receiptState: Self.receiptState(for: submission.disposition))
+                return (submission.operationID, item)
+            })
+            foregroundDiagnosticIntentIDs = Dictionary(uniqueKeysWithValues: submissions.values.map {
+                ($0.operationID, $0.intentID)
+            })
+        } else {
+            foregroundDiagnosticSnapshotAvailable = false
+            foregroundDiagnosticOperationsAtStart = [:]
+            foregroundDiagnosticIntentIDs = [:]
+        }
         let epoch = refreshGeneration
-        _ = await refreshFromTrustedRelay()
-        return refreshGeneration == epoch && context == expected && confirmedRelayContext == expected
+        return await foregroundDeadline.run(deadline: deadline, operation: { [weak self] in
+            guard let self else { return false }
+            _ = await self.refreshFromTrustedRelay()
+            return self.refreshGeneration == epoch && self.context == expected && self.confirmedRelayContext == expected
+        }, onTimeout: { [weak self] in
+            await self?.cancelTimedOutSession(generation: epoch, expected: expected)
+        }, onProgress: onProgress)
+    }
+
+    func foregroundOperationDiagnostics(for expected: ProfileContext) -> NativeForegroundOperationSnapshot {
+        guard foregroundDiagnosticContext == expected, context == expected,
+              foregroundDiagnosticSnapshotAvailable,
+              let configuration, configuration.context == expected else {
+            return .unavailable
+        }
+        let operations = foregroundDiagnosticOperationsAtStart.values.map { initial in
+            guard let intentID = foregroundDiagnosticIntentIDs[initial.operationID],
+                  let submission = try? configuration.store.lookupIntent(intentID, context: expected) else {
+                return NativeForegroundOperationDiagnostic(operationID: initial.operationID,
+                    senderID: initial.senderID, messageID: initial.messageID,
+                    requestRevision: initial.requestRevision, receiptState: "unknown_after_attempt")
+            }
+            return NativeForegroundOperationDiagnostic(operationID: initial.operationID,
+                senderID: initial.senderID, messageID: initial.messageID,
+                requestRevision: initial.requestRevision,
+                receiptState: Self.receiptState(for: submission.disposition))
+        }.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
+        return NativeForegroundOperationSnapshot(available: true, operations: operations)
+    }
+
+    private static func receiptState(for disposition: IntentDisposition) -> String {
+        switch disposition {
+        case .pending: "pending_unconfirmed"
+        case let .accepted(sequence): "relay_accepted_sequence_\(sequence.map { String($0) } ?? "unknown")_awaiting_terminal_state"
+        case .lost: "locally_lost_unconfirmed"
+        case let .terminal(state, sequence, _): "terminal_\(state.rawValue)_sequence_\(sequence)"
+        case .repairRequired: "repair_required"
+        }
+    }
+
+    private static func isUnresolved(_ submission: Submission,
+                                     remoteStates: [RequestKey: RemoteRequestState]) -> Bool {
+        guard remoteStates[submission.requestKey]?.isTerminal != true else { return false }
+        if case .terminal = submission.disposition { return false }
+        return true
     }
 
     /// A token callback can arrive after an in-flight resync has already read
@@ -177,7 +642,7 @@ final class NativeRelayLifecycle {
     }
 
     private func performRefresh(generation: UUID) async -> NativeRelayRefreshResult {
-        guard refreshGeneration == generation else { return .unavailable }
+        guard refreshGeneration == generation, !requiresExplicitForegroundRetry else { return .unavailable }
         // A past replay is not proof that this connection attempt worked.
         confirmedRelayContext = nil
         do {
@@ -185,6 +650,7 @@ final class NativeRelayLifecycle {
             return refreshGeneration == generation ? result : .unavailable
         } catch {
             guard refreshGeneration == generation else { return .unavailable }
+            foregroundDeadline.recordFailure(error)
             // Retire an ambiguous WebSocket before retrying C's exact durable
             // outbox and cursor once on a fresh authenticated session.
             do {
@@ -193,6 +659,8 @@ final class NativeRelayLifecycle {
                 let result = try await refreshOnce(generation: generation)
                 return refreshGeneration == generation ? result : .unavailable
             } catch {
+                guard refreshGeneration == generation else { return .unavailable }
+                foregroundDeadline.recordFailure(error)
                 return .unavailable
             }
         }
@@ -245,12 +713,14 @@ final class NativeRelayLifecycle {
         let nextTransport = try URLSessionInstallationSession(profile: configuration.context,
                                                               relayURL: configuration.relayURL,
                                                               clientIdentity: TrustedKeychainIdentity(configuration.identity),
-                                                              trustedRootDER: configuration.rootDER)
+                                                              trustedRootDER: configuration.rootDER,
+                                                              onProgress: progressHandler(generation: generation))
         let nextCore: NativeRelayCore
         do {
             nextCore = try NativeRelayCore(store: configuration.store,
                                            context: configuration.context,
-                                           session: nextTransport)
+                                           session: nextTransport,
+                                           onProgress: progressHandler(generation: generation))
         } catch {
             await nextTransport.close()
             throw error
@@ -262,6 +732,32 @@ final class NativeRelayLifecycle {
         }
         self.transport = nextTransport
         self.core = nextCore
+    }
+
+    private func progressHandler(generation: UUID) -> @Sendable (NativeRelayProgressEvent) -> Void {
+        { [weak self] event in
+            Task { @MainActor [weak self] in
+                guard let self, self.refreshGeneration == generation else { return }
+                self.foregroundDeadline.observe(event)
+            }
+        }
+    }
+
+    private func cancelTimedOutSession(generation: UUID, expected: ProfileContext) async {
+        guard refreshGeneration == generation, context == expected else { return }
+        // Invalidate callbacks before awaiting actor shutdown. Keep the approved
+        // profile and immutable relay configuration so only an explicit retry
+        // can reopen this identity after timeout.
+        refreshGeneration = UUID()
+        requiresExplicitForegroundRetry = true
+        refreshFlights.reset()
+        confirmedRelayContext = nil
+        let priorCore = core
+        let priorTransport = transport
+        core = nil
+        transport = nil
+        if let priorCore { await priorCore.deactivate() }
+        if let priorTransport { await priorTransport.close() }
     }
 }
 

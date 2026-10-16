@@ -128,7 +128,29 @@ struct NativeEnrollmentView: View {
             heading("Approved, finishing up", symbol: "checkmark.shield")
             Text("The owner approved this device. Harklight is confirming its connection to the server.")
             Text("Not connected yet.").foregroundStyle(.secondary)
+            if let progress = launch.foregroundConnectProgress {
+                VStack(alignment: .leading, spacing: 8) {
+                    if progress.outcome == .connecting { ProgressView() }
+                    Text(progress.message)
+                        .font(.callout)
+                        .accessibilityIdentifier("foreground-connect-progress")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            }
+            if let diagnostic = launch.foregroundConnectDiagnostic {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Connection details include the app build, observed phase and queued-operation receipt state. Answers and credentials are excluded.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    ShareLink(item: diagnostic.shareText) {
+                        Label("Share connection details", systemImage: "square.and.arrow.up")
+                    }
+                    .accessibilityIdentifier("foreground-connect-diagnostics")
+                }
+            }
             primary("Try again") { Task { await flow.retry() } }
+                .disabled(flow.busy)
         case .connected:
             heading("Connected", symbol: "checkmark.circle")
             Text("\(flow.currentAccount?.deviceLabel ?? flow.deviceName) is now part of \(flow.currentAccount?.serverDisplayName ?? flow.invitation?.serverName ?? "Harklight").")
