@@ -269,6 +269,11 @@ final class NativeAppLaunch {
         guard case let .live(current) = state, current === presentation else { return }
         presentation.applyRefreshResult(result)
     }
+
+    func retryForegroundConnection() async {
+        guard case .live = state else { return }
+        await guidedJoin.retryApprovedConnection()
+    }
 }
 
 /// C's admitted presentation is the only live view feed. Its revision stream

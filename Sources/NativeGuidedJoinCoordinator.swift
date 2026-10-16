@@ -16,6 +16,7 @@ final class NativeGuidedJoinCoordinator {
     private(set) var currentAccount: NativeEnrollmentRecord?
     private(set) var message: String?
     private(set) var busy = false
+    private(set) var isApprovedConnectBusy = false
     private var approvalObservationCurrent = false
     private(set) var isShowing: Bool
     var deviceName: String
@@ -130,7 +131,7 @@ final class NativeGuidedJoinCoordinator {
     }
 
     func retry() async {
-        guard !busy else { return }
+        guard !busy, !isApprovedConnectBusy else { return }
         approvalObservationCurrent = false
         if verificationPending, let invitation {
             let epoch = generation
@@ -151,6 +152,58 @@ final class NativeGuidedJoinCoordinator {
         defer { if generation == epoch { busy = false } }
         do {
             try await refreshSavedAttempt(saved, epoch: epoch)
+        } catch {
+            if generation == epoch { explain(error) }
+        }
+    }
+
+    /// The scene poll may continue ordinary approval checks, but an approved
+    /// foreground connection that timed out waits for a person to retry it.
+    func shouldAutomaticallyRetry(foregroundOutcome: NativeForegroundConnectProgress.Outcome?) -> Bool {
+        guard isShowing, !busy, !isApprovedConnectBusy, !receivedInvitation,
+              [.pending, .approvalExpired, .unreachable, .approvedFinishing].contains(screen) else {
+            return false
+        }
+        return foregroundOutcome != .timedOut
+    }
+
+    /// Runs the same gated retry used by the foreground scene poll. Keeping
+    /// the decision and call together lets tests verify a timeout cannot be
+    /// bypassed by a caller that forgets the explicit-retry boundary.
+    @discardableResult
+    func retryAutomaticallyIfNeeded(
+        foregroundOutcome: NativeForegroundConnectProgress.Outcome?
+    ) async -> Bool {
+        guard shouldAutomaticallyRetry(foregroundOutcome: foregroundOutcome) else { return false }
+        await retry()
+        return true
+    }
+
+    /// Reopens only the already-approved record through the existing app
+    /// connection owner. It does not create or submit a join request.
+    func retryApprovedConnection() async {
+        guard !busy, !isApprovedConnectBusy,
+              [.approvedFinishing, .connected].contains(screen),
+              let record = currentAccount, record.isApproved,
+              let connectApproved else { return }
+        let epoch = generation
+        busy = true
+        isApprovedConnectBusy = true
+        message = nil
+        screen = .approvedFinishing
+        defer {
+            busy = false
+            isApprovedConnectBusy = false
+        }
+        do {
+            let connected = try await connectApproved(record)
+            guard generation == epoch else { return }
+            if connected {
+                screen = .connected
+                message = nil
+            } else {
+                message = "The approved account is still offline. Saved requests and pending answers remain on this device."
+            }
         } catch {
             if generation == epoch { explain(error) }
         }
@@ -349,6 +402,8 @@ final class NativeGuidedJoinCoordinator {
             isShowing = false
         }
         guard let connectApproved else { throw NativeJoinError.unavailable }
+        isApprovedConnectBusy = true
+        defer { isApprovedConnectBusy = false }
         let connected = try await connectApproved(record)
         guard generation == epoch else { return }
         if connected {

@@ -140,8 +140,9 @@ final class NativeGuidedTLSTests: XCTestCase {
                        ExactText("Keep this draft"))
 
         let deadline = ForegroundConnectDeadline()
-        deadline.beginSession()
-        deadline.observe(.clientIdentityOffered)
+        let transportAttemptID = UUID()
+        deadline.beginSession(transportAttemptID: transportAttemptID)
+        deadline.observe(.clientIdentityOffered, transportAttemptID: transportAttemptID)
         let sessionID = UUID()
         var closedSessions: [UUID] = []
         var lateCompletion: CheckedContinuation<Bool, Never>?
@@ -168,7 +169,7 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         // Neither a stale open callback nor a late successful operation may
         // turn the timed-out attempt into foreground confirmation.
-        deadline.observe(.webSocketOpened)
+        deadline.observe(.webSocketOpened, transportAttemptID: transportAttemptID)
         lateCompletion?.resume(returning: true)
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertEqual(deadline.progress.outcome, .timedOut)
@@ -282,34 +283,176 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(high, 1)
         XCTAssertEqual(session.cursorAtAcknowledgement, 1,
                        "The event cursor must be durable before the ACK exchange begins.")
-        XCTAssertEqual(events.snapshot(), [.nativeSyncReplayStarted, .nativeSyncResynced, .nativeSyncAcknowledged])
+        XCTAssertEqual(events.snapshot(), [.nativeSyncRequestStarted, .nativeSyncResynced, .nativeSyncAcknowledged])
 
         let progress = ForegroundConnectDeadline()
-        progress.beginSession()
-        progress.observe(.serverTrustValidated)
+        let transportAttemptID = UUID()
+        progress.beginSession(transportAttemptID: transportAttemptID)
+        progress.observe(.serverTrustValidated, transportAttemptID: transportAttemptID)
         XCTAssertEqual(progress.progress.lastConfirmedStage, .serverTrustValidated)
-        progress.observe(.clientIdentityOffered)
+        progress.observe(.clientIdentityOffered, transportAttemptID: transportAttemptID)
         XCTAssertTrue(progress.progress.message.contains("server acceptance is not known yet"))
-        progress.observe(.webSocketOpened)
+        progress.observe(.webSocketOpened, transportAttemptID: transportAttemptID)
         XCTAssertTrue(progress.progress.webSocketOpenObserved)
-        progress.observe(.relayAdmitted)
+        progress.observe(.relayAdmitted, transportAttemptID: transportAttemptID)
         XCTAssertEqual(progress.progress.lastConfirmedStage, .relayAdmitted)
-        progress.observe(.nativeSyncReplayStarted)
-        progress.observe(.nativeSyncResynced)
-        progress.observe(.nativeSyncAcknowledged)
+        progress.observe(.nativeSyncRequestStarted, transportAttemptID: transportAttemptID)
+        XCTAssertEqual(progress.progress.lastConfirmedStage, .relayAdmitted,
+                       "A local replay request is not a remotely confirmed phase.")
+        XCTAssertTrue(progress.progress.nativeSyncRequestStarted)
+        progress.observe(.nativeSyncResynced, transportAttemptID: transportAttemptID)
+        progress.observe(.nativeSyncAcknowledged, transportAttemptID: transportAttemptID)
         XCTAssertEqual(progress.progress.lastConfirmedStage, .nativeSyncAcknowledged)
 
         let rejectedTrust = ForegroundConnectDeadline()
-        rejectedTrust.beginSession()
-        rejectedTrust.observe(.serverTrustRejected)
+        let rejectedTrustTransportID = UUID()
+        rejectedTrust.beginSession(transportAttemptID: rejectedTrustTransportID)
+        rejectedTrust.observe(.serverTrustRejected, transportAttemptID: rejectedTrustTransportID)
         XCTAssertEqual(rejectedTrust.progress.issue, .serverTrustRejected)
         XCTAssertTrue(rejectedTrust.progress.message.contains("did not pass the saved host and CA check"))
 
         let rejectedIdentity = ForegroundConnectDeadline()
-        rejectedIdentity.beginSession()
-        rejectedIdentity.observe(.clientIdentityChallengeRejected)
+        let rejectedIdentityTransportID = UUID()
+        rejectedIdentity.beginSession(transportAttemptID: rejectedIdentityTransportID)
+        rejectedIdentity.observe(.clientIdentityChallengeRejected, transportAttemptID: rejectedIdentityTransportID)
         XCTAssertEqual(rejectedIdentity.progress.issue, .clientIdentityChallengeRejected)
         XCTAssertTrue(rejectedIdentity.progress.message.contains("could not offer its identity to the saved relay host"))
+    }
+
+    func testReplacementTransportHasFreshPhasesAndKeepsOnlyPriorTransportSummary() async throws {
+        let deadline = ForegroundConnectDeadline()
+        let firstTransportID = UUID()
+        deadline.beginSession(transportAttemptID: firstTransportID)
+        let operationStarted = AsyncTestSignal()
+        var finishOperation: CheckedContinuation<Bool, Never>?
+        let run = Task { @MainActor in
+            await deadline.run(deadline: .seconds(3), operation: {
+                await operationStarted.signal()
+                return await withCheckedContinuation { finishOperation = $0 }
+            }, onTimeout: {}, onProgress: { _ in })
+        }
+        await operationStarted.wait()
+
+        deadline.observe(.serverTrustValidated, transportAttemptID: firstTransportID)
+        deadline.observe(.clientIdentityOffered, transportAttemptID: firstTransportID)
+        deadline.observe(.webSocketOpened, transportAttemptID: firstTransportID)
+        deadline.observe(.relayAdmitted, transportAttemptID: firstTransportID)
+        deadline.observe(.nativeSyncRequestStarted, transportAttemptID: firstTransportID)
+        deadline.observe(.nativeSyncResynced, transportAttemptID: firstTransportID)
+        deadline.observe(.nativeSyncAcknowledged, transportAttemptID: firstTransportID)
+        deadline.recordFailure(URLError(.networkConnectionLost))
+
+        let secondTransportID = UUID()
+        deadline.beginTransportAttempt(secondTransportID)
+        XCTAssertEqual(deadline.progress.transportAttemptID, secondTransportID)
+        XCTAssertNil(deadline.progress.lastConfirmedStage)
+        XCTAssertFalse(deadline.progress.webSocketOpenObserved)
+        XCTAssertFalse(deadline.progress.nativeSyncRequestStarted)
+        XCTAssertEqual(deadline.progress.previousTransportAttempt?.id, firstTransportID)
+        XCTAssertEqual(deadline.progress.previousTransportAttempt?.lastConfirmedStage, .nativeSyncAcknowledged)
+        XCTAssertEqual(deadline.progress.previousTransportAttempt?.failureClass,
+                       .urlSession(code: URLError.networkConnectionLost.rawValue))
+
+        // A local replay request cannot become a confirmed phase, and a
+        // callback queued by the retired transport cannot contaminate the new one.
+        deadline.observe(.nativeSyncRequestStarted, transportAttemptID: secondTransportID)
+        XCTAssertNil(deadline.progress.lastConfirmedStage)
+        deadline.observe(.webSocketOpened, transportAttemptID: firstTransportID)
+        XCTAssertNil(deadline.progress.lastConfirmedStage)
+        XCTAssertFalse(deadline.progress.webSocketOpenObserved)
+        deadline.observe(.serverTrustValidated, transportAttemptID: secondTransportID)
+        XCTAssertEqual(deadline.progress.lastConfirmedStage, .serverTrustValidated,
+                       "A later-arriving trust result must not be hidden by the earlier local replay request.")
+
+        let diagnostic = NativeForegroundConnectDiagnostic(progress: deadline.progress,
+                                                            operationSnapshot: .unavailable,
+                                                            appVersion: "test", buildNumber: "test",
+                                                            executableSHA256: "unavailable")
+        XCTAssertTrue(diagnostic.shareText.contains("transport_attempt_id=\(secondTransportID.uuidString.lowercased())"))
+        XCTAssertTrue(diagnostic.shareText.contains("last_confirmed_phase=server_trust_validated"))
+        XCTAssertTrue(diagnostic.shareText.contains("previous_transport_attempt_id=\(firstTransportID.uuidString.lowercased())"))
+        XCTAssertTrue(diagnostic.shareText.contains("previous_last_confirmed_phase=native_sync_acknowledged"))
+        XCTAssertTrue(diagnostic.shareText.contains("previous_error_class=url_session_error_code_\(URLError.networkConnectionLost.rawValue)"))
+
+        finishOperation?.resume(returning: false)
+        let completed = await run.value
+        XCTAssertEqual(completed.outcome, .incomplete)
+    }
+
+    func testRestoredInboxCanRetryTheSameApprovedIdentityAndTimeoutStopsAutomaticJoinRetry() async throws {
+        let establishedService = "Harklight.foreground-established-retry." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: establishedService) }
+        let establishedRecord = approvedRecord(foregroundRelayConfirmed: true,
+                                               notificationExplanationSeen: true)
+        try saveEnrollmentRecord(establishedRecord, service: establishedService)
+        let establishedFlow = NativeGuidedJoinCoordinator(
+            store: NativeGuidedJoinStore(namespace: establishedService), deviceName: "Test device")
+        var establishedConnections: [NativeEnrollmentRecord] = []
+        establishedFlow.connectApproved = { record in
+            establishedConnections.append(record)
+            return establishedConnections.count > 1
+        }
+
+        await establishedFlow.restore()
+        XCTAssertFalse(establishedFlow.isShowing, "A restored joined account remains in its ordinary inbox while offline.")
+        XCTAssertEqual(establishedConnections, [establishedRecord])
+        XCTAssertFalse(establishedFlow.shouldAutomaticallyRetry(foregroundOutcome: .timedOut))
+
+        await establishedFlow.retryApprovedConnection()
+        XCTAssertEqual(establishedConnections, [establishedRecord, establishedRecord],
+                       "The inbox Retry reconnects the exact approved record, not a new join request.")
+        XCTAssertEqual(establishedFlow.screen, .connected)
+        XCTAssertFalse(establishedFlow.isShowing)
+
+        let firstJoinService = "Harklight.foreground-first-join-retry." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: firstJoinService) }
+        let firstJoinRecord = approvedRecord(foregroundRelayConfirmed: false,
+                                             notificationExplanationSeen: false)
+        try saveEnrollmentRecord(firstJoinRecord, service: firstJoinService)
+        let firstJoinFlow = NativeGuidedJoinCoordinator(
+            store: NativeGuidedJoinStore(namespace: firstJoinService), deviceName: "Test device")
+        var firstJoinConnections = 0
+        firstJoinFlow.connectApproved = { _ in
+            firstJoinConnections += 1
+            return false
+        }
+        await firstJoinFlow.restore()
+        XCTAssertTrue(firstJoinFlow.isShowing)
+        XCTAssertEqual(firstJoinFlow.screen, .approvedFinishing)
+        XCTAssertEqual(firstJoinConnections, 1)
+        let retriedAutomatically = await firstJoinFlow.retryAutomaticallyIfNeeded(foregroundOutcome: .timedOut)
+        XCTAssertFalse(retriedAutomatically,
+                       "The scene poll must honor the explicit Retry boundary after timeout.")
+        XCTAssertEqual(firstJoinConnections, 1,
+                       "The actual scene-poll caller must not re-run an approved connection after timeout.")
+        XCTAssertFalse(firstJoinFlow.shouldAutomaticallyRetry(foregroundOutcome: .timedOut))
+        XCTAssertTrue(firstJoinFlow.shouldAutomaticallyRetry(foregroundOutcome: .incomplete),
+                      "Other saved approval checks retain their existing retry behavior.")
+    }
+
+    private func approvedRecord(foregroundRelayConfirmed: Bool,
+                                notificationExplanationSeen: Bool) -> NativeEnrollmentRecord {
+        NativeEnrollmentRecord(host: "relay.example.test", enrollmentPort: 18444, relayPort: 18443,
+                               trustedRootDER: Data([1]), identityLabel: "saved-device-identity",
+                               deviceLabel: "Saved device", deviceID: "saved-device-id",
+                               approvalCode: "ABCDEF2345", statusSecret: String(repeating: "a", count: 64),
+                               expiresAt: 1, statusExpiresAt: 2, personID: "saved-person",
+                               notificationExplanationSeen: notificationExplanationSeen,
+                               foregroundRelayConfirmed: foregroundRelayConfirmed)
+    }
+
+    private func saveEnrollmentRecord(_ record: NativeEnrollmentRecord, service: String) throws {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: "current-installation",
+                                    kSecValueData as String: try JSONEncoder().encode(record),
+                                    kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        XCTAssertEqual(SecItemAdd(query as CFDictionary, nil), errSecSuccess)
+    }
+
+    private func deleteEnrollmentRecord(service: String) {
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                       kSecAttrService as String: service] as CFDictionary)
     }
 
     func testStalledForegroundRelayTimesOutClosesOnlyItsSessionAndPreservesSavedState() async throws {

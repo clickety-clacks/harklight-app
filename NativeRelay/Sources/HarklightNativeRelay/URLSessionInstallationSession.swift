@@ -23,7 +23,7 @@ public enum NativeRelayProgressEvent: Equatable, Sendable {
     case clientIdentityChallengeRejected
     case webSocketOpened
     case relayAdmitted
-    case nativeSyncReplayStarted
+    case nativeSyncRequestStarted
     case nativeSyncResynced
     case nativeSyncAcknowledged
 }

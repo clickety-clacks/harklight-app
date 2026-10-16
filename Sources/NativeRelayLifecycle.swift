@@ -33,7 +33,6 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         case clientIdentityOffered
         case webSocketOpened
         case relayAdmitted
-        case nativeSyncReplayStarted
         case nativeSyncResynced
         case nativeSyncAcknowledged
         case foregroundConfirmed
@@ -44,7 +43,6 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             case .clientIdentityOffered: "The saved device certificate was selected for the challenge; server acceptance is not known yet."
             case .webSocketOpened: "The WebSocket open event was received."
             case .relayAdmitted: "The relay accepted the native sync request."
-            case .nativeSyncReplayStarted: "Native sync replay started."
             case .nativeSyncResynced: "The replay reached its resynced marker and was saved locally."
             case .nativeSyncAcknowledged: "The relay acknowledged the saved native sync cursor."
             case .foregroundConfirmed: "Foreground connection is confirmed."
@@ -57,10 +55,9 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             case .clientIdentityOffered: 2
             case .webSocketOpened: 3
             case .relayAdmitted: 4
-            case .nativeSyncReplayStarted: 5
-            case .nativeSyncResynced: 6
-            case .nativeSyncAcknowledged: 7
-            case .foregroundConfirmed: 8
+            case .nativeSyncResynced: 5
+            case .nativeSyncAcknowledged: 6
+            case .foregroundConfirmed: 7
             }
         }
     }
@@ -80,6 +77,15 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     }
 
     enum Outcome: Equatable, Sendable { case connecting, incomplete, timedOut, confirmed }
+
+    struct PreviousTransportAttempt: Equatable, Sendable {
+        let id: UUID
+        let lastConfirmedStage: Stage?
+        let webSocketOpenObserved: Bool
+        let nativeSyncRequestStarted: Bool
+        let issue: Issue?
+        let failureClass: FailureClass?
+    }
 
     enum FailureClass: Equatable, Sendable {
         case foregroundDeadline
@@ -117,6 +123,9 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var outcome: Outcome
     var attemptID: UUID? = nil
     var failureClass: FailureClass? = nil
+    var transportAttemptID: UUID? = nil
+    var nativeSyncRequestStarted = false
+    var previousTransportAttempt: PreviousTransportAttempt? = nil
 
     var message: String {
         let last = lastConfirmedStage?.label ?? "No connection milestone was confirmed."
@@ -234,10 +243,20 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             "attempt_id=\(progress.attemptID?.uuidString.lowercased() ?? "unavailable")",
             "outcome=\(outcome)",
             "last_confirmed_phase=\(stage)",
+            "transport_attempt_id=\(progress.transportAttemptID?.uuidString.lowercased() ?? "unavailable")",
+            "native_sync_request_started=\(progress.nativeSyncRequestStarted ? "yes" : "no")",
             "websocket_open_observed=\(websocket)",
             "issue=\(issue)",
             "error_class=\(failure)"
         ]
+        if let previous = progress.previousTransportAttempt {
+            lines.append("previous_transport_attempt_id=\(previous.id.uuidString.lowercased())")
+            lines.append("previous_last_confirmed_phase=\(previous.lastConfirmedStage?.diagnosticValue ?? "none_confirmed")")
+            lines.append("previous_websocket_open_observed=\(previous.webSocketOpenObserved ? "yes" : "no")")
+            lines.append("previous_native_sync_request_started=\(previous.nativeSyncRequestStarted ? "yes" : "no")")
+            lines.append("previous_issue=\(Self.issueValue(previous.issue))")
+            lines.append("previous_error_class=\(previous.failureClass?.diagnosticValue ?? "none_observed")")
+        }
         guard operationSnapshot.available else {
             lines.append("queued_operation_state=unavailable; outcome remains unknown")
             return lines.joined(separator: "\n")
@@ -267,6 +286,14 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "unavailable"
     }
 
+    private static func issueValue(_ issue: NativeForegroundConnectProgress.Issue?) -> String {
+        switch issue {
+        case .serverTrustRejected: "server_trust_rejected"
+        case .clientIdentityChallengeRejected: "client_identity_challenge_rejected"
+        case nil: "none_observed"
+        }
+    }
+
     static func executableSHA256(for url: URL?) -> String {
         guard let url, let bytes = try? Data(contentsOf: url, options: .mappedIfSafe) else { return "unavailable" }
         return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
@@ -280,7 +307,6 @@ private extension NativeForegroundConnectProgress.Stage {
         case .clientIdentityOffered: "client_identity_offered"
         case .webSocketOpened: "websocket_opened"
         case .relayAdmitted: "relay_admitted"
-        case .nativeSyncReplayStarted: "native_sync_replay_started"
         case .nativeSyncResynced: "native_sync_resynced"
         case .nativeSyncAcknowledged: "native_sync_acknowledged"
         case .foregroundConfirmed: "foreground_confirmed"
@@ -305,19 +331,46 @@ final class ForegroundConnectDeadline {
     private var timeoutTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var acceptsEvents = false
+    private var activeTransportAttemptID: UUID?
     private(set) var progress = NativeForegroundConnectProgress(lastConfirmedStage: nil,
                                                                  webSocketOpenObserved: false,
                                                                  issue: nil, outcome: .incomplete)
 
-    func beginSession() {
+    func beginSession(transportAttemptID: UUID) {
         guard attempt == nil else { return }
         progress = NativeForegroundConnectProgress(lastConfirmedStage: nil, webSocketOpenObserved: false,
-                                                   issue: nil, outcome: .connecting)
+                                                   issue: nil, outcome: .connecting,
+                                                   transportAttemptID: transportAttemptID)
+        activeTransportAttemptID = transportAttemptID
         acceptsEvents = true
     }
 
-    func observe(_ event: NativeRelayProgressEvent) {
-        guard acceptsEvents else { return }
+    /// A replacement transport gets a fresh phase boundary while retaining
+    /// one bounded summary of the transport it replaced.
+    func beginTransportAttempt(_ transportAttemptID: UUID) {
+        guard acceptsEvents, activeTransportAttemptID != transportAttemptID else { return }
+        if let priorID = activeTransportAttemptID {
+            progress.previousTransportAttempt = NativeForegroundConnectProgress.PreviousTransportAttempt(
+                id: priorID,
+                lastConfirmedStage: progress.lastConfirmedStage,
+                webSocketOpenObserved: progress.webSocketOpenObserved,
+                nativeSyncRequestStarted: progress.nativeSyncRequestStarted,
+                issue: progress.issue,
+                failureClass: progress.failureClass)
+        }
+        activeTransportAttemptID = transportAttemptID
+        progress.transportAttemptID = transportAttemptID
+        progress.lastConfirmedStage = nil
+        progress.webSocketOpenObserved = false
+        progress.nativeSyncRequestStarted = false
+        progress.issue = nil
+        progress.failureClass = nil
+        progress.outcome = .connecting
+        publishProgress()
+    }
+
+    func observe(_ event: NativeRelayProgressEvent, transportAttemptID: UUID) {
+        guard acceptsEvents, activeTransportAttemptID == transportAttemptID else { return }
         let candidate: NativeForegroundConnectProgress.Stage?
         let issue: NativeForegroundConnectProgress.Issue?
         switch event {
@@ -336,8 +389,9 @@ final class ForegroundConnectDeadline {
             progress.webSocketOpenObserved = true
         case .relayAdmitted:
             candidate = .relayAdmitted; issue = nil
-        case .nativeSyncReplayStarted:
-            candidate = .nativeSyncReplayStarted; issue = nil
+        case .nativeSyncRequestStarted:
+            candidate = nil; issue = nil
+            progress.nativeSyncRequestStarted = true
         case .nativeSyncResynced:
             candidate = .nativeSyncResynced; issue = nil
         case .nativeSyncAcknowledged:
@@ -350,11 +404,7 @@ final class ForegroundConnectDeadline {
         progress.issue = issue
         if issue == nil { progress.failureClass = nil }
         progress.outcome = .connecting
-        if var active = attempt {
-            active.progress = progress
-            attempt = active
-            active.onProgress(progress)
-        }
+        publishProgress()
     }
 
     func run(deadline: Duration,
@@ -391,11 +441,14 @@ final class ForegroundConnectDeadline {
     func recordFailure(_ error: Error) {
         guard acceptsEvents, attempt != nil else { return }
         progress.failureClass = NativeForegroundConnectProgress.FailureClass.classify(error)
-        if var active = attempt {
-            active.progress = progress
-            attempt = active
-            active.onProgress(progress)
-        }
+        publishProgress()
+    }
+
+    private func publishProgress() {
+        guard var active = attempt else { return }
+        active.progress = progress
+        attempt = active
+        active.onProgress(progress)
     }
 
     private func finish(_ id: UUID, connected: Bool) {
@@ -445,6 +498,7 @@ final class NativeRelayLifecycle {
     private var context: ProfileContext?
     private var confirmedRelayContext: ProfileContext?
     private var requiresExplicitForegroundRetry = false
+    private var activeTransportAttemptID: UUID?
     private let foregroundDeadline = ForegroundConnectDeadline()
     private var foregroundDiagnosticContext: ProfileContext?
     private var foregroundDiagnosticOperationsAtStart: [UUID: NativeForegroundOperationDiagnostic] = [:]
@@ -471,22 +525,25 @@ final class NativeRelayLifecycle {
                   trustedRootDER: Data) async throws {
         _ = try store.snapshot(context: context)
         let generation = UUID()
+        let transportAttemptID = UUID()
         let nextTransport = try URLSessionInstallationSession(profile: context,
                                                               relayURL: relayURL,
                                                               clientIdentity: TrustedKeychainIdentity(clientIdentity),
                                                               trustedRootDER: trustedRootDER,
-                                                              onProgress: progressHandler(generation: generation))
+                                                              onProgress: progressHandler(generation: generation,
+                                                                                          transportAttemptID: transportAttemptID))
         let nextCore: NativeRelayCore
         do {
             nextCore = try NativeRelayCore(store: store, context: context, session: nextTransport,
-                                           onProgress: progressHandler(generation: generation))
+                                           onProgress: progressHandler(generation: generation,
+                                                                       transportAttemptID: transportAttemptID))
         } catch {
             await nextTransport.close()
             throw error
         }
         refreshGeneration = generation
         refreshFlights.reset()
-        foregroundDeadline.beginSession()
+        foregroundDeadline.beginSession(transportAttemptID: transportAttemptID)
         requiresExplicitForegroundRetry = false
         let priorCore = core
         let priorTransport = transport
@@ -505,6 +562,7 @@ final class NativeRelayLifecycle {
         transport = nextTransport
         core = nextCore
         self.context = context
+        activeTransportAttemptID = transportAttemptID
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER)
     }
 
@@ -518,6 +576,7 @@ final class NativeRelayLifecycle {
         transport = nil
         context = nil
         confirmedRelayContext = nil
+        activeTransportAttemptID = nil
         configuration = nil
         foregroundDiagnosticContext = nil
         foregroundDiagnosticOperationsAtStart = [:]
@@ -728,6 +787,9 @@ final class NativeRelayLifecycle {
     private func reconnect(generation: UUID) async throws {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let configuration else { throw NativeRelayCoreError.inactive }
+        let transportAttemptID = UUID()
+        foregroundDeadline.beginTransportAttempt(transportAttemptID)
+        activeTransportAttemptID = transportAttemptID
         let priorCore = core
         let priorTransport = transport
         core = nil
@@ -739,13 +801,15 @@ final class NativeRelayLifecycle {
                                                               relayURL: configuration.relayURL,
                                                               clientIdentity: TrustedKeychainIdentity(configuration.identity),
                                                               trustedRootDER: configuration.rootDER,
-                                                              onProgress: progressHandler(generation: generation))
+                                                              onProgress: progressHandler(generation: generation,
+                                                                                          transportAttemptID: transportAttemptID))
         let nextCore: NativeRelayCore
         do {
             nextCore = try NativeRelayCore(store: configuration.store,
                                            context: configuration.context,
                                            session: nextTransport,
-                                           onProgress: progressHandler(generation: generation))
+                                           onProgress: progressHandler(generation: generation,
+                                                                       transportAttemptID: transportAttemptID))
         } catch {
             await nextTransport.close()
             throw error
@@ -759,11 +823,13 @@ final class NativeRelayLifecycle {
         self.core = nextCore
     }
 
-    private func progressHandler(generation: UUID) -> @Sendable (NativeRelayProgressEvent) -> Void {
+    private func progressHandler(generation: UUID,
+                                 transportAttemptID: UUID) -> @Sendable (NativeRelayProgressEvent) -> Void {
         { [weak self] event in
             Task { @MainActor [weak self] in
-                guard let self, self.refreshGeneration == generation else { return }
-                self.foregroundDeadline.observe(event)
+                guard let self, self.refreshGeneration == generation,
+                      self.activeTransportAttemptID == transportAttemptID else { return }
+                self.foregroundDeadline.observe(event, transportAttemptID: transportAttemptID)
             }
         }
     }
@@ -775,6 +841,7 @@ final class NativeRelayLifecycle {
         // can reopen this identity after timeout.
         refreshGeneration = UUID()
         requiresExplicitForegroundRetry = true
+        activeTransportAttemptID = nil
         refreshFlights.reset()
         confirmedRelayContext = nil
         let priorCore = core

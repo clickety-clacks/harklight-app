@@ -5,20 +5,77 @@ import SwiftUI
 struct LiveContentView: View {
     let store: LivePresentationStore
     let samples: SampleLibrary
+    let launch: NativeAppLaunch
 
     var body: some View {
-        HarklightInbox(
-            requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
-            requestDetail: { key, context in
-                if let request = store.request(for: key) {
-                    LiveRequestDetail(request: request, store: store, context: context)
-                } else {
-                    ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
+        let progress = launch.foregroundConnectProgress
+        let showsRecovery = progress.map { $0.outcome != .confirmed } ?? false
+        VStack(spacing: 0) {
+            if showsRecovery, let progress {
+                LiveConnectionRecoveryBanner(
+                    progress: progress,
+                    diagnostic: launch.foregroundConnectDiagnostic,
+                    isRetrying: launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy,
+                    retry: { Task { await launch.retryForegroundConnection() } })
+            }
+            HarklightInbox(
+                requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
+                requestDetail: { key, context in
+                    if let request = store.request(for: key) {
+                        LiveRequestDetail(request: request, store: store, context: context)
+                    } else {
+                        ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
+                    }
+                },
+                warnings: [store.observationError, store.notificationWarning,
+                           showsRecovery ? nil : store.connectionWarning,
+                           store.pushRegistrationWarning].compactMap { $0 },
+                conversationStore: store)
+        }
+    }
+}
+
+private struct LiveConnectionRecoveryBanner: View {
+    let progress: NativeForegroundConnectProgress
+    let diagnostic: NativeForegroundConnectDiagnostic?
+    let isRetrying: Bool
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "wifi.exclamationmark")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Connection not confirmed")
+                        .font(.headline)
+                    Text(progress.message)
+                        .font(.callout)
+                        .accessibilityIdentifier("foreground-connect-progress")
                 }
-            },
-            warnings: [store.observationError, store.notificationWarning,
-                       store.connectionWarning, store.pushRegistrationWarning].compactMap { $0 },
-            conversationStore: store)
+            }
+            HStack(spacing: 12) {
+                Button(action: retry) {
+                    Label(isRetrying ? "Retrying connection" : "Retry connection",
+                          systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isRetrying)
+                .accessibilityIdentifier("foreground-connect-retry")
+                if let diagnostic {
+                    ShareLink(item: diagnostic.shareText) {
+                        Label("Share connection details", systemImage: "square.and.arrow.up")
+                    }
+                    .accessibilityIdentifier("foreground-connect-diagnostics")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.regularMaterial)
+        .accessibilityIdentifier("foreground-connection-recovery")
     }
 }
 
