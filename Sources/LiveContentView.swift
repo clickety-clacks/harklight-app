@@ -4,93 +4,29 @@ import SwiftUI
 @MainActor
 struct LiveContentView: View {
     let store: LivePresentationStore
-    @State private var preferredCompactColumn: NavigationSplitViewColumn = .detail
+    let samples: SampleLibrary
 
     var body: some View {
-        NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
-            LiveRequestList(store: store)
-        } detail: {
-            NavigationStack {
-                if let request = store.selectedRequest {
-                    LiveRequestDetail(request: request, store: store)
-                        .id(request.key)
+        HarklightInbox(
+            requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
+            requestDetail: { key, context in
+                if let request = store.request(for: key) {
+                    LiveRequestDetail(request: request, store: store, context: context)
                 } else {
-                    ContentUnavailableView("Select a request", systemImage: "tray")
+                    ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
                 }
-            }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            VStack(spacing: 0) {
-                if let observationError = store.observationError {
-                    Label(observationError, systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                }
-                if let notificationWarning = store.notificationWarning {
-                    Label(notificationWarning, systemImage: "bell.slash")
-                        .font(.caption)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                }
-                if let connectionWarning = store.connectionWarning {
-                    Label(connectionWarning, systemImage: "wifi.exclamationmark")
-                        .font(.caption)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                }
-                if let pushRegistrationWarning = store.pushRegistrationWarning {
-                    Label(pushRegistrationWarning, systemImage: "bell.badge")
-                        .font(.caption)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                }
-            }
-        }
-    }
-}
-
-@MainActor
-private struct LiveRequestList: View {
-    let store: LivePresentationStore
-
-    var body: some View {
-        List(selection: Binding(get: { store.selectedRequestKey },
-                                set: { store.selectRequest($0) })) {
-            Section("Open") {
-                ForEach(store.openRequests, id: \.key) { request in
-                    LiveRequestRow(request: request).tag(request.key)
-                }
-            }
-            if !store.resolvedRequests.isEmpty {
-                Section("Resolved") {
-                    ForEach(store.resolvedRequests, id: \.key) { request in
-                        LiveRequestRow(request: request).tag(request.key)
-                    }
-                }
-            }
-        }
-        .navigationTitle("Requests")
-    }
-}
-
-private struct LiveRequestRow: View {
-    let request: PresentedRequest
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(request.title?.rawValue ?? request.key.senderID.rawValue)
-                .font(.headline)
-            Text(LiveLifecycleTitle(request.lifecycleStatus).label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
+            },
+            warnings: [store.observationError, store.notificationWarning,
+                       store.connectionWarning, store.pushRegistrationWarning].compactMap { $0 })
     }
 }
 
 struct LiveRequestDetail: View {
     let request: PresentedRequest
     let store: LivePresentationStore
+    var context: InboxCardContext = .standalone
+    @State private var deferred = false
+    @State private var chatPresented = false
 
     var canAnswer: Bool {
         guard request.lifecycleStatus == .open, request.intentReceipt == nil else { return false }
@@ -107,17 +43,19 @@ struct LiveRequestDetail: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(request.title?.rawValue ?? request.key.senderID.rawValue)
-                        .font(.title2.bold())
-                    Spacer()
-                    Text(LiveLifecycleTitle(request.lifecycleStatus).label)
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(.quaternary, in: Capsule())
+        MessageCardSurface(context: context) {
+            VStack(alignment: .leading, spacing: 22) {
+                MessageHeading(sender: request.key.senderID.rawValue,
+                               initials: String(request.key.senderID.rawValue.prefix(2)).uppercased(),
+                               title: request.title?.rawValue ?? request.key.senderID.rawValue)
+                Text(LiveLifecycleTitle(request.lifecycleStatus).label)
+                    .font(.caption).foregroundStyle(.secondary)
+                if deferred {
+                    HStack {
+                        Label("Not now", systemImage: "clock")
+                        Spacer()
+                        Button("Undo") { deferred = false }
+                    }.font(.subheadline)
                 }
                 if let body = request.body {
                     Text(body.rawValue)
@@ -139,10 +77,7 @@ struct LiveRequestDetail: View {
                     Text("This request uses an unsupported answer format.")
                         .foregroundStyle(.secondary)
                 }
-                if canAnswer {
-                    Button(submitLabel) { store.submitFromUser(request.key) }
-                        .buttonStyle(.borderedProminent)
-                } else if request.lifecycleStatus == .pending {
+                if request.lifecycleStatus == .pending {
                     Button("Retry delivery") { store.retryPendingDelivery() }
                         .buttonStyle(.bordered)
                 }
@@ -170,10 +105,29 @@ struct LiveRequestDetail: View {
                     }
                 }
             }
+            .padding(.horizontal, 22).padding(.vertical, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
         }
-        .navigationTitle("Request")
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(submitLabel, systemImage: "checkmark") { store.submitFromUser(request.key) }
+                    .labelStyle(.iconOnly).disabled(!canAnswer)
+                    .accessibilityIdentifier("request-finish")
+            }
+            ToolbarItemGroup(placement: .bottomBar) {
+                Button("Later", systemImage: "clock") { deferred.toggle() }.labelStyle(.iconOnly)
+                Spacer()
+                Button("Chat", systemImage: "bubble.left.and.bubble.right") { chatPresented = true }
+                    .labelStyle(.iconOnly)
+                    .popover(isPresented: $chatPresented, arrowEdge: .bottom) {
+                        ContentUnavailableView("Conversation is not available yet",
+                            systemImage: "bubble.left.and.bubble.right",
+                            description: Text("Your request and answer continue to use their existing delivery path."))
+                            .frame(idealWidth: 360, idealHeight: 300)
+                            .presentationCompactAdaptation(.sheet)
+                    }
+            }
+        }
     }
 }
 
@@ -255,14 +209,8 @@ private struct LiveProjectedInputView: View {
         case let .response(actions):
             VStack(alignment: .leading, spacing: 10) {
                 Text(input.label.rawValue).font(.headline)
-                if layout == .cards {
-                    AdaptiveGridLayout(maxColumns: 2, minimumItemWidth: 138, spacing: 10) {
-                        ForEach(actions, id: \.id) { action in actionButton(action) }
-                    }
-                } else {
-                    VStack(spacing: 10) {
-                        ForEach(actions, id: \.id) { action in actionButton(action) }
-                    }
+                VStack(spacing: 10) {
+                    ForEach(actions, id: \.id) { action in actionButton(action) }
                 }
                 if let selected = draft?.selectedActionID,
                    let action = actions.first(where: { $0.id == selected }),
@@ -320,16 +268,11 @@ private struct LiveProjectedInputView: View {
                    let illustration = sender.illustrations.first(where: { $0.id == artID }) {
                     SenderIllustrationCanvas(illustration: illustration, point: nil)
                 }
-                Text(action.label.rawValue)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                MessageChoiceLabel(title: action.label.rawValue, detail: "",
+                                   selected: selected, multiple: false, suggested: false)
             }
-            .padding(10)
-            .background(selected ? Color.accentColor.opacity(0.12) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
-        .overlay(RoundedRectangle(cornerRadius: 10)
-            .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.3)))
         .accessibilityValue(selected ? "Selected" : "Not selected")
         .disabled(readOnly)
     }
@@ -365,10 +308,13 @@ private struct LiveCompatibilityActions: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(actions, id: \.id) { action in
-                Button(action.label.rawValue) {
+                Button {
                     store.selectAction(action.id, input: nil, for: request.key)
+                } label: {
+                    MessageChoiceLabel(title: action.label.rawValue, detail: "",
+                        selected: selected == action.id, multiple: false, suggested: false)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
                 .accessibilityValue(selected == action.id ? "Selected" : "Not selected")
                 .disabled(readOnly)
             }
@@ -387,7 +333,7 @@ private struct LiveCompatibilityActions: View {
     }
 }
 
-private struct LiveLifecycleTitle {
+struct LiveLifecycleTitle {
     let label: LocalizedStringResource
 
     init(_ status: AppLifecycleStatus) {

@@ -129,11 +129,12 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let setPoint = app.buttons["set-point"]
         XCTAssertTrue(setPoint.waitForExistence(timeout: 5))
         setPoint.tap()
-        replaceText(in: app.textFields["coordinate-horizontal"], with: "240")
-        replaceText(in: app.textFields["coordinate-vertical"], with: "610")
+        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-horizontal"], with: "240")
+        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-vertical"], with: "610")
 
         let note = app.textViews["text-input-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
+        revealOutcomeEditor(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
 
@@ -142,45 +143,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         send.tap()
         XCTAssertTrue(app.buttons["request-status-details"].waitForExistence(timeout: 5))
 
-        showRequestsListIfNeeded(in: app)
-        let demoControls = app.buttons["demo-controls-button"]
-        XCTAssertTrue(demoControls.waitForExistence(timeout: 5))
-        demoControls.tap()
-
-        XCTAssertTrue(app.descendants(matching: .any)["demo-scope-disclosure"].waitForExistence(timeout: 5))
-        let targetPicker = app.descendants(matching: .any)["demo-target-picker"]
-        XCTAssertTrue(targetPicker.waitForExistence(timeout: 5))
-        targetPicker.tap()
-        let facilitiesOption = app.buttons["Facilities desk"].firstMatch
-        XCTAssertTrue(facilitiesOption.waitForExistence(timeout: 5))
-        facilitiesOption.tap()
-
-        let acceptOutcome = app.buttons["demo-scenario-ownOperationAccepted"]
-        XCTAssertTrue(acceptOutcome.isEnabled,
-                      "Selecting the pending Facilities request should enable its outcome.\n\(app.debugDescription)")
-        let demoScrollView = app.scrollViews.containing(.any, identifier: acceptOutcome.identifier).firstMatch
-        XCTAssertTrue(demoScrollView.exists,
-                      "The outcome should be inside the Demo controls scroll view.\n\(app.debugDescription)")
-        let appViewport = app.windows.firstMatch.frame
-        for _ in 0..<5 {
-            let frame = acceptOutcome.frame
-            let center = CGPoint(x: frame.midX, y: frame.midY)
-            if appViewport.contains(center) && acceptOutcome.isHittable { break }
-            demoScrollView.swipeUp()
-        }
-        let outcomeFrame = acceptOutcome.frame
-        let outcomeCenter = CGPoint(x: outcomeFrame.midX, y: outcomeFrame.midY)
-        XCTAssertTrue(appViewport.contains(outcomeCenter) && acceptOutcome.isHittable,
-                      "The enabled outcome must be inside the app viewport after scrolling Demo controls.\n\(app.debugDescription)")
-        acceptOutcome.tap()
-
-        let answeredState = app.staticTexts["Current state, Answered"]
-        XCTAssertTrue(answeredState.waitForExistence(timeout: 5),
-                      "Applying the accepted outcome should move the selected request to Answered.\n\(app.debugDescription)")
-        XCTAssertTrue(app.staticTexts["Example outcome applied"].waitForExistence(timeout: 5))
-        let returnButton = app.buttons["demo-return-to-request"]
-        XCTAssertTrue(returnButton.exists)
-        returnButton.tap()
+        applyFixtureOutcome("ownOperationAccepted", in: app)
 
         let acceptedStatus = app.buttons["request-status-details"]
         XCTAssertTrue(acceptedStatus.waitForExistence(timeout: 5))
@@ -198,34 +161,14 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let acceptedOutcome = app.staticTexts["request-details-outcome"]
         XCTAssertTrue(acceptedOutcome.waitForExistence(timeout: 5))
         XCTAssertTrue(acceptedOutcome.label.contains("No relay or source receipt exists"))
+        assertExactFacilitiesReceipt(in: app)
     }
 
     func testUnconfirmedAnswerOutcomeKeepsNeutralSceneAndExactReceipt() throws {
         let app = launchFreshApp()
         submitFacilitiesAnswer(in: app, horizontal: "240", vertical: "610")
 
-        showRequestsListIfNeeded(in: app)
-        app.buttons["demo-controls-button"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["demo-scope-disclosure"].waitForExistence(timeout: 5))
-
-        let targetPicker = app.descendants(matching: .any)["demo-target-picker"]
-        targetPicker.tap()
-        app.buttons["Facilities desk"].firstMatch.tap()
-        let unconfirmed = app.buttons["demo-scenario-answerOutcomeUnconfirmed"]
-        XCTAssertTrue(unconfirmed.waitForExistence(timeout: 5))
-        let demoScrollView = app.scrollViews.containing(.any, identifier: unconfirmed.identifier).firstMatch
-        XCTAssertTrue(demoScrollView.exists)
-        let appViewport = app.windows.firstMatch.frame
-        for _ in 0..<5 {
-            let frame = unconfirmed.frame
-            let center = CGPoint(x: frame.midX, y: frame.midY)
-            if appViewport.contains(center) && unconfirmed.isHittable { break }
-            demoScrollView.swipeUp()
-        }
-        XCTAssertTrue(unconfirmed.isHittable,
-                      "The unconfirmed scenario must be visible before the demo applies it.\n\(app.debugDescription)")
-        unconfirmed.tap()
-        app.buttons["demo-return-to-request"].tap()
+        applyFixtureOutcome("answerOutcomeUnconfirmed", in: app)
 
         let unconfirmedStatus = app.buttons["request-status-details"]
         XCTAssertTrue(unconfirmedStatus.waitForExistence(timeout: 5))
@@ -241,6 +184,28 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(outcome.label.contains("original operation outcome remains unconfirmed"))
         XCTAssertTrue(app.staticTexts["Your submitted answer · exact JSON"].exists,
                       "Read-only inspection retains the captured answer without calling it the winning result.")
+        assertExactFacilitiesReceipt(in: app)
+    }
+
+    private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
+        let outcomeButton = app.buttons["fixture-outcome-button"]
+        XCTAssertTrue(outcomeButton.waitForExistence(timeout: 5),
+                      "The ordinary pending fixture card must expose its local outcome control.")
+        XCTAssertTrue(outcomeButton.isHittable)
+        outcomeButton.tap()
+        let outcome = app.buttons.matching(identifier: "fixture-outcome-" + scenario).firstMatch
+        XCTAssertTrue(outcome.waitForExistence(timeout: 5))
+        XCTAssertTrue(outcome.isEnabled && outcome.isHittable,
+                      "Apply the local outcome through the ordinary card's native dialog.")
+        outcome.tap()
+    }
+
+    private func assertExactFacilitiesReceipt(in app: XCUIApplication) {
+        let receipt = app.staticTexts["request-details-receipt-json"]
+        XCTAssertTrue(receipt.waitForExistence(timeout: 5))
+        XCTAssertEqual(receipt.label,
+                       "{\"point\":{\"x\":240,\"y\":610},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}",
+                       "The terminal fixture outcome must preserve the exact originally submitted answer.")
     }
 
     private func selectFacilitiesRequest(in app: XCUIApplication) {
@@ -278,6 +243,33 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         field.typeText(value)
     }
 
+    private func revealOutcomeEditor(_ editor: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        for _ in 0..<8 {
+            let keyboard = app.keyboards.firstMatch
+            let keyboardTop = keyboard.exists ? keyboard.frame.minY : app.frame.maxY
+            let cancel = app.buttons["Cancel draft"]
+            let bottom = min(keyboardTop, cancel.exists ? cancel.frame.minY : app.frame.maxY - 80)
+            let frame = editor.frame
+            if editor.isHittable && frame.minY >= 100 && frame.maxY < bottom - 44 { return }
+            let direction: CGFloat = frame.minY < 100 ? 1 : -1
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0))
+                .withOffset(CGVector(dx: 0, dy: bottom - 160))
+            let end = start.withOffset(CGVector(dx: 0, dy: direction * 120))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        XCTFail("The ordinary card must reveal the editor above its bars and keyboard.\n\(app.debugDescription)")
+    }
+
+    private func replaceOutcomeCoordinate(in app: XCUIApplication, field: XCUIElement, with value: String) {
+        revealOutcomeEditor(field, in: app)
+        let existing = field.value as? String ?? ""
+        field.tap()
+        if !existing.isEmpty { field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.count)) }
+        field.typeText(value)
+        XCTAssertEqual(field.value as? String, value)
+    }
+
     private func submitFacilitiesAnswer(in app: XCUIApplication,
                                         horizontal: String,
                                         vertical: String) {
@@ -285,10 +277,11 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let setPoint = app.buttons["set-point"]
         XCTAssertTrue(setPoint.waitForExistence(timeout: 5))
         setPoint.tap()
-        replaceText(in: app.textFields["coordinate-horizontal"], with: horizontal)
-        replaceText(in: app.textFields["coordinate-vertical"], with: vertical)
+        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-horizontal"], with: horizontal)
+        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-vertical"], with: vertical)
         let note = app.textViews["text-input-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
+        revealOutcomeEditor(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
         let send = app.buttons["send-answer"]
