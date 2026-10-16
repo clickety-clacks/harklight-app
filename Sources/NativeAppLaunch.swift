@@ -213,7 +213,8 @@ final class NativeAppLaunch {
 
     var inboxPresentation: LivePresentationStore? {
         switch state {
-        case let .live(presentation), let .disconnected(presentation): presentation
+        case let .live(presentation): presentation
+        case let .disconnected(presentation): presentation
         default: nil
         }
     }
