@@ -1,5 +1,6 @@
 import AttentionDomain
 import CryptoKit
+import Foundation
 import XCTest
 @testable import AttentionClientDuoPrototype
 
@@ -62,6 +63,88 @@ final class ConversationPresentationTests: XCTestCase {
         try restored.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn)), context: context)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 2,
             "A duplicate inline replay normalizes to the same retained reference instead of conflicting.")
+    }
+
+    func testLegacyInlineRecoveryAfterFailedTextWriteKeepsRetryAndDuplicateReplayNormalized() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let request = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy-inline"))
+        let binding = ConversationBinding(request: request, revision: 1)
+        let bytes = Data(repeating: 0xB4, count: 200_000)
+        let digest = ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+        let inline = ConversationFile(id: ExactText("legacy-attachment"), name: ExactText("legacy-note.bin"),
+            byteCount: UInt64(bytes.count), sha256: digest, content: .inline(bytes))
+        let requestEvent = ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null))
+        let turn = ConversationTurn(id: ExactText("legacy-turn"), binding: binding, author: .person,
+            sessionHandle: ExactText("session"), text: ExactText("Retained exact bytes"), files: [inline])
+        let turnEvent = ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn))
+
+        // Build a pre-externalization state with the memory persistence's
+        // explicitly permitted inline representation, then seed those exact
+        // encoded bytes as an older on-disk account state.
+        let legacyPersistence = MemoryAttentionStatePersistence()
+        let legacyStore = try AttentionDomainStore(context: context, persistence: legacyPersistence)
+        try legacyStore.applyConversation(requestEvent, context: context)
+        try legacyStore.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Before retry"), files: [inline]),
+            context: context)
+        try legacyStore.applyConversation(turnEvent, context: context)
+        let legacyBytes = try XCTUnwrap(legacyPersistence.load(identity: identity))
+        XCTAssertNotNil(legacyBytes.range(of: bytes), "The fixture must contain legacy inline payload bytes.")
+
+        let backing = FileAttentionStatePersistence(directoryURL: root.appendingPathComponent("State", isDirectory: true))
+        try backing.commit(legacyBytes, identity: identity)
+        let failingPersistence = FailOnceAttentionStatePersistence(backing: backing)
+        let storage = try ConversationFileStorage(identity: identity, root: root.appendingPathComponent("Files", isDirectory: true))
+        let store = try AttentionDomainStore(context: context, persistence: failingPersistence,
+            conversationFileReferences: storage)
+
+        let initiallyNormalized = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request])
+        let retainedTurnFile = try XCTUnwrap(initiallyNormalized.turns.first?.files.first)
+        let retainedDraftFile = try XCTUnwrap(initiallyNormalized.drafts[1]?.files.first)
+        guard case .localFile = retainedTurnFile.content, case .localFile = retainedDraftFile.content else {
+            return XCTFail("Loading a legacy inline state must externalize its conversation files.")
+        }
+        XCTAssertEqual(retainedTurnFile.id, inline.id)
+        XCTAssertEqual(retainedDraftFile.id, inline.id)
+
+        failingPersistence.failNextCommit()
+        XCTAssertThrowsError(try store.updateConversationDraftText(ExactText("Failed attempt"), for: binding, context: context)) { error in
+            guard let storeError = error as? AttentionStoreError, case .persistence = storeError else {
+                return XCTFail("Expected the injected durable-write failure; received \(error).")
+            }
+        }
+        let recovered = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request])
+        XCTAssertEqual(recovered.drafts[1]?.text, ExactText("Before retry"), "The failed edit is not reported as saved.")
+        XCTAssertEqual(recovered.turns.first?.files.first, retainedTurnFile)
+        XCTAssertEqual(recovered.drafts[1]?.files.first, retainedDraftFile)
+        let unchangedDiskBytes = try XCTUnwrap(failingPersistence.load(identity: identity))
+        XCTAssertNotNil(unchangedDiskBytes.range(of: bytes), "A pre-replacement failure leaves the older plist intact.")
+
+        let retried = try store.updateConversationDraftText(ExactText("Saved retry"), for: binding, context: context)
+        XCTAssertEqual(retried.text, ExactText("Saved retry"))
+        XCTAssertEqual(retried.binding, binding)
+        XCTAssertEqual(retried.files, [retainedDraftFile])
+        let retriedDiskBytes = try XCTUnwrap(failingPersistence.load(identity: identity))
+        XCTAssertNil(retriedDiskBytes.range(of: bytes), "The successful retry persists references instead of legacy payload bytes.")
+        let retainedURL = try storage.fileURL(for: retainedTurnFile)
+        try storage.verify(retainedURL, for: retainedTurnFile)
+        XCTAssertEqual(try Data(contentsOf: retainedURL), bytes)
+
+        let cursorBeforeDuplicate = try store.conversationSnapshot(context: context).cursor
+        try store.applyConversation(turnEvent, context: context)
+        let afterDuplicate = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request])
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, cursorBeforeDuplicate)
+        XCTAssertEqual(afterDuplicate.turns.count, 1, "The original turn remains a single idempotently replayed fact.")
+        XCTAssertEqual(afterDuplicate.turns.first?.id, turn.id)
+        XCTAssertEqual(afterDuplicate.turns.first?.binding, binding)
+        XCTAssertEqual(afterDuplicate.turns.first?.files.first, retainedTurnFile)
+        let finalDiskBytes = try XCTUnwrap(failingPersistence.load(identity: identity))
+        XCTAssertNil(finalDiskBytes.range(of: bytes), "Duplicate replay leaves the normalized persisted state unchanged.")
     }
 
     func testQuestionRevisionArchivesTheOldAnswerAndInvalidatesItsSelectorWithoutReusingIt() throws {
@@ -226,4 +309,35 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertThrowsError(try fixture.domain.prepareDiscussion(ConversationBinding(request: revised.key, revision: 2), context: fixture.context))
     }
 
+}
+
+private final class FailOnceAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+    private let backing: FileAttentionStatePersistence
+    private let lock = NSLock()
+    private var failNextWrite = false
+
+    init(backing: FileAttentionStatePersistence) {
+        self.backing = backing
+    }
+
+    func failNextCommit() {
+        lock.lock()
+        failNextWrite = true
+        lock.unlock()
+    }
+
+    func load(identity: ProfileIdentity) throws -> Data? {
+        try backing.load(identity: identity)
+    }
+
+    func commit(_ data: Data, identity: ProfileIdentity) throws {
+        lock.lock()
+        let shouldFail = failNextWrite
+        failNextWrite = false
+        lock.unlock()
+        if shouldFail {
+            throw AttentionStoreError.persistence("Injected pre-replacement test write failure.")
+        }
+        try backing.commit(data, identity: identity)
+    }
 }

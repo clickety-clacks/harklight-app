@@ -1345,8 +1345,15 @@ public final class AttentionDomainStore: @unchecked Sendable {
         } catch {
             if let bytes = try? persistence.load(identity: context.identity),
                let recovered = try? PropertyListDecoder().decode(PersistedAttentionState.self, from: bytes),
-               recovered.profileIdentity == context.identity {
-                state = recovered
+               recovered.profileIdentity == context.identity,
+               let normalized = try? Self.externalizingConversationFiles(in: recovered,
+                    using: conversationFileReferences,
+                    allowInlinePersistence: persistence is MemoryAttentionStatePersistence) {
+                // A failed write may leave the prior on-disk plist in its legacy
+                // inline form. Keep the in-memory invariant used by text-only
+                // edits when recovering that older durable snapshot. This scan
+                // runs only after a failed commit, never on the normal edit path.
+                state = normalized
             }
             if let storeError = error as? AttentionStoreError { throw storeError }
             throw AttentionStoreError.persistence(error.localizedDescription)
