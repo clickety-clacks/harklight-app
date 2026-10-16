@@ -51,6 +51,33 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertEqual(thread.drafts[1], draft)
     }
 
+    func testConversationCanArriveBeforeOrdinaryDeliveryWithoutCreatingOrphanedLegacyState() throws {
+        let context = context()
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let first = binding(context)
+        let second = binding(context, 2)
+        let original = try JSONValue.parse(Data(#"{"title":"Original"}"#.utf8))
+        let revised = try JSONValue.parse(Data(#"{"title":"Revised"}"#.utf8))
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: first,
+            fact: .request(sessionHandle: ExactText("origin"), payload: original)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: second,
+            fact: .request(sessionHandle: ExactText("origin"), payload: revised)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: second,
+            fact: .terminal(turn: ExactText("terminal"), author: .server, state: .expired)), context: context)
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.snapshot(context: context).drafts.isEmpty)
+        XCTAssertTrue(try restored.snapshot(context: context).remoteStates.isEmpty)
+        try restored.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: first.request, originalPayload: original), .message)), context: context)
+        let snapshot = try restored.snapshot(context: context)
+        XCTAssertEqual(snapshot.requests[first.request]?.originalPayload, revised)
+        XCTAssertEqual(snapshot.remoteStates[first.request]?.state, .expired)
+        XCTAssertEqual(snapshot.cursor, 1)
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 3)
+        _ = try AttentionDomainStore(context: context, persistence: persistence)
+    }
+
     func testUnknownSubmissionKeepsExactOperationAndDraftUntilMatchingAcceptedTurn() throws {
         let context = context()
         let persistence = MemoryAttentionStatePersistence()

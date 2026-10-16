@@ -550,10 +550,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
             } else {
                 next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
-                next.drafts[request.key] = RequestDraft(interface: request.interface)
+                let thread = next.conversation?.threads[request.key]
+                let currentPayload = thread.flatMap { $0.revisions[$0.currentRevision] } ?? request.originalPayload
+                next.drafts[request.key] = RequestDraft(interface: StoredRequest(key: request.key, originalPayload: currentPayload).interface)
             }
             let previous = next.remoteStates[request.key]
-            next.remoteStates[request.key] = RemoteRequestState(state: previous?.state,
+            next.remoteStates[request.key] = RemoteRequestState(state: previous?.state ?? next.conversation?.threads[request.key]?.terminal,
                                                                 authorizedOriginAnswer: previous?.authorizedOriginAnswer,
                                                                 classification: classification,
                                                                 eventSequence: event.sequence)
@@ -780,11 +782,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
             var archived = previous.answerDrafts ?? [:]
             if let draft = state.drafts[key] { archived[previous.currentRevision] = draft }
             conversation.threads[key]?.answerDrafts = archived
-            let fresh = RequestDraft(interface: StoredRequest(key: key, originalPayload: payload).interface)
-            next.drafts[key] = fresh
-            if var fixture = next.fixtureSessions[key], case .open = fixture.lifecycle {
-                fixture.draft = fresh
-                next.fixtureSessions[key] = fixture
+            if next.requests[key] != nil {
+                let fresh = RequestDraft(interface: StoredRequest(key: key, originalPayload: payload).interface)
+                next.drafts[key] = fresh
+                if var fixture = next.fixtureSessions[key], case .open = fixture.lifecycle {
+                    fixture.draft = fresh
+                    next.fixtureSessions[key] = fixture
+                }
             }
             if let id = next.intentByRequest[key], var intent = next.intents[id] {
                 if case .accepted = intent.disposition { throw ConversationError.conflict }
@@ -795,7 +799,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 next.outboxOrder.removeAll { $0 == id }
             }
         }
-        if case let .terminal(_, _, terminal) = event.fact {
+        if case let .terminal(_, _, terminal) = event.fact, next.requests[key] != nil {
             let previous = next.remoteStates[key] ?? RemoteRequestState()
             guard previous.state == nil || previous.state == terminal else { throw ConversationError.conflict }
             next.remoteStates[key] = RemoteRequestState(state: terminal,
