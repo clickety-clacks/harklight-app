@@ -139,7 +139,7 @@ public struct ConversationWire: Sendable {
                 operation = id
             } else { operation = nil }
             let content: ExactText
-            if (kind == "discussion" || kind == "reply") && !redacted {
+            if (kind == "discussion" || kind == "reply" || kind == "result") && !redacted {
                 guard let string = value.uniqueValue(named: "text")?.stringValue else { throw RelayWireError.invalidFrame }
                 content = string
             } else { content = ExactText("") }

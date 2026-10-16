@@ -115,7 +115,7 @@ final class ConversationRelayTests: XCTestCase {
         _ = try store.applyConversation(try ConversationWire(profile: context).decodeEvent(result), context: context)
         session.ordinary[2] = data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"request","origin":"origin","state":"answered","by":"agent_answer","request_revision":1,"event_id":"answer-2","author":"agent"}"#)
         session.ordinary.append(data(#"{"v":1,"type":"resynced","seq":2}"#))
-        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#), result,
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
         session.onOrdinaryACK = {
             let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
