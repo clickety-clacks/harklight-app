@@ -1,5 +1,6 @@
 import Foundation
 import AttentionDomain
+import CryptoKit
 import HarklightNativeRelay
 import Network
 import Security
@@ -430,6 +431,84 @@ final class NativeGuidedTLSTests: XCTestCase {
                       "Other saved approval checks retain their existing retry behavior.")
     }
 
+    func testReceivedInvitationContinuesAutomaticApprovalPolling() async throws {
+        let namespace = "Harklight.received-invitation-approval-poll." + UUID().uuidString
+        let certificateURL = try XCTUnwrap(Bundle(for: NativeGuidedTLSTests.self)
+            .url(forResource: "guided-local-tls", withExtension: "pem"))
+        let caPEM = try String(contentsOf: certificateURL, encoding: .utf8)
+        let caDER = try XCTUnwrap(NativeEnrollmentSettings.certificateDER(from: caPEM))
+        let caSHA256 = SHA256.hash(data: caDER).map { String(format: "%02x", $0) }.joined()
+        let payload: [String: Any] = [
+            "v": 1,
+            "person_id": "invited-person",
+            "server_name": "relay.example.test",
+            "enrollment_url": "https://relay.example.test:18444/enroll",
+            "relay_url": "wss://relay.example.test:18443/relay",
+            "ca_pem": caPEM,
+            "ca_sha256": caSHA256,
+            "invite_token": String(repeating: "1", count: 64),
+            "expires_at": Int64(Date().timeIntervalSince1970 * 1000) + 1_800_000
+        ]
+        let invitation = try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: payload))
+        let invitationData = try JSONEncoder().encode(invitation)
+        let encodedInvitation = invitationData.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let invitationURL = try XCTUnwrap(URL(string: "harklight://join#\(encodedInvitation)"))
+
+        let transport = InvitationApprovalPollingTransport()
+        let store = NativeGuidedJoinStore(namespace: namespace, transport: transport)
+        transport.store = store
+        defer {
+            if let attempt = try? store.loadAttempt() {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: attempt.identityLabel] as CFDictionary)
+                let keyTag = String(attempt.identityLabel.dropLast(".certificate".count))
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(keyTag.utf8)] as CFDictionary)
+            }
+            SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                           kSecAttrService as String: namespace] as CFDictionary)
+        }
+
+        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "Test device")
+        var connectedRecord: NativeEnrollmentRecord?
+        flow.connectApproved = { record in
+            connectedRecord = record
+            return true
+        }
+
+        await flow.receive(invitationURL)
+        XCTAssertEqual(flow.screen, .confirmation,
+                       "Receiving a valid link reaches the ordinary, deliberate Join confirmation.")
+        await flow.join()
+        XCTAssertEqual(flow.screen, .pending)
+        let originalAttempt = try XCTUnwrap(store.loadAttempt())
+
+        XCTAssertFalse(flow.shouldAutomaticallyRetry(foregroundOutcome: .timedOut),
+                       "The timeout stop still applies after receiving an invitation.")
+        let retriedTimedOutAttempt = await flow.retryAutomaticallyIfNeeded(foregroundOutcome: .timedOut)
+        XCTAssertFalse(retriedTimedOutAttempt)
+        XCTAssertEqual(transport.approvalCheckCount, 0,
+                       "A timed-out foreground attempt still waits for the explicit Retry action.")
+        XCTAssertTrue(flow.shouldAutomaticallyRetry(foregroundOutcome: .incomplete),
+                      "Receiving an invitation must not disable non-timed-out approval polling.")
+        let didPoll = await flow.retryAutomaticallyIfNeeded(foregroundOutcome: .incomplete)
+
+        XCTAssertTrue(didPoll)
+        XCTAssertEqual(transport.joinSubmissionCount, 1,
+                       "Approval polling must not create a second Join request.")
+        XCTAssertEqual(transport.approvalCheckCount, 1,
+                       "The actual automatic helper must check the pending request after invitation receipt.")
+        XCTAssertEqual(flow.screen, .connected,
+                       "The ordinary invitation flow observes and completes owner approval.")
+        XCTAssertEqual(flow.attempt?.id, originalAttempt.id)
+        XCTAssertEqual(flow.attempt?.deviceID, originalAttempt.deviceID)
+        XCTAssertEqual(connectedRecord?.personID, invitation.personID)
+        XCTAssertEqual(connectedRecord?.deviceID, originalAttempt.deviceID)
+    }
+
     private func approvedRecord(foregroundRelayConfirmed: Bool,
                                 notificationExplanationSeen: Bool) -> NativeEnrollmentRecord {
         NativeEnrollmentRecord(host: "relay.example.test", enrollmentPort: 18444, relayPort: 18443,
@@ -557,6 +636,37 @@ final class NativeGuidedTLSTests: XCTestCase {
                                                               rootDER: server.rootDER)
             XCTFail("An oversized invitation response must be stopped before joining can continue")
         } catch NativeJoinError.invalidResponse {}
+    }
+}
+
+@MainActor
+private final class InvitationApprovalPollingTransport: NativeJoinTransport {
+    weak var store: NativeGuidedJoinStore?
+    private(set) var joinSubmissionCount = 0
+    private(set) var approvalCheckCount = 0
+
+    func request(_ url: URL, method: String, body: Data?, rootDER: Data) async throws -> NativeJoinResponse {
+        switch (url.path, method) {
+        case ("/enroll", "GET"):
+            return try reply(["state": "reachable"])
+        case ("/enroll", "POST"):
+            joinSubmissionCount += 1
+            let deadline = Int64(Date().timeIntervalSince1970 * 1000) + 600_000
+            return try reply(["state": "pending", "approval_code": "ABCDEF2345",
+                              "expires_at": deadline, "status_expires_at": deadline + 86_400_000])
+        case ("/enroll/status", "POST"):
+            approvalCheckCount += 1
+            guard let attempt = try store?.loadAttempt() else { throw NativeJoinError.unavailable }
+            let fields: [String: Any] = ["state": "approved", "person_id": attempt.invitation.personID,
+                                         "device_id": attempt.deviceID]
+            return try reply(fields)
+        default:
+            throw NativeJoinError.unavailable
+        }
+    }
+
+    private func reply(_ fields: [String: Any]) throws -> NativeJoinResponse {
+        NativeJoinResponse(statusCode: 200, data: try JSONSerialization.data(withJSONObject: fields))
     }
 }
 

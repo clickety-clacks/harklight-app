@@ -160,7 +160,7 @@ final class NativeGuidedJoinCoordinator {
     /// The scene poll may continue ordinary approval checks, but an approved
     /// foreground connection that timed out waits for a person to retry it.
     func shouldAutomaticallyRetry(foregroundOutcome: NativeForegroundConnectProgress.Outcome?) -> Bool {
-        guard isShowing, !busy, !isApprovedConnectBusy, !receivedInvitation,
+        guard isShowing, !busy, !isApprovedConnectBusy,
               [.pending, .approvalExpired, .unreachable, .approvedFinishing].contains(screen) else {
             return false
         }
