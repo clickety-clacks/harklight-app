@@ -30,6 +30,13 @@ struct ConversationPanel: View {
                 }.padding().frame(maxWidth: .infinity, alignment: .leading)
             }
             if let thread {
+                if thread.revisionNumbers.count > 1 {
+                    Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
+                        ForEach(thread.revisionNumbers, id: \.self) { value in
+                            Text("Version \(value)\(thread.drafts[value] == nil && thread.answerDrafts?[value] == nil ? "" : " · draft")").tag(value)
+                    }
+                    }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
+                }
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
@@ -55,13 +62,6 @@ struct ConversationPanel: View {
                         .font(.caption).padding(8)
                 }
                 HStack {
-                    if thread.revisionNumbers.count > 1 {
-                        Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
-                            ForEach(thread.revisionNumbers, id: \.self) { value in
-                                Text("Version \(value)\(thread.drafts[value] == nil && thread.answerDrafts?[value] == nil ? "" : " · draft")").tag(value)
-                            }
-                        }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
-                    }
                     Spacer(minLength: 0)
                     Text(store.isLocalExample ? "Local conversation · nothing sent" : "Discussion · version \(revision)")
                         .font(.caption2).foregroundStyle(.secondary)
