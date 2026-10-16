@@ -7,3 +7,8 @@ build/
 # Generated loopback-only TLS test credentials.
 /Tests/Fixtures/guided-local-tls.pem
 /Tests/Fixtures/guided-local-tls.p12
+/Tests/Fixtures/conversation-interop.json
+/Tests/Fixtures/conversation-interop-ca.pem
+/Tests/Fixtures/conversation-interop-client.p12
+/Tests/Fixtures/native-inline.bin
+/Tests/Fixtures/native-upload.bin
