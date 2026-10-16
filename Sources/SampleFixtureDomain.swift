@@ -78,6 +78,18 @@ final class SampleFixtureDomain {
                 try apply(.availability(sessionHandle: handle, .gone))
                 try apply(.terminal(turn: ExactText(message.id + "-terminal"), author: .origin, state: .cleared))
             }
+            if message.id == "sample-review-0" {
+                let bytes = Data(repeating: 66, count: 300_000)
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                let file = ConversationFile(id: ExactText("local-mixed-file"), name: ExactText("Unidentified example.txt"),
+                    byteCount: UInt64(bytes.count), sha256: ExactText(digest), content: .inline(bytes))
+                try domain.stageFixtureConversationUpload(file, binding: binding,
+                    text: ExactText("Keep the original mixed-result note."), context: context)
+                if let cleanup = try domain.abandonConversationUploads(for: key, context: context).first {
+                    try domain.recordConversationCleanup(cleanup.id, request: key,
+                        outcome: .acknowledged(ConversationUploadDiscardResult(state: .committed, discarded: 1)), context: context)
+                }
+            }
             if message.id == "sample-review-2" {
                 let bytes = Data(repeating: 65, count: 300_000)
                 let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()

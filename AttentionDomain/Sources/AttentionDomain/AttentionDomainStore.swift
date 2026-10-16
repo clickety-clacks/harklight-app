@@ -1026,6 +1026,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
             guard $0.binding == binding else { return false }
             if case .acknowledged = $0.outcome { return false }; return true
         }) else { throw ConversationError.pendingSubmission }
+        let unready = Set((thread.uploadGroups ?? [:]).values.filter { $0.cleanupID != nil }
+            .flatMap { $0.originals.map(\.id) })
+        guard !draft.files.contains(where: { unready.contains($0.id) }) else { throw ConversationError.pendingSubmission }
         let operation: UUID
         switch draft.disposition {
         case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):

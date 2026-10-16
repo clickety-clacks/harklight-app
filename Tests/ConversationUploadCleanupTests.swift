@@ -73,11 +73,11 @@ final class ConversationUploadCleanupTests: XCTestCase {
         XCTAssertEqual(mixed, ConversationUploadDiscardResult(state: .committed, discarded: 1))
         let zero = try wire.decodeDiscard(Data(#"{"v":1,"type":"ok","state":"discarded","discarded":0}"#.utf8), status: 200)
         XCTAssertEqual(zero.discarded, 0)
-        try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .acknowledged(mixed), context: context)
+        try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .acknowledged(zero), context: context)
         try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .unknown(ExactText("Late failure")), context: context)
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
-        XCTAssertEqual(thread.uploadCleanups?[cleanup.id]?.outcome, .acknowledged(mixed))
+        XCTAssertEqual(thread.uploadCleanups?[cleanup.id]?.outcome, .acknowledged(zero))
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Text remains"))
         XCTAssertTrue(thread.drafts[1]?.files.isEmpty == true)
         XCTAssertTrue(try restored.abandonConversationUploads(for: binding.request, context: context).isEmpty)
@@ -107,6 +107,40 @@ final class ConversationUploadCleanupTests: XCTestCase {
         XCTAssertEqual(pending.uploadOperations, [operation])
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.text, ExactText("Keep exact draft"))
         XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
+    }
+
+    @MainActor
+    func testMixedCleanupKeepsUnidentifiedReferencesAndHistoryUntilReplayOrExplicitReselection() throws {
+        let (context, persistence, store, binding) = try setup()
+        let original = file("unidentified.bin")
+        let committedFile = ConversationFile(id: ExactText("history-file"), name: ExactText("previous.bin"), byteCount: 300_000,
+            sha256: original.sha256, content: .uploaded(ExactText(UUID().uuidString.lowercased())))
+        let history = ConversationTurn(id: ExactText("2"), binding: binding, author: .person,
+            sessionHandle: ExactText("handle"), text: ExactText("Already accepted"), files: [committedFile])
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding, fact: .turn(history)), context: context)
+        let retainedHistory = try XCTUnwrap(store.conversationSnapshot(context: context).threads[binding.request]?.turns)
+        try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Keep original note"), files: [original]), context: context)
+        let operation = try store.prepareDiscussion(binding, context: context)
+        try store.markDiscussionOutcome(binding, operation: operation, rejection: ExactText("Not submitted"), context: context)
+        let cleanup = try XCTUnwrap(store.abandonConversationUploads(for: binding.request, context: context).first)
+        let mixed = ConversationUploadDiscardResult(state: .committed, discarded: 1)
+        try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .acknowledged(mixed), context: context)
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.drafts[1]?.files, [original], "A count cannot identify which draft file was discarded or committed")
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("Keep original note"))
+        XCTAssertEqual(thread.turns, retainedHistory, "Keep only actually replayed committed content; do not fabricate a history entry")
+        XCTAssertEqual(thread.uploadCleanups?[cleanup.id]?.outcome, .acknowledged(mixed))
+        XCTAssertThrowsError(try restored.prepareDiscussion(binding, context: context), "Unidentified old references cannot resend")
+        let model = try LivePresentationStore(store: restored, context: context)
+        XCTAssertTrue(model.hasUnreadyUploadReference(for: binding.request, revision: 1))
+        XCTAssertTrue(model.uploadHistoryNeedsReconciliation(for: binding.request, revision: 1))
+        let selected = ConversationFile(id: ExactText(UUID().uuidString), name: original.name,
+            byteCount: original.byteCount, sha256: original.sha256, content: original.content)
+        model.updateConversation(for: binding.request, revision: 1, files: [selected])
+        XCTAssertFalse(model.hasUnreadyUploadReference(for: binding.request, revision: 1))
+        XCTAssertNotEqual(try restored.prepareDiscussion(binding, context: context), operation, "Explicit reselection prepares a new upload operation, never the abandoned one")
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.turns, retainedHistory)
     }
 
 }

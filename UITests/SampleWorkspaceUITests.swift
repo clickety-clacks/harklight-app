@@ -224,6 +224,29 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("sender-updated-earlier-question-and-draft", app)
     }
 
+    func testMixedCleanupRetainsUnidentifiedFilesWithoutInventedCommittedHistory() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--conversation-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let search = app.searchFields.firstMatch
+        search.tap(); search.typeText("welcome\n")
+        let row = app.buttons["request-row-sample-review-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        app.buttons["Chat"].tap()
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "Keep the original mixed-result note.")
+        XCTAssertTrue(app.staticTexts["Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend."].exists)
+        XCTAssertTrue(app.staticTexts["Unidentified example.txt"].exists)
+        XCTAssertTrue(app.staticTexts["Not ready · reselect after cleanup"].exists)
+        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        XCTAssertFalse(app.staticTexts["Committed file references remain available in history. This result does not identify individual files."].exists)
+        capture("mixed-cleanup-retained-unidentified-reference", app)
+    }
+
     func testCompactBackLeavesMessageButClosingChatDoesNotAbandonItsUpload() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

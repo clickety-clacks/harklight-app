@@ -234,7 +234,8 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         }
         let abandoned = (uploadGroups ?? [:]).values.filter { group in
             guard group.binding.revision == revision, let id = group.cleanupID,
-                  let cleanup = uploadCleanups?[id], case .acknowledged = cleanup.outcome else { return false }
+                  let cleanup = uploadCleanups?[id], case let .acknowledged(result) = cleanup.outcome,
+                  result.state == .discarded else { return false }
             return true
         }
         let ids = Set(abandoned.flatMap { $0.originals.map(\.id) })

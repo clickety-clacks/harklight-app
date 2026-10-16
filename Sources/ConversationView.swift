@@ -177,7 +177,7 @@ private struct ConversationComposer: View {
             }
             .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
             .accessibilityLabel(store.isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
-            .disabled(store.isSendingDiscussion || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
+            .disabled(store.isSendingDiscussion || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || store.hasUnreadyUploadReference(for: key, revision: revision) || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
         }
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {
@@ -233,7 +233,7 @@ private struct ConversationUploadCleanupStatus: View {
                     case let .acknowledged(result):
                         Text("Cleanup acknowledged: \(result.discarded) unsubmitted uploads removed. Reselect unready files to upload again.")
                         if result.state == .committed {
-                            Text("Committed file references remain available in history. This result does not identify individual files.")
+                            Text("Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend.")
                         }
                     }
                 }
@@ -245,8 +245,8 @@ private struct ConversationUploadCleanupStatus: View {
                         .disabled(store.retryingCleanupRequests.contains(key))
                         .accessibilityIdentifier("conversation-retry-cleanup")
                 }
-                if store.hasAbandonedDiscussion(for: key, revision: revision) {
-                    Text("The earlier submission is unconfirmed. Refresh history to reconcile its original operation; it will not be resent.")
+                if store.hasAbandonedDiscussion(for: key, revision: revision) || store.uploadHistoryNeedsReconciliation(for: key, revision: revision) {
+                    Text("Refresh history to reconcile retained file and submission identities. These unready references will not be resent.")
                     Button("Refresh discussion history") { Task { await store.refreshDiscussionHistory() } }
                 }
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal)

@@ -422,6 +422,20 @@ final class LivePresentationStore {
         }
     }
 
+    func hasUnreadyUploadReference(for key: RequestKey, revision: UInt64) -> Bool {
+        conversationDraft(for: key, revision: revision).files.contains {
+            uploadNeedsReselection($0, for: key, revision: revision)
+        }
+    }
+
+    func uploadHistoryNeedsReconciliation(for key: RequestKey, revision: UInt64) -> Bool {
+        hasUnreadyUploadReference(for: key, revision: revision) &&
+        (conversationThreads[key]?.uploadCleanups ?? [:]).values.contains {
+            guard $0.binding.revision == revision, case let .acknowledged(result) = $0.outcome else { return false }
+            return result.state == .committed
+        }
+    }
+
     func retryUploadCleanup(for key: RequestKey) async {
         guard permitsDelivery, retryingCleanupRequests.insert(key).inserted else { return }
         defer { retryingCleanupRequests.remove(key) }
@@ -437,8 +451,9 @@ final class LivePresentationStore {
     func sendDiscussion(for key: RequestKey, revision: UInt64) {
         do {
             let binding = ConversationBinding(request: key, revision: revision)
-            guard !hasPendingUploadCleanup(for: key, revision: revision) else {
-                conversationError = "Upload cleanup is not confirmed. Retry cleanup before sending; your text draft is retained."
+            guard !hasPendingUploadCleanup(for: key, revision: revision),
+                  !hasUnreadyUploadReference(for: key, revision: revision) else {
+                conversationError = "Upload files are not ready to resend. Reconcile cleanup/history or remove and reselect them; your text draft is retained."
                 return
             }
             if permitsDelivery {
