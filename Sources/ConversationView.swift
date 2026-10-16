@@ -36,7 +36,7 @@ struct ConversationPanel: View {
                             if let earlier = store.historicalAnswerDraft(for: key, revision: revision) {
                                 DisclosureGroup("Earlier answer draft · not delivered") {
                                     HistoricalAnswerDraftView(request: earlier, store: store)
-                                }
+                                }.accessibilityIdentifier("conversation-earlier-answer")
                             }
                             ForEach(thread.turns) { turn in
                                 ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
@@ -60,7 +60,7 @@ struct ConversationPanel: View {
                             ForEach(thread.revisionNumbers, id: \.self) { value in
                                 Text("Version \(value)\(thread.drafts[value] == nil && thread.answerDrafts?[value] == nil ? "" : " · draft")").tag(value)
                             }
-                        }.pickerStyle(.menu).font(.caption)
+                        }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
                     }
                     Spacer(minLength: 0)
                     Text(store.isLocalExample ? "Local conversation · nothing sent" : "Discussion · version \(revision)")
@@ -249,7 +249,7 @@ private struct ConversationTurnView: View {
                 Button { inspect(file) } label: { Label(file.name.rawValue, systemImage: "doc") }.font(.caption)
                 if turn.author == .person {
                     ConversationFileFacts(transfer: facts.fileTransfers[file.id] ?? .unknown,
-                        use: facts.fileUses[file.id] ?? .unknown)
+                        use: facts.fileUses[file.id] ?? .unknown, local: local)
                 }
             }
             if turn.author == .person {
@@ -265,17 +265,19 @@ private struct ConversationTurnView: View {
 private struct ConversationFileFacts: View {
     let transfer: ConversationFileTransfer
     let use: ConversationFileUse
+    var local = false
+    private var prefix: String { local ? "Example · " : "" }
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             switch transfer {
-            case .unknown: Text("Transfer not confirmed")
-            case .transferred: Text("Exact bytes transferred")
-            case let .notTransferred(reason): Text("Not transferred: " + reason.rawValue)
+            case .unknown: Text(prefix + "Transfer not confirmed")
+            case .transferred: Text(prefix + "Exact bytes transferred")
+            case let .notTransferred(reason): Text(prefix + "Not transferred: " + reason.rawValue)
             }
             switch use {
-            case .unknown: Text("Agent use not reported")
-            case .used: Text("Agent reported used")
-            case let .unusable(reason): Text("Agent reported unusable" + (reason.map { ": " + $0.rawValue } ?? ""))
+            case .unknown: Text(prefix + "Agent use not reported")
+            case .used: Text(prefix + "Agent reported used")
+            case let .unusable(reason): Text(prefix + "Agent reported unusable" + (reason.map { ": " + $0.rawValue } ?? ""))
             }
         }.font(.caption2).foregroundStyle(.secondary)
     }

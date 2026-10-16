@@ -56,11 +56,11 @@ final class SampleFixtureDomain {
                 try domain.saveDraft(answer, selector: domain.selector(for: key, context: context), context: context)
                 let members = request.originalPayload.objectMembers ?? []
                 let payload = JSONValue.object(members.map { member in
-                    member.key == ExactText("body") ? JSONMember("body", .string(ExactText(message.body + " The local request now asks for a review before publication."))) : member
+                    member.key == ExactText("body") ? JSONMember("body", .string(ExactText(message.body + " The local request now asks for a review before archiving."))) : member
                 })
                 let revised = ConversationTurn(id: ExactText(message.id + "-revision"),
                     binding: ConversationBinding(request: key, revision: 2), author: .origin,
-                    sessionHandle: handle, text: ExactText("Please review before publishing. The earlier answer draft is retained."), kind: .revision)
+                    sessionHandle: handle, text: ExactText("Please review the sketches before archiving. The earlier answer draft is retained."), kind: .revision)
                 try apply(.revision(revised, payload: payload), revision: 2)
             }
             if message.id == "sample-information-2" {

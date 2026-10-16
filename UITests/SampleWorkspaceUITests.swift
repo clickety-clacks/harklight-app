@@ -199,6 +199,47 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testConversationRevisionFileFactsAndClosureUseTheOrdinaryApp() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--conversation-fixture"]
+        func open(_ id: String, search: String) {
+            app.terminate()
+            app.launch()
+            XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+            let field = app.searchFields.firstMatch
+            field.tap(); field.typeText(search + "\n")
+            let row = app.buttons["request-row-" + id]
+            XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+            row.tap()
+            app.buttons["Chat"].tap()
+            XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5))
+        }
+        open("sample-approval-2", search: "Archive")
+        XCTAssertTrue(app.staticTexts["Please review the sketches before archiving. The earlier answer draft is retained."].exists)
+        capture("conversation-current-revision", app)
+        let picker = app.buttons["conversation-revision-picker"]
+        XCTAssertTrue(picker.exists, app.debugDescription)
+        picker.tap()
+        app.buttons["Version 1 · draft"].tap()
+        app.buttons["conversation-earlier-answer"].tap()
+        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
+        capture("conversation-archived-answer", app)
+        open("sample-information-2", search: "Thursday")
+        XCTAssertTrue(app.staticTexts["Example · Exact bytes transferred"].exists)
+        XCTAssertTrue(app.staticTexts["Example · Agent reported unusable: Fictional unsupported format"].exists)
+        capture("conversation-distinct-file-facts", app)
+        app.buttons["example.txt"].tap()
+        XCTAssertTrue(app.staticTexts["Original bytes"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Open file"].exists, "Local examples cannot fetch from a real service")
+        capture("conversation-file-metadata", app)
+        open("sample-completed-2", search: "journal is ready")
+        XCTAssertTrue(app.staticTexts["Request cleared"].exists)
+        XCTAssertFalse(app.textFields["sample-chat-composer"].isEnabled)
+        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        capture("conversation-explicit-closure", app)
+    }
+
     func testCorrectedInboxDuoOrientations() {
         let orientations: [(String, UIDeviceOrientation)] = [
             ("portrait", .portrait), ("landscape-left", .landscapeLeft),

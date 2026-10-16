@@ -147,7 +147,7 @@ final class ConversationPresentationTests: XCTestCase {
         let revision = try XCTUnwrap(fixture.viewModel.conversation(for: revised.key))
         XCTAssertEqual(revision.currentRevision, 2)
         XCTAssertNotNil(revision.answerDrafts?[1]?.inputs[ExactText("answer")]?.selectedActionID)
-        XCTAssertTrue(fixture.viewModel.request(for: revised.key)?.body?.rawValue.contains("review before publication") == true)
+        XCTAssertTrue(fixture.viewModel.request(for: revised.key)?.body?.rawValue.contains("review before archiving") == true)
         let files = try XCTUnwrap(library.responses["sample-information-2"])
         let fileThread = try XCTUnwrap(fixture.viewModel.conversation(for: files.key))
         let turn = try XCTUnwrap(fileThread.turns.last)
