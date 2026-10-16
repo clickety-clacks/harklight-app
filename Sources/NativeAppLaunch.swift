@@ -35,6 +35,10 @@ final class NativeAppLaunch {
     private(set) var activeEnrollmentRecord: NativeEnrollmentRecord?
     private(set) var disconnectedAccount: NativeAccountDeparture?
     private(set) var disconnectedArchive: LivePresentationStore?
+    private(set) var archivedAccountDepartures: [NativeAccountDeparture] = []
+    private(set) var selectedArchivedAccount: NativeAccountDeparture?
+    private(set) var selectedArchivedPresentation: LivePresentationStore?
+    private(set) var archiveCatalogWarning: String?
     private(set) var isShowingDisconnectedArchive = false
     private(set) var disconnectMessage: String?
     private(set) var isDisconnectBusy = false
@@ -98,6 +102,7 @@ final class NativeAppLaunch {
         guard !didRestore else { return }
         didRestore = true
         if case .fixture = state { return }
+        refreshArchivedAccounts()
         if let departure = try? guidedJoinStore.departure(),
            departure.replacement == nil {
             disconnectedAccount = departure
@@ -143,6 +148,7 @@ final class NativeAppLaunch {
         disconnectMessage = nil
         do {
             try guidedJoin.prepareStandaloneRemoval(record)
+            refreshArchivedAccounts()
             let departure = try guidedJoinStore.departure() ??
                 NativeAccountDeparture(record: record, replacement: nil, removed: false)
             disconnectedAccount = departure
@@ -221,10 +227,12 @@ final class NativeAppLaunch {
         await NativeRelayLifecycle.shared.deactivate()
         do {
             try await guidedJoin.removeStandaloneAccount()
+            refreshArchivedAccounts()
             disconnectedAccount = try guidedJoinStore.departure() ?? departure
             disconnectMessage = disconnectedStatusMessage(for: disconnectedAccount ?? departure,
                                                          presentation: disconnectedStore)
         } catch {
+            refreshArchivedAccounts()
             disconnectedAccount = (try? guidedJoinStore.departure()) ?? departure
             disconnectMessage = disconnectedStatusMessage(for: disconnectedAccount ?? departure,
                                                          presentation: disconnectedStore)
@@ -261,6 +269,25 @@ final class NativeAppLaunch {
         disconnectedArchive != nil && disconnectedAccount?.removed == true && activeEnrollmentRecord != nil
     }
 
+    /// All confirmed account archives, including the current disconnected
+    /// profile until it is superseded by a later removal.
+    var availableDisconnectedAccounts: [NativeAccountDeparture] {
+        var values = archivedAccountDepartures
+        if let disconnectedAccount, disconnectedAccount.removed,
+           !values.contains(where: { $0.archiveID == disconnectedAccount.archiveID }) {
+            values.append(NativeAccountDeparture(record: disconnectedAccount.record,
+                                                 replacement: nil, removed: true))
+        }
+        return values
+    }
+
+    var displayedArchiveDeparture: NativeAccountDeparture? {
+        if let selectedArchivedAccount { return selectedArchivedAccount }
+        if isShowingDisconnectedArchive { return disconnectedAccount }
+        if case .disconnected = state { return disconnectedAccount }
+        return nil
+    }
+
     var inboxPresentation: LivePresentationStore? {
         switch state {
         case let .live(presentation): presentation
@@ -271,11 +298,44 @@ final class NativeAppLaunch {
 
     func showDisconnectedArchive() {
         guard canOpenDisconnectedArchive else { return }
+        selectedArchivedAccount = nil
+        selectedArchivedPresentation = nil
         isShowingDisconnectedArchive = true
+    }
+
+    func showArchivedAccount(_ departure: NativeAccountDeparture) {
+        guard departure.removed,
+              availableDisconnectedAccounts.contains(where: { $0.archiveID == departure.archiveID }) else { return }
+        do {
+            let presentation = try makeDisconnectedPresentation(for: departure)
+            presentation.enterReadOnlyMode()
+            selectedArchivedAccount = departure
+            selectedArchivedPresentation = presentation
+            isShowingDisconnectedArchive = false
+        } catch {
+            disconnectMessage = "The saved messages for this account could not be opened. Its original account identity remains on this phone."
+        }
+    }
+
+    func leaveSelectedArchive() {
+        selectedArchivedAccount = nil
+        selectedArchivedPresentation = nil
+        isShowingDisconnectedArchive = activeEnrollmentRecord == nil && disconnectedArchive != nil
+    }
+
+    private func refreshArchivedAccounts() {
+        do {
+            archivedAccountDepartures = try guidedJoinStore.archivedDepartures()
+            archiveCatalogWarning = nil
+        } catch {
+            archiveCatalogWarning = "Some previously disconnected accounts could not be loaded. Their saved files have not been deleted."
+        }
     }
 
     func showCurrentAccount() {
         guard canOpenDisconnectedArchive else { return }
+        selectedArchivedAccount = nil
+        selectedArchivedPresentation = nil
         isShowingDisconnectedArchive = false
     }
 
@@ -544,7 +604,9 @@ final class LivePresentationStore {
         self.selectedRequestKey = snapshot.requests.first?.key
     }
 
-    var isLocalExample: Bool { !permitsDelivery }
+    /// Read-only real account archives are offline relay data, not fictional
+    /// local examples. Delivery permission and data provenance are separate.
+    var isLocalExample: Bool { profileContext.transportMode == .fixture }
 
     func hasAcceptedUpdate(for key: RequestKey) -> Bool {
         conversationThreads[key]?.acceptedUpdates.isEmpty == false
@@ -558,12 +620,18 @@ final class LivePresentationStore {
     }
 
     func prepareConversationPreview(_ file: ConversationFile) async throws -> URL {
-        guard permitsDelivery, let files = conversationFiles else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard let files = conversationFiles else { throw AttentionStoreError.fixtureOnlyOperation }
         if let cached = try files.cachedPreview(for: file) { return cached }
+        guard permitsDelivery, !isReadOnly else { throw AttentionStoreError.fixtureOnlyOperation }
         let destination = try files.previewDestination(for: file)
         try await NativeRelayLifecycle.shared.fetchConversationFile(file, to: destination, expected: profileContext)
         try files.verify(destination, for: file)
         return destination
+    }
+
+    func hasCachedConversationPreview(_ file: ConversationFile) -> Bool {
+        guard let conversationFiles else { return false }
+        return (try? conversationFiles.cachedPreview(for: file)) != nil
     }
 
     func reportConversationImportError(_ error: String) {
@@ -576,6 +644,7 @@ final class LivePresentationStore {
 
     func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
                             files: [ConversationFile]? = nil) {
+        guard !isReadOnly else { return }
         do {
             if let text, files == nil {
                 guard var thread = conversationThreads[key] else { throw ConversationError.missingRequest }
@@ -603,7 +672,7 @@ final class LivePresentationStore {
     /// Rebuilding a detail or losing transport never calls it.
     func navigateMessage(from previous: RequestKey?, to next: RequestKey?) {
         guard previous != next else { return }
-        if let previous {
+        if !isReadOnly, let previous {
             do {
                 let pending = try port.abandonConversationUploads(for: previous, context: port.context)
                 try refreshFromDurableStore()
@@ -678,6 +747,7 @@ final class LivePresentationStore {
     }
 
     func sendDiscussion(for key: RequestKey, revision: UInt64) {
+        guard !isReadOnly else { return }
         do {
             let binding = ConversationBinding(request: key, revision: revision)
             guard !hasPendingUploadCleanup(for: key, revision: revision),
@@ -722,7 +792,7 @@ final class LivePresentationStore {
     }
 
     func addLocalAttachment(_ name: String, for key: RequestKey, revision: UInt64) {
-        guard !permitsDelivery else { return }
+        guard !permitsDelivery, !isReadOnly else { return }
         let bytes = Data(("Fictional local attachment: " + name).utf8)
         let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         let file = ConversationFile(id: ExactText(UUID().uuidString.lowercased()), name: ExactText(name),

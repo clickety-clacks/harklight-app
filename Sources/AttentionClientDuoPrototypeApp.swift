@@ -17,13 +17,19 @@ struct AttentionClientDuoPrototypeApp: App {
         WindowGroup {
             ShakeHostingView(onShake: { samples.populate() }) {
                 Group {
-                    if launch.guidedJoin.isShowing {
+                    if let archive = launch.selectedArchivedPresentation,
+                       let departure = launch.selectedArchivedAccount {
+                        LiveContentView(store: archive, samples: samples, launch: launch,
+                                        archiveDeparture: departure)
+                    } else if launch.guidedJoin.isShowing {
                         NativeEnrollmentView(launch: launch)
                     } else if launch.canOpenDisconnectedArchive && launch.isShowingDisconnectedArchive,
                               let archive = launch.disconnectedArchive {
-                        LiveContentView(store: archive, samples: samples, launch: launch)
+                        LiveContentView(store: archive, samples: samples, launch: launch,
+                                        archiveDeparture: launch.disconnectedAccount)
                     } else if let store = launch.inboxPresentation {
-                        LiveContentView(store: store, samples: samples, launch: launch)
+                        LiveContentView(store: store, samples: samples, launch: launch,
+                                        archiveDeparture: launch.displayedArchiveDeparture)
                     } else {
                         switch launch.state {
                         case .enrollmentRequired:

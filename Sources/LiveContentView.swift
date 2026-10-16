@@ -6,6 +6,7 @@ struct LiveContentView: View {
     let store: LivePresentationStore
     let samples: SampleLibrary
     var launch: NativeAppLaunch? = nil
+    var archiveDeparture: NativeAccountDeparture? = nil
 
     var body: some View {
         HarklightInbox(
@@ -17,12 +18,15 @@ struct LiveContentView: View {
                     ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
                 }
             },
-            settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch) },
+            settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
+                                                  archiveDeparture: archiveDeparture) },
             warnings: [store.observationError, store.notificationWarning,
                        store.connectionWarning, store.pushRegistrationWarning,
+                       launch?.archiveCatalogWarning,
                        launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
                 .compactMap { $0 },
-            conversationStore: store)
+            conversationStore: store,
+            showsLocalExamples: !store.isReadOnly)
     }
 }
 
@@ -31,12 +35,14 @@ struct LiveInboxSettings: View {
     let store: LivePresentationStore
     let samples: SampleLibrary
     let launch: NativeAppLaunch?
+    let archiveDeparture: NativeAccountDeparture?
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingDisconnect = false
     @State private var confirmingEndpointMigration = false
 
     private var record: NativeEnrollmentRecord? {
-        store.isReadOnly ? launch?.disconnectedAccount?.record : launch?.activeEnrollmentRecord
+        if store.isReadOnly { return archiveDeparture?.record ?? launch?.disconnectedAccount?.record }
+        return launch?.activeEnrollmentRecord
     }
 
     private var pendingAnswerCount: Int {
@@ -71,27 +77,49 @@ struct LiveInboxSettings: View {
                         LabeledContent("Server", value: record.serverDisplayName ?? record.host)
                     }
                 }
-                if !store.isReadOnly, launch?.canOpenDisconnectedArchive == true,
-                   let previous = launch?.disconnectedAccount?.record {
-                    Section("Previous account") {
-                        Label("Disconnected · Read-only", systemImage: "lock")
-                        Text("Saved messages and drafts for \(previous.accountDisplayName ?? "the previous account") remain on this phone and are not shared with the current account.")
-                            .foregroundStyle(.secondary)
-                        Button("View saved messages") {
-                            launch?.showDisconnectedArchive()
-                            dismiss()
+                if let launch {
+                    let otherArchives = launch.availableDisconnectedAccounts
+                        .filter { $0.archiveID != archiveDeparture?.archiveID }
+                    if !otherArchives.isEmpty {
+                        Section("Saved accounts") {
+                            ForEach(otherArchives, id: \.archiveID) { departure in
+                                Button {
+                                    launch.showArchivedAccount(departure)
+                                    dismiss()
+                                } label: {
+                                    Label(departure.record.accountDisplayName ?? "Disconnected account",
+                                          systemImage: "lock")
+                                }
+                                .accessibilityHint("Open this account’s saved messages and discussion read-only")
+                            }
                         }
                     }
                 }
                 if store.isReadOnly {
                     Section("Connection") {
-                        if launch?.canOpenDisconnectedArchive == true {
+                        if let archiveDeparture {
                             Label("Disconnected · Read-only", systemImage: "lock")
-                            Text("These saved messages and drafts belong to the previous account. They are not shared with the current account.")
+                            Text("These saved messages, discussion history, drafts and local files belong to this account. They are read-only and are not shared with another account.")
                                 .foregroundStyle(.secondary)
-                            Button("Return to current account") {
-                                launch?.showCurrentAccount()
-                                dismiss()
+                            if launch?.activeEnrollmentRecord != nil {
+                                Button("Return to current account") {
+                                    launch?.showCurrentAccount()
+                                    dismiss()
+                                }
+                            } else if launch?.selectedArchivedAccount != nil {
+                                Button("Return to connection status") {
+                                    launch?.leaveSelectedArchive()
+                                    dismiss()
+                                }
+                            } else if archiveDeparture.removed {
+                                Button("Connect with an invitation") {
+                                    launch?.beginReconnect()
+                                }
+                            } else {
+                                Button(launch?.isDisconnectBusy == true ? "Retrying removal…" : "Retry removal") {
+                                    Task { await launch?.retryDisconnectRemoval() }
+                                }
+                                .disabled(launch?.isDisconnectBusy == true)
                             }
                         } else if let departure = launch?.disconnectedAccount, departure.replacement == nil {
                             Label(departure.removed ? "Disconnected" : "Removal not confirmed",
@@ -154,9 +182,11 @@ struct LiveInboxSettings: View {
                         }
                     }
                 }
-                Section("Local examples") {
+                if !store.isReadOnly {
+                    Section("Local examples") {
                     Text("Shake to add fictional messages to your inbox. Their answers, chat and attachments stay on this device and disappear when the app closes.")
                     Button("Add example messages") { samples.populate(); dismiss() }
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -279,7 +309,6 @@ struct LiveRequestDetail: View {
                     if context.canInlineChat { context.openChat?() } else { chatPresented = true }
                 }
                     .labelStyle(.iconOnly)
-                    .disabled(store.isReadOnly)
                     .popover(isPresented: $chatPresented, arrowEdge: .bottom) {
                         NavigationStack {
                             ConversationPanel(store: store, key: request.key,

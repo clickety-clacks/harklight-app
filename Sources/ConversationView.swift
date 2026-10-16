@@ -73,8 +73,14 @@ struct ConversationPanel: View {
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
-                ConversationComposer(store: store, key: key, revision: revision, inspect: { fileError = nil; inspectedFile = $0 })
-                    .padding(verticalSizeClass == .compact ? 4 : 12)
+                if store.isReadOnly {
+                    ReadOnlyConversationDraftView(draft: draft) { fileError = nil; inspectedFile = $0 }
+                        .padding(verticalSizeClass == .compact ? 4 : 12)
+                } else {
+                    ConversationComposer(store: store, key: key, revision: revision,
+                        inspect: { fileError = nil; inspectedFile = $0 })
+                        .padding(verticalSizeClass == .compact ? 4 : 12)
+                }
             } else {
                 ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right",
                     description: Text("This request has no conversation record. Its existing answer remains available."))
@@ -89,7 +95,7 @@ struct ConversationPanel: View {
                     Text("SHA-256").font(.headline)
                     Text(file.sha256.rawValue).font(.caption.monospaced()).textSelection(.enabled)
                     if !store.isLocalExample {
-                        Button(openingFile ? "Opening…" : "Open file") {
+                        Button(openingFile ? "Opening…" : (store.isReadOnly ? "Open saved file" : "Open file")) {
                             openingFile = true
                             fileError = nil
                             Task {
@@ -97,7 +103,11 @@ struct ConversationPanel: View {
                                 do { previewURL = try await store.prepareConversationPreview(file) }
                                 catch { fileError = "\(file.name.rawValue) could not be opened (\(error)). Its saved metadata and draft are retained." }
                             }
-                        }.disabled(openingFile)
+                        }.disabled(openingFile || (store.isReadOnly && !store.hasCachedConversationPreview(file)))
+                        if store.isReadOnly && !store.hasCachedConversationPreview(file) {
+                            Text("This file is not saved locally on this phone. The archive will not download it.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     if let fileError { Text(fileError).font(.caption).foregroundStyle(.secondary) }
                     Text("Transfer and agent-reported use are separate facts. A completed transfer does not establish that the agent read this file.")
@@ -109,6 +119,35 @@ struct ConversationPanel: View {
         }
     }
 
+}
+
+@MainActor
+private struct ReadOnlyConversationDraftView: View {
+    let draft: ConversationDraft
+    let inspect: (ConversationFile) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Saved discussion draft · not delivered", systemImage: "lock")
+                .font(.caption).foregroundStyle(.secondary)
+            if !draft.text.rawValue.isEmpty {
+                Text(draft.text.rawValue)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            ForEach(draft.files) { file in
+                Button { inspect(file) } label: {
+                    Label(file.name.rawValue, systemImage: "paperclip")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+            }
+            Text("This account is disconnected. Its saved discussion cannot be edited or sent.")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal)
+        .accessibilityIdentifier("read-only-conversation-draft")
+    }
 }
 
 @MainActor
@@ -240,12 +279,13 @@ private struct ConversationUploadCleanupStatus: View {
                 if store.hasPendingUploadCleanup(for: key, revision: revision), store.isLocalExample {
                     Text("Local example · cleanup is unconfirmed; no service is contacted.")
                 }
-                if store.hasPendingUploadCleanup(for: key, revision: revision), !store.isLocalExample {
+                if store.hasPendingUploadCleanup(for: key, revision: revision), !store.isLocalExample, !store.isReadOnly {
                     Button("Retry upload cleanup") { Task { await store.retryUploadCleanup(for: key) } }
                         .disabled(store.retryingCleanupRequests.contains(key))
                         .accessibilityIdentifier("conversation-retry-cleanup")
                 }
-                if store.hasAbandonedDiscussion(for: key, revision: revision) || store.uploadHistoryNeedsReconciliation(for: key, revision: revision) {
+                if !store.isReadOnly &&
+                   (store.hasAbandonedDiscussion(for: key, revision: revision) || store.uploadHistoryNeedsReconciliation(for: key, revision: revision)) {
                     Text("Refresh history to reconcile retained file and submission identities. These unready references will not be resent.")
                     Button("Refresh discussion history") { Task { await store.refreshDiscussionHistory() } }
                 }
