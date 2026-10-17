@@ -129,7 +129,7 @@ final class NativeAppLaunch {
                                                     pkcs12: pkcs12,
                                                     password: password,
                                                     onPreparedCleanupFailure: { error in
-                                                        diagnostics.record(area: .localStore,
+                                                        self.diagnostics.record(area: .localStore,
                                                             phase: .enrollmentCleanup, transition: .failed,
                                                             error: error, attemptID: attemptID)
                                                     })
