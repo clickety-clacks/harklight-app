@@ -134,7 +134,9 @@ final class SampleFixtureDomain {
             }
         }
 
-        let createdAt = Int(Date().timeIntervalSince1970 * 1_000)
+        // Re-registration is intentionally strict about original payloads. Keep
+        // this identity-bound fixture fact stable across every Shake/populate.
+        let createdAt = message.fixtureCreatedAtMilliseconds
         if message.kind.isNotice {
             return try storedRequest([
                 "sender_id": message.sender,

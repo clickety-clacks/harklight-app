@@ -31,13 +31,21 @@ final class SampleLibraryTests: XCTestCase {
         response.text = "Keep this draft"
         response.chatDraft = "A local conversation"
         response.sendLocalChat()
+        let firstFixture = try XCTUnwrap(library.fixture)
+        let originalPayloads = try firstFixture.domain.snapshot(context: firstFixture.context)
+            .requests.mapValues(\.originalPayload)
         let ids = library.messages.map(\.id)
         controller.motionEnded(.motionShake, with: nil)
+        XCTAssertNil(library.loadError)
         XCTAssertEqual(library.messages.map(\.id), ids)
         XCTAssertTrue(library.responses[first.id] === response)
         XCTAssertEqual(response.text, "Keep this draft")
         XCTAssertEqual(response.choices, ["keep"])
         XCTAssertEqual(response.chat.last?.text, "A local conversation")
+        let repeatedPayloads = try firstFixture.domain.snapshot(context: firstFixture.context)
+            .requests.mapValues(\.originalPayload)
+        XCTAssertEqual(repeatedPayloads, originalPayloads,
+            "Stable sample identities must retain their exact registered payloads on repeated Shake.")
     }
 
     func testSampleActionsLeaveRealRequestsAndIdentityUntouched() throws {
@@ -71,10 +79,20 @@ final class SampleLibraryTests: XCTestCase {
         XCTAssertNil(library.loadError)
         let fixture = try XCTUnwrap(library.fixture)
         XCTAssertEqual(fixture.viewModel.presentation.requests.count, 45)
+        var compatibilityExamples = 0
         for message in library.messages {
             let response = try XCTUnwrap(library.responses[message.id])
             let projected = try XCTUnwrap(fixture.viewModel.request(for: response.key))
-            guard case .sender = projected.projection else { return XCTFail("Unrecognized fixture descriptor") }
+            switch projected.projection {
+            case .sender:
+                break
+            case let .compatibility(actions):
+                compatibilityExamples += 1
+                XCTAssertTrue(actions.contains { ["seen", "reply"].contains($0.id.rawValue) },
+                    "Compatibility examples must retain their explicit Seen or Reply action.")
+            case .unsupported:
+                return XCTFail("Unrecognized fixture descriptor")
+            }
             XCTAssertEqual(projected.title?.rawValue, message.title)
             library.select(message.id)
             XCTAssertEqual(fixture.viewModel.selectedRequestKey, response.key)
@@ -118,6 +136,8 @@ final class SampleLibraryTests: XCTestCase {
             default: break
             }
         }
+        XCTAssertGreaterThan(compatibilityExamples, 0,
+            "The fixture must exercise compatibility Seen/Reply projections as well as sender descriptors.")
         for message in library.messages where [.approval, .review, .multipleChoice, .colorChoice, .soundChoice].contains(message.kind) {
             let response = try XCTUnwrap(library.responses[message.id])
             response.ownAnswer = true
@@ -128,7 +148,16 @@ final class SampleLibraryTests: XCTestCase {
             XCTAssertEqual(request.draft.inputs[ExactText("answer")]?.selectedActionID, ExactText("own"))
             XCTAssertEqual(request.draft.inputs[ExactText("answer")]?.textByActionID[ExactText("own")]?.rawValue,
                 "An alternative for " + message.id)
+            XCTAssertTrue(response.canFinishLocally,
+                "The offered own-answer alternative must not require unrelated per-option choices.")
         }
+        let multipleChoice = try XCTUnwrap(library.messages.first { $0.kind == .multipleChoice })
+        let multipleChoiceResponse = try XCTUnwrap(library.responses[multipleChoice.id])
+        multipleChoiceResponse.ownAnswer = false
+        multipleChoiceResponse.choices = [try XCTUnwrap(multipleChoice.options.first).id]
+        XCTAssertEqual(multipleChoiceResponse.choices.count, 1)
+        XCTAssertTrue(multipleChoiceResponse.canFinishLocally,
+            "Selecting a subset must not require unrelated answers for every option.")
         library.populate()
         XCTAssertEqual(fixture.viewModel.presentation.requests.count, 45)
         XCTAssertTrue(try fixture.domain.snapshot(context: fixture.context).intents.isEmpty)
