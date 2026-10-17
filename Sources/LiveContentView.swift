@@ -18,27 +18,27 @@ struct LiveContentView: View {
     var body: some View {
         let progress = launch?.foregroundConnectProgress
         let showsRecovery = progress.map { $0.outcome != .confirmed } ?? false
-        VStack(spacing: 0) {
+        HarklightInbox(
+            requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
+            requestDetail: { key, context in
+                if let request = store.request(for: key) {
+                    LiveRequestDetail(request: request, store: store, context: context)
+                } else {
+                    ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
+                }
+            },
+            warnings: [store.observationError, store.notificationWarning,
+                       showsRecovery ? nil : store.connectionWarning,
+                       store.pushRegistrationWarning].compactMap { $0 },
+            conversationStore: store,
+            launch: launch)
+        .overlay(alignment: .top) {
             if showsRecovery, let progress, let launch {
                 LiveConnectionRecoveryBanner(
                     progress: progress,
                     isRetrying: launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy,
                     retry: { Task { await launch.retryForegroundConnection() } })
             }
-            HarklightInbox(
-                requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
-                requestDetail: { key, context in
-                    if let request = store.request(for: key) {
-                        LiveRequestDetail(request: request, store: store, context: context)
-                    } else {
-                        ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
-                    }
-                },
-                warnings: [store.observationError, store.notificationWarning,
-                           showsRecovery ? nil : store.connectionWarning,
-                           store.pushRegistrationWarning].compactMap { $0 },
-                conversationStore: store,
-                launch: launch)
         }
     }
 }
