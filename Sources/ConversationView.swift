@@ -11,6 +11,7 @@ struct ConversationPanel: View {
     let title: String
     @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
+    @State private var inspectedFileRevision: UInt64?
     @State private var previewURL: URL?
     @State private var openingFile = false
     @State private var fileError: String?
@@ -50,7 +51,11 @@ struct ConversationPanel: View {
                                     sender: sender, local: store.isLocalExample,
                                     replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue },
                                     retracted: thread.isRetracted && thread.terminalTurn == turn.id,
-                                    inspect: { fileError = nil; inspectedFile = $0 })
+                                    inspect: { file, fileRevision in
+                                        fileError = nil
+                                        inspectedFile = file
+                                        inspectedFileRevision = fileRevision
+                                    })
                                     .id(turn.id)
                             }
                         }.padding(.horizontal)
@@ -74,11 +79,19 @@ struct ConversationPanel: View {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
                 if store.isReadOnly {
-                    ReadOnlyConversationDraftView(draft: draft) { fileError = nil; inspectedFile = $0 }
+                    ReadOnlyConversationDraftView(draft: draft) { file in
+                        fileError = nil
+                        inspectedFile = file
+                        inspectedFileRevision = revision
+                    }
                         .padding(verticalSizeClass == .compact ? 4 : 12)
                 } else {
                     ConversationComposer(store: store, key: key, revision: revision,
-                        inspect: { fileError = nil; inspectedFile = $0 })
+                        inspect: { file, fileRevision in
+                            fileError = nil
+                            inspectedFile = file
+                            inspectedFileRevision = fileRevision
+                        })
                         .padding(verticalSizeClass == .compact ? 4 : 12)
                 }
             } else {
@@ -100,7 +113,10 @@ struct ConversationPanel: View {
                             fileError = nil
                             Task {
                                 defer { openingFile = false }
-                                do { previewURL = try await store.prepareConversationPreview(file) }
+                                do {
+                                    previewURL = try await store.prepareConversationPreview(file, for: key,
+                                        revision: inspectedFileRevision ?? revision)
+                                }
                                 catch { fileError = "\(file.name.rawValue) could not be opened (\(error)). Its saved metadata and draft are retained." }
                             }
                         }.disabled(openingFile || (store.isReadOnly && !store.hasCachedConversationPreview(file)))
@@ -176,7 +192,7 @@ private struct ConversationComposer: View {
     let store: LivePresentationStore
     let key: RequestKey
     let revision: UInt64
-    let inspect: (ConversationFile) -> Void
+    let inspect: (ConversationFile, UInt64) -> Void
     @State private var pickingFiles = false
     @State private var attachmentChoices = false
     private var thread: ConversationThread? { store.conversation(for: key) }
@@ -205,7 +221,7 @@ private struct ConversationComposer: View {
                         HStack {
                             ForEach(draft.files) { file in
                                 VStack(spacing: 4) {
-                                    Button { inspect(file) } label: {
+                                    Button { inspect(file, revision) } label: {
                                         VStack(spacing: 4) {
                                             ConversationAttachmentThumbnail(file: file, local: store.isLocalExample)
                                             Text(file.name.rawValue).lineLimit(1)
@@ -244,7 +260,7 @@ private struct ConversationComposer: View {
                 let addressedRevision = revision
                 Task { await store.importConversationFiles(urls, for: key, revision: addressedRevision) }
             } else if case let .failure(error) = result {
-                store.reportConversationImportError(error.localizedDescription)
+                store.reportConversationImportError(error, for: key, revision: revision)
             }
         }
     }
@@ -342,7 +358,7 @@ private struct ConversationTurnView: View {
     let local: Bool
     let replyContext: String?
     let retracted: Bool
-    let inspect: (ConversationFile) -> Void
+    let inspect: (ConversationFile, UInt64) -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
@@ -364,7 +380,7 @@ private struct ConversationTurnView: View {
                 if !turn.text.rawValue.isEmpty { Text(turn.text.rawValue).textSelection(.enabled) }
             }
             ForEach(turn.files) { file in
-                Button { inspect(file) } label: { Label(file.name.rawValue, systemImage: "doc") }.font(.caption)
+                Button { inspect(file, turn.binding.revision) } label: { Label(file.name.rawValue, systemImage: "doc") }.font(.caption)
                 if turn.author == .person {
                     ConversationFileFacts(transfer: facts.fileTransfers[file.id] ?? .unknown,
                         use: facts.fileUses[file.id] ?? .unknown, local: local)

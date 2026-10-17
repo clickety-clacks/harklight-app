@@ -1,4 +1,5 @@
 import Foundation
+import HarklightNativeRelay
 import Observation
 
 @MainActor
@@ -22,6 +23,7 @@ final class NativeGuidedJoinCoordinator {
     var deviceName: String
 
     @ObservationIgnored private let store: NativeGuidedJoinStore
+    @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var verificationPending = false
     @ObservationIgnored private var receivedInvitation = false
@@ -30,8 +32,10 @@ final class NativeGuidedJoinCoordinator {
     @ObservationIgnored var didRemoveCurrentAccount: (() async -> Void)?
 
     init(store: NativeGuidedJoinStore = NativeGuidedJoinStore(),
-         deviceName: String, isShowing: Bool = true) {
+         deviceName: String, isShowing: Bool = true,
+         diagnostics: NativeClientDiagnosticJournal? = nil) {
         self.store = store
+        self.diagnostics = diagnostics
         self.deviceName = deviceName
         self.isShowing = isShowing
     }
@@ -39,6 +43,8 @@ final class NativeGuidedJoinCoordinator {
     func restore() async {
         guard isShowing, !busy, !receivedInvitation else { return }
         let epoch = generation
+        diagnostics?.record(area: .enrollment, phase: .approvalCheck, transition: .began,
+                            attemptID: epoch)
         do {
             if let departure = try store.departure() {
                 invitation = departure.replacement
@@ -69,7 +75,11 @@ final class NativeGuidedJoinCoordinator {
                 show(saved)
                 if !saved.isTerminal { await retry() }
             }
+            diagnostics?.record(area: .enrollment, phase: .approvalCheck,
+                                transition: .completed, attemptID: epoch)
         } catch {
+            diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .failed,
+                                error: error, attemptID: epoch)
             if generation == epoch {
                 screen = .refused
                 message = "The saved join could not be opened. Your existing identity has been kept."
@@ -178,6 +188,8 @@ final class NativeGuidedJoinCoordinator {
         isShowing = true
         message = nil
         screen = .verifying
+        diagnostics?.record(area: .enrollment, phase: .invitationVerification, transition: .began,
+                            attemptID: epoch)
         busy = true
         defer { if generation == epoch { busy = false } }
         do {
@@ -202,7 +214,12 @@ final class NativeGuidedJoinCoordinator {
             try await store.verifyDestination(next)
             guard generation == epoch else { return }
             try await acceptVerifiedInvitation(epoch: epoch)
+            diagnostics?.record(area: .enrollment, phase: .invitationVerification,
+                                transition: .completed, attemptID: epoch)
         } catch {
+            diagnostics?.record(area: .enrollment, phase: .invitationVerification,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: epoch)
             if generation == epoch { explain(error) }
         }
     }
@@ -213,6 +230,8 @@ final class NativeGuidedJoinCoordinator {
         busy = true
         message = nil
         screen = .joining
+        diagnostics?.record(area: .enrollment, phase: .enrollmentSubmission,
+                            transition: .began, attemptID: epoch)
         defer { if generation == epoch { busy = false } }
         do {
             let prepared = try store.prepare(invitation, deviceLabel: deviceName.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -220,7 +239,12 @@ final class NativeGuidedJoinCoordinator {
             let result = try await store.submit()
             guard generation == epoch else { return }
             try await accept(result, epoch: epoch)
+            diagnostics?.record(area: .enrollment, phase: .enrollmentSubmission,
+                                transition: .completed, attemptID: attempt?.id ?? epoch)
         } catch {
+            diagnostics?.record(area: .enrollment, phase: .enrollmentSubmission,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: attempt?.id ?? epoch)
             if generation == epoch { explain(error) }
         }
     }
@@ -230,6 +254,8 @@ final class NativeGuidedJoinCoordinator {
         approvalObservationCurrent = false
         if verificationPending, let invitation {
             let epoch = generation
+            diagnostics?.record(area: .enrollment, phase: .invitationVerification,
+                                transition: .retrying, attemptID: epoch)
             busy = true
             defer { if generation == epoch { busy = false } }
             do {
@@ -237,17 +263,36 @@ final class NativeGuidedJoinCoordinator {
                 guard generation == epoch else { return }
                 message = nil
                 try await acceptVerifiedInvitation(epoch: epoch)
-            } catch { if generation == epoch { explain(error) } }
+            } catch {
+                diagnostics?.record(area: .enrollment, phase: .invitationVerification,
+                                    transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                    error: error, attemptID: epoch)
+                if generation == epoch { explain(error) }
+            }
             return
         }
-        guard let saved = try? store.loadAttempt(), !saved.isTerminal else { return }
+        let saved: NativeJoinAttempt?
+        do { saved = try store.loadAttempt() }
+        catch {
+            diagnostics?.record(area: .localStore, phase: .projectionRefresh,
+                                transition: .failed, error: error)
+            return
+        }
+        guard let saved, !saved.isTerminal else { return }
         let epoch = generation
+        diagnostics?.record(area: .enrollment, phase: .approvalCheck,
+                            transition: .retrying, attemptID: saved.id)
         busy = true
         message = nil
         defer { if generation == epoch { busy = false } }
         do {
             try await refreshSavedAttempt(saved, epoch: epoch)
+            diagnostics?.record(area: .enrollment, phase: .approvalCheck,
+                                transition: .completed, attemptID: saved.id)
         } catch {
+            diagnostics?.record(area: .enrollment, phase: .approvalCheck,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: saved.id)
             if generation == epoch { explain(error) }
         }
     }
@@ -282,6 +327,9 @@ final class NativeGuidedJoinCoordinator {
               let record = currentAccount, record.isApproved,
               let connectApproved else { return }
         let epoch = generation
+        let connectionAttemptID = UUID()
+        diagnostics?.record(area: .connection, phase: .approvedConnection,
+                            transition: .retrying, attemptID: connectionAttemptID)
         busy = true
         isApprovedConnectBusy = true
         message = nil
@@ -296,10 +344,19 @@ final class NativeGuidedJoinCoordinator {
             if connected {
                 screen = .connected
                 message = nil
+                diagnostics?.record(area: .connection, phase: .approvedConnection,
+                                    transition: .completed, attemptID: connectionAttemptID)
             } else {
                 message = "The approved account is still offline. Saved requests and pending answers remain on this device."
+                diagnostics?.record(area: .connection, phase: .approvedConnection,
+                                    transition: .unresolved,
+                                    causeCode: "foreground_connection_not_confirmed",
+                                    attemptID: connectionAttemptID)
             }
         } catch {
+            diagnostics?.record(area: .connection, phase: .approvedConnection,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: connectionAttemptID)
             if generation == epoch { explain(error) }
         }
     }
@@ -315,8 +372,19 @@ final class NativeGuidedJoinCoordinator {
     }
 
     func cancelRequest() async {
-        guard !busy, let saved = try? store.loadAttempt(), !saved.isTerminal else { return }
+        guard !busy else { return }
+        let saved: NativeJoinAttempt?
+        do { saved = try store.loadAttempt() }
+        catch {
+            diagnostics?.record(area: .localStore, phase: .joinCancellation,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error)
+            return
+        }
+        guard let saved, !saved.isTerminal else { return }
         let epoch = generation
+        diagnostics?.record(area: .enrollment, phase: .joinCancellation,
+                            transition: .began, attemptID: saved.id)
         busy = true
         message = nil
         defer { if generation == epoch { busy = false } }
@@ -324,7 +392,12 @@ final class NativeGuidedJoinCoordinator {
             let result = try await store.cancel()
             guard generation == epoch else { return }
             try await accept(result, epoch: epoch)
+            diagnostics?.record(area: .enrollment, phase: .joinCancellation,
+                                transition: .completed, attemptID: saved.id)
         } catch {
+            diagnostics?.record(area: .enrollment, phase: .joinCancellation,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: saved.id)
             if generation == epoch {
                 screen = .unreachable
                 message = "Cancellation has not been confirmed. Trying again checks this same request; it is still saved."
@@ -370,17 +443,33 @@ final class NativeGuidedJoinCoordinator {
 
     func keepCurrentAccount() async {
         guard !busy else { return }
+        let departureAttemptID = UUID()
         // Once removal has been sent, its result may already be committed.
         // Keep the recovery route until the old server confirms the outcome.
-        if let departure = try? store.departure(), !departure.removed {
-            message = "Removal is still unconfirmed. Try again with the current server before keeping or replacing this account."
-            return
+        do {
+            if let departure = try store.departure(), !departure.removed {
+                diagnostics?.record(area: .enrollment, phase: .accountRemoval,
+                                    transition: .unresolved, attemptID: departureAttemptID)
+                message = "Removal is still unconfirmed. Try again with the current server before keeping or replacing this account."
+                return
+            }
+        } catch {
+            // Preserve the existing keep-account path while retaining the
+            // storage cause that the old `try?` discarded.
+            diagnostics?.record(area: .localStore, phase: .accountRemoval,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: departureAttemptID)
         }
         do { try store.dismissConfirmedDeparture() }
         catch {
+            diagnostics?.record(area: .localStore, phase: .accountRemoval,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: departureAttemptID)
             message = "The confirmed removal could not be saved yet. Try again before opening another invitation."
             return
         }
+        diagnostics?.record(area: .localStore, phase: .accountRemoval,
+                            transition: .completed, attemptID: departureAttemptID)
         verificationPending = false
         invitation = nil
         message = nil
@@ -399,6 +488,9 @@ final class NativeGuidedJoinCoordinator {
                 try await finishApproval(currentAccount, epoch: epoch, restoring: true)
             }
         } catch {
+            diagnostics?.record(area: .connection, phase: .approvedConnection,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: departureAttemptID)
             if generation == epoch { explain(error) }
         }
     }
@@ -455,17 +547,25 @@ final class NativeGuidedJoinCoordinator {
     func confirmReplacement() async {
         guard !busy, screen == .replacementConfirmation, let old = currentAccount, let invitation else { return }
         let epoch = generation
+        let removalAttemptID = UUID()
         busy = true
         message = nil
         defer { if generation == epoch { busy = false } }
+        diagnostics?.record(area: .enrollment, phase: .accountRemoval,
+                            transition: .began, attemptID: removalAttemptID)
         do {
             try await store.removeCurrentAccount(old, replacement: invitation)
+            diagnostics?.record(area: .enrollment, phase: .accountRemoval,
+                                transition: .completed, attemptID: removalAttemptID)
             await didRemoveCurrentAccount?()
             guard generation == epoch else { return }
             currentAccount = nil
             attempt = nil
             screen = .confirmation
         } catch {
+            diagnostics?.record(area: .enrollment, phase: .accountRemoval,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: removalAttemptID)
             if generation == epoch {
                 message = "Removal could not be confirmed with the current server. This account has been kept. Try again when it is reachable."
                 screen = .replacementConfirmation
@@ -537,9 +637,21 @@ final class NativeGuidedJoinCoordinator {
             message = "Ask the owner for a new invitation. This device keeps the identity it made."
         case NativeJoinError.existingAccount:
             screen = .existingAccount
-            currentAccount = try? store.approvedRecord()
+            do { currentAccount = try store.approvedRecord() }
+            catch {
+                diagnostics?.record(area: .localStore, phase: .projectionRefresh,
+                                    transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                    error: error)
+                currentAccount = nil
+            }
         case NativeJoinError.savedRequest:
-            attempt = try? store.loadAttempt()
+            do { attempt = try store.loadAttempt() }
+            catch {
+                diagnostics?.record(area: .localStore, phase: .projectionRefresh,
+                                    transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                    error: error)
+                attempt = nil
+            }
             if let attempt { show(attempt) }
             message = "Finish the saved request before joining a different account."
         case NativeJoinError.unavailable:
