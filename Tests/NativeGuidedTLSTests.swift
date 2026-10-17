@@ -537,6 +537,100 @@ final class NativeGuidedTLSTests: XCTestCase {
                       "Returning from the archive reveals the still-enrolled account")
     }
 
+    func testForegroundFailureDismissalSurvivesArchiveNavigationAndIsScopedToAccountAndAttempt() throws {
+        let service = "Harklight.foreground-failure-dismissal-test." + UUID().uuidString
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                           kSecAttrService as String: service] as CFDictionary)
+        }
+
+        func makeRecord(_ personID: String, _ deviceID: String) -> NativeEnrollmentRecord {
+            NativeEnrollmentRecord(host: "relay.example", enrollmentPort: 18444, relayPort: 18443,
+                trustedRootDER: Data("test-root".utf8), identityLabel: "test-identity-\(deviceID)",
+                deviceLabel: deviceID, deviceID: deviceID, approvalCode: "unused",
+                statusSecret: "unused", expiresAt: 0, statusExpiresAt: 0, personID: personID)
+        }
+
+        func makePresentation(for record: NativeEnrollmentRecord) throws -> LivePresentationStore {
+            let context = ProfileContext(identity: ProfileIdentity(
+                trustedRelayAuthority: ExactText(record.profileAuthority),
+                personID: ExactText(record.personID!), deviceID: ExactText(record.deviceID)),
+                transportMode: .relay)
+            let domain = try AttentionDomainStore(context: context,
+                persistence: MemoryAttentionStatePersistence())
+            return try LivePresentationStore(store: domain, context: context)
+        }
+
+        let current = makeRecord("current-person", "current-device")
+        let archived = makeRecord("archived-person", "archived-device")
+        let departure = NativeAccountDeparture(record: archived, replacement: nil, removed: true)
+        let currentPresentation = try makePresentation(for: current)
+        let app = NativeAppLaunch(arguments: ["Harklight"],
+            enrollmentStore: NativeEnrollmentStore(service: service),
+            joinStore: NativeGuidedJoinStore(namespace: service),
+            initialState: .live(currentPresentation), initialEnrollmentRecord: current,
+            initialArchivedDepartures: [departure])
+
+        var reconnectCalls = 0
+        app.guidedJoin.connectApproved = { _ in
+            reconnectCalls += 1
+            return false
+        }
+
+        let operationID = UUID()
+        let snapshot = NativeForegroundOperationSnapshot(available: true, operations: [
+            NativeForegroundOperationDiagnostic(operationID: operationID, senderID: "sender",
+                messageID: "request", requestRevision: 4, receiptState: "unknown")
+        ])
+        let attemptID = UUID()
+        let progress = NativeForegroundConnectProgress(lastConfirmedStage: .nativeSyncAcknowledged,
+            webSocketOpenObserved: true, issue: nil, outcome: .timedOut, attemptID: attemptID)
+        app.recordForegroundConnectProgress(progress, operationSnapshot: snapshot)
+        let failureKey = try XCTUnwrap(app.foregroundConnectFailureKey)
+        XCTAssertTrue(app.shouldPresentForegroundConnectFailure(failureKey))
+
+        app.dismissForegroundConnectFailure(failureKey)
+        XCTAssertFalse(app.shouldPresentForegroundConnectFailure(failureKey))
+        XCTAssertEqual(app.foregroundConnectProgress, progress, "Dismissal keeps the observed failure state.")
+        XCTAssertEqual(app.foregroundConnectDiagnostic?.operationSnapshot, snapshot,
+                       "Dismissal keeps the original uncertain operation and receipt evidence.")
+        XCTAssertEqual(app.activeEnrollmentRecord, current)
+        XCTAssertEqual(reconnectCalls, 0, "Dismissing details never retries the connection.")
+
+        app.showArchivedAccount(departure)
+        XCTAssertEqual(app.selectedArchivedAccount?.record.deviceID, archived.deviceID)
+        XCTAssertTrue(app.selectedArchivedPresentation?.isReadOnly == true)
+        XCTAssertFalse(app.shouldPresentForegroundConnectFailure(failureKey),
+                       "Rebuilding the inbox for an archive does not forget dismissal.")
+        app.showCurrentAccount()
+        XCTAssertFalse(app.shouldPresentForegroundConnectFailure(failureKey),
+                       "Returning to the active account does not re-force the unchanged failure.")
+        XCTAssertEqual(app.foregroundConnectDiagnostic?.operationSnapshot, snapshot)
+        XCTAssertEqual(reconnectCalls, 0)
+
+        app.reopenForegroundConnectFailure(failureKey)
+        XCTAssertTrue(app.shouldPresentForegroundConnectFailure(failureKey),
+                      "Settings can explicitly reopen the same failure details.")
+        XCTAssertEqual(reconnectCalls, 0, "Reopening details also does not retry.")
+
+        let nextAttempt = NativeForegroundConnectProgress(lastConfirmedStage: .nativeSyncAcknowledged,
+            webSocketOpenObserved: true, issue: nil, outcome: .incomplete, attemptID: UUID())
+        app.recordForegroundConnectProgress(nextAttempt, operationSnapshot: snapshot)
+        let nextKey = try XCTUnwrap(app.foregroundConnectFailureKey)
+        XCTAssertNotEqual(nextKey, failureKey)
+        XCTAssertTrue(app.shouldPresentForegroundConnectFailure(nextKey),
+                      "A new failed attempt remains eligible for details.")
+        let otherAccountKey = try XCTUnwrap(NativeForegroundConnectFailureKey(record: archived,
+                                                                              progress: nextAttempt))
+        XCTAssertNotEqual(otherAccountKey, nextKey,
+                          "The same attempt identifier is distinct under another saved account.")
+        app.dismissForegroundConnectFailure(nextKey)
+        XCTAssertFalse(app.shouldPresentForegroundConnectFailure(nextKey))
+        XCTAssertTrue(app.shouldPresentForegroundConnectFailure(otherAccountKey),
+                      "Dismissal is scoped to the original account identity.")
+        XCTAssertEqual(reconnectCalls, 0)
+    }
+
     func testReadOnlyDraftStatusDoesNotCallUncertainOrAcceptedSubmissionUndelivered() throws {
         XCTAssertEqual(ConversationDraftPresentationText.status(for: .outcomeUnknown(UUID())), .outcomeUnknown)
         XCTAssertEqual(ConversationDraftPresentationText.status(for:

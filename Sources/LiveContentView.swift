@@ -1,5 +1,6 @@
 import AttentionDomain
 import SwiftUI
+import UIKit
 
 @MainActor
 struct LiveContentView: View {
@@ -21,6 +22,17 @@ struct LiveContentView: View {
     var body: some View {
         let progress = launch?.foregroundConnectProgress
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
+        let failureKey = launch?.foregroundConnectFailureKey
+        let diagnostic = launch?.foregroundConnectDiagnostic
+        let connectionStatus = showsRecovery ? progress?.headline : store.connectionWarning
+        let presentsFailureDetails = !store.isReadOnly && diagnostic != nil &&
+            (failureKey.map { launch?.shouldPresentForegroundConnectFailure($0) ?? false } ?? false)
+        let failureAlertPresented = Binding<Bool>(
+            get: { presentsFailureDetails },
+            set: { isPresented in
+                guard !isPresented, let launch, let failureKey else { return }
+                launch.dismissForegroundConnectFailure(failureKey)
+            })
         HarklightInbox(
             requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
             requestDetail: { key, context in
@@ -33,60 +45,28 @@ struct LiveContentView: View {
             settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
                                                   archiveDeparture: archiveDeparture) },
             warnings: [store.observationError, store.notificationWarning,
-                       showsRecovery ? nil : store.connectionWarning,
+                       connectionStatus,
                        store.pushRegistrationWarning, launch?.archiveCatalogWarning,
                        launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
                 .compactMap { $0 },
             conversationStore: store,
             showsLocalExamples: !store.isReadOnly)
-        .overlay(alignment: .top) {
-            if showsRecovery, let progress, let launch {
-                LiveConnectionRecoveryBanner(
-                    progress: progress,
-                    isRetrying: launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy,
-                    retry: { Task { await launch.retryForegroundConnection() } })
-                    // Keep the NavigationSplitView's title and Settings toolbar
-                    // clear while the recovery controls remain over the inbox.
-                    .padding(.top, 56)
-            }
-        }
-    }
-}
-
-private struct LiveConnectionRecoveryBanner: View {
-    let progress: NativeForegroundConnectProgress
-    let isRetrying: Bool
-    let retry: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "wifi.exclamationmark")
-                    .foregroundStyle(.orange)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(progress.headline)
-                        .font(.headline)
-                    Text(progress.message)
-                        .font(.callout)
-                        .accessibilityIdentifier("foreground-connect-progress")
+        .alert("Connection needs attention", isPresented: failureAlertPresented,
+               presenting: diagnostic) { diagnostic in
+            Button("Copy details") {
+                UIPasteboard.general.string = diagnostic.shareText
+                if let launch, let failureKey {
+                    launch.dismissForegroundConnectFailure(failureKey)
                 }
             }
-            HStack(spacing: 12) {
-                Button(action: retry) {
-                    Label(isRetrying ? "Retrying connection" : "Retry connection",
-                          systemImage: "arrow.clockwise")
+            Button("Dismiss", role: .cancel) {
+                if let launch, let failureKey {
+                    launch.dismissForegroundConnectFailure(failureKey)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(isRetrying)
-                .accessibilityIdentifier("foreground-connect-retry")
             }
+        } message: { diagnostic in
+            Text(diagnostic.progress.message)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(.regularMaterial)
-        .accessibilityIdentifier("foreground-connection-recovery")
     }
 }
 
@@ -244,7 +224,8 @@ struct LiveInboxSettings: View {
                 }
                 if let launch,
                    launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
-                    InboxDiagnosticsSettingsSection(launch: launch)
+                    InboxDiagnosticsSettingsSection(launch: launch, isReadOnly: store.isReadOnly,
+                                                    closeSettings: { dismiss() })
                 }
                 if !store.isReadOnly {
                     Section("Local examples") {
