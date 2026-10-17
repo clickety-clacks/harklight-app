@@ -1278,10 +1278,7 @@ final class LivePresentationStore {
                       actions.count == 1,
                       let action = actions.first,
                       action.id == explicitCompatibilityAction,
-                      action.kind == .value,
-                      action.value?.semanticallyEquals(JSONValue.object([
-                        JSONMember("acknowledgment", .string(ExactText("seen")))
-                      ])) == true else {
+                      action.kind == .value else {
                     throw LiveReplyError.unsupported
                 }
                 return [.compatibilityValue(action: explicitCompatibilityAction)]
