@@ -131,8 +131,50 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var nativeSyncReplayRequested = false
     var previousTransportAttempt: PreviousTransportAttempt? = nil
 
+    var headline: String {
+        guard outcome != .confirmed else { return "Connected" }
+        switch lastConfirmedStage {
+        case .nativeSyncAcknowledged:
+            return outcome == .connecting ? "Messages synced; finishing connection" : "Messages synced; connection not confirmed"
+        case .nativeSyncResynced:
+            return "Messages saved; relay acknowledgement not confirmed"
+        default:
+            return "Connection not confirmed"
+        }
+    }
+
     var message: String {
         let last = lastConfirmedStage?.label ?? "No connection milestone was confirmed."
+        if lastConfirmedStage == .nativeSyncAcknowledged, outcome != .confirmed {
+            let status = "Ordinary messages through the saved native cursor were durably applied and that cursor was acknowledged. Full foreground completion remains unconfirmed. This does not establish pending-answer delivery, a later ordinary or conversation replay, upload cleanup, or notification registration. The current progress signal cannot identify the exact post-ACK step; Settings diagnostics retains operation-receipt states."
+            switch outcome {
+            case .connecting:
+                return "\(status) The foreground attempt is still running."
+            case .incomplete:
+                let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
+                return "Foreground sync remains incomplete. \(status)\(failureText)Retry with the same approved identity."
+            case .timedOut:
+                let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
+                return "Foreground attempt timed out after the ordinary cursor ACK. \(status)\(failureText)Saved state is preserved. Retry with the same approved identity."
+            case .confirmed:
+                break
+            }
+        }
+        if lastConfirmedStage == .nativeSyncResynced, outcome != .confirmed {
+            let status = "Ordinary messages through the replay high-water were durably saved locally, but relay acknowledgement of that cursor is not confirmed. Pending-answer delivery and overall foreground completion are not established."
+            switch outcome {
+            case .connecting:
+                return "\(status) The foreground attempt is still running."
+            case .incomplete:
+                let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
+                return "Foreground sync remains incomplete. \(status)\(failureText)Retry with the same approved identity."
+            case .timedOut:
+                let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
+                return "Foreground attempt timed out before cursor acknowledgement. \(status)\(failureText)Saved state is preserved. Retry with the same approved identity."
+            case .confirmed:
+                break
+            }
+        }
         switch outcome {
         case .connecting:
             return issue?.message ?? last
