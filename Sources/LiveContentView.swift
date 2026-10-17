@@ -62,7 +62,7 @@ private struct LiveConnectionRecoveryBanner: View {
                     .foregroundStyle(.orange)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Connection not confirmed")
+                    Text(progress.headline)
                         .font(.headline)
                     Text(progress.message)
                         .font(.callout)

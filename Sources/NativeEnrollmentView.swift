@@ -137,7 +137,8 @@ struct NativeEnrollmentView: View {
         case .approvedFinishing:
             heading("Approved, finishing up", symbol: "checkmark.shield")
             Text("The owner approved this device. Harklight is confirming its connection to the server.")
-            Text("Not connected yet.").foregroundStyle(.secondary)
+            Text(launch.foregroundConnectProgress?.headline ?? "Foreground connection is not confirmed.")
+                .foregroundStyle(.secondary)
             if let progress = launch.foregroundConnectProgress {
                 VStack(alignment: .leading, spacing: 8) {
                     if progress.outcome == .connecting { ProgressView() }
