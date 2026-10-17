@@ -92,7 +92,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
         XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first).informationalSeenStatus, .pending)
 
-        try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID, sequence: 6, context: context)
+        try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                          terminalSequence: 6, context: context)
         _ = store.applyRelayEvent(RelayEvent(sequence: 6, body: .terminal(seenKey, .answered, seenValue)), context: context)
         XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first).informationalSeenStatus, .confirmed)
     }
