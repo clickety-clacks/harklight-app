@@ -420,8 +420,7 @@ final class LivePresentationStore {
             return destination
         } catch {
             diagnose(.fileAccess, .filePreview,
-                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
-                     request: key, revision: revision)
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
             throw error
         }
     }
