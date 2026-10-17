@@ -84,18 +84,17 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: remotelySeenKey).requests.first).informationalSeenStatus,
                        .confirmed, "An exact origin-authored Seen terminal confirms the message even without a local operation.")
 
-        let receipt = try port.submit(SubmitIntent(context: port.context,
-                                                   selector: try XCTUnwrap(initial.selector),
-                                                   intentID: UUID(),
-                                                   inputs: [.compatibilityValue(action: ExactText("seen"))]))
+        let live = try LivePresentationStore(store: store, context: context)
+        let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
         let seenValue = try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8))
         XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
-        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first).informationalSeenStatus, .pending)
+        XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
 
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                           terminalSequence: 6, context: context)
         _ = store.applyRelayEvent(RelayEvent(sequence: 6, body: .terminal(seenKey, .answered, seenValue)), context: context)
-        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first).informationalSeenStatus, .confirmed)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .confirmed)
     }
 
     func testAuthenticatedRelayRefusesToFollowAnotherEndpoint() async throws {
