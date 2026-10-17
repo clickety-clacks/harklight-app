@@ -1413,7 +1413,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                              senderID: ExactText("sender"), messageID: ExactText("answer-request"))
         let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
         _ = try store.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key, originalPayload: payload), .message),
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
             context: context)
         let port = AttentionDomainPort(store: store)
@@ -1460,7 +1460,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                              senderID: ExactText("sender"), messageID: ExactText("answer-request"))
         let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
         _ = try store.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key, originalPayload: payload), .message),
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
             context: context)
         let port = AttentionDomainPort(store: store)
