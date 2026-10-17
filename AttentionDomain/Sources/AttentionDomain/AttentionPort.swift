@@ -746,7 +746,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
         let seenValue = JSONValue.object([
             JSONMember("acknowledgment", .string(ExactText("seen")))
         ])
-        if Self.isConfirmedSeenOutcome(status: status, remote: remote, seenValue: seenValue) {
+        if Self.isConfirmedSeenOutcome(status: status, remote: remote, requestKey: request.key,
+                                       submission: submission, seenValue: seenValue) {
             return .confirmed
         }
         if status == .open || status == .pending {
@@ -757,15 +758,24 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
     private static func isConfirmedSeenOutcome(status: AppLifecycleStatus,
                                                remote: RemoteRequestState?,
+                                               requestKey: RequestKey,
+                                               submission: Submission?,
                                                seenValue: JSONValue) -> Bool {
         guard status == .answered,
               remote?.state == .answered,
-              remote?.eventSequence != nil,
-              remote?.authorizedOriginAnswer?.semanticallyEquals(seenValue) == true else { return false }
-        // The origin-authored terminal frame is the confirmation. Requiring a
-        // local submission would mislabel a valid Seen delivered by another
-        // device on the same account as unconfirmed.
-        return true
+              let terminalSequence = remote?.eventSequence else { return false }
+        if let authorizedOriginAnswer = remote?.authorizedOriginAnswer {
+            return authorizedOriginAnswer.semanticallyEquals(seenValue)
+        }
+        // Receiving devices get an answer-free lifecycle. Their local original
+        // operation is authoritative only when its accepted terminal sequence
+        // is the exact terminal now projected for this same request and answer.
+        guard let submission,
+              submission.requestKey == requestKey,
+              submission.answer.semanticallyEquals(seenValue),
+              case let .accepted(acceptedSequence) = submission.disposition,
+              let acceptedSequence else { return false }
+        return acceptedSequence == terminalSequence
     }
 
     private func projectScene(from node: SceneNode,

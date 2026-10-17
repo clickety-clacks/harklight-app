@@ -52,24 +52,29 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(snapshot.requests.map(\.isResolved), [false, true, true])
     }
 
-    func testExplicitSeenRequiresCanonicalDescriptorAndShowsPendingUntilExactTerminalAnswer() throws {
+    func testExplicitSeenRequiresCanonicalDescriptorAndConfirmsOnlyAuthorizedEvidence() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-seen"), deviceID: ExactText("device-seen"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let seenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("notice"))
         let remotelySeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("remote-seen"))
+        let competingSeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("competing-seen"))
+        let originSeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("origin-seen"))
         let legacyKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy"))
         let misleadingLabelKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("misleading-label"))
         let seenPayload = try JSONValue.parse(Data(#"{"title":"Release complete","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        let seenValue = try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8))
         let legacyPayload = try JSONValue.parse(Data(#"{"title":"Legacy request"}"#.utf8))
         let misleadingLabelPayload = try JSONValue.parse(Data(#"{"title":"Still a request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":"different"}]}}"#.utf8))
         _ = store.applyRelayEvent(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: seenKey, originalPayload: seenPayload), .message)), context: context)
         _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: legacyKey, originalPayload: legacyPayload), .message)), context: context)
         _ = store.applyRelayEvent(RelayEvent(sequence: 3, body: .delivery(StoredRequest(key: misleadingLabelKey, originalPayload: misleadingLabelPayload), .message)), context: context)
         _ = store.applyRelayEvent(RelayEvent(sequence: 4, body: .delivery(StoredRequest(key: remotelySeenKey, originalPayload: seenPayload), .message)), context: context)
-        _ = store.applyRelayEvent(RelayEvent(sequence: 5, body: .terminal(remotelySeenKey, .answered,
-            try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8)))), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 5, body: .delivery(StoredRequest(key: competingSeenKey, originalPayload: seenPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 6, body: .delivery(StoredRequest(key: originSeenKey, originalPayload: seenPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 7, body: .terminal(remotelySeenKey, .answered, nil)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 8, body: .terminal(originSeenKey, .answered, seenValue)), context: context)
 
         let port = AttentionDomainPort(store: store)
         let initial = try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first)
@@ -82,19 +87,27 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(legacyActions.first?.label, ExactText("Reply"))
         XCTAssertNil(try port.observe(context: port.context).requests.first(where: { $0.key == misleadingLabelKey })?.informationalSeenStatus)
         XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: remotelySeenKey).requests.first).informationalSeenStatus,
-                       .confirmed, "An exact origin-authored Seen terminal confirms the message even without a local operation.")
+                       .resolvedWithoutSeen,
+                       "An answer-free terminal from another device is not a local operation receipt.")
+        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: originSeenKey).requests.first).informationalSeenStatus,
+                       .confirmed, "An authorized origin answer remains sufficient confirmation.")
 
         let live = try LivePresentationStore(store: store, context: context)
         let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
-        let seenValue = try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8))
         XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
 
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
-                                          terminalSequence: 6, context: context)
-        _ = store.applyRelayEvent(RelayEvent(sequence: 6, body: .terminal(seenKey, .answered, seenValue)), context: context)
+                                          terminalSequence: 9, context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 9, body: .terminal(seenKey, .answered, nil)), context: context)
         try live.refreshFromDurableStore()
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .confirmed)
+
+        _ = try live.submit(competingSeenKey, explicitCompatibilityAction: ExactText("seen"))
+        _ = store.applyRelayEvent(RelayEvent(sequence: 10, body: .terminal(competingSeenKey, .answered, nil)), context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: competingSeenKey)?.informationalSeenStatus, .resolvedWithoutSeen,
+                       "A competing terminal cannot confirm an unaccepted local Seen operation.")
     }
 
     func testAuthenticatedRelayRefusesToFollowAnotherEndpoint() async throws {
