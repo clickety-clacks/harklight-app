@@ -654,6 +654,7 @@ private struct LiveCompatibilityActions: View {
                 }
             }
         }
+    }
 }
 
 struct LiveLifecycleTitle {
