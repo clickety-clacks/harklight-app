@@ -1559,6 +1559,145 @@ final class NativeGuidedTLSTests: XCTestCase {
         await lifecycle.deactivate()
     }
 
+    func testAcceptedOriginalOperationReplayIsJoinedToItsSavedBinding() async throws {
+        let (context, store, session) = try makeU2ReplayFixture()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("answer-request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        let submission = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+        session.replayFrames = [
+            [u2Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+             u2Data(#"{"v":1,"type":"resynced","seq":1}"#)],
+            [u2Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+             u2Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"answer-request","origin":"other-installation","state":"answered","at":2}"#),
+             u2Data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        ]
+        let events = NativeDiagnosticEventCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: { events.append($0) })
+
+        _ = try await core.resyncAndDrainOutbox()
+
+        let replay = events.events.filter {
+            $0.phase == .ordinaryReplay && $0.operationID == submission.operationID
+        }
+        XCTAssertTrue(replay.contains {
+            $0.transition == .began && $0.receiptState == .acceptedAwaitingReplay &&
+                $0.requestTag != nil && $0.requestRevision == 1
+        })
+        XCTAssertTrue(replay.contains {
+            $0.transition == .completed && $0.receiptState == .terminal &&
+                $0.requestTag != nil && $0.requestRevision == 1
+        })
+        XCTAssertEqual(session.sent.first?.1, receipt.opID,
+                       "Replay must keep the accepted operation's original UUID.")
+        XCTAssertEqual(session.acknowledgements.count, 2,
+                       "The terminal replay is durably applied before its cursor ACK.")
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        XCTAssertEqual(try store.snapshot(context: context).remoteStates[key]?.state, .answered)
+    }
+
+    func testAcceptedOperationReplayFailureKeepsExactReceiptAndCauseRetrievable() async throws {
+        let (context, store, session) = try makeU2ReplayFixture()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("answer-request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+        session.replayFrames = [
+            [u2Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+             u2Data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        ]
+        session.resyncFailureOnCall = 2
+        let events = NativeDiagnosticEventCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: { events.append($0) })
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("The follow-on replay failure must remain visible to its accepted operation.")
+        } catch InstallationTransportError.unexpectedServerFrame {}
+
+        let submission = try XCTUnwrap(store.snapshot(context: context).intents[receipt.intentID])
+        let replayFailure = events.events.first {
+            $0.phase == .ordinaryReplay && $0.transition == .failed &&
+                $0.operationID == submission.operationID
+        }
+        XCTAssertEqual(replayFailure?.causeCode, "unexpected_relay_frame")
+        XCTAssertEqual(replayFailure?.requestRevision, 1)
+        XCTAssertNotNil(replayFailure?.requestTag)
+        XCTAssertEqual(replayFailure?.receiptState, .acceptedAwaitingReplay)
+        XCTAssertEqual(session.sent.first?.1, receipt.opID,
+                       "A retry must stay bound to the accepted operation, never a replacement answer.")
+        XCTAssertEqual(session.acknowledgements.count, 1,
+                       "The failed follow-on replay must not ACK a missing terminal.")
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "The accepted operation is not silently requeued as a new answer.")
+    }
+
+    private func makeU2ReplayFixture() throws -> (ProfileContext, AttentionDomainStore, U2ReplaySession) {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-A"),
+                                       deviceID: ExactText("installation-A"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        return (context,
+                try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence()),
+                U2ReplaySession(identity))
+    }
+
+    private func u2Data(_ text: String) -> Data { Data((text + "\n").utf8) }
+
+    private final class U2ReplaySession: AuthenticatedInstallationSession, @unchecked Sendable {
+        let authenticatedIdentity: ProfileIdentity
+        var acknowledgements: [Data] = []
+        var sent: [(Data, UUID)] = []
+        var result: OriginalOperationResult = .unresolved
+        var replayFrames: [[Data]] = []
+        var resyncFailureOnCall: Int?
+
+        private var requests: [Data] = []
+
+        init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
+
+        func resync(_ request: Data,
+                    consume: @Sendable (Data) async throws -> Void) async throws {
+            requests.append(request)
+            if resyncFailureOnCall == requests.count {
+                throw InstallationTransportError.unexpectedServerFrame
+            }
+            let selected = replayFrames.isEmpty ? [] : replayFrames.removeFirst()
+            for frame in selected {
+                try await consume(frame)
+            }
+        }
+
+        func acknowledge(_ request: Data) async throws {
+            acknowledgements.append(request)
+        }
+
+        func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+            sent.append((frame, operationID))
+            return result
+        }
+    }
+
     private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         for _ in 0..<150 {
             if condition() { return true }
