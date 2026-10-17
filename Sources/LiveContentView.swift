@@ -21,55 +21,37 @@ struct LiveContentView: View {
     var body: some View {
         let progress = launch?.foregroundConnectProgress
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
-        VStack(spacing: 0) {
+        HarklightInbox(
+            requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
+            requestDetail: { key, context in
+                if let request = store.request(for: key) {
+                    LiveRequestDetail(request: request, store: store, context: context)
+                } else {
+                    ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
+                }
+            },
+            settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
+                                                  archiveDeparture: archiveDeparture) },
+            warnings: [store.observationError, store.notificationWarning,
+                       showsRecovery ? nil : store.connectionWarning,
+                       store.pushRegistrationWarning, launch?.archiveCatalogWarning,
+                       launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
+                .compactMap { $0 },
+            conversationStore: store,
+            showsLocalExamples: !store.isReadOnly)
+        .overlay(alignment: .top) {
             if showsRecovery, let progress, let launch {
                 LiveConnectionRecoveryBanner(
                     progress: progress,
-                    diagnostic: launch.foregroundConnectDiagnostic,
                     isRetrying: launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy,
                     retry: { Task { await launch.retryForegroundConnection() } })
             }
-            if let launch, launch.diagnostics.hasEvents {
-                HStack(spacing: 12) {
-                    Label("Client activity is available", systemImage: "waveform.path")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    ShareLink(item: launch.diagnostics.shareText) {
-                        Label("Share diagnostics", systemImage: "square.and.arrow.up")
-                    }
-                    .font(.caption)
-                    .accessibilityIdentifier("client-diagnostics-share")
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .accessibilityIdentifier("client-diagnostics-retrieval")
-            }
-            HarklightInbox(
-                requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
-                requestDetail: { key, context in
-                    if let request = store.request(for: key) {
-                        LiveRequestDetail(request: request, store: store, context: context)
-                    } else {
-                        ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
-                    }
-                },
-                settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
-                                                      archiveDeparture: archiveDeparture) },
-                warnings: [store.observationError, store.notificationWarning,
-                           showsRecovery ? nil : store.connectionWarning,
-                           store.pushRegistrationWarning, launch?.archiveCatalogWarning,
-                           launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
-                    .compactMap { $0 },
-                conversationStore: store,
-                showsLocalExamples: !store.isReadOnly)
         }
     }
 }
 
 private struct LiveConnectionRecoveryBanner: View {
     let progress: NativeForegroundConnectProgress
-    let diagnostic: NativeForegroundConnectDiagnostic?
     let isRetrying: Bool
     let retry: () -> Void
 
@@ -95,12 +77,6 @@ private struct LiveConnectionRecoveryBanner: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(isRetrying)
                 .accessibilityIdentifier("foreground-connect-retry")
-                if let diagnostic {
-                    ShareLink(item: diagnostic.shareText) {
-                        Label("Share connection details", systemImage: "square.and.arrow.up")
-                    }
-                    .accessibilityIdentifier("foreground-connect-diagnostics")
-                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -262,6 +238,10 @@ struct LiveInboxSettings: View {
                             Text(message).font(.footnote).foregroundStyle(.red)
                         }
                     }
+                }
+                if let launch,
+                   launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
+                    InboxDiagnosticsSettingsSection(launch: launch)
                 }
                 if !store.isReadOnly {
                     Section("Local examples") {

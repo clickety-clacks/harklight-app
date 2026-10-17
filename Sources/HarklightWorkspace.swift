@@ -416,19 +416,63 @@ extension SampleKind {
 
 struct InboxSettings: View {
     let samples: SampleLibrary
+    var launch: NativeAppLaunch? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
             Form {
-                Section("Local examples") {
-                    Text("Shake to add fictional messages to your inbox. Their answers, chat and attachments stay on this device and disappear when the app closes.")
-                    Button("Add example messages") { samples.populate(); dismiss() }
+                if let launch,
+                   launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
+                    InboxDiagnosticsSettingsSection(launch: launch)
                 }
+                LocalExamplesSettingsSection(samples: samples, close: { dismiss() })
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) {
                 Button("Done", systemImage: "checkmark") { dismiss() }.labelStyle(.iconOnly)
             } }
+        }
+    }
+}
+
+@MainActor
+struct InboxDiagnosticsSettingsSection: View {
+    let launch: NativeAppLaunch
+
+    var body: some View {
+        Section("Diagnostics") {
+            if launch.diagnostics.hasEvents {
+                ShareLink(item: launch.diagnostics.shareText) {
+                    Label("Share diagnostics", systemImage: "square.and.arrow.up")
+                }
+                .accessibilityIdentifier("client-diagnostics-share")
+                Text("Shares retained client history without answers or credentials.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            if let diagnostic = launch.foregroundConnectDiagnostic {
+                ShareLink(item: diagnostic.shareText) {
+                    Label("Share connection details", systemImage: "waveform.path")
+                }
+                .accessibilityIdentifier("foreground-connect-diagnostics")
+                Text("Includes the app build, observed connection phase and queued-operation receipt state. Answers and credentials are excluded.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct LocalExamplesSettingsSection: View {
+    let samples: SampleLibrary
+    let close: () -> Void
+
+    var body: some View {
+        Section("Local examples") {
+            Text("Shake to add fictional messages to your inbox. Their answers, chat and attachments stay on this device and disappear when the app closes.")
+            Button("Add example messages") {
+                samples.populate()
+                close()
+            }
         }
     }
 }
