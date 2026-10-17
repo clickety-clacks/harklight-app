@@ -24,27 +24,6 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
     }
 }
 
-private final class ToggleReadFailurePersistence: AttentionStatePersistence, @unchecked Sendable {
-    private let lock = NSLock()
-    private var readsFail = false
-
-    func failReads() {
-        lock.lock()
-        readsFail = true
-        lock.unlock()
-    }
-
-    func load(identity: ProfileIdentity) throws -> Data? {
-        lock.lock()
-        let shouldFail = readsFail
-        lock.unlock()
-        if shouldFail { throw AttentionStoreError.persistence("PRIVATE-STORE-FAILURE") }
-        return nil
-    }
-
-    func commit(_ data: Data, identity: ProfileIdentity) throws {}
-}
-
 /// Actual pinned TLS exercises certificate-free enrollment and the explicit
 /// identity proof required for own-device removal. The iOS listener cannot
 /// request an optional certificate; that server seam needs server integration.
@@ -367,35 +346,39 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(restored.events.map(\.id), [earlier.id, later.id])
     }
 
-    func testCaughtHistoricalDraftReadFailureIsRetrievableWithSafeRequestContext() throws {
+    func testCaughtFilePreviewFailureIsRetrievableWithSafeRequestContext() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("private-person-marker"),
                                        deviceID: ExactText("diagnostic-draft-read-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = ToggleReadFailurePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let journalURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("HarklightCaughtRead-\(UUID().uuidString).json")
+            .appendingPathComponent("HarklightCaughtPreview-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: journalURL) }
         let journal = NativeClientDiagnosticJournal(fileURL: journalURL)
         let presentation = try LivePresentationStore(store: domain, context: context, diagnostics: journal)
         let request = RequestKey(accountScope: identity.personID,
                                  senderID: ExactText("private-sender-marker"),
                                  messageID: ExactText("private-message-marker"))
-        persistence.failReads()
+        let file = ConversationFile(id: ExactText("file-marker"),
+            name: ExactText("../private-file-name-marker"), byteCount: 1,
+            sha256: ExactText(String(repeating: "a", count: 64)), content: .inline(Data([0x41])))
 
-        XCTAssertNil(presentation.historicalAnswerDraft(for: request, revision: 7))
+        do {
+            _ = try await presentation.prepareConversationPreview(file, for: request, revision: 7)
+            XCTFail("A path-like filename must be refused before any network fetch.")
+        } catch {}
         let event = try XCTUnwrap(journal.events.last)
-        XCTAssertEqual(event.area, .localStore)
-        XCTAssertEqual(event.phase, .draftLoad)
+        XCTAssertEqual(event.area, .fileAccess)
+        XCTAssertEqual(event.phase, .filePreview)
         XCTAssertEqual(event.transition, .failed)
-        XCTAssertEqual(event.causeCode, "store_persistence_failure")
+        XCTAssertEqual(event.causeCode, "conversation_file_mismatch")
         XCTAssertEqual(event.requestRevision, 7)
         XCTAssertNotNil(event.requestTag)
-        XCTAssertFalse(journal.shareText.contains("PRIVATE-STORE-FAILURE"))
         XCTAssertFalse(journal.shareText.contains("private-person-marker"))
         XCTAssertFalse(journal.shareText.contains("private-sender-marker"))
         XCTAssertFalse(journal.shareText.contains("private-message-marker"))
+        XCTAssertFalse(journal.shareText.contains("private-file-name-marker"))
     }
 
     func testUncertainRetrySendsOnlyTheSameSavedOperationAndBinding() async throws {
