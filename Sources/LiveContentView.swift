@@ -38,6 +38,9 @@ struct LiveContentView: View {
                     progress: progress,
                     isRetrying: launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy,
                     retry: { Task { await launch.retryForegroundConnection() } })
+                    // Keep the NavigationSplitView's title and Settings toolbar
+                    // clear while the recovery controls remain over the inbox.
+                    .padding(.top, 56)
             }
         }
     }

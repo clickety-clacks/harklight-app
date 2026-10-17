@@ -485,6 +485,18 @@ final class NativeGuidedTLSTests: XCTestCase {
         progress.observe(.nativeSyncAcknowledged, transportAttemptID: transportAttemptID)
         XCTAssertEqual(progress.progress.lastConfirmedStage, .nativeSyncAcknowledged)
 
+        // A follow-on replay can advance the saved cursor while this monotonic
+        // milestone still records only the earlier acknowledged checkpoint.
+        progress.observe(.nativeSyncReplayRequested, transportAttemptID: transportAttemptID)
+        progress.observe(.nativeSyncResynced, transportAttemptID: transportAttemptID)
+        var laterReplayAwaitingAck = progress.progress
+        laterReplayAwaitingAck.outcome = .incomplete
+        XCTAssertTrue(laterReplayAwaitingAck.message.contains("At the last confirmed checkpoint"))
+        XCTAssertTrue(laterReplayAwaitingAck.message.contains("whether a later replay advanced the saved cursor"))
+        XCTAssertTrue(laterReplayAwaitingAck.message.contains("whether that later cursor was acknowledged"))
+        XCTAssertTrue(laterReplayAwaitingAck.message.contains("Full foreground completion remains unconfirmed"))
+        XCTAssertFalse(laterReplayAwaitingAck.message.contains("through the saved native cursor were durably applied and that cursor was acknowledged"))
+
         let rejectedTrust = ForegroundConnectDeadline()
         let rejectedTrustTransportID = UUID()
         rejectedTrust.beginSession(transportAttemptID: rejectedTrustTransportID)
