@@ -443,8 +443,11 @@ final class LivePresentationStore {
         }
     }
 
-    func reportConversationImportError(_ error: String) {
-        conversationError = "The selected file could not be opened: " + error + ". Your saved draft is retained."
+    func reportConversationImportError(_ error: Error, for key: RequestKey, revision: UInt64) {
+        conversationError = "The selected file could not be opened: " + error.localizedDescription + ". Your saved draft is retained."
+        diagnose(.fileAccess, .fileRetention,
+                 NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                 request: key, revision: revision)
     }
 
     func conversationDraft(for key: RequestKey, revision: UInt64) -> ConversationDraft {

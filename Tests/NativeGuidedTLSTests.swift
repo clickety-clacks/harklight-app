@@ -379,6 +379,17 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(journal.shareText.contains("private-sender-marker"))
         XCTAssertFalse(journal.shareText.contains("private-message-marker"))
         XCTAssertFalse(journal.shareText.contains("private-file-name-marker"))
+
+        let importError = NSError(domain: "private-import-path-marker", code: 73,
+            userInfo: [NSLocalizedDescriptionKey: "private-picker-url-marker"])
+        presentation.reportConversationImportError(importError, for: request, revision: 9)
+        let importEvent = try XCTUnwrap(journal.events.last)
+        XCTAssertEqual(importEvent.phase, .fileRetention)
+        XCTAssertEqual(importEvent.transition, .failed)
+        XCTAssertEqual(importEvent.causeCode, "unknown_error")
+        XCTAssertEqual(importEvent.requestRevision, 9)
+        XCTAssertFalse(journal.shareText.contains("private-import-path-marker"))
+        XCTAssertFalse(journal.shareText.contains("private-picker-url-marker"))
     }
 
     func testUncertainRetrySendsOnlyTheSameSavedOperationAndBinding() async throws {

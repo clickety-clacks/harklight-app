@@ -196,7 +196,7 @@ private struct ConversationComposer: View {
                 let addressedRevision = revision
                 Task { await store.importConversationFiles(urls, for: key, revision: addressedRevision) }
             } else if case let .failure(error) = result {
-                store.reportConversationImportError(error.localizedDescription)
+                store.reportConversationImportError(error, for: key, revision: revision)
             }
         }
     }
