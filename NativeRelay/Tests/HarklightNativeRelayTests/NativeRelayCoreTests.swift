@@ -3,6 +3,21 @@ import Foundation
 import HarklightNativeRelay
 import XCTest
 
+private final class DiagnosticEventCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [NativeClientDiagnosticEvent] = []
+
+    func append(_ event: NativeClientDiagnosticEvent) {
+        lock.lock(); defer { lock.unlock() }
+        storage.append(event)
+    }
+
+    var events: [NativeClientDiagnosticEvent] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+}
+
 final class NativeRelayCoreTests: XCTestCase {
     private final class Session: AuthenticatedInstallationSession, @unchecked Sendable {
         var authenticatedIdentity: ProfileIdentity
@@ -14,11 +29,14 @@ final class NativeRelayCoreTests: XCTestCase {
         var replayFrames: [[Data]] = []
         var rejectFirstAcknowledgement = false
         var interruptAfterFrames: Int?
+        var resyncFailureOnCall: Int?
+        var resyncFailure: Error = InstallationTransportError.unexpectedServerFrame
 
         init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
         func resync(_ request: Data,
                     consume: @Sendable (Data) async throws -> Void) async throws {
             requests.append(request)
+            if resyncFailureOnCall == requests.count { throw resyncFailure }
             let selected = !replayFrames.isEmpty ? replayFrames.removeFirst() : frames
             for (index, frame) in selected.enumerated() {
                 if index == interruptAfterFrames {
@@ -237,5 +255,90 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try restarted.snapshot(context: restartedContext).cursor, 1,
                        "An operation receipt at sequence 9 cannot jump the durable relay cursor.")
         XCTAssertTrue(try restarted.snapshot(context: restartedContext).outbox.isEmpty)
+    }
+
+    func testAcceptedOriginalOperationReplayIsJoinedToItsSavedBinding() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("answer-request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        let submission = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+        session.replayFrames = [
+            [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+             data(#"{"v":1,"type":"resynced","seq":1}"#)],
+            [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+             data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"answer-request","origin":"other-installation","state":"answered","at":2}"#),
+             data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        ]
+        let events = DiagnosticEventCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: { events.append($0) })
+
+        _ = try await core.resyncAndDrainOutbox()
+
+        let replay = events.events.filter {
+            $0.phase == .ordinaryReplay && $0.operationID == submission.operationID
+        }
+        XCTAssertTrue(replay.contains {
+            $0.transition == .began && $0.receiptState == .acceptedAwaitingReplay &&
+                $0.requestTag != nil && $0.requestRevision == 1
+        })
+        XCTAssertTrue(replay.contains {
+            $0.transition == .completed && $0.receiptState == .terminal &&
+                $0.requestTag != nil && $0.requestRevision == 1
+        })
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        XCTAssertEqual(try store.snapshot(context: context).remoteStates[key]?.state, .answered)
+    }
+
+    func testAcceptedOperationReplayFailureKeepsExactReceiptAndCauseRetrievable() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("answer-request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+        session.replayFrames = [
+            [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+             data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        ]
+        session.resyncFailureOnCall = 2
+        let events = DiagnosticEventCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: { events.append($0) })
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("The follow-on replay failure must remain visible to its accepted operation.")
+        } catch InstallationTransportError.unexpectedServerFrame {}
+
+        let submission = try XCTUnwrap(store.snapshot(context: context).intents[receipt.intentID])
+        let replayFailure = events.events.first {
+            $0.phase == .ordinaryReplay && $0.transition == .failed &&
+                $0.operationID == submission.operationID
+        }
+        XCTAssertEqual(replayFailure?.causeCode, "unexpected_relay_frame")
+        XCTAssertEqual(replayFailure?.requestRevision, 1)
+        XCTAssertNotNil(replayFailure?.requestTag)
+        XCTAssertEqual(replayFailure?.receiptState, .acceptedAwaitingReplay)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "The accepted operation is not silently requeued as a new answer.")
     }
 }
