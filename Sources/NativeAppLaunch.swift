@@ -17,6 +17,26 @@ struct NativeInstallationMaterial {
     let trustedRootDER: Data
 }
 
+/// In-memory presentation identity for one failed foreground attempt. The
+/// profile identity keeps a dismissal from leaking across accounts; the
+/// attempt ID lets a later failure surface normally.
+struct NativeForegroundConnectFailureKey: Equatable, Hashable {
+    let profileAuthority: String
+    let personID: String
+    let deviceID: String
+    let attemptID: UUID
+
+    init?(record: NativeEnrollmentRecord, progress: NativeForegroundConnectProgress) {
+        guard progress.outcome == .incomplete || progress.outcome == .timedOut,
+              let attemptID = progress.attemptID,
+              let personID = record.personID else { return nil }
+        profileAuthority = record.profileAuthority
+        self.personID = personID
+        deviceID = record.deviceID
+        self.attemptID = attemptID
+    }
+}
+
 @MainActor
 @Observable
 final class NativeAppLaunch {
@@ -48,6 +68,8 @@ final class NativeAppLaunch {
     private(set) var isEndpointMigrationBusy = false
     let guidedJoin: NativeGuidedJoinCoordinator
     let diagnostics: NativeClientDiagnosticJournal
+
+    private var dismissedForegroundConnectFailure: NativeForegroundConnectFailureKey?
 
     @ObservationIgnored private let enrollment: NativeEnrollmentStore
     @ObservationIgnored private let guidedJoinStore: NativeGuidedJoinStore
@@ -93,9 +115,8 @@ final class NativeAppLaunch {
             let epoch = self.activationGeneration
             let connect = await NativeRelayLifecycle.shared.confirmForegroundProgress(for: material.context) { [weak self] progress in
                 guard let self else { return }
-                self.foregroundConnectProgress = progress
-                self.foregroundConnectDiagnostic = NativeForegroundConnectDiagnostic(
-                    progress: progress,
+                self.recordForegroundConnectProgress(
+                    progress,
                     operationSnapshot: NativeRelayLifecycle.shared.foregroundOperationDiagnostics(for: material.context))
                 if case let .live(presentation) = self.state {
                     presentation.connectionWarning = progress.outcome == .confirmed ? nil : progress.message
@@ -657,6 +678,35 @@ final class NativeAppLaunch {
     private func clearForegroundConnectionDetails() {
         foregroundConnectProgress = nil
         foregroundConnectDiagnostic = nil
+        dismissedForegroundConnectFailure = nil
+    }
+
+    var foregroundConnectFailureKey: NativeForegroundConnectFailureKey? {
+        guard let activeEnrollmentRecord, let foregroundConnectProgress else { return nil }
+        return NativeForegroundConnectFailureKey(record: activeEnrollmentRecord,
+                                                  progress: foregroundConnectProgress)
+    }
+
+    func shouldPresentForegroundConnectFailure(_ key: NativeForegroundConnectFailureKey) -> Bool {
+        dismissedForegroundConnectFailure != key
+    }
+
+    func dismissForegroundConnectFailure(_ key: NativeForegroundConnectFailureKey) {
+        guard foregroundConnectFailureKey == key else { return }
+        dismissedForegroundConnectFailure = key
+    }
+
+    func reopenForegroundConnectFailure(_ key: NativeForegroundConnectFailureKey) {
+        guard foregroundConnectFailureKey == key,
+              dismissedForegroundConnectFailure == key else { return }
+        dismissedForegroundConnectFailure = nil
+    }
+
+    func recordForegroundConnectProgress(_ progress: NativeForegroundConnectProgress,
+                                         operationSnapshot: NativeForegroundOperationSnapshot) {
+        foregroundConnectProgress = progress
+        foregroundConnectDiagnostic = NativeForegroundConnectDiagnostic(
+            progress: progress, operationSnapshot: operationSnapshot)
     }
 
     func refreshLive() async {

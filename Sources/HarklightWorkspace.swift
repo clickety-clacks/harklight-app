@@ -423,7 +423,7 @@ struct InboxSettings: View {
             Form {
                 if let launch,
                    launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
-                    InboxDiagnosticsSettingsSection(launch: launch)
+                    InboxDiagnosticsSettingsSection(launch: launch, closeSettings: { dismiss() })
                 }
                 LocalExamplesSettingsSection(samples: samples, close: { dismiss() })
             }
@@ -438,6 +438,8 @@ struct InboxSettings: View {
 @MainActor
 struct InboxDiagnosticsSettingsSection: View {
     let launch: NativeAppLaunch
+    var isReadOnly = false
+    var closeSettings: () -> Void = {}
 
     var body: some View {
         Section("Diagnostics") {
@@ -456,6 +458,19 @@ struct InboxDiagnosticsSettingsSection: View {
                 .accessibilityIdentifier("foreground-connect-diagnostics")
                 Text("Includes the app build, observed connection phase and queued-operation receipt state. Answers and credentials are excluded.")
                     .font(.footnote).foregroundStyle(.secondary)
+            }
+            if !isReadOnly, let failureKey = launch.foregroundConnectFailureKey {
+                Button("View connection details") {
+                    launch.reopenForegroundConnectFailure(failureKey)
+                    closeSettings()
+                }
+                .accessibilityIdentifier("foreground-connect-reopen-details")
+                Button(launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy
+                       ? "Retrying connection…" : "Retry connection") {
+                    Task { await launch.retryForegroundConnection() }
+                }
+                .disabled(launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy)
+                .accessibilityIdentifier("foreground-connect-settings-retry")
             }
         }
     }
