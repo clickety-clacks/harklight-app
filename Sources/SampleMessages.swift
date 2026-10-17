@@ -119,6 +119,13 @@ final class SampleResponse {
               request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         if request.informationalSeenStatus != nil || message.kind == .instructions { return true }
+        if message.kind == .multipleChoice {
+            if ownAnswer {
+                return request.draft.inputs[ExactText("answer")]?.textByActionID[ExactText("own")]?.rawValue
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            }
+            return !choices.isEmpty
+        }
         switch request.projection {
         case let .sender(sender):
             var hasAnswerInput = false
@@ -136,8 +143,9 @@ final class SampleResponse {
                 case .text:
                     if input.id.rawValue == "value" {
                         hasAnswerInput = true
-                        guard request.draft.inputs[input.id]?.text?.rawValue
-                            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return false }
+                        guard let rawValue = request.draft.inputs[input.id]?.text?.rawValue,
+                              let value = Double(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+                              (7...90).contains(value) else { return false }
                     }
                 case .point:
                     hasAnswerInput = true

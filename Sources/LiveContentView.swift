@@ -108,6 +108,18 @@ struct MessageHeading: View {
     }
 }
 
+private extension SampleKind {
+    var noticeTint: Color? {
+        switch self {
+        case .error: .red
+        case .warning: .orange
+        case .information: .blue
+        case .completed: .green
+        default: nil
+        }
+    }
+}
+
 @MainActor
 struct LiveInboxSettings: View {
     let store: LivePresentationStore
@@ -293,6 +305,7 @@ struct LiveRequestDetail: View {
     var localExample: SampleResponse? = nil
     @State private var deferred = false
     @State private var chatPresented = false
+    @State private var enlargedPicture: SampleOption?
 
     private var controlsReadOnly: Bool {
         if let localExample {
@@ -330,13 +343,14 @@ struct LiveRequestDetail: View {
         MessageCardSurface(context: context) {
             VStack(alignment: .leading, spacing: 22) {
                 MessageHeading(sender: request.key.senderID.rawValue,
-                               initials: String(request.key.senderID.rawValue.prefix(2)).uppercased(),
+                               initials: localExample?.message.initials ?? String(request.key.senderID.rawValue.prefix(2)).uppercased(),
                                title: request.title?.rawValue ?? request.key.senderID.rawValue,
                                createdAt: request.createdAt,
-                               symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle")
+                               symbol: localExample?.message.kind.symbol ?? (request.informationalSeenStatus == nil ? "text.bubble" : "info.circle"))
                 if let localExample {
                     Label("Local example · answers stay on this device", systemImage: "iphone")
                         .font(.caption).foregroundStyle(.secondary)
+                    LocalSampleContext(response: localExample)
                     if localExample.finished {
                         Label(request.informationalSeenStatus == nil
                               ? "Answered locally · nothing sent"
@@ -376,8 +390,18 @@ struct LiveRequestDetail: View {
                     }.font(.subheadline)
                 }
                 if let body = request.body {
-                    Text(body.rawValue)
-                        .textSelection(.enabled)
+                    if let tint = localExample?.message.kind.noticeTint {
+                        Text(body.rawValue)
+                            .textSelection(.enabled)
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                    } else {
+                        Text(body.rawValue).textSelection(.enabled)
+                    }
+                }
+                if localExample?.message.kind == .review {
+                    SampleDiffView()
                 }
                 switch request.projection {
                 case let .sender(sender):
@@ -385,12 +409,15 @@ struct LiveRequestDetail: View {
                                            sender: sender,
                                            node: sender.scene,
                                            store: store,
-                                           readOnly: controlsReadOnly)
+                                           readOnly: controlsReadOnly,
+                                           localExample: localExample,
+                                           enlargePicture: { enlargedPicture = $0 })
                 case let .compatibility(actions):
                     LiveCompatibilityActions(request: request,
                                              actions: actions,
                                              store: store,
                                              readOnly: controlsReadOnly,
+                                             localExample: localExample,
                                              onSeen: localSeenAction)
                 case .unsupported:
                     Text("This request uses an unsupported answer format.")
@@ -452,6 +479,7 @@ struct LiveRequestDetail: View {
                 .disabled(store.isReadOnly || localExample?.finished == true)
                 Spacer()
                 Button("Chat", systemImage: "bubble.left.and.bubble.right") {
+                    localExample?.chatRead = true
                     if context.canInlineChat { context.openChat?() } else { chatPresented = true }
                 }
                     .labelStyle(.iconOnly)
@@ -470,6 +498,9 @@ struct LiveRequestDetail: View {
                         .presentationDetents([.medium, .large])
                     }
             }
+        }
+        .sheet(item: $enlargedPicture) { picture in
+            SamplePictureViewer(initialPicture: picture)
         }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
@@ -525,6 +556,8 @@ private struct LiveProjectedSceneView: View {
     let node: ProjectedSceneNode
     let store: LivePresentationStore
     let readOnly: Bool
+    var localExample: SampleResponse? = nil
+    var enlargePicture: (SampleOption) -> Void = { _ in }
 
     var body: some View {
         switch node.kind {
@@ -557,7 +590,9 @@ private struct LiveProjectedSceneView: View {
                                        layout: layout,
                                        sender: sender,
                                        store: store,
-                                       readOnly: readOnly)
+                                       readOnly: readOnly,
+                                       localExample: localExample,
+                                       enlargePicture: enlargePicture)
             }
         case let .resultPoint(illustrationID, label, point):
             if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
@@ -576,7 +611,8 @@ private struct LiveProjectedSceneView: View {
     @ViewBuilder
     private func childView(_ child: ProjectedSceneNode) -> some View {
         LiveProjectedSceneView(request: request, sender: sender,
-                               node: child, store: store, readOnly: readOnly)
+                               node: child, store: store, readOnly: readOnly,
+                               localExample: localExample, enlargePicture: enlargePicture)
     }
 }
 
@@ -588,6 +624,8 @@ private struct LiveProjectedInputView: View {
     let sender: AdmittedSenderProjection
     let store: LivePresentationStore
     let readOnly: Bool
+    var localExample: SampleResponse? = nil
+    var enlargePicture: (SampleOption) -> Void = { _ in }
 
     private var draft: InputDraft? {
         readOnly ? request.draft.inputs[input.id] : store.request(for: request.key)?.draft.inputs[input.id]
@@ -596,49 +634,88 @@ private struct LiveProjectedInputView: View {
     var body: some View {
         switch input.kind {
         case let .response(actions):
-            VStack(alignment: .leading, spacing: 10) {
-                Text(input.label.rawValue).font(.headline)
-                VStack(spacing: 10) {
-                    ForEach(actions, id: \.id) { action in actionButton(action) }
+            if let localExample,
+               localExample.message.kind == .pictureChoice,
+               input.id.rawValue == "answer" {
+                let options = localExample.message.options.filter { option in
+                    actions.contains { $0.id.rawValue == option.id }
                 }
-                if let selected = draft?.selectedActionID,
-                   let action = actions.first(where: { $0.id == selected }),
-                   action.kind == .text {
-                    TextEditor(text: Binding(
-                        get: { draft?.textByActionID[selected]?.rawValue ?? "" },
-                        set: { store.updateText($0, input: input.id, action: selected, for: request.key) }
-                    ))
-                    .frame(minHeight: 120)
-                    .accessibilityLabel(action.label.rawValue)
-                    .disabled(readOnly)
+                SamplePictureChoices(options: options, response: localExample,
+                                     isReadOnly: readOnly, enlarge: enlargePicture)
+            } else if let localExample,
+                      localExample.message.kind == .multipleChoice,
+                      input.id.rawValue != "answer",
+                      let option = localExample.message.options.first(where: { $0.id == input.id.rawValue }) {
+                SampleChoiceRow(option: option,
+                                selected: localExample.choices.contains(option.id),
+                                multiple: true, swatch: nil, sound: false) {
+                    localExample.choose(option.id, multiple: true)
+                }
+                .disabled(readOnly)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(input.label.rawValue).font(.headline)
+                    VStack(spacing: 10) {
+                        ForEach(actions.filter { action in
+                            !(localExample?.message.kind == .multipleChoice &&
+                              input.id.rawValue == "answer" && action.id.rawValue == "options")
+                        }, id: \.id) { action in actionButton(action) }
+                    }
+                    if let selected = draft?.selectedActionID,
+                       let action = actions.first(where: { $0.id == selected }),
+                       action.kind == .text {
+                        TextEditor(text: Binding(
+                            get: { draft?.textByActionID[selected]?.rawValue ?? "" },
+                            set: { store.updateText($0, input: input.id, action: selected, for: request.key) }
+                        ))
+                        .frame(minHeight: 120)
+                        .accessibilityLabel(action.label.rawValue)
+                        .disabled(readOnly)
+                    }
                 }
             }
         case .text:
-            VStack(alignment: .leading, spacing: 8) {
-                Text(input.label.rawValue).font(.headline)
-                TextEditor(text: Binding(
-                    get: { draft?.text?.rawValue ?? "" },
-                    set: { store.updateText($0, input: input.id, action: nil, for: request.key) }
-                ))
-                .frame(minHeight: 120)
-                .accessibilityLabel(input.label.rawValue)
-                .disabled(readOnly)
+            if let localExample,
+               localExample.message.kind == .value,
+               input.id.rawValue == "value" {
+                SampleNumberInput(response: localExample, isReadOnly: readOnly)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(input.label.rawValue).font(.headline)
+                    TextEditor(text: Binding(
+                        get: { draft?.text?.rawValue ?? "" },
+                        set: { store.updateText($0, input: input.id, action: nil, for: request.key) }
+                    ))
+                    .frame(minHeight: 120)
+                    .accessibilityLabel(input.label.rawValue)
+                    .disabled(readOnly)
+                }
             }
         case let .point(illustrationID):
             if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(input.label.rawValue).font(.headline)
-                    SenderIllustrationCanvas(illustration: illustration,
-                                             point: draft?.effectivePoint)
-                    if let point = draft?.effectivePoint {
-                        Text("Horizontal \(point.x), vertical \(point.y)")
-                        Stepper("Horizontal position", value: pointBinding(horizontal: true), in: 0...1000)
-                            .disabled(readOnly)
-                        Stepper("Vertical position", value: pointBinding(horizontal: false), in: 0...1000)
-                            .disabled(readOnly)
-                    } else if !readOnly {
-                        Button("Set point") {
-                            store.setPoint(PointValue(x: 500, y: 500), input: input.id, for: request.key)
+                if let localExample, localExample.message.kind == .point {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(input.label.rawValue).font(.headline)
+                        SampleAnnotationEditor(response: localExample,
+                                               illustration: illustration,
+                                               point: draft?.effectivePoint,
+                                               isReadOnly: readOnly)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(input.label.rawValue).font(.headline)
+                        SenderIllustrationCanvas(illustration: illustration,
+                                                 point: draft?.effectivePoint)
+                        if let point = draft?.effectivePoint {
+                            Text("Horizontal \(point.x), vertical \(point.y)")
+                            Stepper("Horizontal position", value: pointBinding(horizontal: true), in: 0...1000)
+                                .disabled(readOnly)
+                            Stepper("Vertical position", value: pointBinding(horizontal: false), in: 0...1000)
+                                .disabled(readOnly)
+                        } else if !readOnly {
+                            Button("Set point") {
+                                store.setPoint(PointValue(x: 500, y: 500), input: input.id, for: request.key)
+                            }
                         }
                     }
                 }
@@ -649,21 +726,38 @@ private struct LiveProjectedInputView: View {
     @ViewBuilder
     private func actionButton(_ action: ProjectedAction) -> some View {
         let selected = draft?.selectedActionID == action.id
-        Button {
-            store.selectAction(action.id, input: input.id, for: request.key)
-        } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                if let artID = action.illustrationID,
-                   let illustration = sender.illustrations.first(where: { $0.id == artID }) {
-                    SenderIllustrationCanvas(illustration: illustration, point: nil)
-                }
-                MessageChoiceLabel(title: action.label.rawValue, detail: "",
-                                   selected: selected, multiple: false, suggested: false)
+        if let localExample,
+           let option = localExample.message.options.first(where: { $0.id == action.id.rawValue }) {
+            SampleChoiceRow(option: option, selected: selected,
+                            multiple: false,
+                            swatch: localExample.message.kind == .colorChoice ? option.id : nil,
+                            sound: localExample.message.kind == .soundChoice) {
+                store.selectAction(action.id, input: input.id, for: request.key)
             }
+            .disabled(readOnly)
+        } else {
+            Button {
+                if localExample?.message.kind == .multipleChoice && action.id.rawValue == "own" {
+                    localExample?.choices = []
+                }
+                store.selectAction(action.id, input: input.id, for: request.key)
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let artID = action.illustrationID,
+                       let illustration = sender.illustrations.first(where: { $0.id == artID }) {
+                        SenderIllustrationCanvas(illustration: illustration, point: nil)
+                    }
+                    let detail = localExample != nil && action.id.rawValue == "own"
+                        ? "Write it here, or say why none of these fit."
+                        : ""
+                    MessageChoiceLabel(title: action.label.rawValue, detail: detail,
+                                       selected: selected, multiple: false, suggested: false)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(selected ? "Selected" : "Not selected")
+            .disabled(readOnly)
         }
-        .buttonStyle(.plain)
-        .accessibilityValue(selected ? "Selected" : "Not selected")
-        .disabled(readOnly)
     }
 
     private func pointBinding(horizontal: Bool) -> Binding<Int> {
@@ -689,6 +783,7 @@ private struct LiveCompatibilityActions: View {
     let actions: [ProjectedAction]
     let store: LivePresentationStore
     let readOnly: Bool
+    var localExample: SampleResponse? = nil
     var onSeen: (() -> Void)? = nil
 
     private var selected: ExactText? {
@@ -728,8 +823,12 @@ private struct LiveCompatibilityActions: View {
                     Button {
                         store.selectAction(action.id, input: nil, for: request.key)
                     } label: {
-                        MessageChoiceLabel(title: action.label.rawValue, detail: "",
-                            selected: selected == action.id, multiple: false, suggested: false)
+                    let option = localExample?.message.options.first { $0.id == action.id.rawValue }
+                    MessageChoiceLabel(title: action.label.rawValue,
+                            detail: option?.detail ?? "",
+                            selected: selected == action.id, multiple: false,
+                            suggested: option.map { if case .suggested = $0.role { true } else { false } } ?? false,
+                            selectionColor: option.map { if case .destructive = $0.role { .red } else { .blue } } ?? .blue)
                     }
                     .buttonStyle(.plain)
                     .accessibilityValue(selected == action.id ? "Selected" : "Not selected")
