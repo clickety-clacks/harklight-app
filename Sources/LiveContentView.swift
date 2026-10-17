@@ -333,8 +333,7 @@ struct LiveRequestDetail: View {
                                initials: String(request.key.senderID.rawValue.prefix(2)).uppercased(),
                                title: request.title?.rawValue ?? request.key.senderID.rawValue,
                                createdAt: request.createdAt,
-                               symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                               isLocalExample: localExample != nil)
+                               symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle")
                 if let localExample {
                     Label("Local example · answers stay on this device", systemImage: "iphone")
                         .font(.caption).foregroundStyle(.secondary)
