@@ -28,7 +28,12 @@ final class NativeClientDiagnosticJournal {
     private(set) var persistenceCauseCode: String?
     private let fileURL: URL?
 
-    init(fileURL: URL? = Self.defaultFileURL()) {
+    init() {
+        fileURL = Self.defaultFileURL()
+        load()
+    }
+
+    init(fileURL: URL?) {
         self.fileURL = fileURL
         load()
     }
