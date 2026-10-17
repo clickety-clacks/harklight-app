@@ -1040,11 +1040,29 @@ final class LivePresentationStore {
 
     var inboxRows: [InboxRequestRow] {
         presentation.requests.map {
-            InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
+            let lifecycle = isRetracted($0.key) ? "Retracted" :
+                String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)
+            var statusParts: [String] = []
+            if hasAcceptedUpdate(for: $0.key) { statusParts.append("Updated") }
+            statusParts.append(lifecycle)
+            if let seenStatus = $0.informationalSeenStatus {
+                statusParts.append(informationalSeenRowStatus(seenStatus))
+            }
+            return InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
                 sender: $0.key.senderID.rawValue,
-                status: (hasAcceptedUpdate(for: $0.key) ? "Updated · " : "") +
-                    (isRetracted($0.key) ? "Retracted" : String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)),
-                bodyText: $0.body?.rawValue ?? "")
+                status: statusParts.joined(separator: " · "),
+                bodyText: $0.body?.rawValue ?? "",
+                symbol: $0.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
+                isResolved: $0.isResolved)
+        }
+    }
+
+    private func informationalSeenRowStatus(_ status: InformationalSeenStatus) -> String {
+        switch status {
+        case .available: "Seen available"
+        case .pending: "Seen pending"
+        case .confirmed: "Seen confirmed"
+        case .resolvedWithoutSeen: "Seen not confirmed"
         }
     }
 
@@ -1119,7 +1137,7 @@ final class LivePresentationStore {
     /// C composes the exact answer and durably stores one original operation
     /// before any network send. A persisted receipt prevents a second intent.
     @discardableResult
-    func submit(_ key: RequestKey) throws -> IntentReceipt {
+    func submit(_ key: RequestKey, explicitCompatibilityAction: ExactText? = nil) throws -> IntentReceipt {
         guard !isReadOnly else { throw LiveReplyError.disconnected }
         guard permitsDelivery else { throw LiveReplyError.localExample }
         let request = try inspectedRequest(key)
@@ -1128,7 +1146,7 @@ final class LivePresentationStore {
               let selector = request.selector else {
             throw LiveReplyError.notOpen
         }
-        let records = try typedInputs(for: request)
+        let records = try typedInputs(for: request, explicitCompatibilityAction: explicitCompatibilityAction)
         let receipt = try port.submit(SubmitIntent(context: port.context,
                                                    selector: selector,
                                                    intentID: UUID(),
@@ -1139,10 +1157,10 @@ final class LivePresentationStore {
         return receipt
     }
 
-    func submitFromUser(_ key: RequestKey) {
+    func submitFromUser(_ key: RequestKey, explicitCompatibilityAction: ExactText? = nil) {
         guard permitsDelivery, !isReadOnly else { return }
         do {
-            _ = try submit(key)
+            _ = try submit(key, explicitCompatibilityAction: explicitCompatibilityAction)
             retryPendingDelivery()
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error, request: key,
@@ -1225,7 +1243,8 @@ final class LivePresentationStore {
         return request
     }
 
-    private func typedInputs(for request: PresentedRequest) throws -> [TypedInputRecord] {
+    private func typedInputs(for request: PresentedRequest,
+                             explicitCompatibilityAction: ExactText? = nil) throws -> [TypedInputRecord] {
         switch request.projection {
         case let .sender(sender):
             return try sender.inputs.map { input in
@@ -1252,6 +1271,21 @@ final class LivePresentationStore {
                 }
             }
         case let .compatibility(actions):
+            if let explicitCompatibilityAction {
+                guard request.informationalSeenStatus == .available,
+                      request.informationalSeenStatus != nil,
+                      explicitCompatibilityAction == ExactText("seen"),
+                      actions.count == 1,
+                      let action = actions.first,
+                      action.id == explicitCompatibilityAction,
+                      action.kind == .value,
+                      action.value?.semanticallyEquals(JSONValue.object([
+                        JSONMember("acknowledgment", .string(ExactText("seen")))
+                      ])) == true else {
+                    throw LiveReplyError.unsupported
+                }
+                return [.compatibilityValue(action: explicitCompatibilityAction)]
+            }
             guard let selected = request.draft.compatibility.selectedActionID,
                   let action = actions.first(where: { $0.id == selected }) else {
                 throw LiveReplyError.incomplete

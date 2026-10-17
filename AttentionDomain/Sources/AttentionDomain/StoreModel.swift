@@ -240,6 +240,28 @@ public struct StoredRequest: Equatable, Codable, Sendable {
         return members.count == 1 ? members[0].value : nil
     }
 
+    /// This is the one explicit informational convention supported by Spirit
+    /// v19. Labels, body text, missing descriptors and unrelated values never
+    /// imply that a message can be acknowledged as Seen.
+    public var hasExplicitInformationalSeenAction: Bool {
+        guard let description = answerDescription,
+              description.hasExactlyKeys(["schema", "actions"]),
+              description.uniqueValue(named: "schema")?.stringValue?.rawValue == "attention-client.actions/1",
+              let actions = description.uniqueValue(named: "actions")?.arrayValues,
+              actions.count == 1,
+              let action = actions.first,
+              action.hasExactlyKeys(["id", "label", "kind", "value"]),
+              action.uniqueValue(named: "id")?.stringValue?.rawValue == "seen",
+              action.uniqueValue(named: "label")?.stringValue?.rawValue == "Seen",
+              action.uniqueValue(named: "kind")?.stringValue?.rawValue == "value",
+              let value = action.uniqueValue(named: "value"),
+              value.hasExactlyKeys(["acknowledgment"]),
+              value.uniqueValue(named: "acknowledgment")?.stringValue?.rawValue == "seen" else {
+            return false
+        }
+        return true
+    }
+
     public var interface: RequestInterface {
         guard let members = originalPayload.objectMembers?.filter({ $0.key == ExactText("answer_ui") }),
               members.count <= 1 else {

@@ -29,6 +29,74 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
 /// request an optional certificate; that server seam needs server integration.
 @MainActor
 final class NativeGuidedTLSTests: XCTestCase {
+    func testOrdinaryInboxGroupsUnresolvedThenResolvedAndUsesDescendingAcceptanceOrder() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-order"), deviceID: ExactText("device-order"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let olderResolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("older-resolved"))
+        let newerResolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("newer-resolved"))
+        let unresolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("unresolved"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Order check"}"#.utf8))
+
+        _ = store.applyRelayEvent(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: olderResolved, originalPayload: payload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: newerResolved, originalPayload: payload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 3, body: .delivery(StoredRequest(key: unresolved, originalPayload: payload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 4, body: .terminal(newerResolved, .answered, nil)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 5, body: .terminal(olderResolved, .cleared, nil)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let snapshot = try port.observe(context: port.context)
+        XCTAssertEqual(snapshot.requests.map(\.key), [unresolved, newerResolved, olderResolved])
+        XCTAssertEqual(snapshot.cursor, 5, "Presentation ordering must not reverse or advance the causal replay cursor.")
+        XCTAssertEqual(snapshot.requests.map(\.isResolved), [false, true, true])
+    }
+
+    func testExplicitSeenRequiresCanonicalDescriptorAndShowsPendingUntilExactTerminalAnswer() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-seen"), deviceID: ExactText("device-seen"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let seenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("notice"))
+        let remotelySeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("remote-seen"))
+        let legacyKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy"))
+        let misleadingLabelKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("misleading-label"))
+        let seenPayload = try JSONValue.parse(Data(#"{"title":"Release complete","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        let legacyPayload = try JSONValue.parse(Data(#"{"title":"Legacy request"}"#.utf8))
+        let misleadingLabelPayload = try JSONValue.parse(Data(#"{"title":"Still a request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":"different"}]}}"#.utf8))
+        _ = store.applyRelayEvent(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: seenKey, originalPayload: seenPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: legacyKey, originalPayload: legacyPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 3, body: .delivery(StoredRequest(key: misleadingLabelKey, originalPayload: misleadingLabelPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 4, body: .delivery(StoredRequest(key: remotelySeenKey, originalPayload: seenPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 5, body: .terminal(remotelySeenKey, .answered,
+            try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8)))), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let initial = try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first)
+        XCTAssertEqual(initial.informationalSeenStatus, .available)
+        XCTAssertNil(try port.observe(context: port.context).requests.first(where: { $0.key == legacyKey })?.informationalSeenStatus)
+        let legacy = try XCTUnwrap(port.inspect(context: port.context, request: legacyKey).requests.first)
+        guard case let .compatibility(legacyActions) = legacy.projection else {
+            return XCTFail("A missing answer_ui must retain the compatibility Reply control.")
+        }
+        XCTAssertEqual(legacyActions.first?.label, ExactText("Reply"))
+        XCTAssertNil(try port.observe(context: port.context).requests.first(where: { $0.key == misleadingLabelKey })?.informationalSeenStatus)
+        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: remotelySeenKey).requests.first).informationalSeenStatus,
+                       .confirmed, "An exact origin-authored Seen terminal confirms the message even without a local operation.")
+
+        let receipt = try port.submit(SubmitIntent(context: port.context,
+                                                   selector: try XCTUnwrap(initial.selector),
+                                                   intentID: UUID(),
+                                                   inputs: [.compatibilityValue(action: ExactText("seen"))]))
+        let seenValue = try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8))
+        XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
+        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first).informationalSeenStatus, .pending)
+
+        try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID, sequence: 6, context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 6, body: .terminal(seenKey, .answered, seenValue)), context: context)
+        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first).informationalSeenStatus, .confirmed)
+    }
+
     func testAuthenticatedRelayRefusesToFollowAnotherEndpoint() async throws {
         let namespace = "Harklight.relay-redirect-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()

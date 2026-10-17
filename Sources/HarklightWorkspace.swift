@@ -110,6 +110,8 @@ struct InboxRequestRow: Identifiable {
     let sender: String
     let status: String
     var bodyText: String = ""
+    var symbol: String = "text.bubble"
+    var isResolved = false
     var id: RequestKey { key }
 }
 
@@ -300,8 +302,8 @@ struct InboxList: View {
                             switch row {
                             case let .request(request):
                                 InboxRowContent(sender: request.sender, title: request.title,
-                                    bodyText: nil, symbol: "text.bubble", status: request.status,
-                                    local: false, selected: selected == row.id)
+                                    bodyText: nil, symbol: request.symbol, status: request.status,
+                                    local: false, selected: selected == row.id, resolved: request.isResolved)
                             case let .example(message, response):
                                 SampleListRow(message: message, response: response)
                             }
@@ -337,6 +339,7 @@ struct InboxRowContent: View {
     let status: String?
     let local: Bool
     var selected = false
+    var resolved = false
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
@@ -351,6 +354,7 @@ struct InboxRowContent: View {
         }
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? Color.blue.opacity(0.055) : Color(uiColor: .systemBackground))
+        .foregroundStyle(resolved ? .secondary : .primary)
         .accessibilityElement(children: .combine)
     }
 }
