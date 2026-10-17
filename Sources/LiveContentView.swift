@@ -43,9 +43,9 @@ struct LiveContentView: View {
                 }
             },
             settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
-                                                  archiveDeparture: archiveDeparture) },
+                                                  archiveDeparture: archiveDeparture,
+                                                  connectionStatus: connectionStatus) },
             warnings: [store.observationError, store.notificationWarning,
-                       connectionStatus,
                        store.pushRegistrationWarning, launch?.archiveCatalogWarning,
                        launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
                 .compactMap { $0 },
@@ -76,6 +76,7 @@ struct LiveInboxSettings: View {
     let samples: SampleLibrary
     let launch: NativeAppLaunch?
     let archiveDeparture: NativeAccountDeparture?
+    let connectionStatus: String?
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingDisconnect = false
     @State private var confirmingEndpointMigration = false
@@ -111,6 +112,11 @@ struct LiveInboxSettings: View {
     var body: some View {
         NavigationStack {
             Form {
+                if let connectionStatus {
+                    Section("Connection status") {
+                        Text(connectionStatus).foregroundStyle(.secondary)
+                    }
+                }
                 if let record {
                     Section("Account") {
                         LabeledContent("Account", value: record.accountDisplayName ?? "Current account")
