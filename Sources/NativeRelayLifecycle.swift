@@ -135,7 +135,9 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         guard outcome != .confirmed else { return "Connected" }
         switch lastConfirmedStage {
         case .nativeSyncAcknowledged:
-            return outcome == .connecting ? "Messages synced; finishing connection" : "Messages synced; connection not confirmed"
+            return outcome == .connecting
+                ? "Earlier messages synced; finishing connection"
+                : "Earlier messages synced; connection not confirmed"
         case .nativeSyncResynced:
             return "Messages saved; relay acknowledgement not confirmed"
         default:
@@ -146,7 +148,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var message: String {
         let last = lastConfirmedStage?.label ?? "No connection milestone was confirmed."
         if lastConfirmedStage == .nativeSyncAcknowledged, outcome != .confirmed {
-            let status = "Ordinary messages through the saved native cursor were durably applied and that cursor was acknowledged. Full foreground completion remains unconfirmed. This does not establish pending-answer delivery, a later ordinary or conversation replay, upload cleanup, or notification registration. The current progress signal cannot identify the exact post-ACK step; Settings diagnostics retains operation-receipt states."
+            let status = "At the last confirmed checkpoint, ordinary messages through that replay's cursor were durably applied and the relay acknowledged that cursor. The progress signal does not establish whether a later replay advanced the saved cursor or whether that later cursor was acknowledged. Full foreground completion remains unconfirmed. This does not establish pending-answer delivery, later conversation replay, upload cleanup, or notification registration. The current progress signal cannot identify the exact post-ACK step; Settings diagnostics retains operation-receipt states."
             switch outcome {
             case .connecting:
                 return "\(status) The foreground attempt is still running."
