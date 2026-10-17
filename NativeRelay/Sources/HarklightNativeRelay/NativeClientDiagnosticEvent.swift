@@ -186,7 +186,8 @@ public enum NativeDiagnosticCauseCode {
         "local_store_error", "local_projection_error", "notification_bundle_mismatch",
         "notification_empty_token", "notification_stored_token_invalid", "server_trust_validated", "client_identity_offered",
         "websocket_opened", "relay_admitted", "replay_requested_locally", "relay_resynced",
-        "relay_acknowledged"
+        "relay_acknowledged", "follow_on_replay_not_reached", "original_operation_terminal_not_observed",
+        "original_operation_state_unavailable"
     ]
 
     private static let serverReasons: Set<String> = [
