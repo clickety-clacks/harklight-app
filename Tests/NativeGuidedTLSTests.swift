@@ -161,7 +161,7 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         let secondHigh = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(secondHigh, 4)
-        XCTAssertEqual(session.acknowledgedSequences(), [3, 4, 4],
+        XCTAssertEqual(session.acknowledgedSequences(), [3, 3, 4],
                        "The terminal replay is durably applied and ACKed before the refreshed view can confirm Seen.")
         let sent = try XCTUnwrap(session.sentOriginalOperation())
         XCTAssertEqual(sent.operationID, receipt.opID)
@@ -1876,12 +1876,12 @@ private final class OrdinaryOrderingRelaySession: AuthenticatedInstallationSessi
         case 1:
             return [
                 #"{"v":1,"type":"ok","ref":"native-sync"}"#,
-                #"{"v":1,"type":"lifecycle","seq":4,"sender_id":"sender","message_id":"notice","origin":"other-installation","state":"answered","by":"agent_answer","request_revision":1,"event_id":"terminal-4","author":"agent"}"#,
-                #"{"v":1,"type":"resynced","seq":4}"#
+                #"{"v":1,"type":"resynced","seq":3}"#
             ]
         default:
             return [
                 #"{"v":1,"type":"ok","ref":"native-sync"}"#,
+                #"{"v":1,"type":"lifecycle","seq":4,"sender_id":"sender","message_id":"notice","origin":"other-installation","state":"answered","by":"agent_answer","request_revision":1,"event_id":"terminal-4","author":"agent"}"#,
                 #"{"v":1,"type":"resynced","seq":4}"#
             ]
         }
