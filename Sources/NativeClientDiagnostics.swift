@@ -192,6 +192,7 @@ final class NativeClientDiagnosticJournal {
             case .keyPending: return "enrollment_key_pending"
             case .keyInUse: return "enrollment_key_in_use"
             case .preparedIdentityMismatch: return "enrollment_identity_mismatch"
+            case .endpointMigrationNotAllowed: return "enrollment_endpoint_migration_not_allowed"
             }
         }
         if let value = error as? NativeJoinInvitationError {
