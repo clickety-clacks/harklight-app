@@ -17,6 +17,11 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         invitation.typeText("harklight://join#invalid")
         app.buttons["Check invitation"].tap()
         XCTAssertTrue(app.staticTexts["Joining could not be confirmed"].waitForExistence(timeout: 5))
+        let diagnosticHistory = app.buttons["enrollment-client-diagnostics-share"]
+        XCTAssertTrue(diagnosticHistory.waitForExistence(timeout: 5),
+                      "An invitation verification failure must expose the retained safe journal before the inbox exists")
+        XCTAssertTrue(diagnosticHistory.isHittable,
+                      "The journal action must be reachable on the pre-inbox failure screen")
         XCTAssertFalse(app.buttons["Join"].exists, "An invalid invitation cannot add a device")
         app.buttons["Use another invitation"].tap()
         XCTAssertTrue(app.secureTextFields["Full invitation"].waitForExistence(timeout: 5),

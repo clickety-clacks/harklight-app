@@ -17,6 +17,12 @@ struct NativeEnrollmentView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                     }
+                    if launch.diagnostics.hasEvents {
+                        ShareLink(item: launch.diagnostics.shareText) {
+                            Label("Share diagnostic history", systemImage: "square.and.arrow.up")
+                        }
+                        .accessibilityIdentifier("enrollment-client-diagnostics-share")
+                    }
                     content
                     if launch.canReturnToDisconnectedAccount {
                         Button("Back to saved messages") { launch.cancelReconnect() }

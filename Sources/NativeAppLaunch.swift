@@ -47,6 +47,7 @@ final class NativeAppLaunch {
     private(set) var endpointMigrationMessage: String?
     private(set) var isEndpointMigrationBusy = false
     let guidedJoin: NativeGuidedJoinCoordinator
+    let diagnostics: NativeClientDiagnosticJournal
 
     @ObservationIgnored private let enrollment: NativeEnrollmentStore
     @ObservationIgnored private let guidedJoinStore: NativeGuidedJoinStore
@@ -61,6 +62,8 @@ final class NativeAppLaunch {
          initialEnrollmentRecord: NativeEnrollmentRecord? = nil,
          initialArchivedDepartures: [NativeAccountDeparture] = []) {
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
+        let diagnostics = NativeClientDiagnosticJournal()
+        self.diagnostics = diagnostics
         enrollment = enrollmentStore ?? NativeEnrollmentStore()
         let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
         guidedJoinStore = joinStore
@@ -70,7 +73,8 @@ final class NativeAppLaunch {
         let standaloneDeparture = savedDeparture.flatMap { $0.replacement == nil ? $0 : nil }
         guidedJoin = NativeGuidedJoinCoordinator(store: joinStore,
                                                  deviceName: UIDevice.current.name,
-                                                 isShowing: !fixture && standaloneDeparture == nil)
+                                                 isShowing: !fixture && standaloneDeparture == nil,
+                                                 diagnostics: diagnostics)
         if let initialState {
             state = initialState
         } else if fixture {
@@ -423,6 +427,9 @@ final class NativeAppLaunch {
         guard !isEnrollmentBusy else { return }
         let generation = UUID()
         activationGeneration = generation
+        let attemptID = UUID()
+        diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .began,
+                           attemptID: attemptID)
         isEnrollmentBusy = true
         defer { isEnrollmentBusy = false }
         enrollmentMessage = nil
@@ -434,27 +441,50 @@ final class NativeAppLaunch {
                                                         label: label)
             let record = try await enrollment.begin(settings: settings,
                                                     pkcs12: pkcs12,
-                                                    password: password)
+                                                    password: password,
+                                                    onPreparedCleanupFailure: { error in
+                                                        self.diagnostics.record(area: .localStore,
+                                                            phase: .enrollmentCleanup, transition: .failed,
+                                                            error: error, attemptID: attemptID)
+                                                    })
             guard activationGeneration == generation else { return }
             isEnrollmentExpired = false
             state = .enrollmentPending(record)
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .completed,
+                               attemptID: attemptID)
         } catch NativeEnrollmentError.keyPending {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .unresolved,
+                               causeCode: "enrollment_key_pending", attemptID: attemptID)
             if activationGeneration == generation {
                 enrollmentMessage = "This identity already has a request pending on the server. Keep the same identity file and retry after its code expires, or ask the server owner to check it."
             }
         } catch NativeEnrollmentError.keyInUse {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .rejected,
+                               causeCode: "enrollment_key_in_use", attemptID: attemptID)
             if activationGeneration == generation {
                 enrollmentMessage = "This identity is already enrolled. Ask the server owner to recover its approved profile; do not replace the device identity."
             }
         } catch NativeEnrollmentError.preparedIdentityMismatch {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
+                               causeCode: "enrollment_identity_mismatch", attemptID: attemptID)
             if activationGeneration == generation {
                 enrollmentMessage = "A prior request used a different identity or server. Reimport the same identity with the same server settings, or ask the server owner for help."
             }
-        } catch NativeEnrollmentError.invalidSettings, NativeEnrollmentError.invalidIdentity {
+        } catch NativeEnrollmentError.invalidSettings {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
+                               error: NativeEnrollmentError.invalidSettings, attemptID: attemptID)
+            if activationGeneration == generation {
+                enrollmentMessage = "Check the server settings, CA certificate and identity file."
+            }
+        } catch NativeEnrollmentError.invalidIdentity {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
+                               error: NativeEnrollmentError.invalidIdentity, attemptID: attemptID)
             if activationGeneration == generation {
                 enrollmentMessage = "Check the server settings, CA certificate and identity file."
             }
         } catch {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
+                               error: error, attemptID: attemptID)
             if activationGeneration == generation {
                 enrollmentMessage = "Enrollment could not be confirmed. Keep this identity file; retry with the same file after ten minutes or ask the server owner to check it."
             }
@@ -464,6 +494,9 @@ final class NativeAppLaunch {
     func retryExpiredEnrollment() async {
         guard !isEnrollmentBusy else { return }
         let generation = activationGeneration
+        let attemptID = UUID()
+        diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .retrying,
+                           attemptID: attemptID)
         isEnrollmentBusy = true
         defer { isEnrollmentBusy = false }
         enrollmentMessage = nil
@@ -472,15 +505,23 @@ final class NativeAppLaunch {
             guard activationGeneration == generation else { return }
             isEnrollmentExpired = false
             state = .enrollmentPending(record)
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .completed,
+                               attemptID: attemptID)
         } catch NativeEnrollmentError.keyPending {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .unresolved,
+                               causeCode: "enrollment_key_pending", attemptID: attemptID)
             if activationGeneration == generation {
                 enrollmentMessage = "The server still has a request pending for this identity. Try again after its code expires."
             }
         } catch NativeEnrollmentError.keyInUse {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .rejected,
+                               causeCode: "enrollment_key_in_use", attemptID: attemptID)
             if activationGeneration == generation {
                 enrollmentMessage = "This identity is already enrolled. Ask the server owner to recover its approved profile."
             }
         } catch {
+            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
+                               error: error, attemptID: attemptID)
             if activationGeneration == generation {
                 enrollmentMessage = "A new code could not be confirmed. Keep this device identity and try again or ask the server owner."
             }
@@ -490,6 +531,9 @@ final class NativeAppLaunch {
     func checkEnrollmentApproval() async {
         guard !isEnrollmentBusy else { return }
         let generation = activationGeneration
+        let attemptID = UUID()
+        diagnostics.record(area: .enrollment, phase: .approvalCheck, transition: .began,
+                           attemptID: attemptID)
         isEnrollmentBusy = true
         defer { isEnrollmentBusy = false }
         enrollmentMessage = nil
@@ -501,13 +545,19 @@ final class NativeAppLaunch {
             isEnrollmentExpired = false
             try await activate(enrollment.material(from: record))
         } catch NativeEnrollmentError.approvalPending {
+            diagnostics.record(area: .enrollment, phase: .approvalCheck, transition: .unresolved,
+                               error: NativeEnrollmentError.approvalPending, attemptID: attemptID)
             if activationGeneration == generation { enrollmentMessage = "Waiting for server-owner approval." }
         } catch NativeEnrollmentError.approvalExpired {
+            diagnostics.record(area: .enrollment, phase: .approvalCheck, transition: .failed,
+                               error: NativeEnrollmentError.approvalExpired, attemptID: attemptID)
             if activationGeneration == generation {
                 isEnrollmentExpired = true
                 enrollmentMessage = "This approval code expired. Request a new code for the same device identity."
             }
         } catch {
+            diagnostics.record(area: .enrollment, phase: .approvalCheck, transition: .failed,
+                               error: error, attemptID: attemptID)
             if approvalConfirmed || activationGeneration == generation {
                 enrollmentMessage = "Approval could not be verified with the trusted server."
             }
@@ -532,15 +582,19 @@ final class NativeAppLaunch {
         let fileStorage = try ConversationFileStorage(identity: installation.context.identity)
         let store = try AttentionDomainStore(context: installation.context, persistence: persistence,
                                              conversationFileReferences: fileStorage)
-        let presentation = try LivePresentationStore(store: store, context: installation.context)
+        let presentation = try LivePresentationStore(store: store, context: installation.context,
+                                                     diagnostics: diagnostics)
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
                                                            context: installation.context,
                                                            relayURL: installation.relayURL,
                                                            clientIdentity: installation.keychainIdentity,
-                                                           trustedRootDER: installation.trustedRootDER)
+                                                           trustedRootDER: installation.trustedRootDER,
+                                                           diagnostics: diagnostics)
         } catch {
             if activationGeneration != generation { return }
+            diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,
+                               error: error)
             throw error
         }
         guard activationGeneration == generation else { return }
@@ -558,18 +612,33 @@ final class NativeAppLaunch {
     }
 
     private func chooseNotifications(_ enabled: Bool) async {
-        guard case let .live(presentation) = state, let record = try? enrollment.load(), record.isApproved else { return }
+        guard case let .live(presentation) = state else { return }
+        let record: NativeEnrollmentRecord?
+        do { record = try enrollment.load() }
+        catch {
+            diagnostics.record(area: .localStore, phase: .projectionRefresh,
+                               transition: NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            return
+        }
+        guard let record, record.isApproved else { return }
         let epoch = activationGeneration
+        diagnostics.record(area: .notifications, phase: .pushRegistration, transition: .began)
         do {
             try enrollment.markNotificationExplanationSeen(for: record.deviceID)
             let allowed = try await notifications.choose(enabled) { self.activationGeneration == epoch }
             guard activationGeneration == epoch else { return }
             if allowed {
                 presentation.notificationWarning = nil
+                diagnostics.record(area: .notifications, phase: .pushRegistration, transition: .completed)
             } else {
                 presentation.notificationWarning = "Notifications are off. You will see new requests when you open Harklight. Turn them on in Settings."
+                diagnostics.record(area: .notifications, phase: .pushRegistration, transition: .unresolved,
+                                   causeCode: "notification_permission_not_granted")
             }
         } catch {
+            diagnostics.record(area: .notifications, phase: .pushRegistration,
+                               transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                               error: error)
             if activationGeneration == epoch {
                 presentation.notificationWarning = "Notification permission could not be checked. Foreground requests still work."
             }
@@ -626,29 +695,33 @@ final class LivePresentationStore {
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
     private(set) var isReadOnly: Bool
+    @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
 
-    convenience init(store: AttentionDomainStore, context: ProfileContext) throws {
+    convenience init(store: AttentionDomainStore, context: ProfileContext,
+                     diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        try self.init(store: store, context: context, permitsDelivery: true)
+        try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics)
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
     convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
-        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false)
+        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false, diagnostics: nil)
     }
 
     convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true)
+        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true, diagnostics: nil)
     }
 
     private init(store: AttentionDomainStore, context: ProfileContext,
-                 permitsDelivery: Bool, isReadOnly: Bool = false) throws {
+                 permitsDelivery: Bool, isReadOnly: Bool = false,
+                 diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
         self.isReadOnly = isReadOnly
+        self.diagnostics = diagnostics
         _ = try store.snapshot(context: context)
         let port = AttentionDomainPort(store: store)
         let snapshot = try port.observe(context: port.context)
@@ -671,17 +744,32 @@ final class LivePresentationStore {
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
 
     func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
-        try? port.inspectAnswerDraft(context: port.context, request: key, revision: revision)
+        do { return try port.inspectAnswerDraft(context: port.context, request: key, revision: revision) }
+        catch {
+            diagnose(.localStore, .draftLoad,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                     request: key, revision: revision)
+            return nil
+        }
     }
 
-    func prepareConversationPreview(_ file: ConversationFile) async throws -> URL {
+    func prepareConversationPreview(_ file: ConversationFile,
+                                    for request: RequestKey? = nil,
+                                    revision: UInt64? = nil) async throws -> URL {
         guard let files = conversationFiles else { throw AttentionStoreError.fixtureOnlyOperation }
-        if let cached = try files.cachedPreview(for: file) { return cached }
-        guard permitsDelivery, !isReadOnly else { throw AttentionStoreError.fixtureOnlyOperation }
-        let destination = try files.previewDestination(for: file)
-        try await NativeRelayLifecycle.shared.fetchConversationFile(file, to: destination, expected: profileContext)
-        try files.verify(destination, for: file)
-        return destination
+        do {
+            if let cached = try files.cachedPreview(for: file) { return cached }
+            guard permitsDelivery, !isReadOnly else { throw AttentionStoreError.fixtureOnlyOperation }
+            let destination = try files.previewDestination(for: file)
+            try await NativeRelayLifecycle.shared.fetchConversationFile(file, to: destination, expected: profileContext)
+            try files.verify(destination, for: file)
+            return destination
+        } catch {
+            diagnose(.fileAccess, .filePreview,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                     request: request, revision: revision)
+            throw error
+        }
     }
 
     func hasCachedConversationPreview(_ file: ConversationFile) -> Bool {
@@ -689,8 +777,11 @@ final class LivePresentationStore {
         return (try? conversationFiles.cachedPreview(for: file)) != nil
     }
 
-    func reportConversationImportError(_ error: String) {
-        conversationError = "The selected file could not be opened: " + error + ". Your saved draft is retained."
+    func reportConversationImportError(_ error: Error, for key: RequestKey, revision: UInt64) {
+        conversationError = "The selected file could not be opened: " + error.localizedDescription + ". Your saved draft is retained."
+        diagnose(.fileAccess, .fileRetention,
+                 NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                 request: key, revision: revision)
     }
 
     func conversationDraft(for key: RequestKey, revision: UInt64) -> ConversationDraft {
@@ -720,6 +811,8 @@ final class LivePresentationStore {
             conversationError = nil
         } catch {
             conversationError = "Your discussion edit could not be saved. Its earlier saved draft is retained."
+            diagnose(.localStore, .draftSave, .failed, error: error,
+                     request: key, revision: revision)
         }
     }
 
@@ -741,6 +834,9 @@ final class LivePresentationStore {
                 }
             } catch {
                 conversationError = "Upload cleanup could not be saved. Return to this message and retry; deletion is not confirmed."
+                diagnose(.upload, .uploadCleanup,
+                         NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                         request: previous)
             }
         }
         selectRequest(next)
@@ -766,7 +862,8 @@ final class LivePresentationStore {
     func refreshDiscussionHistory() async {
         guard permitsDelivery else { return }
         _ = await NativeRelayLifecycle.shared.refreshFromTrustedRelay()
-        try? refreshFromDurableStore()
+        do { try refreshFromDurableStore() }
+        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
     }
 
     func uploadNeedsReselection(_ file: ConversationFile, for key: RequestKey, revision: UInt64) -> Bool {
@@ -795,10 +892,17 @@ final class LivePresentationStore {
         do {
             try await NativeRelayLifecycle.shared.discardAbandonedUploads(for: key, expected: profileContext)
         } catch {
-            try? port.markConversationCleanupUnknown(for: key,
-                reason: ExactText("Cleanup not confirmed: \(error)"), context: port.context)
+            diagnose(.upload, .uploadCleanup,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error, request: key)
+            do {
+                try port.markConversationCleanupUnknown(for: key,
+                    reason: ExactText("Cleanup not confirmed: \(error)"), context: port.context)
+            } catch {
+                diagnose(.localStore, .draftSave, .failed, error: error, request: key)
+            }
         }
-        try? refreshFromDurableStore()
+        do { try refreshFromDurableStore() }
+        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
     }
 
     func sendDiscussion(for key: RequestKey, revision: UInt64) {
@@ -828,7 +932,13 @@ final class LivePresentationStore {
                         case .unresolved: conversationError = "Submission unconfirmed. Retry uses the same saved operation."
                         }
                     } catch {
-                        try? refreshFromDurableStore()
+                        diagnose(.conversation, .discussionSubmission,
+                                 NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
+                                 operationID: discussionOperationID(for: key, revision: revision),
+                                 request: key, revision: revision, receiptState: .unknown)
+                        do { try refreshFromDurableStore() }
+                        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error,
+                                         request: key, revision: revision) }
                         if (error as? ConversationError) == .emptyDraft {
                             conversationError = "Add a message before sending these files. Your draft is retained."
                         } else {
@@ -843,6 +953,9 @@ final class LivePresentationStore {
             conversationError = nil
         } catch {
             conversationError = "Not delivered: the discussion could not be submitted. Your draft is retained."
+            diagnose(.conversation, .discussionSubmission, .failed, error: error,
+                     operationID: discussionOperationID(for: key, revision: revision),
+                     request: key, revision: revision, receiptState: .unknown)
         }
     }
 
@@ -869,6 +982,8 @@ final class LivePresentationStore {
                 updateConversation(for: key, revision: revision, files: files)
             } catch {
                 conversationError = "\(url.lastPathComponent): the file could not be retained. Your text and other selected files remain saved."
+                diagnose(.fileAccess, .fileRetention, .failed, error: error,
+                         request: key, revision: revision)
             }
         }
     }
@@ -968,7 +1083,8 @@ final class LivePresentationStore {
                                                    selector: selector,
                                                    intentID: UUID(),
                                                    inputs: records))
-        try? refreshFromDurableStore()
+        do { try refreshFromDurableStore() }
+        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         clearActionError()
         return receipt
     }
@@ -979,14 +1095,23 @@ final class LivePresentationStore {
             _ = try submit(key)
             retryPendingDelivery()
         } catch {
-            try? refreshFromDurableStore()
+            diagnose(.localStore, .draftSave, .failed, error: error, request: key,
+                     receiptState: .unknown)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
             // A stale Send callback can arrive after the original intent or
             // its receipt. Never mint another intent or contradict that fact.
-            if let current = try? inspectedRequest(key), current.intentReceipt != nil {
+            let current: PresentedRequest?
+            do { current = try inspectedRequest(key) }
+            catch {
+                diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key)
+                current = nil
+            }
+            if let current, current.intentReceipt != nil {
                 clearActionError()
             } else {
                 actionErrorRequest = key
-                if let current = try? inspectedRequest(key), current.lifecycleStatus != .open {
+                if let current, current.lifecycleStatus != .open {
                     actionError = "This request is no longer open for an answer."
                 } else if case .some(.incomplete) = error as? LiveReplyError {
                     actionError = "Complete the response before sending your answer."
@@ -1025,12 +1150,15 @@ final class LivePresentationStore {
             var draft = request.draft
             change(&draft)
             try port.saveDraft(context: port.context, selector: selector, completeDraft: draft)
-            try? refreshFromDurableStore()
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
             clearActionError()
         } catch {
+            diagnose(.localStore, .draftSave, .failed, error: error, request: key)
             actionErrorRequest = key
             actionError = "Your edit could not be saved."
-            try? refreshFromDurableStore()
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         }
     }
 
@@ -1103,6 +1231,8 @@ final class LivePresentationStore {
                 return
             } catch {
                 observationError = "The local request view could not be refreshed."
+                diagnose(.localStore, .projectionRefresh,
+                         NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
             }
         }
     }
@@ -1124,7 +1254,10 @@ final class LivePresentationStore {
 
     private func adopt(_ snapshot: PresentationSnapshot) {
         do { conversationThreads = try port.conversations(context: port.context).threads }
-        catch { observationError = "The local conversation could not be refreshed." }
+        catch {
+            observationError = "The local conversation could not be refreshed."
+            diagnose(.localStore, .projectionRefresh, .failed, error: error)
+        }
         presentation = snapshot
         if let key = actionErrorRequest,
            let current = snapshot.requests.first(where: { $0.key == key }),
@@ -1138,9 +1271,31 @@ final class LivePresentationStore {
             self.selectedRequestKey = snapshot.requests.first?.key
         }
     }
+
+    private func discussionOperationID(for request: RequestKey, revision: UInt64) -> UUID? {
+        switch conversationDraft(for: request, revision: revision).disposition {
+        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _): id
+        default: nil
+        }
+    }
+
+    private func diagnose(_ area: NativeDiagnosticArea,
+                          _ phase: NativeDiagnosticPhase,
+                          _ transition: NativeDiagnosticTransition,
+                          error: Error? = nil,
+                          causeCode: String? = nil,
+                          operationID: UUID? = nil,
+                          request: RequestKey? = nil,
+                          revision: UInt64? = nil,
+                          receiptState: NativeDiagnosticReceiptState? = nil) {
+        guard permitsDelivery else { return }
+        diagnostics?.record(area: area, phase: phase, transition: transition, error: error,
+            causeCode: causeCode, operationID: operationID, request: request,
+            requestRevision: revision, receiptState: receiptState)
+    }
 }
 
-private enum LiveReplyError: Error {
+enum LiveReplyError: Error {
     case localExample
     case disconnected
     case notOpen
