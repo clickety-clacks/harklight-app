@@ -84,6 +84,82 @@ final class SampleResponse {
     }
 
     private var draft: RequestDraft? { viewModel.request(for: key)?.draft }
+    var inboxRow: InboxRequestRow? {
+        guard let request = viewModel.request(for: key) else { return nil }
+        var statusParts: [String] = []
+        if viewModel.hasAcceptedUpdate(for: key) { statusParts.append("Updated") }
+        statusParts.append(viewModel.isRetracted(key)
+            ? "Retracted"
+            : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
+        if let seen = request.informationalSeenStatus {
+            statusParts.append(LiveRequestDetail.informationalSeenText(seen))
+        }
+        let localStatus: String?
+        if finished {
+            localStatus = request.informationalSeenStatus == nil
+                ? "Answered locally · nothing sent"
+                : "Seen selected locally · nothing sent"
+        } else if deferred {
+            localStatus = "Deferred locally"
+        } else {
+            localStatus = nil
+        }
+        return InboxRequestRow(key: request.key,
+            title: request.title?.rawValue ?? request.key.senderID.rawValue,
+            sender: request.key.senderID.rawValue,
+            status: statusParts.joined(separator: " · "),
+            bodyText: request.body?.rawValue,
+            symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
+            isResolved: request.isResolved, createdAt: request.createdAt,
+            isLocalExample: true, localStatus: localStatus)
+    }
+
+    var canFinishLocally: Bool {
+        guard let request = viewModel.request(for: key),
+              request.lifecycleStatus == .open,
+              request.intentReceipt == nil else { return false }
+        if request.informationalSeenStatus != nil || message.kind == .instructions { return true }
+        switch request.projection {
+        case let .sender(sender):
+            var hasAnswerInput = false
+            for input in sender.inputs {
+                switch input.kind {
+                case let .response(actions):
+                    hasAnswerInput = true
+                    guard let selected = request.draft.inputs[input.id]?.selectedActionID,
+                          let action = actions.first(where: { $0.id == selected }) else { return false }
+                    if action.kind == .text,
+                       request.draft.inputs[input.id]?.textByActionID[selected]?.rawValue
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                        return false
+                    }
+                case .text:
+                    if input.id.rawValue == "value" {
+                        hasAnswerInput = true
+                        guard request.draft.inputs[input.id]?.text?.rawValue
+                            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return false }
+                    }
+                case .point:
+                    hasAnswerInput = true
+                    guard request.draft.inputs[input.id]?.effectivePoint != nil else { return false }
+                }
+            }
+            return hasAnswerInput
+        case let .compatibility(actions):
+            guard let selected = request.draft.compatibility.selectedActionID,
+                  let action = actions.first(where: { $0.id == selected }) else { return false }
+            return action.kind != .text || request.draft.compatibility.textByActionID[selected]?.rawValue
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        case .unsupported:
+            return false
+        }
+    }
+
+    func finishLocally() {
+        finished = true
+        deferred = false
+    }
+
     var isClosed: Bool {
         guard let status = viewModel.request(for: key)?.lifecycleStatus else { return false }
         return status != .open && status != .pending

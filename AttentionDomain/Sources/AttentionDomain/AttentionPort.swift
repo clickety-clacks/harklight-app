@@ -233,6 +233,9 @@ public struct PresentedRequest: Equatable, Sendable {
     public let acceptanceOrder: UInt64
     public let title: ExactText?
     public let body: ExactText?
+    /// Sender-authored creation time, if the original message supplied one.
+    /// It never changes the server-assigned inbox order.
+    public let createdAt: Date?
     /// A UTF-8 JSON string for inert inspection. H must not parse it to render answers.
     public let originalContentJSON: String
     public let selector: BoundDocumentSelector?
@@ -251,6 +254,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 acceptanceOrder: UInt64,
                 title: ExactText?,
                 body: ExactText?,
+                createdAt: Date? = nil,
                 originalContentJSON: String,
                 selector: BoundDocumentSelector?,
                 draft: RequestDraft,
@@ -263,6 +267,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.acceptanceOrder = acceptanceOrder
         self.title = title
         self.body = body
+        self.createdAt = createdAt
         self.originalContentJSON = originalContentJSON
         self.selector = selector
         self.draft = draft
@@ -727,6 +732,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 acceptanceOrder: acceptanceOrder,
                                 title: request.originalPayload.uniqueValue(named: "title")?.stringValue,
                                 body: request.originalPayload.uniqueValue(named: "body")?.stringValue,
+                                createdAt: request.createdAt,
                                 originalContentJSON: request.originalPayload.canonicalJSON,
                                 selector: selector,
                                 draft: draft,

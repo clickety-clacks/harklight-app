@@ -15,7 +15,7 @@ enum InboxItem: Identifiable {
 
     var preview: InboxCardPreview {
         switch self {
-        case let .request(row): InboxCardPreview(sender: row.sender, title: row.title, body: row.bodyText)
+        case let .request(row): InboxCardPreview(sender: row.sender, title: row.title, body: row.bodyText ?? "")
         case let .example(message, _): InboxCardPreview(sender: message.sender, title: message.title, body: message.body)
         }
     }

@@ -123,6 +123,48 @@ final class SampleFixtureDomain {
     }
 
     private func record(_ message: SampleMessage) throws -> StoredRequest {
+        func storedRequest(_ payload: [String: Any]) throws -> StoredRequest {
+            let json = try JSONValue.parse(JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+            let stored = StoredRequest(key: key(for: message), originalPayload: json)
+            switch stored.interface {
+            case .sender, .compatibility:
+                return stored
+            case .unsupported:
+                throw SampleFixtureError.invalidDescriptor(message.id)
+            }
+        }
+
+        let createdAt = Int(Date().timeIntervalSince1970 * 1_000)
+        if message.kind.isNotice {
+            return try storedRequest([
+                "sender_id": message.sender,
+                "message_id": message.id,
+                "created_at": createdAt,
+                "title": message.title,
+                "body": message.body,
+                "answer_ui": [
+                    "schema": "attention-client.actions/1",
+                    "actions": [[
+                        "id": "seen", "label": "Seen", "kind": "value",
+                        "value": ["acknowledgment": "seen"]
+                    ]]
+                ]
+            ])
+        }
+        if message.kind == .note {
+            return try storedRequest([
+                "sender_id": message.sender,
+                "message_id": message.id,
+                "created_at": createdAt,
+                "title": message.title,
+                "body": message.body,
+                "answer_ui": [
+                    "schema": "attention-client.actions/1",
+                    "actions": [["id": "reply", "label": "Reply", "kind": "text"]]
+                ]
+            ])
+        }
+
         var inputs: [[String: Any]] = []
         var illustrations: [[String: Any]] = []
         var capabilities = ["scene/1", "result/1"]
@@ -184,12 +226,8 @@ final class SampleFixtureDomain {
                 ["kind": "input", "id": $0["id"]!]
             }]]
         ]
-        let payload: [String: Any] = ["sender_id": message.sender, "message_id": message.id,
-            "created_at": 1, "title": message.title, "body": message.body, "answer_ui": descriptor]
-        let json = try JSONValue.parse(JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
-        let stored = StoredRequest(key: key(for: message), originalPayload: json)
-        guard case .sender = stored.interface else { throw SampleFixtureError.invalidDescriptor(message.id) }
-        return stored
+        return try storedRequest(["sender_id": message.sender, "message_id": message.id,
+            "created_at": createdAt, "title": message.title, "body": message.body, "answer_ui": descriptor])
     }
 }
 

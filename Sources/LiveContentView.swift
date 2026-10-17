@@ -70,6 +70,44 @@ struct LiveContentView: View {
     }
 }
 
+/// Shared message identity header for ordinary live and local-example details.
+/// Only explicit protocol metadata is shown; missing metadata stays absent.
+struct MessageHeading: View {
+    let sender: String
+    let initials: String
+    let title: String
+    var createdAt: Date? = nil
+    var symbol: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 9) {
+                Text(initials)
+                    .font(.caption.bold())
+                    .padding(9)
+                    .background(.quaternary, in: Circle())
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
+                Text(sender).font(.subheadline.weight(.semibold))
+                Spacer(minLength: 0)
+                if let createdAt {
+                    Text(createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(title)
+                .font(.largeTitle.bold())
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 @MainActor
 struct LiveInboxSettings: View {
     let store: LivePresentationStore
@@ -252,8 +290,22 @@ struct LiveRequestDetail: View {
     let request: PresentedRequest
     let store: LivePresentationStore
     var context: InboxCardContext = .standalone
+    var localExample: SampleResponse? = nil
     @State private var deferred = false
     @State private var chatPresented = false
+
+    private var controlsReadOnly: Bool {
+        if let localExample {
+            return store.isReadOnly || request.lifecycleStatus != .open ||
+                request.intentReceipt != nil || localExample.finished
+        }
+        return !canAnswer
+    }
+
+    private var localSeenAction: (() -> Void)? {
+        guard let localExample else { return nil }
+        return { localExample.finishLocally() }
+    }
 
     var canAnswer: Bool {
         guard !store.isReadOnly, request.lifecycleStatus == .open,
@@ -279,7 +331,27 @@ struct LiveRequestDetail: View {
             VStack(alignment: .leading, spacing: 22) {
                 MessageHeading(sender: request.key.senderID.rawValue,
                                initials: String(request.key.senderID.rawValue.prefix(2)).uppercased(),
-                               title: request.title?.rawValue ?? request.key.senderID.rawValue)
+                               title: request.title?.rawValue ?? request.key.senderID.rawValue,
+                               createdAt: request.createdAt,
+                               symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
+                               isLocalExample: localExample != nil)
+                if let localExample {
+                    Label("Local example · answers stay on this device", systemImage: "iphone")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if localExample.finished {
+                        Label(request.informationalSeenStatus == nil
+                              ? "Answered locally · nothing sent"
+                              : "Seen selected locally · nothing sent",
+                              systemImage: "checkmark.circle")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    } else if localExample.deferred {
+                        HStack {
+                            Label("Deferred locally", systemImage: "clock")
+                            Spacer()
+                            Button("Undo") { localExample.deferred = false }
+                        }.font(.subheadline)
+                    }
+                }
                 if let thread = store.conversation(for: request.key), thread.currentRevision > 1 {
                     Text(store.hasAcceptedUpdate(for: request.key) ? "Updated · version \(thread.currentRevision)" : "Question version \(thread.currentRevision)")
                         .font(.caption).foregroundStyle(.secondary)
@@ -297,7 +369,7 @@ struct LiveRequestDetail: View {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if deferred {
+                if localExample == nil && deferred {
                     HStack {
                         Label("Not now", systemImage: "clock")
                         Spacer()
@@ -314,17 +386,18 @@ struct LiveRequestDetail: View {
                                            sender: sender,
                                            node: sender.scene,
                                            store: store,
-                                           readOnly: !canAnswer)
+                                           readOnly: controlsReadOnly)
                 case let .compatibility(actions):
                     LiveCompatibilityActions(request: request,
                                              actions: actions,
                                              store: store,
-                                             readOnly: !canAnswer)
+                                             readOnly: controlsReadOnly,
+                                             onSeen: localSeenAction)
                 case .unsupported:
                     Text("This request uses an unsupported answer format.")
                         .foregroundStyle(.secondary)
                 }
-                if request.lifecycleStatus == .pending {
+                if localExample == nil && request.lifecycleStatus == .pending {
                     Button("Retry delivery") { store.retryPendingDelivery() }
                         .buttonStyle(.bordered)
                         .disabled(store.isReadOnly)
@@ -358,15 +431,26 @@ struct LiveRequestDetail: View {
         }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                if request.informationalSeenStatus == nil {
+                if let localExample {
+                    Button("Finish locally", systemImage: "checkmark") {
+                        localExample.finishLocally()
+                    }
+                    .labelStyle(.iconOnly)
+                    .disabled(!localExample.canFinishLocally || localExample.finished)
+                    .accessibilityIdentifier("sample-finish")
+                } else if request.informationalSeenStatus == nil {
                     Button(submitLabel, systemImage: "checkmark") { store.submitFromUser(request.key) }
                         .labelStyle(.iconOnly).disabled(!canAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
             }
             ToolbarItemGroup(placement: .bottomBar) {
-                Button("Later", systemImage: "clock") { deferred.toggle() }.labelStyle(.iconOnly)
-                    .disabled(store.isReadOnly)
+                Button("Later", systemImage: "clock") {
+                    if let localExample { localExample.deferred.toggle() }
+                    else { deferred.toggle() }
+                }
+                .labelStyle(.iconOnly)
+                .disabled(store.isReadOnly || localExample?.finished == true)
                 Spacer()
                 Button("Chat", systemImage: "bubble.left.and.bubble.right") {
                     if context.canInlineChat { context.openChat?() } else { chatPresented = true }
@@ -393,7 +477,7 @@ struct LiveRequestDetail: View {
         }
     }
 
-    private static func informationalSeenText(_ status: InformationalSeenStatus) -> String {
+    static func informationalSeenText(_ status: InformationalSeenStatus) -> String {
         switch status {
         case .available: "Seen available"
         case .pending: "Seen pending confirmation"
@@ -606,6 +690,7 @@ private struct LiveCompatibilityActions: View {
     let actions: [ProjectedAction]
     let store: LivePresentationStore
     let readOnly: Bool
+    var onSeen: (() -> Void)? = nil
 
     private var selected: ExactText? {
         readOnly ? request.draft.compatibility.selectedActionID : store.request(for: request.key)?.draft.compatibility.selectedActionID
@@ -618,7 +703,11 @@ private struct LiveCompatibilityActions: View {
             case .available:
                 if let action = actions.first {
                     Button {
-                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
+                        if let onSeen {
+                            onSeen()
+                        } else {
+                            store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
+                        }
                     } label: {
                         Label(action.label.rawValue, systemImage: "checkmark.circle")
                             .frame(maxWidth: .infinity, alignment: .leading)

@@ -1051,9 +1051,9 @@ final class LivePresentationStore {
             return InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
                 sender: $0.key.senderID.rawValue,
                 status: statusParts.joined(separator: " · "),
-                bodyText: $0.body?.rawValue ?? "",
+                bodyText: $0.body?.rawValue,
                 symbol: $0.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: $0.isResolved)
+                isResolved: $0.isResolved, createdAt: $0.createdAt)
         }
     }
 

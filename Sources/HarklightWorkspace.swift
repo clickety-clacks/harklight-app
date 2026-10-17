@@ -109,9 +109,12 @@ struct InboxRequestRow: Identifiable {
     let title: String
     let sender: String
     let status: String
-    var bodyText: String = ""
+    var bodyText: String? = nil
     var symbol: String = "text.bubble"
     var isResolved = false
+    var createdAt: Date? = nil
+    var isLocalExample = false
+    var localStatus: String? = nil
     var id: RequestKey { key }
 }
 
@@ -211,12 +214,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 .id(key)
                         case let .sample(id):
                             if showsLocalExamples,
-                               let message = samples.messages.first(where: { $0.id == id }),
+                               samples.messages.contains(where: { $0.id == id }),
                                let response = samples.responses[id] {
-                                SampleCardScreen(message: message, response: response, library: samples,
-                                    inlineChat: inlineChat, canInlineChat: wideChat,
-                                    openChat: { chatOpen.toggle() },
-                                    context: cardContext(for: .sample(id)))
+                                SampleCardScreen(response: response,
+                                    context: cardContext(for: .sample(id), inlineChat: inlineChat,
+                                        canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
                                     .id(id)
                             }
                         case nil:
@@ -301,11 +303,13 @@ struct InboxList: View {
                         Button { select(row.id) } label: {
                             switch row {
                             case let .request(request):
-                                InboxRowContent(sender: request.sender, title: request.title,
-                                    bodyText: nil, symbol: request.symbol, status: request.status,
-                                    local: false, selected: selected == row.id, resolved: request.isResolved)
-                            case let .example(message, response):
-                                SampleListRow(message: message, response: response)
+                                InboxRowContent(row: request, selected: selected == row.id)
+                            case let .example(_, response):
+                                if let request = response.inboxRow {
+                                    InboxRowContent(row: request, selected: selected == row.id)
+                                } else {
+                                    EmptyView()
+                                }
                             }
                         }
                         .buttonStyle(.plain)
@@ -332,89 +336,36 @@ struct InboxList: View {
 }
 
 struct InboxRowContent: View {
-    let sender: String
-    let title: String
-    let bodyText: String?
-    let symbol: String
-    let status: String?
-    let local: Bool
+    let row: InboxRequestRow
     var selected = false
-    var resolved = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Text(sender).font(.caption.weight(.medium))
+                Text(row.sender).font(.caption.weight(.medium))
+                if row.isLocalExample {
+                    Text("Local example").font(.caption2).foregroundStyle(.secondary)
+                }
                 Spacer()
-                if local { Text("Local example").font(.caption2).foregroundStyle(.secondary) }
+                if let createdAt = row.createdAt {
+                    Text(createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
-            Label(title, systemImage: symbol).font(.headline)
+            Label(row.title, systemImage: row.symbol).font(.headline)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if let bodyText { Text(bodyText).font(.subheadline).foregroundStyle(.secondary) }
-            if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
+            if let bodyText = row.bodyText, !bodyText.isEmpty {
+                Text(bodyText).font(.subheadline).foregroundStyle(.secondary)
+            }
+            if !row.status.isEmpty { Text(row.status).font(.caption).foregroundStyle(.secondary) }
+            if let localStatus = row.localStatus {
+                Text(localStatus).font(.caption).foregroundStyle(.secondary)
+            }
         }
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? Color.blue.opacity(0.055) : Color(uiColor: .systemBackground))
-        .foregroundStyle(resolved ? .secondary : .primary)
+        .foregroundStyle(row.isResolved ? .secondary : .primary)
         .accessibilityElement(children: .combine)
-    }
-}
-
-struct SampleListRow: View {
-    let message: SampleMessage
-    let response: SampleResponse?
-    private var emphasis: Int { response?.deferred == true ? 0 : message.emphasis }
-    private var titleColor: Color {
-        if message.missed || message.kind == .error { return .red }
-        if message.kind == .warning { return Color(red: 0.6, green: 0.36, blue: 0.02) }
-        return message.kind == .completed ? .secondary : .primary
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            if emphasis > 0 {
-                HStack(spacing: 7) {
-                    Text(message.initials).font(.caption2.bold()).padding(6)
-                        .background(.quaternary, in: Circle())
-                    Text(message.sender).font(.caption.weight(.medium))
-                    if message.revised { Text("Revised").font(.caption2).foregroundStyle(.secondary) }
-                    Spacer(minLength: 0)
-                    if let deadline = message.deadline {
-                        Text(deadline).font(.caption2).foregroundStyle(message.missed ? .red : .secondary)
-                    }
-                    Text("2:14 PM").font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Image(systemName: response?.deferred == true ? "clock" : message.kind.symbol)
-                    .foregroundStyle(message.kind.color)
-                Text(message.title)
-                    .font(emphasis >= 3 ? .title2.bold() : emphasis > 0 ? .headline : .subheadline)
-                    .foregroundStyle(titleColor)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if message.hasChat || !(response?.chat.isEmpty ?? true) {
-                    Image(systemName: "bubble.left.and.bubble.right")
-                        .foregroundStyle(message.chatUnread && response?.chatRead != true ? .blue : .secondary)
-                        .font(.caption)
-                }
-            }
-            if emphasis >= 3 { Text(message.body).font(.subheadline).foregroundStyle(.secondary) }
-            if emphasis == 0 { Text("\(message.sender) · 2:14 PM").font(.caption).foregroundStyle(.secondary) }
-            if response?.finished == true { Label("Answered locally", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary) }
-        }
-        .padding(emphasis >= 2 ? 18 : 13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(emphasis >= 2 ? Color.blue.opacity(0.055) : Color(uiColor: .systemBackground))
-        .accessibilityElement(children: .combine)
-    }
-}
-
-extension SampleKind {
-    var color: Color {
-        switch self {
-        case .error: .red
-        case .warning: .orange
-        case .completed: .green
-        default: .blue
-        }
     }
 }
 
