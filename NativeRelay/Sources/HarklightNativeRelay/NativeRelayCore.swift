@@ -48,6 +48,14 @@ public enum NativeRelayCoreError: Error, Equatable {
 /// The first native relay seam. C is the only durable owner of events, cursor,
 /// drafts, intents, receipts and outbox; this object holds no shadow journal.
 public actor NativeRelayCore {
+    private struct OperationReplayDiagnosticState: Equatable {
+        let transition: NativeDiagnosticTransition
+        let causeCode: String?
+        let request: RequestKey
+        let revision: UInt64?
+        let receipt: NativeDiagnosticReceiptState?
+    }
+
     private let store: AttentionDomainStore
     private let context: ProfileContext
     private let session: any AuthenticatedInstallationSession
@@ -62,6 +70,10 @@ public actor NativeRelayCore {
     private var inspectedConversationMetadata = false
     private var discoveredOriginURL: URL?
     private var activeCleanupRequests: Set<UUID> = []
+    // This cache contains only accepted operations that still await their exact
+    // terminal replay. Removing a terminal entry keeps memory bounded by current
+    // outstanding work, not the account's retained history.
+    private var operationReplayDiagnosticStates: [UUID: OperationReplayDiagnosticState] = [:]
 
     public func conversationOriginURL() throws -> URL? {
         try validate()
@@ -289,11 +301,13 @@ public actor NativeRelayCore {
         let enrich = session is any AuthenticatedConversationSession && !inspectedConversationMetadata &&
             snapshot.conversationThreads.isEmpty && !snapshot.requests.isEmpty
         let before = enrich ? 0 : snapshot.cursor
-        let acceptedBeforeReplay = acceptedOperationsAwaitingTerminalReplay(in: snapshot)
+        let acceptedBeforeReplay = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
+        retainReplayDiagnostics(for: acceptedBeforeReplay)
         var high = try await replayAndAcknowledge(since: before,
                                                    trackingAcceptedOperations: acceptedBeforeReplay)
         inspectedConversationMetadata = true
-        let acceptedBeforeDrain = Set(acceptedBeforeReplay.map(\.operationID))
+        let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            .map(\.operationID))
         let attempted: Int
         do {
             attempted = try await drainPending()
@@ -302,13 +316,11 @@ public actor NativeRelayCore {
             // accepted. Record that the accepted operation's terminal replay
             // was not reached, without attributing the later operation's
             // transport error to it.
-            let acceptedAfterInterruptedDrain = (try? store.snapshot(context: context))
-                .map { acceptedOperationsAwaitingTerminalReplay(in: $0) } ?? []
+            let acceptedAfterInterruptedDrain = (try? store.acceptedOperationsAwaitingTerminalReplay(context: context)) ?? []
             for submission in acceptedAfterInterruptedDrain where !acceptedBeforeDrain.contains(submission.operationID) {
-                diagnose(.answer, .ordinaryReplay, .unresolved,
+                diagnoseOperationReplay(.unresolved,
                          causeCode: "follow_on_replay_not_reached",
-                         operationID: submission.operationID, request: submission.requestKey,
-                         revision: submission.requestRevision, receipt: .acceptedAwaitingReplay)
+                         submission: submission, receipt: .acceptedAwaitingReplay)
             }
             throw error
         }
@@ -316,9 +328,8 @@ public actor NativeRelayCore {
             // The answer may have created a terminal event after the first
             // replay. Commit and ACK it before publishing the refreshed view;
             // an operation's receipt sequence cannot advance C's cursor.
-            let afterDrain = try store.snapshot(context: context)
-            high = try await replayAndAcknowledge(since: afterDrain.cursor,
-                trackingAcceptedOperations: acceptedOperationsAwaitingTerminalReplay(in: afterDrain))
+            high = try await replayAndAcknowledge(since: high,
+                trackingAcceptedOperations: try store.acceptedOperationsAwaitingTerminalReplay(context: context))
         }
         if try !store.conversationSnapshot(context: context).threads.isEmpty,
            let conversationSession = session as? any AuthenticatedConversationSession {
@@ -421,59 +432,66 @@ public actor NativeRelayCore {
 
     private func replayAndAcknowledge(since cursor: UInt64,
                                       trackingAcceptedOperations submissions: [Submission]) async throws -> UInt64 {
-        for submission in submissions {
-            diagnose(.answer, .ordinaryReplay, .began,
-                     operationID: submission.operationID, request: submission.requestKey,
-                     revision: submission.requestRevision, receipt: .acceptedAwaitingReplay)
+        guard !submissions.isEmpty else {
+            return try await replayAndAcknowledge(since: cursor)
         }
         do {
             let high = try await replayAndAcknowledge(since: cursor)
-            let snapshot = try? store.snapshot(context: context)
+            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            let outstandingOperationIDs = outstanding.map { Set($0.map(\.operationID)) }
             for submission in submissions {
-                let terminalWasObserved = snapshot.map {
-                    hasObservedTerminal(for: submission, in: $0)
-                } ?? false
+                let terminalWasObserved = outstandingOperationIDs.map { !$0.contains(submission.operationID) } ?? false
                 if terminalWasObserved {
-                    diagnose(.answer, .ordinaryReplay, .completed,
-                             operationID: submission.operationID, request: submission.requestKey,
-                             revision: submission.requestRevision, receipt: .terminal)
+                    diagnoseOperationReplay(.completed, submission: submission, receipt: .terminal)
                 } else {
-                    diagnose(.answer, .ordinaryReplay, .unresolved,
-                             causeCode: snapshot == nil ? "original_operation_state_unavailable" :
+                    diagnoseOperationReplay(.unresolved,
+                             causeCode: outstanding == nil ? "original_operation_state_unavailable" :
                                 "original_operation_terminal_not_observed",
-                             operationID: submission.operationID, request: submission.requestKey,
-                             revision: submission.requestRevision, receipt: .acceptedAwaitingReplay)
+                             submission: submission,
+                             receipt: outstanding == nil ? .unknown : .acceptedAwaitingReplay)
                 }
             }
             return high
         } catch {
-            let snapshot = try? store.snapshot(context: context)
+            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            let outstandingOperationIDs = outstanding.map { Set($0.map(\.operationID)) }
             for submission in submissions {
-                diagnose(.answer, .ordinaryReplay, NativeDiagnosticCauseCode.failureTransition(for: error),
-                         error: error, operationID: submission.operationID,
-                         request: submission.requestKey, revision: submission.requestRevision,
-                         receipt: snapshot.map { hasObservedTerminal(for: submission, in: $0) } == true
-                            ? .terminal : .acceptedAwaitingReplay)
+                diagnoseOperationReplay(NativeDiagnosticCauseCode.failureTransition(for: error),
+                         causeCode: NativeDiagnosticCauseCode.forError(error),
+                         submission: submission,
+                         receipt: outstandingOperationIDs.map {
+                            $0.contains(submission.operationID) ? .acceptedAwaitingReplay : .terminal
+                         } ?? .unknown)
             }
             throw error
         }
     }
 
-    private func acceptedOperationsAwaitingTerminalReplay(in snapshot: AttentionStoreSnapshot) -> [Submission] {
-        snapshot.intents.values.filter { submission in
-            guard case .accepted(_) = submission.disposition else { return false }
-            return !hasObservedTerminal(for: submission, in: snapshot)
-        }.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
+    private func diagnoseOperationReplay(_ transition: NativeDiagnosticTransition,
+                                        causeCode: String? = nil,
+                                        submission: Submission,
+                                        receipt: NativeDiagnosticReceiptState?) {
+        let state = OperationReplayDiagnosticState(transition: transition,
+                                                   causeCode: causeCode,
+                                                   request: submission.requestKey,
+                                                   revision: submission.requestRevision,
+                                                   receipt: receipt)
+        guard operationReplayDiagnosticStates[submission.operationID] != state else { return }
+        if receipt == .terminal {
+            operationReplayDiagnosticStates.removeValue(forKey: submission.operationID)
+        } else {
+            operationReplayDiagnosticStates[submission.operationID] = state
+        }
+        diagnose(.answer, .ordinaryReplay, transition, causeCode: causeCode,
+                 operationID: submission.operationID, request: submission.requestKey,
+                 revision: submission.requestRevision, receipt: receipt)
     }
 
-    private func hasObservedTerminal(for submission: Submission,
-                                    in snapshot: AttentionStoreSnapshot) -> Bool {
-        guard case let .accepted(expectedSequence) = submission.disposition,
-              let expectedSequence,
-              let remote = snapshot.remoteStates[submission.requestKey],
-              remote.isTerminal,
-              let observedSequence = remote.eventSequence else { return false }
-        return observedSequence == expectedSequence
+    private func retainReplayDiagnostics(for submissions: [Submission]) {
+        let outstanding = Set(submissions.map(\.operationID))
+        operationReplayDiagnosticStates = operationReplayDiagnosticStates.filter {
+            outstanding.contains($0.key)
+        }
     }
 
     private func replay(since cursor: UInt64) async throws -> UInt64 {
