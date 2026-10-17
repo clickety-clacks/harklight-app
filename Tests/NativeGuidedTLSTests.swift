@@ -160,6 +160,97 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "The stable profile authority keeps local attachment copies reachable")
     }
 
+    func testInboxRetryUsesCommittedMigrationAfterIncompleteOldEndpointRecovery() async throws {
+        let service = "Harklight.endpoint-migration-retry-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: service).loadOrCreate()
+        let tlsFixture = try LocalEnrollmentTLS(expectedDevice: identity.deviceID)
+        defer {
+            tlsFixture.close()
+            SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                           kSecAttrService as String: service] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(service.utf8)] as CFDictionary)
+        }
+
+        let operationID = UUID()
+        let original = NativeEnrollmentRecord(
+            host: NativeEndpointMigrationPolicy.sourceHost,
+            enrollmentPort: NativeEndpointMigrationPolicy.gibsonEnrollmentPort,
+            relayPort: NativeEndpointMigrationPolicy.gibsonRelayPort,
+            trustedRootDER: tlsFixture.rootDER,
+            identityLabel: identity.label,
+            deviceLabel: "My phone",
+            deviceID: identity.deviceID,
+            approvalCode: "ABCDEF2345",
+            statusSecret: String(repeating: "b", count: 64),
+            expiresAt: Int64(Date().timeIntervalSince1970 * 1_000) + 600_000,
+            statusExpiresAt: Int64(Date().timeIntervalSince1970 * 1_000) + 900_000,
+            personID: "same-person",
+            pushBinding: NativePushBinding(address: "saved-push-address", operationID: operationID,
+                                           revision: 12, accepted: false),
+            serverDisplayName: "Saved server",
+            accountDisplayName: "Saved account",
+            notificationExplanationSeen: true,
+            foregroundRelayConfirmed: true)
+        let enrollment = NativeEnrollmentStore(service: service)
+        try enrollment.retainApprovedGuided(original, expectedPersonID: "same-person",
+                                             expectedDeviceID: identity.deviceID)
+        let join = NativeGuidedJoinStore(namespace: service)
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(original.profileAuthority),
+            personID: ExactText(original.personID!), deviceID: ExactText(original.deviceID)),
+            transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        let presentation = try LivePresentationStore(store: domain, context: context)
+        let app = NativeAppLaunch(arguments: ["Harklight"], enrollmentStore: enrollment,
+                                  joinStore: join, initialState: .live(presentation),
+                                  initialEnrollmentRecord: original)
+
+        var attemptedRecords: [NativeEnrollmentRecord] = []
+        app.guidedJoin.connectApproved = { record in
+            attemptedRecords.append(record)
+            return false
+        }
+
+        await app.guidedJoin.restore()
+        XCTAssertEqual(attemptedRecords, [original], "The established account first attempts recovery at its saved endpoint.")
+        XCTAssertEqual(app.guidedJoin.currentAccount, original)
+        XCTAssertEqual(app.guidedJoin.screen, .approvedFinishing)
+        XCTAssertFalse(app.guidedJoin.isShowing, "An incomplete established-account recovery leaves the ordinary inbox available.")
+
+        let fixtureFingerprint = NativeEndpointMigrationPolicy.rootSHA256(tlsFixture.rootDER)
+        let migrated = try NativeEndpointMigrationPolicy.candidate(from: original,
+                                                                    acceptedRootSHA256: fixtureFingerprint)
+        XCTAssertTrue(app.canApplyPersistedEndpointMigration(from: original, to: migrated))
+        try enrollment.commitGibsonEndpointMigration(from: original, to: migrated,
+                                                     acceptedRootSHA256: fixtureFingerprint)
+        app.applyPersistedEndpointMigration(migrated)
+
+        XCTAssertEqual(try enrollment.load(), migrated, "The fixed-endpoint migration is durably committed first.")
+        XCTAssertEqual(app.activeEnrollmentRecord, migrated)
+        XCTAssertEqual(app.guidedJoin.currentAccount, migrated,
+                       "The visible Retry authority follows the same persisted migrated record.")
+        XCTAssertEqual(migrated.personID, original.personID)
+        XCTAssertEqual(migrated.deviceID, original.deviceID)
+        XCTAssertEqual(migrated.identityLabel, original.identityLabel)
+        XCTAssertEqual(migrated.trustedRootDER, original.trustedRootDER)
+        XCTAssertEqual(migrated.profileAuthority, original.profileAuthority)
+        XCTAssertEqual(migrated.pushBinding, original.pushBinding,
+                       "Migration preserves the original device operation and revision binding.")
+
+        await app.retryForegroundConnection()
+        XCTAssertEqual(attemptedRecords.map(\.host), [NativeEndpointMigrationPolicy.sourceHost,
+                                                       NativeEndpointMigrationPolicy.gibsonHost],
+                       "The ordinary inbox Retry uses the validated and persisted migrated endpoint.")
+        XCTAssertEqual(attemptedRecords.last?.deviceID, original.deviceID)
+        XCTAssertEqual(app.guidedJoin.currentAccount, migrated)
+        XCTAssertEqual(try enrollment.load(), migrated,
+                       "Retry does not restore the stale old-host enrollment record.")
+    }
+
     func testConversationOriginUsesTheNewEndpointWithoutChangingProfileAuthority() throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText(NativeEndpointMigrationPolicy.sourceHost),

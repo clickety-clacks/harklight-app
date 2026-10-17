@@ -216,6 +216,19 @@ final class NativeAppLaunch {
         }
     }
 
+    func canApplyPersistedEndpointMigration(from original: NativeEnrollmentRecord,
+                                            to migrated: NativeEnrollmentRecord) -> Bool {
+        activeEnrollmentRecord == original && hasNoRecordedDeparture &&
+            guidedJoin.canAdoptEndpointMigration(from: original, to: migrated)
+    }
+
+    /// Keep the active account and the ordinary inbox Retry authority aligned
+    /// immediately after the validated enrollment record is persisted.
+    func applyPersistedEndpointMigration(_ migrated: NativeEnrollmentRecord) {
+        activeEnrollmentRecord = migrated
+        guidedJoin.adoptPersistedEndpointMigration(migrated)
+    }
+
     /// Switches only the approved endpoint. The current relay remains active
     /// until the new hostname passes the same CA and device-identity checks.
     func migrateDirectEndpointToGibson() async {
@@ -232,11 +245,14 @@ final class NativeAppLaunch {
         defer { isEndpointMigrationBusy = false }
         do {
             try await NativeRelayLifecycle.shared.migrateEndpoint(to: relayURL) {
-                guard self.activationGeneration == generation else { throw NativeRelayCoreError.inactive }
+                guard self.activationGeneration == generation,
+                      self.canApplyPersistedEndpointMigration(from: record, to: migrated) else {
+                    throw NativeRelayCoreError.inactive
+                }
                 try self.enrollment.commitGibsonEndpointMigration(from: record, to: migrated)
+                self.applyPersistedEndpointMigration(migrated)
             }
             guard activationGeneration == generation else { return }
-            activeEnrollmentRecord = migrated
             endpointMigrationMessage = "The approved server address is saved. This account, device identity, trust certificate and local history are unchanged."
             Task { await refreshLive() }
         } catch {
