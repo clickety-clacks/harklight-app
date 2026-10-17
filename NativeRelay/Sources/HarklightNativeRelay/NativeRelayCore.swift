@@ -435,6 +435,13 @@ public actor NativeRelayCore {
         guard !submissions.isEmpty else {
             return try await replayAndAcknowledge(since: cursor)
         }
+        for submission in submissions where operationReplayDiagnosticStates[submission.operationID] == nil {
+            // Record the first operation-bound pending phase before replay can
+            // suspend. Later refreshes retain the state cache, so this same
+            // unchanged observation is not rewritten on every poll.
+            diagnoseOperationReplay(.began, submission: submission,
+                                    receipt: .acceptedAwaitingReplay)
+        }
         do {
             let high = try await replayAndAcknowledge(since: cursor)
             let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
