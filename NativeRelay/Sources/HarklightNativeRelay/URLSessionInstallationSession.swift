@@ -49,12 +49,16 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let task: URLSessionWebSocketTask
     private let profileContext: ProfileContext
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
+    private let onDiagnostic: NativeClientDiagnosticSink
+    private let attemptID: UUID?
 
     public init(profile: ProfileContext,
                 relayURL: URL,
                 clientIdentity: TrustedKeychainIdentity,
                 trustedRootDER: Data,
-                onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in }) throws {
+                attemptID: UUID? = nil,
+                onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
         guard profile.transportMode == .relay,
               relayURL.scheme == "wss",
               relayURL.path == "/relay",
@@ -79,8 +83,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         authenticatedIdentity = profile.identity
         profileContext = profile
         self.onProgress = onProgress
+        self.attemptID = attemptID
+        self.onDiagnostic = onDiagnostic
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root,
-                                         onProgress: onProgress)
+                                         attemptID: attemptID, onProgress: onProgress,
+                                         onDiagnostic: onDiagnostic)
         self.delegate = delegate
         let configuration = URLSessionConfiguration.ephemeral
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
@@ -102,29 +109,43 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     private func replay(_ request: Data, ref: String, event: String, end: String,
                         consume: @Sendable (Data) async throws -> Void) async throws {
-        try await send(request)
-        var accepted = false
-        while true {
-            let frame = try await receive()
-            let value = try JSONValue.parse(frame)
-            let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
-            if kind == "error" { throw InstallationTransportError.serverRejected }
-            let ordinary = kind == "delivery" || kind == "lifecycle"
-            let conversation = kind == "conversation"
-            if !accepted {
-                // Incidental known projection frames remain in their own durable
-                // replay journal. This read cannot advance or ACK either cursor.
-                if ordinary || conversation { continue }
-                guard kind == "ok", value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref else {
-                    throw InstallationTransportError.unexpectedServerFrame
+        let area: NativeDiagnosticArea = event == "conversation" ? .conversation : .relay
+        let phase: NativeDiagnosticPhase = event == "conversation" ? .conversationReplay : .ordinaryReplay
+        do {
+            try await send(request)
+            var accepted = false
+            while true {
+                let frame = try await receive()
+                let value = try JSONValue.parse(frame)
+                let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+                if kind == "error" {
+                    let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
+                    diagnose(area, phase, .rejected, causeCode: NativeDiagnosticCauseCode.serverReason(reason))
+                    throw InstallationTransportError.serverRejected
                 }
-                accepted = true
-                if ref == "native-sync" { onProgress(.relayAdmitted) }
-            } else if (event == "conversation" && ordinary) || (event == "delivery" && conversation) {
-                continue
+                let ordinary = kind == "delivery" || kind == "lifecycle"
+                let conversation = kind == "conversation"
+                if !accepted {
+                    // Incidental known projection frames remain in their own durable
+                    // replay journal. This read cannot advance or ACK either cursor.
+                    if ordinary || conversation { continue }
+                    guard kind == "ok", value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref else {
+                        throw InstallationTransportError.unexpectedServerFrame
+                    }
+                    accepted = true
+                    if ref == "native-sync" {
+                        onProgress(.relayAdmitted)
+                        diagnose(.connection, .relayAdmission, .completed)
+                    }
+                } else if (event == "conversation" && ordinary) || (event == "delivery" && conversation) {
+                    continue
+                }
+                try await consume(frame)
+                if kind == end { return }
             }
-            try await consume(frame)
-            if kind == end { return }
+        } catch {
+            diagnose(area, phase, NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            throw error
         }
     }
 
@@ -137,40 +158,56 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func acknowledgeProjection(_ request: Data, field: String, ref: String) async throws {
-        let requestValue = try JSONValue.parse(request)
-        guard case let .number(expectedNumber)? = requestValue.uniqueValue(named: field),
-              let expected = UInt64(expectedNumber.lexeme) else {
-            throw InstallationTransportError.unexpectedServerFrame
-        }
-        try await send(request)
-        while true {
-            let value = try JSONValue.parse(try await receive())
-            switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
-            case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref:
-                guard case let .number(actualNumber)? = value.uniqueValue(named: field),
-                      UInt64(actualNumber.lexeme) == expected else {
-                    throw InstallationTransportError.unexpectedServerFrame
-                }
-                return
-            case "error":
-                if value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref,
-                   value.uniqueValue(named: "reason")?.stringValue?.rawValue == "invalid_cursor" {
-                    throw InstallationTransportError.acknowledgementBehind
-                }
-                throw InstallationTransportError.serverRejected
-            case "delivery", "lifecycle", "conversation":
-                // These remain on the server's replay journal until a future
-                // durable resync. They are never ACKed by this incidental read.
-                continue
-            default:
+        let area: NativeDiagnosticArea = field == "conversation_seq" ? .conversation : .relay
+        do {
+            let requestValue = try JSONValue.parse(request)
+            guard case let .number(expectedNumber)? = requestValue.uniqueValue(named: field),
+                  let expected = UInt64(expectedNumber.lexeme) else {
                 throw InstallationTransportError.unexpectedServerFrame
             }
+            try await send(request)
+            while true {
+                let value = try JSONValue.parse(try await receive())
+                switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+                case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref:
+                    guard case let .number(actualNumber)? = value.uniqueValue(named: field),
+                          UInt64(actualNumber.lexeme) == expected else {
+                        throw InstallationTransportError.unexpectedServerFrame
+                    }
+                    diagnose(area, .acknowledgement, .completed)
+                    return
+                case "error":
+                    let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
+                    if value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref,
+                       reason == "invalid_cursor" {
+                        diagnose(area, .acknowledgement, .retrying,
+                                 causeCode: NativeDiagnosticCauseCode.serverReason(reason))
+                        throw InstallationTransportError.acknowledgementBehind
+                    }
+                    diagnose(area, .acknowledgement, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason))
+                    throw InstallationTransportError.serverRejected
+                case "delivery", "lifecycle", "conversation":
+                    // These remain on the server's replay journal until a future
+                    // durable resync. They are never ACKed by this incidental read.
+                    continue
+                default:
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+            }
+        } catch {
+            diagnose(area, .acknowledgement, NativeDiagnosticCauseCode.failureTransition(for: error),
+                     error: error)
+            throw error
         }
     }
 
     public func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
         do { try await send(frame) }
         catch {
+            diagnose(.answer, .originalOperationDelivery,
+                     NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
+                     operationID: operationID, receipt: .unknown)
             close()
             return .unresolved
         }
@@ -180,6 +217,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             catch {
                 // The response could still arrive later. Retire this socket
                 // so a stale uncorrelated `ok` cannot confirm a later send.
+                diagnose(.answer, .originalOperationDelivery,
+                         NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
+                         operationID: operationID, receipt: .unknown)
                 close()
                 return .unresolved
             }
@@ -187,15 +227,27 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             case "ok":
                 guard case let .number(number)? = value.uniqueValue(named: "seq"),
                       let sequence = UInt64(number.lexeme), sequence > 0 else {
+                    diagnose(.answer, .originalOperationDelivery, .unresolved,
+                             causeCode: "invalid_acceptance_sequence", operationID: operationID,
+                             receipt: .unknown)
                     close()
                     return .unresolved
                 }
+                diagnose(.answer, .originalOperationDelivery, .accepted,
+                         operationID: operationID, receipt: .acceptedAwaitingReplay)
                 return .accepted(operationID: operationID, terminalSequence: sequence)
             case "error":
+                let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
+                diagnose(.answer, .originalOperationDelivery, .unresolved,
+                         causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                         operationID: operationID, receipt: .unknown)
                 return .unresolved
             case "delivery", "lifecycle", "conversation":
                 continue
             default:
+                diagnose(.answer, .originalOperationDelivery, .unresolved,
+                         causeCode: "unexpected_relay_frame", operationID: operationID,
+                         receipt: .unknown)
                 close()
                 return .unresolved
             }
@@ -208,6 +260,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             let outgoing = try JSONValue.parse(frame)
             guard outgoing.uniqueValue(named: "type") == .string(ExactText("discussion")),
                   outgoing.uniqueValue(named: "op_id")?.stringValue?.rawValue == operationID.uuidString.lowercased() else {
+                diagnose(.conversation, .discussionSubmission, .rejected,
+                         causeCode: "saved_operation_frame_mismatch", operationID: operationID,
+                         receipt: .repairRequired)
                 return .rejected(reason: ExactText("The saved discussion operation does not match its frame"))
             }
             try await send(frame)
@@ -216,9 +271,25 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 let incoming = try await receive()
                 let kind = try JSONValue.parse(incoming).uniqueValue(named: "type")?.stringValue?.rawValue
                 if kind == "delivery" || kind == "lifecycle" || kind == "conversation" { continue }
-                return try wire.decodeDiscussionResult(incoming)
+                let result = try wire.decodeDiscussionResult(incoming)
+                switch result {
+                case .accepted:
+                    diagnose(.conversation, .discussionSubmission, .accepted,
+                             operationID: operationID, receipt: .acceptedAwaitingReplay)
+                case let .rejected(reason):
+                    diagnose(.conversation, .discussionSubmission, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason.rawValue),
+                             operationID: operationID, receipt: .pendingUnconfirmed)
+                case .unresolved:
+                    diagnose(.conversation, .discussionSubmission, .unresolved,
+                             operationID: operationID, receipt: .unknown)
+                }
+                return result
             }
         } catch {
+            diagnose(.conversation, .discussionSubmission,
+                     NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
+                     operationID: operationID, receipt: .unknown)
             close()
             return .unresolved
         }
@@ -256,6 +327,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             }
         } catch {
             // A late `ok` on this socket must never confirm a different op.
+            diagnose(.notifications, .pushRegistration,
+                     NativeDiagnosticCauseCode.failureTransition(for: error),
+                     error: error, operationID: operationID)
             close()
             throw error
         }
@@ -268,17 +342,34 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     public func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
                                            originURL: URL) async throws -> ConversationUploadDiscardResult {
-        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
-        let (data, response) = try await urlSession.data(for: wire.discardRequest(cleanup))
-        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
-        return try wire.decodeDiscard(data, status: http.statusCode)
+        diagnose(.upload, .uploadCleanup, .began, operationID: cleanup.id,
+                 request: cleanup.binding.request, revision: cleanup.binding.revision)
+        do {
+            let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+            let (data, response) = try await urlSession.data(for: wire.discardRequest(cleanup))
+            guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+            let result = try wire.decodeDiscard(data, status: http.statusCode)
+            diagnose(.upload, .uploadCleanup, .completed, operationID: cleanup.id,
+                     request: cleanup.binding.request, revision: cleanup.binding.revision)
+            return result
+        } catch {
+            diagnose(.upload, .uploadCleanup, NativeDiagnosticCauseCode.failureTransition(for: error),
+                     error: error, operationID: cleanup.id, request: cleanup.binding.request,
+                     revision: cleanup.binding.revision, receipt: .unknown)
+            throw error
+        }
     }
 
     public func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {
-        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
-        let (data, response) = try await urlSession.data(for: wire.limitsRequest())
-        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
-        return try wire.decodeLimits(data, status: http.statusCode)
+        do {
+            let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+            let (data, response) = try await urlSession.data(for: wire.limitsRequest())
+            guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+            return try wire.decodeLimits(data, status: http.statusCode)
+        } catch {
+            diagnose(.upload, .uploadTransfer, NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            throw error
+        }
     }
 
     /// Reuses the enrolled certificate/CA session and streams the retained file;
@@ -286,31 +377,48 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     public func uploadConversationFile(_ file: ConversationFile, from source: URL,
                                        binding: ConversationBinding, operationID: UUID,
                                        limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
-        if let cap = limits.uploadCap, file.byteCount > cap {
-            throw ConversationError.uploadCapExceeded(file: file.name, cap: cap)
+        diagnose(.upload, .uploadTransfer, .began, operationID: operationID,
+                 request: binding.request, revision: binding.revision)
+        do {
+            if let cap = limits.uploadCap, file.byteCount > cap {
+                throw ConversationError.uploadCapExceeded(file: file.name, cap: cap)
+            }
+            let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+            try wire.verify(source, file: file)
+            let request = try wire.uploadRequest(file: file, binding: binding, operationID: operationID)
+            let (data, response) = try await urlSession.upload(for: request, fromFile: source)
+            guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+            let uploaded = try wire.decodeUpload(data, status: http.statusCode, original: file)
+            diagnose(.upload, .uploadTransfer, .completed, operationID: operationID,
+                     request: binding.request, revision: binding.revision)
+            return uploaded
+        } catch {
+            diagnose(.upload, .uploadTransfer, NativeDiagnosticCauseCode.failureTransition(for: error),
+                     error: error, operationID: operationID, request: binding.request,
+                     revision: binding.revision, receipt: .unknown)
+            throw error
         }
-        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
-        try wire.verify(source, file: file)
-        let request = try wire.uploadRequest(file: file, binding: binding, operationID: operationID)
-        let (data, response) = try await urlSession.upload(for: request, fromFile: source)
-        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
-        return try wire.decodeUpload(data, status: http.statusCode, original: file)
     }
 
     public func fetchConversationFile(_ file: ConversationFile, to destination: URL, originURL: URL) async throws {
-        let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
-        let (temporary, response) = try await urlSession.download(for: wire.fetchRequest(file))
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
-        guard http.statusCode == 200 else {
-            throw ConversationFileTransportError.server(status: http.statusCode, reason: ExactText("File could not be fetched"))
+        do {
+            let wire = try ConversationFileWire(profile: profileContext, originURL: originURL)
+            let (temporary, response) = try await urlSession.download(for: wire.fetchRequest(file))
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
+            guard http.statusCode == 200 else {
+                throw ConversationFileTransportError.server(status: http.statusCode, reason: ExactText("File could not be fetched"))
+            }
+            guard http.value(forHTTPHeaderField: "Content-Length") == String(file.byteCount),
+                  http.value(forHTTPHeaderField: "X-Harklight-Sha256") == file.sha256.rawValue else {
+                throw ConversationError.fileMismatch
+            }
+            try wire.verify(temporary, file: file)
+            try FileManager.default.copyItem(at: temporary, to: destination)
+        } catch {
+            diagnose(.fileAccess, .fileDownload, NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            throw error
         }
-        guard http.value(forHTTPHeaderField: "Content-Length") == String(file.byteCount),
-              http.value(forHTTPHeaderField: "X-Harklight-Sha256") == file.sha256.rawValue else {
-            throw ConversationError.fileMismatch
-        }
-        try wire.verify(temporary, file: file)
-        try FileManager.default.copyItem(at: temporary, to: destination)
     }
 
     private func send(_ frame: Data) async throws {
@@ -326,6 +434,22 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         case .data: throw InstallationTransportError.unexpectedServerFrame
         @unknown default: throw InstallationTransportError.unexpectedServerFrame
         }
+    }
+
+    private func diagnose(_ area: NativeDiagnosticArea,
+                          _ phase: NativeDiagnosticPhase,
+                          _ transition: NativeDiagnosticTransition,
+                          error: Error? = nil,
+                          causeCode: String? = nil,
+                          operationID: UUID? = nil,
+                          request: RequestKey? = nil,
+                          revision: UInt64? = nil,
+                          receipt: NativeDiagnosticReceiptState? = nil) {
+        onDiagnostic(NativeClientDiagnosticEvent(area: area, phase: phase, transition: transition,
+            causeCode: causeCode ?? error.map { NativeDiagnosticCauseCode.forError($0) },
+            attemptID: attemptID, transportAttemptID: attemptID,
+            operationID: operationID, request: request,
+            requestRevision: revision, receiptState: receipt))
     }
 }
 
@@ -386,14 +510,20 @@ private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, URLSess
     private let host: String
     private let identity: SecIdentity
     private let root: SecCertificate
+    private let attemptID: UUID?
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
+    private let onDiagnostic: NativeClientDiagnosticSink
 
     init(host: String, identity: SecIdentity, root: SecCertificate,
-         onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void) {
+         attemptID: UUID?,
+         onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void,
+         onDiagnostic: @escaping NativeClientDiagnosticSink) {
         self.host = host
         self.identity = identity
         self.root = root
+        self.attemptID = attemptID
         self.onProgress = onProgress
+        self.onDiagnostic = onDiagnostic
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
@@ -407,6 +537,9 @@ private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, URLSess
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
         // Authentication belongs only to the original pinned relay endpoint.
+        onDiagnostic(NativeClientDiagnosticEvent(area: .connection, phase: .relayAdmission,
+            transition: .rejected, causeCode: "relay_redirect_refused", attemptID: attemptID,
+            transportAttemptID: attemptID))
         completionHandler(nil)
     }
 

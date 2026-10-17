@@ -7,6 +7,23 @@ import Security
 import XCTest
 @testable import AttentionClientDuoPrototype
 
+private final class NativeDiagnosticEventCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [NativeClientDiagnosticEvent] = []
+
+    func append(_ event: NativeClientDiagnosticEvent) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
+    }
+
+    var events: [NativeClientDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 /// Actual pinned TLS exercises certificate-free enrollment and the explicit
 /// identity proof required for own-device removal. The iOS listener cannot
 /// request an optional certificate; that server seam needs server integration.
@@ -31,9 +48,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
             deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let diagnosticEvents = NativeDiagnosticEventCollector()
         let session = try URLSessionInstallationSession(
             profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
-            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: original.rootDER)
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: original.rootDER,
+            onDiagnostic: { diagnosticEvents.append($0) })
         do {
             try await session.resync(Data("{}\n".utf8)) { _ in }
             XCTFail("A redirect cannot establish the authenticated relay")
@@ -41,6 +60,13 @@ final class NativeGuidedTLSTests: XCTestCase {
         await session.close()
         XCTAssertTrue(original.receivedRequest, "The original pinned relay received the connection")
         XCTAssertFalse(target.receivedRequest, "The authenticated request must not reach a redirected endpoint")
+        XCTAssertTrue(diagnosticEvents.events.contains {
+            $0.phase == .ordinaryReplay && $0.transition == .failed && $0.causeCode != nil
+        }, "The actual failed relay boundary should remain visible with a safe cause code.")
+        XCTAssertTrue(diagnosticEvents.events.contains {
+            $0.phase == .relayAdmission && $0.transition == .rejected &&
+                $0.causeCode == "relay_redirect_refused"
+        }, "An authentication-preserving redirect refusal should report its actual policy cause.")
     }
 
     func testJoinRefusesPlaintextBeforeSendingAnInvitation() async throws {
@@ -230,6 +256,96 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(bundleDiagnostic.shareText.contains("app_executable_sha256=\(bundleDiagnostic.executableSHA256)"))
     }
 
+    func testClientDiagnosticJournalPersistsRetrievableOperationAndSafeCauseOnly() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightClientDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let journal = NativeClientDiagnosticJournal(fileURL: url)
+        let operationID = UUID()
+        let request = RequestKey(accountScope: ExactText("private-person-marker"),
+                                 senderID: ExactText("private-sender-marker"),
+                                 messageID: ExactText("private-message-marker"))
+        let error = NSError(domain: "private-host-marker",
+                            code: 731,
+                            userInfo: [NSLocalizedDescriptionKey: "private-answer-marker token=secret-marker"])
+
+        journal.record(area: .answer, phase: .originalOperationDelivery, transition: .unresolved,
+                       error: error, operationID: operationID, request: request,
+                       requestRevision: 4, receiptState: .unknown)
+
+        let shared = journal.shareText
+        XCTAssertTrue(journal.hasEvents)
+        XCTAssertTrue(shared.contains("operation_id=\(operationID.uuidString.lowercased())"))
+        XCTAssertTrue(shared.contains("request_revision=4"))
+        XCTAssertTrue(shared.contains("receipt_state=unknown"))
+        XCTAssertTrue(shared.contains("cause=unknown_error"))
+        XCTAssertFalse(shared.contains("private-person-marker"))
+        XCTAssertFalse(shared.contains("private-sender-marker"))
+        XCTAssertFalse(shared.contains("private-message-marker"))
+        XCTAssertFalse(shared.contains("private-answer-marker"))
+        XCTAssertFalse(shared.contains("secret-marker"))
+        XCTAssertFalse(shared.contains("private-host-marker"))
+
+        journal.record(area: .relay, phase: .ordinaryReplay, transition: .failed,
+                       error: NSError(domain: NSURLErrorDomain, code: -1001,
+                                      userInfo: [NSLocalizedDescriptionKey: "private-url-marker"]))
+        XCTAssertTrue(journal.shareText.contains("cause=url_session_error_code_-1001"),
+                      "System error classes should retain their numeric cause without a localized message.")
+        XCTAssertFalse(journal.shareText.contains("private-url-marker"))
+
+        journal.record(area: .relay, phase: .ordinaryReplay, transition: .failed,
+                       causeCode: "host=relay.private.example token=secret-marker")
+        XCTAssertTrue(journal.shareText.contains("cause=unknown_error"),
+                      "Caller-supplied cause text must be reduced to a fixed safe code.")
+        XCTAssertFalse(journal.shareText.contains("relay.private.example"))
+        XCTAssertFalse(journal.shareText.contains("secret-marker"))
+
+        journal.record(area: .relay, phase: .ordinaryReplay, transition: .failed,
+                       causeCode: "url_session_error_code_999999999999999999999999999999")
+        XCTAssertTrue(journal.shareText.contains("cause=unknown_error"),
+                      "An arbitrary code-shaped value must not bypass the numeric code bound.")
+
+        var saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var savedEvents = try XCTUnwrap(saved["events"] as? [[String: Any]])
+        savedEvents[0]["causeCode"] = "host=relay.private.example token=secret-marker"
+        savedEvents[0]["requestTag"] = "private-sender-marker"
+        saved["events"] = savedEvents
+        try JSONSerialization.data(withJSONObject: saved, options: [.sortedKeys]).write(to: url, options: .atomic)
+
+        let restored = NativeClientDiagnosticJournal(fileURL: url)
+        XCTAssertEqual(restored.events.count, journal.events.count)
+        XCTAssertEqual(restored.events[0].causeCode, "unknown_error")
+        XCTAssertNil(restored.events[0].requestTag)
+        XCTAssertTrue(restored.shareText.contains("operation_id=\(operationID.uuidString.lowercased())"))
+        XCTAssertFalse(restored.shareText.contains("relay.private.example"))
+        XCTAssertFalse(restored.shareText.contains("private-sender-marker"))
+        XCTAssertFalse(restored.shareText.contains("secret-marker"))
+    }
+
+    func testClientDiagnosticJournalKeepsCallbackHistoryInOccurrenceOrder() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightDiagnosticOrder-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let journal = NativeClientDiagnosticJournal(fileURL: url)
+        let earlier = NativeClientDiagnosticEvent(area: .connection, phase: .serverTrust,
+            transition: .completed, causeCode: "server_trust_validated",
+            attemptID: UUID(), transportAttemptID: UUID(), id: UUID(), occurredAtMilliseconds: 100)
+        let later = NativeClientDiagnosticEvent(area: .connection, phase: .webSocketOpen,
+            transition: .completed, causeCode: "websocket_opened",
+            attemptID: earlier.attemptID, transportAttemptID: earlier.transportAttemptID,
+            id: UUID(), occurredAtMilliseconds: 200)
+
+        // A concurrently delivered callback arrives before an earlier event.
+        journal.record(later)
+        journal.record(earlier)
+
+        let earlyPosition = try XCTUnwrap(journal.shareText.range(of: "event_id=\(earlier.id.uuidString.lowercased())"))
+        let latePosition = try XCTUnwrap(journal.shareText.range(of: "event_id=\(later.id.uuidString.lowercased())"))
+        XCTAssertLessThan(earlyPosition.lowerBound, latePosition.lowerBound)
+        let restored = NativeClientDiagnosticJournal(fileURL: url)
+        XCTAssertEqual(restored.events.map(\.id), [earlier.id, later.id])
+    }
+
     func testUncertainRetrySendsOnlyTheSameSavedOperationAndBinding() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"), deviceID: ExactText("device-A"))
@@ -251,16 +367,34 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(originalReceipt.opID, original.operationID)
         XCTAssertEqual(original.requestRevision, 1)
 
-        let session = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
-        let core = try NativeRelayCore(store: store, context: context, session: session)
-        let firstAttempt = try await core.sendPendingOriginalOperations()
-        let secondAttempt = try await core.sendPendingOriginalOperations()
+        let diagnosticEvents = NativeDiagnosticEventCollector()
+        let firstTransport = UUID()
+        let secondTransport = UUID()
+        let firstSession = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
+        let firstCore = try NativeRelayCore(store: store, context: context, session: firstSession,
+            attemptID: firstTransport, onDiagnostic: { diagnosticEvents.append($0) })
+        let firstAttempt = try await firstCore.sendPendingOriginalOperations()
+        let secondSession = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
+        let secondCore = try NativeRelayCore(store: store, context: context, session: secondSession,
+            attemptID: secondTransport, onDiagnostic: { diagnosticEvents.append($0) })
+        let secondAttempt = try await secondCore.sendPendingOriginalOperations()
         XCTAssertEqual(firstAttempt, 1)
         XCTAssertEqual(secondAttempt, 1)
 
-        let sends = session.originalOperationRecorder.snapshot()
-        XCTAssertEqual(sends.operationIDs, [original.operationID, original.operationID])
-        XCTAssertEqual(sends.frames, [original.wireFrame, original.wireFrame])
+        let firstSends = firstSession.originalOperationRecorder.snapshot()
+        let secondSends = secondSession.originalOperationRecorder.snapshot()
+        let sends = firstSends.operationIDs + secondSends.operationIDs
+        XCTAssertEqual(sends, [original.operationID, original.operationID])
+        XCTAssertEqual(firstSends.frames + secondSends.frames, [original.wireFrame, original.wireFrame])
+        let operationEvents = diagnosticEvents.events.filter {
+            $0.phase == .originalOperationDelivery && $0.transition == .unresolved
+        }
+        XCTAssertEqual(operationEvents.count, 2)
+        XCTAssertEqual(Set(operationEvents.compactMap(\.operationID)), [original.operationID])
+        XCTAssertEqual(Set(operationEvents.compactMap(\.transportAttemptID)), [firstTransport, secondTransport])
+        XCTAssertEqual(Set(operationEvents.compactMap(\.requestRevision)), [1])
+        XCTAssertEqual(Set(operationEvents.compactMap(\.receiptState)), [.unknown])
+        XCTAssertEqual(Set(operationEvents.compactMap(\.requestTag)).count, 1)
         let retained = try XCTUnwrap(store.snapshot(context: context).outbox.first)
         XCTAssertEqual(retained.operationID, original.operationID)
         XCTAssertEqual(retained.requestKey, original.requestKey)
@@ -572,9 +706,14 @@ final class NativeGuidedTLSTests: XCTestCase {
         let savedBefore = try XCTUnwrap(persistence.load(identity: identity))
         XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
 
+        let diagnosticURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: diagnosticURL) }
+        let diagnosticJournal = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
         let lifecycle = NativeRelayLifecycle()
         try await lifecycle.activate(store: store, context: context, relayURL: relayURL,
-                                     clientIdentity: installation.value, trustedRootDER: server.rootDER)
+                                     clientIdentity: installation.value, trustedRootDER: server.rootDER,
+                                     diagnostics: diagnosticJournal)
         var progressUpdates: [NativeForegroundConnectProgress] = []
         var operationSnapshots: [NativeForegroundOperationSnapshot] = []
         let result = await lifecycle.confirmForegroundProgress(for: context, deadline: .seconds(3)) {
@@ -601,6 +740,22 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[requestKey]?.drafts[1]?.text,
                        ExactText("Keep this draft"))
+        let timeoutEvent = try XCTUnwrap(diagnosticJournal.events.first {
+            $0.phase == .approvedConnection && $0.transition == .timedOut &&
+                $0.causeCode == "foreground_deadline"
+        }, "A real stalled local connection must leave a retrievable timeout record.")
+        XCTAssertEqual(timeoutEvent.transportAttemptID, result.transportAttemptID,
+                       "The foreground timeout and actual socket attempt must remain correlated.")
+        let persistedDiagnostics = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
+        XCTAssertTrue(persistedDiagnostics.shareText.contains("phase=approvedConnection"))
+        XCTAssertTrue(persistedDiagnostics.shareText.contains("transition=timedOut"))
+        let transportAttemptID = try XCTUnwrap(timeoutEvent.transportAttemptID)
+        XCTAssertTrue(persistedDiagnostics.shareText.contains("transport_attempt_id=\(transportAttemptID.uuidString.lowercased())"))
+        XCTAssertTrue(persistedDiagnostics.shareText.contains("operation_id=\(originalOperation.operationID.uuidString.lowercased())") == false,
+                      "An operation not yet sent must not be mislabeled as a transport attempt.")
+        XCTAssertEqual(try store.snapshot(context: context).outbox.first?.operationID,
+                       originalOperation.operationID,
+                       "Diagnostics must not change or resubmit the original queued operation.")
         let operationSnapshot = try XCTUnwrap(operationSnapshots.last)
         XCTAssertTrue(operationSnapshot.available)
         XCTAssertEqual(operationSnapshot.operations.count, 1)

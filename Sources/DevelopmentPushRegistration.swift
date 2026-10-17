@@ -20,7 +20,9 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate {
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
         guard Bundle.main.bundleIdentifier == Self.expectedBundleID else {
-            Self.clearAddressAndSetStatus("refused")
+            NativeRelayLifecycle.shared.recordPushRegistrationFailure(
+                causeCode: "notification_bundle_mismatch")
+            clearAddressAndSetStatus("refused")
             return
         }
 
@@ -29,8 +31,11 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate {
             UserDefaults.standard.set("registered", forKey: Self.statusKey)
             Task { await NativeRelayLifecycle.shared.refreshAfterPushAddressStored() }
         } catch DevelopmentAPNsAddressStore.AddressError.emptyToken {
+            NativeRelayLifecycle.shared.recordPushRegistrationFailure(
+                causeCode: "notification_empty_token")
             UserDefaults.standard.set("refused", forKey: Self.statusKey)
         } catch {
+            NativeRelayLifecycle.shared.recordPushRegistrationFailure(error)
             UserDefaults.standard.set("storage-failed", forKey: Self.statusKey)
         }
     }
@@ -39,7 +44,8 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
-        Self.clearAddressAndSetStatus("registration-failed")
+        NativeRelayLifecycle.shared.recordPushRegistrationFailure(error)
+        clearAddressAndSetStatus("registration-failed")
     }
 
     func application(_ application: UIApplication,
@@ -51,11 +57,12 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate {
         }
     }
 
-    private static func clearAddressAndSetStatus(_ status: String) {
+    private func clearAddressAndSetStatus(_ status: String) {
         do {
             try Self.addressStore().clear()
             UserDefaults.standard.set(status, forKey: Self.statusKey)
         } catch {
+            NativeRelayLifecycle.shared.recordPushRegistrationFailure(error, area: .localStore)
             UserDefaults.standard.set("storage-failed", forKey: Self.statusKey)
         }
     }

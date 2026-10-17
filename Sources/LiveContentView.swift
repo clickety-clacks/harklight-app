@@ -26,6 +26,22 @@ struct LiveContentView: View {
                     isRetrying: launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy,
                     retry: { Task { await launch.retryForegroundConnection() } })
             }
+            if let launch, launch.diagnostics.hasEvents {
+                HStack(spacing: 12) {
+                    Label("Client activity is available", systemImage: "waveform.path")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    ShareLink(item: launch.diagnostics.shareText) {
+                        Label("Share diagnostics", systemImage: "square.and.arrow.up")
+                    }
+                    .font(.caption)
+                    .accessibilityIdentifier("client-diagnostics-share")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("client-diagnostics-retrieval")
+            }
             HarklightInbox(
                 requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
                 requestDetail: { key, context in

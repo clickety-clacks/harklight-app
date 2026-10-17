@@ -53,6 +53,8 @@ public actor NativeRelayCore {
     private let session: any AuthenticatedInstallationSession
     private let wire: RelayWire
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
+    private let onDiagnostic: NativeClientDiagnosticSink
+    private let attemptID: UUID?
     private var active = true
     private var busy = false
     private var activeReplay: ReplayProgress?
@@ -78,6 +80,8 @@ public actor NativeRelayCore {
             // duplicate cannot fence a newly reselected upload after success.
             guard activeCleanupRequests.insert(cleanup.id).inserted else { continue }
             defer { activeCleanupRequests.remove(cleanup.id) }
+            diagnose(.upload, .uploadCleanup, .began, operationID: cleanup.id,
+                     request: request, revision: cleanup.binding.revision)
             do {
                 guard let endpoint = discoveredOriginURL,
                       let transport = session as? any AuthenticatedConversationCleanupSession else {
@@ -87,10 +91,23 @@ public actor NativeRelayCore {
                 try validate()
                 try store.recordConversationCleanup(cleanup.id, request: request,
                     outcome: .acknowledged(result), context: context)
+                diagnose(.upload, .uploadCleanup, .completed, operationID: cleanup.id,
+                         request: request, revision: cleanup.binding.revision)
             } catch {
-                try store.recordConversationCleanup(cleanup.id, request: request,
-                    outcome: .unknown(ExactText(String(describing: error))), context: context)
-                throw error
+                let cleanupError = error
+                diagnose(.upload, .uploadCleanup, NativeDiagnosticCauseCode.failureTransition(for: error),
+                         error: error, operationID: cleanup.id, request: request,
+                         revision: cleanup.binding.revision, receipt: .unknown)
+                do {
+                    try store.recordConversationCleanup(cleanup.id, request: request,
+                        outcome: .unknown(ExactText(String(describing: cleanupError))), context: context)
+                } catch {
+                    diagnose(.localStore, .uploadCleanup, .failed, error: error,
+                             operationID: cleanup.id, request: request,
+                             revision: cleanup.binding.revision, receipt: .unknown)
+                    throw error
+                }
+                throw cleanupError
             }
         }
     }
@@ -102,6 +119,8 @@ public actor NativeRelayCore {
 
     public func submitDiscussion(_ binding: ConversationBinding,
         retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
+        diagnose(.conversation, .discussionSubmission, .began, request: binding.request,
+                 revision: binding.revision)
         guard !busy else { throw NativeRelayCoreError.inactive }
         busy = true
         defer { busy = false }
@@ -142,10 +161,14 @@ public actor NativeRelayCore {
                         try store.registerConversationUpload(file, binding: binding, operation: operation, context: context)
                         let source = try await retainedFile(file)
                         try validateUploadOperation(binding, operation: operation)
+                        diagnose(.upload, .uploadTransfer, .began, operationID: operation,
+                                 request: binding.request, revision: binding.revision)
                         let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
                             operationID: operation, limits: published, originURL: endpoint)
                         try validate()
                         try store.recordConversationUpload(uploaded, binding: binding, operation: operation, context: context)
+                        diagnose(.upload, .uploadTransfer, .completed, operationID: operation,
+                                 request: binding.request, revision: binding.revision)
                         prepared.append(uploaded)
                     } else {
                         let bytes: Data
@@ -166,9 +189,20 @@ public actor NativeRelayCore {
             // ambiguous attempt must still keep its exact operation frozen.
             // Keep all original bytes/draft; unreferenced uploads do not submit a turn.
             let names = frozen.files.map { $0.name.rawValue }.joined(separator: ", ")
-            try store.markDiscussionOutcome(binding, operation: operation,
-                rejection: wasUncertain ? nil : ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
-                context: context)
+            diagnose(.conversation, .discussionPreparation,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                     operationID: operation, request: binding.request, revision: binding.revision,
+                     receipt: wasUncertain ? .unknown : .pendingUnconfirmed)
+            do {
+                try store.markDiscussionOutcome(binding, operation: operation,
+                    rejection: wasUncertain ? nil : ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
+                    context: context)
+            } catch {
+                diagnose(.localStore, .discussionPreparation, .failed, error: error,
+                         operationID: operation, request: binding.request,
+                         revision: binding.revision, receipt: .unknown)
+                throw error
+            }
             throw error
         }
         try validate()
@@ -178,13 +212,26 @@ public actor NativeRelayCore {
         switch result {
         case let .accepted(turn):
             try store.markDiscussionAccepted(binding, operation: operation, turn: turn, context: context)
+            diagnose(.conversation, .discussionSubmission, .accepted, operationID: operation,
+                     request: binding.request, revision: binding.revision,
+                     receipt: .acceptedAwaitingReplay)
             // The accepted turn is durable even if replay temporarily fails. A later
             // refresh joins it; the send response cannot move a replay cursor.
-            try? await replayConversationAndAcknowledge(using: transport)
+            do { try await replayConversationAndAcknowledge(using: transport) }
+            catch {
+                diagnose(.conversation, .conversationReplay,
+                         NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                         operationID: operation, request: binding.request,
+                         revision: binding.revision, receipt: .acceptedAwaitingReplay)
+            }
         case let .rejected(reason):
             try store.markDiscussionOutcome(binding, operation: operation, rejection: reason, context: context)
+            diagnose(.conversation, .discussionSubmission, .rejected, operationID: operation,
+                     request: binding.request, revision: binding.revision, receipt: .pendingUnconfirmed)
         case .unresolved:
             try store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+            diagnose(.conversation, .discussionSubmission, .unresolved, operationID: operation,
+                     request: binding.request, revision: binding.revision, receipt: .unknown)
         }
         return result
     }
@@ -207,7 +254,9 @@ public actor NativeRelayCore {
     public init(store: AttentionDomainStore,
                 context: ProfileContext,
                 session: any AuthenticatedInstallationSession,
-                onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in }) throws {
+                attemptID: UUID? = nil,
+                onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
@@ -217,6 +266,8 @@ public actor NativeRelayCore {
         self.context = context
         self.session = session
         self.onProgress = onProgress
+        self.attemptID = attemptID
+        self.onDiagnostic = onDiagnostic
         self.wire = try RelayWire(profile: context)
     }
 
@@ -255,13 +306,24 @@ public actor NativeRelayCore {
     }
 
     private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
+        diagnose(.conversation, .conversationReplay, .began)
         let wire = try ConversationWire(profile: context)
-        var high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
-            using: transport, wire: wire)
-        do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
-        catch InstallationTransportError.acknowledgementBehind {
-            high = try await replayConversation(since: 0, using: transport, wire: wire)
-            try await transport.acknowledgeConversation(wire.acknowledge(high))
+        do {
+            var high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
+                using: transport, wire: wire)
+            do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
+            catch InstallationTransportError.acknowledgementBehind {
+                diagnose(.conversation, .acknowledgement, .retrying,
+                         error: InstallationTransportError.acknowledgementBehind)
+                high = try await replayConversation(since: 0, using: transport, wire: wire)
+                try await transport.acknowledgeConversation(wire.acknowledge(high))
+            }
+            diagnose(.conversation, .acknowledgement, .completed)
+            diagnose(.conversation, .conversationReplay, .completed)
+        } catch {
+            diagnose(.conversation, .conversationReplay,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            throw error
         }
     }
 
@@ -306,22 +368,33 @@ public actor NativeRelayCore {
         // This is a local intent signal only; relay admission is observed
         // later from the session's authenticated response.
         onProgress(.nativeSyncReplayRequested)
-        var high = try await replay(since: cursor)
-        onProgress(.nativeSyncResynced)
+        diagnose(.relay, .ordinaryReplay, .began)
         do {
-            try await session.acknowledge(wire.acknowledge(high))
-            onProgress(.nativeSyncAcknowledged)
-        } catch InstallationTransportError.acknowledgementBehind {
-            // C may have durably committed a prior replay whose ACK never
-            // reached the server. Re-present the server's complete streamed
-            // history so this session may ACK contiguously from its cursor.
-            onProgress(.nativeSyncReplayRequested)
-            high = try await replay(since: 0)
+            var high = try await replay(since: cursor)
             onProgress(.nativeSyncResynced)
-            try await session.acknowledge(wire.acknowledge(high))
-            onProgress(.nativeSyncAcknowledged)
+            do {
+                try await session.acknowledge(wire.acknowledge(high))
+                onProgress(.nativeSyncAcknowledged)
+            } catch InstallationTransportError.acknowledgementBehind {
+                // C may have durably committed a prior replay whose ACK never
+                // reached the server. Re-present the server's complete streamed
+                // history so this session may ACK contiguously from its cursor.
+                diagnose(.relay, .acknowledgement, .retrying,
+                         error: InstallationTransportError.acknowledgementBehind)
+                onProgress(.nativeSyncReplayRequested)
+                high = try await replay(since: 0)
+                onProgress(.nativeSyncResynced)
+                try await session.acknowledge(wire.acknowledge(high))
+                onProgress(.nativeSyncAcknowledged)
+            }
+            diagnose(.relay, .acknowledgement, .completed)
+            diagnose(.relay, .ordinaryReplay, .completed)
+            return high
+        } catch {
+            diagnose(.relay, .ordinaryReplay,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            throw error
         }
-        return high
     }
 
     private func replay(since cursor: UInt64) async throws -> UInt64 {
@@ -399,18 +472,48 @@ public actor NativeRelayCore {
         var attempted = 0
         for submission in pending {
             try validate()
-            let result = try await session.sendOriginalOperation(submission.wireFrame,
+            diagnose(.answer, .originalOperationDelivery, .began,
+                     operationID: submission.operationID, request: submission.requestKey,
+                     revision: submission.requestRevision, receipt: .pendingUnconfirmed)
+            let result: OriginalOperationResult
+            do {
+                result = try await session.sendOriginalOperation(submission.wireFrame,
                                                                  operationID: submission.operationID)
+            } catch {
+                diagnose(.answer, .originalOperationDelivery,
+                         NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .unknown)
+                throw error
+            }
             try validate()
             attempted += 1
             if case let .accepted(operationID, terminalSequence) = result {
                 guard operationID == submission.operationID, terminalSequence > 0 else {
+                    diagnose(.answer, .originalOperationDelivery, .unresolved,
+                             error: NativeRelayCoreError.mismatchedOperationResult,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
-                try store.recordAcceptedOperation(submission.intentID,
-                                                  operationID: operationID,
-                                                  terminalSequence: terminalSequence,
-                                                  context: context)
+                do {
+                    try store.recordAcceptedOperation(submission.intentID,
+                                                      operationID: operationID,
+                                                      terminalSequence: terminalSequence,
+                                                      context: context)
+                } catch {
+                    diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
+                             operationID: operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                    throw error
+                }
+                diagnose(.answer, .originalOperationDelivery, .accepted,
+                         operationID: operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .acceptedAwaitingReplay)
+            } else {
+                diagnose(.answer, .originalOperationDelivery, .unresolved,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .unknown)
             }
         }
         return attempted
@@ -419,6 +522,21 @@ public actor NativeRelayCore {
     private func isOriginReference(_ event: RelayEvent) -> Bool {
         if case .originReference = event.body { return true }
         return false
+    }
+
+    private func diagnose(_ area: NativeDiagnosticArea,
+                          _ phase: NativeDiagnosticPhase,
+                          _ transition: NativeDiagnosticTransition,
+                          error: Error? = nil,
+                          operationID: UUID? = nil,
+                          request: RequestKey? = nil,
+                          revision: UInt64? = nil,
+                          receipt: NativeDiagnosticReceiptState? = nil) {
+        onDiagnostic(NativeClientDiagnosticEvent(area: area, phase: phase, transition: transition,
+            causeCode: error.map { NativeDiagnosticCauseCode.forError($0) },
+            attemptID: attemptID, transportAttemptID: attemptID,
+            operationID: operationID, request: request,
+            requestRevision: revision, receiptState: receipt))
     }
 
     private func validate() throws {
