@@ -254,7 +254,11 @@ struct LiveRequestDetail: View {
               request.intentReceipt == nil else { return false }
         switch request.projection {
         case .sender: return true
-        case let .compatibility(actions): return !actions.isEmpty
+        case let .compatibility(actions):
+            if request.informationalSeenStatus != nil {
+                return request.informationalSeenStatus == .available && actions.count == 1
+            }
+            return !actions.isEmpty
         case .unsupported: return false
         }
     }
@@ -277,6 +281,12 @@ struct LiveRequestDetail: View {
                 }
                 Text(store.isRetracted(request.key) ? "Retracted" : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                     .font(.caption).foregroundStyle(.secondary)
+                if let seenStatus = request.informationalSeenStatus {
+                    Label(Self.informationalSeenText(seenStatus),
+                          systemImage: Self.informationalSeenSymbol(seenStatus))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("informational-seen-status")
+                }
                 if store.isRetracted(request.key) {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -342,9 +352,11 @@ struct LiveRequestDetail: View {
         }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button(submitLabel, systemImage: "checkmark") { store.submitFromUser(request.key) }
-                    .labelStyle(.iconOnly).disabled(!canAnswer)
-                    .accessibilityIdentifier("request-finish")
+                if request.informationalSeenStatus == nil {
+                    Button(submitLabel, systemImage: "checkmark") { store.submitFromUser(request.key) }
+                        .labelStyle(.iconOnly).disabled(!canAnswer)
+                        .accessibilityIdentifier("request-finish")
+                }
             }
             ToolbarItemGroup(placement: .bottomBar) {
                 Button("Later", systemImage: "clock") { deferred.toggle() }.labelStyle(.iconOnly)
@@ -372,6 +384,24 @@ struct LiveRequestDetail: View {
         }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
+        }
+    }
+
+    private static func informationalSeenText(_ status: InformationalSeenStatus) -> String {
+        switch status {
+        case .available: "Seen available"
+        case .pending: "Seen pending confirmation"
+        case .confirmed: "Seen confirmed"
+        case .resolvedWithoutSeen: "Resolved without Seen confirmation"
+        }
+    }
+
+    private static func informationalSeenSymbol(_ status: InformationalSeenStatus) -> String {
+        switch status {
+        case .available: "info.circle"
+        case .pending: "clock"
+        case .confirmed: "checkmark.circle.fill"
+        case .resolvedWithoutSeen: "checkmark.circle"
         }
     }
 }
@@ -575,29 +605,53 @@ private struct LiveCompatibilityActions: View {
         readOnly ? request.draft.compatibility.selectedActionID : store.request(for: request.key)?.draft.compatibility.selectedActionID
     }
 
+    @ViewBuilder
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(actions, id: \.id) { action in
-                Button {
-                    store.selectAction(action.id, input: nil, for: request.key)
-                } label: {
-                    MessageChoiceLabel(title: action.label.rawValue, detail: "",
-                        selected: selected == action.id, multiple: false, suggested: false)
+        if let seenStatus = request.informationalSeenStatus {
+            switch seenStatus {
+            case .available:
+                if let action = actions.first {
+                    Button {
+                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
+                    } label: {
+                        Label(action.label.rawValue, systemImage: "checkmark.circle")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(readOnly)
+                    .accessibilityIdentifier("request-seen-action")
                 }
-                .buttonStyle(.plain)
-                .accessibilityValue(selected == action.id ? "Selected" : "Not selected")
-                .disabled(readOnly)
+            case .pending:
+                Label("Seen pending confirmation", systemImage: "clock")
+            case .confirmed:
+                Label("Seen confirmed", systemImage: "checkmark.circle.fill")
+            case .resolvedWithoutSeen:
+                Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
             }
-            if let selected,
-               let action = actions.first(where: { $0.id == selected }),
-               action.kind == .text {
-                TextEditor(text: Binding(
-                    get: { (readOnly ? request.draft.compatibility : store.request(for: request.key)?.draft.compatibility)?.textByActionID[selected]?.rawValue ?? "" },
-                    set: { store.updateCompatibilityText($0, action: selected, for: request.key) }
-                ))
-                .frame(minHeight: 120)
-                .accessibilityLabel(action.label.rawValue)
-                .disabled(readOnly)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(actions, id: \.id) { action in
+                    Button {
+                        store.selectAction(action.id, input: nil, for: request.key)
+                    } label: {
+                        MessageChoiceLabel(title: action.label.rawValue, detail: "",
+                            selected: selected == action.id, multiple: false, suggested: false)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(selected == action.id ? "Selected" : "Not selected")
+                    .disabled(readOnly)
+                }
+                if let selected,
+                   let action = actions.first(where: { $0.id == selected }),
+                   action.kind == .text {
+                    TextEditor(text: Binding(
+                        get: { (readOnly ? request.draft.compatibility : store.request(for: request.key)?.draft.compatibility)?.textByActionID[selected]?.rawValue ?? "" },
+                        set: { store.updateCompatibilityText($0, action: selected, for: request.key) }
+                    ))
+                    .frame(minHeight: 120)
+                    .accessibilityLabel(action.label.rawValue)
+                    .disabled(readOnly)
+                }
             }
         }
     }

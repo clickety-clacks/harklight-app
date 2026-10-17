@@ -29,6 +29,158 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
 /// request an optional certificate; that server seam needs server integration.
 @MainActor
 final class NativeGuidedTLSTests: XCTestCase {
+    func testOrdinaryInboxGroupsUnresolvedThenResolvedAndUsesDescendingAcceptanceOrder() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-order"), deviceID: ExactText("device-order"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let olderResolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("older-resolved"))
+        let newerResolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("newer-resolved"))
+        let unresolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("unresolved"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Order check"}"#.utf8))
+
+        _ = store.applyRelayEvent(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: olderResolved, originalPayload: payload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: newerResolved, originalPayload: payload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 3, body: .delivery(StoredRequest(key: unresolved, originalPayload: payload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 4, body: .terminal(newerResolved, .answered, nil)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 5, body: .terminal(olderResolved, .cleared, nil)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let snapshot = try port.observe(context: port.context)
+        XCTAssertEqual(snapshot.requests.map(\.key), [unresolved, newerResolved, olderResolved])
+        XCTAssertEqual(snapshot.cursor, 5, "Presentation ordering must not reverse or advance the causal replay cursor.")
+        XCTAssertEqual(snapshot.requests.map(\.isResolved), [false, true, true])
+    }
+
+    func testExplicitSeenRequiresCanonicalDescriptorAndConfirmsOnlyAuthorizedEvidence() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-seen"), deviceID: ExactText("device-seen"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let seenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("notice"))
+        let remotelySeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("remote-seen"))
+        let competingSeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("competing-seen"))
+        let originSeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("origin-seen"))
+        let legacyKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy"))
+        let misleadingLabelKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("misleading-label"))
+        let seenPayload = try JSONValue.parse(Data(#"{"title":"Release complete","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        let seenValue = try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8))
+        let legacyPayload = try JSONValue.parse(Data(#"{"title":"Legacy request"}"#.utf8))
+        let misleadingLabelPayload = try JSONValue.parse(Data(#"{"title":"Still a request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":"different"}]}}"#.utf8))
+        _ = store.applyRelayEvent(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: seenKey, originalPayload: seenPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: legacyKey, originalPayload: legacyPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 3, body: .delivery(StoredRequest(key: misleadingLabelKey, originalPayload: misleadingLabelPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 4, body: .delivery(StoredRequest(key: remotelySeenKey, originalPayload: seenPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 5, body: .delivery(StoredRequest(key: competingSeenKey, originalPayload: seenPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 6, body: .delivery(StoredRequest(key: originSeenKey, originalPayload: seenPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 7, body: .terminal(remotelySeenKey, .answered, nil)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 8, body: .terminal(originSeenKey, .answered, seenValue)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let initial = try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first)
+        XCTAssertEqual(initial.informationalSeenStatus, .available)
+        XCTAssertNil(try port.observe(context: port.context).requests.first(where: { $0.key == legacyKey })?.informationalSeenStatus)
+        let legacy = try XCTUnwrap(port.inspect(context: port.context, request: legacyKey).requests.first)
+        guard case let .compatibility(legacyActions) = legacy.projection else {
+            return XCTFail("A missing answer_ui must retain the compatibility Reply control.")
+        }
+        XCTAssertEqual(legacyActions.first?.label, ExactText("Reply"))
+        XCTAssertNil(try port.observe(context: port.context).requests.first(where: { $0.key == misleadingLabelKey })?.informationalSeenStatus)
+        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: remotelySeenKey).requests.first).informationalSeenStatus,
+                       .resolvedWithoutSeen,
+                       "An answer-free terminal from another device is not a local operation receipt.")
+        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: originSeenKey).requests.first).informationalSeenStatus,
+                       .confirmed, "An authorized origin answer remains sufficient confirmation.")
+
+        let live = try LivePresentationStore(store: store, context: context)
+        let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
+        XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
+        XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
+
+        try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                          terminalSequence: 9, context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 9, body: .terminal(seenKey, .answered, nil)), context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .confirmed)
+
+        _ = try live.submit(competingSeenKey, explicitCompatibilityAction: ExactText("seen"))
+        _ = store.applyRelayEvent(RelayEvent(sequence: 10, body: .terminal(competingSeenKey, .answered, nil)), context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: competingSeenKey)?.informationalSeenStatus, .resolvedWithoutSeen,
+                       "A competing terminal cannot confirm an unaccepted local Seen operation.")
+    }
+
+    func testSyntheticOrdinaryReplayMapsSeenAndReplyThenConfirmsOnlyAfterMatchingReceiptAndAck() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-wire-order"), deviceID: ExactText("device-wire-order"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let seenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("notice"))
+        let structuredKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("structured"))
+        let legacyKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy"))
+        let session = OrdinaryOrderingRelaySession(identity: identity)
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        let firstHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(firstHigh, 3)
+        XCTAssertEqual(session.acknowledgedSequences(), [3], "The view must follow the durable contiguous cursor ACK.")
+
+        let live = try LivePresentationStore(store: store, context: context)
+        let rows = live.inboxRows
+        XCTAssertEqual(rows.map(\.key), [legacyKey, structuredKey, seenKey],
+                       "The newest unresolved acceptance appears first, independent of sender content type.")
+        XCTAssertEqual(rows.map(\.isResolved), [false, false, false])
+        XCTAssertEqual(rows.last?.symbol, "info.circle")
+
+        let port = AttentionDomainPort(store: store)
+        let seen = try XCTUnwrap(port.inspect(context: port.context, request: seenKey).requests.first)
+        XCTAssertEqual(seen.informationalSeenStatus, .available)
+        guard case let .compatibility(seenActions) = seen.projection else {
+            return XCTFail("The exact informational descriptor must map to one Seen value action.")
+        }
+        XCTAssertEqual(seenActions, [ProjectedAction(id: ExactText("seen"), label: ExactText("Seen"), kind: .value)])
+
+        let structured = try XCTUnwrap(port.inspect(context: port.context, request: structuredKey).requests.first)
+        guard case let .compatibility(structuredActions) = structured.projection else {
+            return XCTFail("A recognized structured answer descriptor must retain its Reply action.")
+        }
+        XCTAssertEqual(structuredActions.map(\.id), [ExactText("approve")])
+        XCTAssertEqual(structuredActions.map(\.label), [ExactText("Approve")])
+        XCTAssertEqual(structuredActions.map(\.kind), [.value])
+
+        let legacy = try XCTUnwrap(port.inspect(context: port.context, request: legacyKey).requests.first)
+        guard case let .compatibility(legacyActions) = legacy.projection else {
+            return XCTFail("A missing answer_ui must remain the compatibility Reply path.")
+        }
+        XCTAssertEqual(legacyActions.map(\.label), [ExactText("Reply")])
+
+        let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
+        let seenAnswer = try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8))
+        XCTAssertEqual(receipt.exactAnswer, seenAnswer)
+        XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
+
+        let secondHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(secondHigh, 4)
+        XCTAssertEqual(session.acknowledgedSequences(), [3, 3, 4],
+                       "The terminal replay is durably applied and ACKed before the refreshed view can confirm Seen.")
+        let sent = try XCTUnwrap(session.sentOriginalOperation())
+        XCTAssertEqual(sent.operationID, receipt.opID)
+        let answerFrame = try JSONValue.parse(sent.frame)
+        XCTAssertEqual(answerFrame.uniqueValue(named: "op_id")?.stringValue, ExactText(receipt.opID.uuidString.lowercased()))
+        XCTAssertEqual(answerFrame.uniqueValue(named: "sender_id")?.stringValue, seenKey.senderID)
+        XCTAssertEqual(answerFrame.uniqueValue(named: "message_id")?.stringValue, seenKey.messageID)
+        XCTAssertEqual(answerFrame.uniqueValue(named: "answer"), receipt.exactAnswer)
+
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .confirmed)
+        XCTAssertEqual(live.request(for: seenKey)?.isResolved, true)
+        XCTAssertEqual(live.openRequests.map(\.key), [legacyKey, structuredKey])
+        XCTAssertEqual(live.resolvedRequests.map(\.key), [seenKey])
+        XCTAssertTrue(live.inboxRows.last?.status.contains("Seen confirmed") == true)
+        XCTAssertTrue(live.inboxRows.last?.isResolved == true,
+                      "Resolved content stays in the ordered inbox projection below open requests.")
+    }
+
     func testAuthenticatedRelayRefusesToFollowAnotherEndpoint() async throws {
         let namespace = "Harklight.relay-redirect-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -1651,6 +1803,88 @@ private final class ForegroundProgressRelaySession: AuthenticatedInstallationSes
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
         originalOperationRecorder.append(operationID: operationID, frame: frame)
         return .unresolved
+    }
+}
+
+/// Feeds exact ordinary v1 relay frames through NativeRelayCore's real decoder,
+/// replay barrier and ACK path without making a network connection.
+private final class OrdinaryOrderingRelaySession: AuthenticatedInstallationSession, @unchecked Sendable {
+    let authenticatedIdentity: ProfileIdentity
+    private let lock = NSLock()
+    private var replayCount = 0
+    private var ackValues: [UInt64] = []
+    private var sentOperation: (UUID, Data)?
+
+    init(identity: ProfileIdentity) { authenticatedIdentity = identity }
+
+    func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        for frame in nextReplayFrames() {
+            try await consume(Data((frame + "\n").utf8))
+        }
+    }
+
+    func acknowledge(_ request: Data) async throws {
+        let value = try JSONValue.parse(request)
+        guard value.uniqueValue(named: "type")?.stringValue == ExactText("ack"),
+              let raw = value.uniqueValue(named: "seq"),
+              case let .number(value) = raw,
+              let sequence = UInt64(value.lexeme) else {
+            throw NativeRelayCoreError.invalidReplay
+        }
+        recordAcknowledgement(sequence)
+    }
+
+    func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        recordSentOperation(operationID, frame: frame)
+        return .accepted(operationID: operationID, terminalSequence: 4)
+    }
+
+    func acknowledgedSequences() -> [UInt64] {
+        lock.lock(); defer { lock.unlock() }
+        return ackValues
+    }
+
+    func sentOriginalOperation() -> (operationID: UUID, frame: Data)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let sentOperation else { return nil }
+        return (sentOperation.0, sentOperation.1)
+    }
+
+    private func recordAcknowledgement(_ sequence: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        ackValues.append(sequence)
+    }
+
+    private func recordSentOperation(_ operationID: UUID, frame: Data) {
+        lock.lock(); defer { lock.unlock() }
+        sentOperation = (operationID, frame)
+    }
+
+    private func nextReplayFrames() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let current = replayCount
+        replayCount += 1
+        switch current {
+        case 0:
+            return [
+                #"{"v":1,"type":"ok","ref":"native-sync"}"#,
+                #"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"notice","origin":"other-installation","as":"message","message":{"title":"Build complete","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}}"#,
+                #"{"v":1,"type":"delivery","seq":2,"sender_id":"sender","message_id":"structured","origin":"other-installation","as":"message","message":{"title":"Approve request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"approve","label":"Approve","kind":"value","value":"approved"}]}}}"#,
+                #"{"v":1,"type":"delivery","seq":3,"sender_id":"sender","message_id":"legacy","origin":"other-installation","as":"message","message":{"title":"Legacy request"}}"#,
+                #"{"v":1,"type":"resynced","seq":3}"#
+            ]
+        case 1:
+            return [
+                #"{"v":1,"type":"ok","ref":"native-sync"}"#,
+                #"{"v":1,"type":"resynced","seq":3}"#
+            ]
+        default:
+            return [
+                #"{"v":1,"type":"ok","ref":"native-sync"}"#,
+                #"{"v":1,"type":"lifecycle","seq":4,"sender_id":"sender","message_id":"notice","origin":"other-installation","state":"answered","by":"agent_answer","request_revision":1,"event_id":"terminal-4","author":"agent"}"#,
+                #"{"v":1,"type":"resynced","seq":4}"#
+            ]
+        }
     }
 }
 

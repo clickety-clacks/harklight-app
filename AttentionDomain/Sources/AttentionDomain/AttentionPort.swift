@@ -220,6 +220,13 @@ public enum AdmittedRequestProjection: Equatable, Sendable {
     case unsupported(UnsupportedInterfaceReason)
 }
 
+public enum InformationalSeenStatus: Equatable, Sendable {
+    case available
+    case pending
+    case confirmed
+    case resolvedWithoutSeen
+}
+
 public struct PresentedRequest: Equatable, Sendable {
     public let key: RequestKey
     /// Durable order assigned by C at first acceptance; consumers preserve this order.
@@ -234,6 +241,11 @@ public struct PresentedRequest: Equatable, Sendable {
     public let receiptFacts: ReceiptPresentationFacts?
     public let intentReceipt: IntentReceipt?
     public let projection: AdmittedRequestProjection
+    public let informationalSeenStatus: InformationalSeenStatus?
+
+    public var isResolved: Bool {
+        lifecycleStatus != .open && lifecycleStatus != .pending
+    }
 
     public init(key: RequestKey,
                 acceptanceOrder: UInt64,
@@ -245,7 +257,8 @@ public struct PresentedRequest: Equatable, Sendable {
                 lifecycleStatus: AppLifecycleStatus,
                 receiptFacts: ReceiptPresentationFacts?,
                 intentReceipt: IntentReceipt?,
-                projection: AdmittedRequestProjection) {
+                projection: AdmittedRequestProjection,
+                informationalSeenStatus: InformationalSeenStatus? = nil) {
         self.key = key
         self.acceptanceOrder = acceptanceOrder
         self.title = title
@@ -257,6 +270,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.receiptFacts = receiptFacts
         self.intentReceipt = intentReceipt
         self.projection = projection
+        self.informationalSeenStatus = informationalSeenStatus
     }
 }
 
@@ -574,11 +588,21 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         }),
                         selector: selectors?[item.request.key])
         }
+        let displayRequests = requests.sorted { left, right in
+            if left.isResolved != right.isResolved { return !left.isResolved }
+            if left.acceptanceOrder != right.acceptanceOrder {
+                return left.acceptanceOrder > right.acceptanceOrder
+            }
+            if left.key.senderID.rawValue != right.key.senderID.rawValue {
+                return left.key.senderID.rawValue < right.key.senderID.rawValue
+            }
+            return left.key.messageID.rawValue < right.key.messageID.rawValue
+        }
         return PresentationSnapshot(revision: snapshot.revision,
                                     cursor: snapshot.cursor,
                                     replayBarrier: snapshot.replayBarrier,
                                     repairIssues: snapshot.repairIssues,
-                                    requests: requests)
+                                    requests: displayRequests)
     }
 
     private func present(_ request: StoredRequest,
@@ -709,7 +733,49 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 lifecycleStatus: status,
                                 receiptFacts: receiptFacts,
                                 intentReceipt: submission.map { receipt($0, context: context) },
-                                projection: projection)
+                                projection: projection,
+                                informationalSeenStatus: informationalSeenStatus(for: request,
+                                    status: status, remote: remote, submission: submission))
+    }
+
+    private func informationalSeenStatus(for request: StoredRequest,
+                                         status: AppLifecycleStatus,
+                                         remote: RemoteRequestState?,
+                                         submission: Submission?) -> InformationalSeenStatus? {
+        guard request.hasExplicitInformationalSeenAction else { return nil }
+        let seenValue = JSONValue.object([
+            JSONMember("acknowledgment", .string(ExactText("seen")))
+        ])
+        if Self.isConfirmedSeenOutcome(status: status, remote: remote, requestKey: request.key,
+                                       submission: submission, seenValue: seenValue) {
+            return .confirmed
+        }
+        if status == .open || status == .pending {
+            return submission?.answer.semanticallyEquals(seenValue) == true ? .pending : .available
+        }
+        return .resolvedWithoutSeen
+    }
+
+    private static func isConfirmedSeenOutcome(status: AppLifecycleStatus,
+                                               remote: RemoteRequestState?,
+                                               requestKey: RequestKey,
+                                               submission: Submission?,
+                                               seenValue: JSONValue) -> Bool {
+        guard status == .answered,
+              remote?.state == .answered,
+              let terminalSequence = remote?.eventSequence else { return false }
+        if let authorizedOriginAnswer = remote?.authorizedOriginAnswer {
+            return authorizedOriginAnswer.semanticallyEquals(seenValue)
+        }
+        // Receiving devices get an answer-free lifecycle. Their local original
+        // operation is authoritative only when its accepted terminal sequence
+        // is the exact terminal now projected for this same request and answer.
+        guard let submission,
+              submission.requestKey == requestKey,
+              submission.answer.semanticallyEquals(seenValue),
+              case let .accepted(acceptedSequence) = submission.disposition,
+              let acceptedSequence else { return false }
+        return acceptedSequence == terminalSequence
     }
 
     private func projectScene(from node: SceneNode,
