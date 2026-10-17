@@ -348,17 +348,33 @@ final class NativeGuidedJoinCoordinator {
 
     func keepCurrentAccount() async {
         guard !busy else { return }
+        let departureAttemptID = UUID()
         // Once removal has been sent, its result may already be committed.
         // Keep the recovery route until the old server confirms the outcome.
-        if let departure = try? store.departure(), !departure.removed {
-            message = "Removal is still unconfirmed. Try again with the current server before keeping or replacing this account."
-            return
+        do {
+            if let departure = try store.departure(), !departure.removed {
+                diagnostics?.record(area: .enrollment, phase: .accountRemoval,
+                                    transition: .unresolved, attemptID: departureAttemptID)
+                message = "Removal is still unconfirmed. Try again with the current server before keeping or replacing this account."
+                return
+            }
+        } catch {
+            // Preserve the existing keep-account path while retaining the
+            // storage cause that the old `try?` discarded.
+            diagnostics?.record(area: .localStore, phase: .accountRemoval,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: departureAttemptID)
         }
         do { try store.dismissConfirmedDeparture() }
         catch {
+            diagnostics?.record(area: .localStore, phase: .accountRemoval,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: departureAttemptID)
             message = "The confirmed removal could not be saved yet. Try again before opening another invitation."
             return
         }
+        diagnostics?.record(area: .localStore, phase: .accountRemoval,
+                            transition: .completed, attemptID: departureAttemptID)
         verificationPending = false
         invitation = nil
         message = nil
@@ -377,6 +393,9 @@ final class NativeGuidedJoinCoordinator {
                 try await finishApproval(currentAccount, epoch: epoch, restoring: true)
             }
         } catch {
+            diagnostics?.record(area: .connection, phase: .approvedConnection,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: departureAttemptID)
             if generation == epoch { explain(error) }
         }
     }
@@ -433,17 +452,25 @@ final class NativeGuidedJoinCoordinator {
     func confirmReplacement() async {
         guard !busy, screen == .replacementConfirmation, let old = currentAccount, let invitation else { return }
         let epoch = generation
+        let removalAttemptID = UUID()
         busy = true
         message = nil
         defer { if generation == epoch { busy = false } }
+        diagnostics?.record(area: .enrollment, phase: .accountRemoval,
+                            transition: .began, attemptID: removalAttemptID)
         do {
             try await store.removeCurrentAccount(old, replacement: invitation)
+            diagnostics?.record(area: .enrollment, phase: .accountRemoval,
+                                transition: .completed, attemptID: removalAttemptID)
             await didRemoveCurrentAccount?()
             guard generation == epoch else { return }
             currentAccount = nil
             attempt = nil
             screen = .confirmation
         } catch {
+            diagnostics?.record(area: .enrollment, phase: .accountRemoval,
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                                error: error, attemptID: removalAttemptID)
             if generation == epoch {
                 message = "Removal could not be confirmed with the current server. This account has been kept. Try again when it is reachable."
                 screen = .replacementConfirmation

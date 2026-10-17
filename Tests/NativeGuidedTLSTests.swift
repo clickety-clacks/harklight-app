@@ -24,6 +24,27 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
     }
 }
 
+private final class ToggleReadFailurePersistence: AttentionStatePersistence, @unchecked Sendable {
+    private let lock = NSLock()
+    private var readsFail = false
+
+    func failReads() {
+        lock.lock()
+        readsFail = true
+        lock.unlock()
+    }
+
+    func load(identity: ProfileIdentity) throws -> Data? {
+        lock.lock()
+        let shouldFail = readsFail
+        lock.unlock()
+        if shouldFail { throw AttentionStoreError.persistence("PRIVATE-STORE-FAILURE") }
+        return nil
+    }
+
+    func commit(_ data: Data, identity: ProfileIdentity) throws {}
+}
+
 /// Actual pinned TLS exercises certificate-free enrollment and the explicit
 /// identity proof required for own-device removal. The iOS listener cannot
 /// request an optional certificate; that server seam needs server integration.
@@ -344,6 +365,37 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertLessThan(earlyPosition.lowerBound, latePosition.lowerBound)
         let restored = NativeClientDiagnosticJournal(fileURL: url)
         XCTAssertEqual(restored.events.map(\.id), [earlier.id, later.id])
+    }
+
+    func testCaughtHistoricalDraftReadFailureIsRetrievableWithSafeRequestContext() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("private-person-marker"),
+                                       deviceID: ExactText("diagnostic-draft-read-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = ToggleReadFailurePersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let journalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightCaughtRead-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: journalURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: journalURL)
+        let presentation = try LivePresentationStore(store: domain, context: context, diagnostics: journal)
+        let request = RequestKey(accountScope: identity.personID,
+                                 senderID: ExactText("private-sender-marker"),
+                                 messageID: ExactText("private-message-marker"))
+        persistence.failReads()
+
+        XCTAssertNil(presentation.historicalAnswerDraft(for: request, revision: 7))
+        let event = try XCTUnwrap(journal.events.last)
+        XCTAssertEqual(event.area, .localStore)
+        XCTAssertEqual(event.phase, .draftLoad)
+        XCTAssertEqual(event.transition, .failed)
+        XCTAssertEqual(event.causeCode, "store_persistence_failure")
+        XCTAssertEqual(event.requestRevision, 7)
+        XCTAssertNotNil(event.requestTag)
+        XCTAssertFalse(journal.shareText.contains("PRIVATE-STORE-FAILURE"))
+        XCTAssertFalse(journal.shareText.contains("private-person-marker"))
+        XCTAssertFalse(journal.shareText.contains("private-sender-marker"))
+        XCTAssertFalse(journal.shareText.contains("private-message-marker"))
     }
 
     func testUncertainRetrySendsOnlyTheSameSavedOperationAndBinding() async throws {

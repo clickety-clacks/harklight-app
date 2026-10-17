@@ -85,7 +85,11 @@ final class NativeAppLaunch {
             if case let .live(previous) = self.state {
                 previous.stopObserving()
                 do { try previous.removeAccountConversationFiles() }
-                catch { self.enrollmentMessage = "The account was removed, but its local conversation file copies could not be removed (\(error))." }
+                catch {
+                    self.diagnostics.record(area: .fileAccess, phase: .fileRetention,
+                        transition: NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+                    self.enrollmentMessage = "The account was removed, but its local conversation file copies could not be removed (\(error))."
+                }
             }
             self.state = .enrollmentRequired
             await NativeRelayLifecycle.shared.deactivate()
@@ -123,7 +127,12 @@ final class NativeAppLaunch {
                                                         label: label)
             let record = try await enrollment.begin(settings: settings,
                                                     pkcs12: pkcs12,
-                                                    password: password)
+                                                    password: password,
+                                                    onPreparedCleanupFailure: { error in
+                                                        diagnostics.record(area: .localStore,
+                                                            phase: .enrollmentCleanup, transition: .failed,
+                                                            error: error, attemptID: attemptID)
+                                                    })
             guard activationGeneration == generation else { return }
             isEnrollmentExpired = false
             state = .enrollmentPending(record)
@@ -403,14 +412,22 @@ final class LivePresentationStore {
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
 
     func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
-        try? port.inspectAnswerDraft(context: port.context, request: key, revision: revision)
+        do { return try port.inspectAnswerDraft(context: port.context, request: key, revision: revision) }
+        catch {
+            diagnose(.localStore, .draftLoad,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                     request: key, revision: revision)
+            return nil
+        }
     }
 
     func removeAccountConversationFiles() throws {
         try conversationFiles?.removeAccountFiles()
     }
 
-    func prepareConversationPreview(_ file: ConversationFile) async throws -> URL {
+    func prepareConversationPreview(_ file: ConversationFile,
+                                    for request: RequestKey,
+                                    revision: UInt64) async throws -> URL {
         guard permitsDelivery, let files = conversationFiles else { throw AttentionStoreError.fixtureOnlyOperation }
         do {
             if let cached = try files.cachedPreview(for: file) { return cached }
@@ -420,7 +437,8 @@ final class LivePresentationStore {
             return destination
         } catch {
             diagnose(.fileAccess, .filePreview,
-                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                     request: request, revision: revision)
             throw error
         }
     }

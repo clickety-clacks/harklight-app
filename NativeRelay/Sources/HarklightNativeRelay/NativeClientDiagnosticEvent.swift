@@ -17,6 +17,8 @@ public enum NativeDiagnosticArea: String, Codable, Sendable {
 public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case invitationVerification
     case enrollmentSubmission
+    case enrollmentCleanup
+    case accountRemoval
     case approvalCheck
     case joinCancellation
     case approvedConnection
@@ -37,6 +39,7 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case fileRetention
     case filePreview
     case draftSave
+    case draftLoad
     case projectionRefresh
 }
 

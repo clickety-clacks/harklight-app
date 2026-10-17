@@ -143,7 +143,10 @@ struct NativeEnrollmentStore {
         return try JSONDecoder().decode(NativeEnrollmentRecord.self, from: data)
     }
 
-    func begin(settings: NativeEnrollmentSettings, pkcs12: Data, password: String) async throws -> NativeEnrollmentRecord {
+    func begin(settings: NativeEnrollmentSettings,
+               pkcs12: Data,
+               password: String,
+               onPreparedCleanupFailure: (@MainActor @Sendable (Error) -> Void)? = nil) async throws -> NativeEnrollmentRecord {
         guard try load() == nil else { throw NativeEnrollmentError.invalidSettings }
         let imported = try importIdentity(pkcs12, password: password)
         var certificate: SecCertificate?
@@ -178,7 +181,8 @@ struct NativeEnrollmentStore {
         try savePrepared(attempt)
         let record = try await requestEnrollment(attempt)
         try save(record)
-        try? deletePrepared()
+        do { try deletePrepared() }
+        catch { await onPreparedCleanupFailure?(error) }
         return record
     }
 
