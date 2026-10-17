@@ -27,7 +27,7 @@ struct NativeForegroundConnectFailureKey: Equatable, Hashable {
     let attemptID: UUID
 
     init?(record: NativeEnrollmentRecord, progress: NativeForegroundConnectProgress) {
-        guard progress.outcome != .confirmed,
+        guard progress.outcome == .incomplete || progress.outcome == .timedOut,
               let attemptID = progress.attemptID,
               let personID = record.personID else { return nil }
         profileAuthority = record.profileAuthority

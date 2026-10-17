@@ -583,6 +583,13 @@ final class NativeGuidedTLSTests: XCTestCase {
                 messageID: "request", requestRevision: 4, receiptState: "unknown")
         ])
         let attemptID = UUID()
+        let connecting = NativeForegroundConnectProgress(lastConfirmedStage: .nativeSyncAcknowledged,
+            webSocketOpenObserved: true, issue: nil, outcome: .connecting, attemptID: attemptID)
+        app.recordForegroundConnectProgress(connecting, operationSnapshot: snapshot)
+        XCTAssertNil(app.foregroundConnectFailureKey,
+                     "An in-flight retry must not consume or present the attempt's failure details.")
+        XCTAssertNil(NativeForegroundConnectFailureKey(record: current, progress: connecting))
+
         let progress = NativeForegroundConnectProgress(lastConfirmedStage: .nativeSyncAcknowledged,
             webSocketOpenObserved: true, issue: nil, outcome: .timedOut, attemptID: attemptID)
         app.recordForegroundConnectProgress(progress, operationSnapshot: snapshot)
