@@ -116,13 +116,15 @@ struct InboxRequestRow: Identifiable {
 /// One ordinary inbox for admitted requests and additive local examples.
 /// Source-bound selections retain the correct domain/view-model action owner.
 @MainActor
-struct HarklightInbox<RequestDetail: View>: View {
+struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let requests: [InboxRequestRow]
     let samples: SampleLibrary
     let selectRequest: (RequestKey) -> Void
     @ViewBuilder let requestDetail: (RequestKey, InboxCardContext) -> RequestDetail
+    @ViewBuilder let settingsContent: () -> SettingsContent
     var warnings: [String] = []
     var conversationStore: LivePresentationStore? = nil
+    var showsLocalExamples = true
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: InboxSelection?
     @State private var visibility: NavigationSplitViewVisibility = .all
@@ -133,7 +135,9 @@ struct HarklightInbox<RequestDetail: View>: View {
     @State private var chatOpen = false
     @State private var windowSize: CGSize = .zero
 
-    private var rows: [InboxItem] { samples.inboxItems(appendingTo: requests) }
+    private var rows: [InboxItem] {
+        showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
+    }
     private var orderedIDs: [InboxSelection] { rows.map(\.id) }
 
     private func preview(for id: InboxSelection) -> InboxCardPreview? {
@@ -204,7 +208,8 @@ struct HarklightInbox<RequestDetail: View>: View {
                                 canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
                                 .id(key)
                         case let .sample(id):
-                            if let message = samples.messages.first(where: { $0.id == id }),
+                            if showsLocalExamples,
+                               let message = samples.messages.first(where: { $0.id == id }),
                                let response = samples.responses[id] {
                                 SampleCardScreen(message: message, response: response, library: samples,
                                     inlineChat: inlineChat, canInlineChat: wideChat,
@@ -239,7 +244,13 @@ struct HarklightInbox<RequestDetail: View>: View {
             .searchFocused($searchFocused)
             .onSubmit(of: .search) { searchFocused = false }
             .onChange(of: samples.selectedID) { _, id in
-                if let id, case .sample = selection { selection = .sample(id) }
+                if showsLocalExamples, let id, case .sample = selection { selection = .sample(id) }
+            }
+            .onChange(of: showsLocalExamples) { _, visible in
+                if !visible, case .sample = selection {
+                    selection = nil
+                    chatOpen = false
+                }
             }
             .onChange(of: samples.messages.count) { _, _ in
                 // Populate the existing list; never present a second navigation stack.
@@ -260,7 +271,7 @@ struct HarklightInbox<RequestDetail: View>: View {
             }
         }
         .background(WorkspaceWindowReader { windowSize = $0 })
-        .sheet(isPresented: $settings) { InboxSettings(samples: samples) }
+        .sheet(isPresented: $settings, content: settingsContent)
         .tint(.blue)
     }
 }

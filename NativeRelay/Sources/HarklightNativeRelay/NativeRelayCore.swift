@@ -5,12 +5,19 @@ import Foundation
 /// certificate and relay peer must already have been authenticated by TLS.
 public protocol AuthenticatedInstallationSession: AnyObject, Sendable {
     var authenticatedIdentity: ProfileIdentity { get }
+    /// Host authenticated for this transport. This can differ from the stable
+    /// profile authority only after an explicit, approved endpoint migration.
+    var relayEndpointHost: String { get }
     /// Delivers bounded individual server frames through `resynced` without
     /// retaining the whole replay in the transport.
     func resync(_ request: Data,
                 consume: @Sendable (Data) async throws -> Void) async throws
     func acknowledge(_ request: Data) async throws
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult
+}
+
+public extension AuthenticatedInstallationSession {
+    var relayEndpointHost: String { authenticatedIdentity.trustedRelayAuthority.rawValue }
 }
 
 public protocol AuthenticatedConversationSession: AuthenticatedInstallationSession {
@@ -159,7 +166,7 @@ public actor NativeRelayCore {
                     }
                 }
             }
-            frame = try ConversationWire(profile: context).discussion(frozen, operationID: operation,
+            frame = try ConversationWire(profile: context, endpointHost: session.relayEndpointHost).discussion(frozen, operationID: operation,
                 preparedFiles: prepared, limits: limits)
         } catch {
             // No discussion frame has been sent by this attempt. A previous
@@ -255,7 +262,7 @@ public actor NativeRelayCore {
     }
 
     private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
-        let wire = try ConversationWire(profile: context)
+        let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
         var high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
             using: transport, wire: wire)
         do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
@@ -282,7 +289,7 @@ public actor NativeRelayCore {
     private func consumeConversationReplay(_ frame: Data) throws {
         try validate()
         guard var replay = conversationReplay, replay.high == nil else { throw NativeRelayCoreError.invalidReplay }
-        let wire = try ConversationWire(profile: context)
+        let wire = try ConversationWire(profile: context, endpointHost: session.relayEndpointHost)
         if !replay.accepted {
             guard try wire.isOpenAccepted(frame) else { throw NativeRelayCoreError.invalidReplay }
             discoveredOriginURL = try wire.originEndpoint(frame)

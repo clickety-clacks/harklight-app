@@ -566,6 +566,52 @@ final class NativeRelayLifecycle {
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER)
     }
 
+    /// Validates a fixed, approved endpoint with the same client identity and
+    /// root before replacing the current transport. The persistence closure is
+    /// called only after the candidate TLS/WebSocket endpoint answers a ping.
+    func migrateEndpoint(to relayURL: URL, persist: () throws -> Void) async throws {
+        guard let current = configuration, let priorCore = core, let priorTransport = transport,
+              current.context.identity.trustedRelayAuthority.rawValue == NativeEndpointMigrationPolicy.sourceHost,
+              current.relayURL.host == NativeEndpointMigrationPolicy.sourceHost,
+              NativeEndpointMigrationPolicy.matchesApprovedRoot(current.rootDER),
+              relayURL.scheme == "wss", relayURL.host == NativeEndpointMigrationPolicy.gibsonHost,
+              relayURL.port == NativeEndpointMigrationPolicy.gibsonRelayPort,
+              relayURL.path == "/relay", relayURL.query == nil, relayURL.fragment == nil,
+              relayURL.user == nil, relayURL.password == nil else {
+            throw NativeRelayCoreError.inactive
+        }
+        let expectedGeneration = refreshGeneration
+        let nextTransport = try URLSessionInstallationSession(profile: current.context,
+                                                              relayURL: relayURL,
+                                                              clientIdentity: TrustedKeychainIdentity(current.identity),
+                                                              trustedRootDER: current.rootDER)
+        var nextCore: NativeRelayCore?
+        do {
+            nextCore = try NativeRelayCore(store: current.store, context: current.context, session: nextTransport)
+            try await nextTransport.verifyEndpoint()
+            guard refreshGeneration == expectedGeneration,
+                  core === priorCore, transport === priorTransport,
+                  configuration?.relayURL == current.relayURL else {
+                throw NativeRelayCoreError.inactive
+            }
+            try persist()
+
+            refreshGeneration = UUID()
+            refreshFlights.reset()
+            confirmedRelayContext = nil
+            core = nextCore
+            transport = nextTransport
+            configuration = (current.store, current.context, relayURL, current.identity, current.rootDER)
+            nextCore = nil
+            await priorCore.deactivate()
+            await priorTransport.close()
+        } catch {
+            if let nextCore { await nextCore.deactivate() }
+            await nextTransport.close()
+            throw error
+        }
+    }
+
     func deactivate() async {
         refreshGeneration = UUID()
         refreshFlights.reset()

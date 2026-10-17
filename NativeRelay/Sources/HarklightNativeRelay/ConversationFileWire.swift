@@ -11,9 +11,10 @@ public enum ConversationFileTransportError: Error, Equatable {
 public struct ConversationFileWire: Sendable {
     public let profile: ProfileContext
     public let originURL: URL
-    public init(profile: ProfileContext, originURL: URL) throws {
+    public init(profile: ProfileContext, originURL: URL, endpointHost: String? = nil) throws {
         guard profile.transportMode == .relay else { throw RelayWireError.wrongActor }
-        guard originURL.scheme == "https", originURL.host == profile.identity.trustedRelayAuthority.rawValue,
+        guard originURL.scheme == "https",
+              originURL.host == (endpointHost ?? profile.identity.trustedRelayAuthority.rawValue),
               originURL.port != nil, originURL.path == "/origin/v1", originURL.query == nil,
               originURL.fragment == nil, originURL.user == nil, originURL.password == nil else {
             throw InstallationTransportError.invalidEndpoint

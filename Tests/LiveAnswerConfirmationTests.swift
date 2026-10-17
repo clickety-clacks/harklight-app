@@ -60,6 +60,27 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
     }
 
+    func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {
+        let (context, store, live, key) = try setup()
+        live.selectAction(ExactText("got-it"), input: nil, for: key)
+        let savedDraft = try XCTUnwrap(live.request(for: key)?.draft)
+        XCTAssertTrue(savedDraft.hasEdits)
+
+        live.enterReadOnlyMode()
+        live.selectAction(ExactText("different"), input: nil, for: key)
+        live.updateCompatibilityText("changed after disconnect", action: ExactText("got-it"), for: key)
+        live.submitFromUser(key)
+        live.retryPendingDelivery()
+
+        XCTAssertTrue(live.isReadOnly)
+        XCTAssertEqual(live.request(for: key)?.draft, savedDraft)
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .open)
+        XCTAssertThrowsError(try live.submit(key))
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertTrue(snapshot.intents.isEmpty)
+        XCTAssertTrue(snapshot.outbox.isEmpty)
+    }
+
     func testAnswerCommittedDuringRefreshGetsADeliveryPassAfterThatRefresh() async {
         let (started, startedSignal) = AsyncStream<Void>.makeStream()
         let (release, releaseSignal) = AsyncStream<Void>.makeStream()

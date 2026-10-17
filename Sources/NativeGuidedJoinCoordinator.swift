@@ -77,8 +77,100 @@ final class NativeGuidedJoinCoordinator {
         }
     }
 
+    func holdForDisconnectedAccount(_ departure: NativeAccountDeparture) {
+        generation = UUID()
+        currentAccount = departure.record
+        invitation = nil
+        attempt = nil
+        message = nil
+        isShowing = false
+        screen = .welcome
+    }
+
+    func restoreAfterStandaloneRemoval() {
+        isShowing = true
+        receivedInvitation = false
+    }
+
+    func prepareStandaloneRemoval(_ record: NativeEnrollmentRecord) throws {
+        guard record.isApproved else { throw NativeJoinError.superseded }
+        currentAccount = record
+        _ = try store.prepareAccountDeparture(record)
+    }
+
+    func removeStandaloneAccount() async throws {
+        guard let departure = try store.departure(), departure.replacement == nil else {
+            throw NativeJoinError.superseded
+        }
+        try await store.removeCurrentAccount(departure.record)
+    }
+
+    /// The app may move only the endpoint of the currently approved identity.
+    /// Check this before committing that move, then replace the coordinator's
+    /// record alongside the durable enrollment so the inbox Retry cannot reopen
+    /// a cached hostname.
+    func canAdoptEndpointMigration(from original: NativeEnrollmentRecord,
+                                   to migrated: NativeEnrollmentRecord) -> Bool {
+        guard original.isApproved, migrated.isApproved,
+              NativeAuthorityBinding.samePerson(original.personID, migrated.personID),
+              original.deviceID == migrated.deviceID,
+              original.identityLabel == migrated.identityLabel,
+              original.trustedRootDER == migrated.trustedRootDER,
+              original.profileAuthority == migrated.profileAuthority,
+              migrated.host == NativeEndpointMigrationPolicy.gibsonHost,
+              migrated.enrollmentPort == original.enrollmentPort,
+              migrated.relayPort == original.relayPort,
+              migrated.pushBinding == original.pushBinding else {
+            return false
+        }
+        guard let currentAccount else { return true }
+        return currentAccount.isApproved &&
+            NativeAuthorityBinding.samePerson(currentAccount.personID, original.personID) &&
+            currentAccount.deviceID == original.deviceID &&
+            currentAccount.identityLabel == original.identityLabel &&
+            currentAccount.trustedRootDER == original.trustedRootDER &&
+            currentAccount.profileAuthority == original.profileAuthority &&
+            currentAccount.host == original.host &&
+            currentAccount.enrollmentPort == original.enrollmentPort &&
+            currentAccount.relayPort == original.relayPort
+    }
+
+    /// Call only after the migrated enrollment record has been persisted and
+    /// `canAdoptEndpointMigration` succeeded in the same MainActor turn.
+    func adoptPersistedEndpointMigration(_ migrated: NativeEnrollmentRecord) {
+        currentAccount = migrated
+    }
+
+    func beginReconnect() {
+        guard !busy else { return }
+        generation = UUID()
+        verificationPending = false
+        receivedInvitation = false
+        invitation = nil
+        attempt = nil
+        currentAccount = nil
+        message = nil
+        screen = .welcome
+        isShowing = true
+    }
+
+    func returnToDisconnectedAccount() {
+        guard !busy else { return }
+        generation = UUID()
+        verificationPending = false
+        invitation = nil
+        currentAccount = nil
+        message = nil
+        isShowing = false
+        screen = .welcome
+    }
+
     func receive(_ url: URL) async {
         guard !busy else { return }
+        if let departure = try? store.departure(), departure.replacement == nil, !departure.removed {
+            message = "Removal is still unconfirmed. Retry it with the original server before connecting again."
+            return
+        }
         let epoch = UUID()
         generation = epoch
         receivedInvitation = true
@@ -90,7 +182,10 @@ final class NativeGuidedJoinCoordinator {
         defer { if generation == epoch { busy = false } }
         do {
             if let departure = try store.departure() {
-                if departure.removed { try store.dismissConfirmedDeparture() }
+                if departure.removed {
+                    if departure.replacement == nil { try store.finishConfirmedDeparture(departure) }
+                    else { try store.dismissConfirmedDeparture() }
+                }
                 else {
                     invitation = departure.replacement
                     currentAccount = try store.approvedRecord()

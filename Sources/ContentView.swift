@@ -20,6 +20,7 @@ struct ContentView: View {
                     RequestDetailView(store: store, requestKey: key,
                                       accessibilityFocus: $accessibilityFocus, context: context)
                 },
+                settingsContent: { InboxSettings(samples: samples) },
                 warnings: [store.persistenceError].compactMap { $0 })
         }
     }
