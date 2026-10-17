@@ -1,4 +1,5 @@
 import Foundation
+import HarklightNativeRelay
 import Observation
 
 @MainActor

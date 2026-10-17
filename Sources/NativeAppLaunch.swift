@@ -931,7 +931,7 @@ final class LivePresentationStore {
     }
 }
 
-private enum LiveReplyError: Error {
+enum LiveReplyError: Error {
     case localExample
     case notOpen
     case incomplete
