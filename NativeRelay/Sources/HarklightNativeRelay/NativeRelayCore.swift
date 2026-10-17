@@ -55,6 +55,14 @@ public enum NativeRelayCoreError: Error, Equatable {
 /// The first native relay seam. C is the only durable owner of events, cursor,
 /// drafts, intents, receipts and outbox; this object holds no shadow journal.
 public actor NativeRelayCore {
+    private struct OperationReplayDiagnosticState: Equatable {
+        let transition: NativeDiagnosticTransition
+        let causeCode: String?
+        let request: RequestKey
+        let revision: UInt64?
+        let receipt: NativeDiagnosticReceiptState?
+    }
+
     private let store: AttentionDomainStore
     private let context: ProfileContext
     private let session: any AuthenticatedInstallationSession
@@ -69,6 +77,10 @@ public actor NativeRelayCore {
     private var inspectedConversationMetadata = false
     private var discoveredOriginURL: URL?
     private var activeCleanupRequests: Set<UUID> = []
+    // This cache contains only accepted operations that still await their exact
+    // terminal replay. Removing a terminal entry keeps memory bounded by current
+    // outstanding work, not the account's retained history.
+    private var operationReplayDiagnosticStates: [UUID: OperationReplayDiagnosticState] = [:]
 
     public func conversationOriginURL() throws -> URL? {
         try validate()
@@ -296,14 +308,35 @@ public actor NativeRelayCore {
         let enrich = session is any AuthenticatedConversationSession && !inspectedConversationMetadata &&
             snapshot.conversationThreads.isEmpty && !snapshot.requests.isEmpty
         let before = enrich ? 0 : snapshot.cursor
-        var high = try await replayAndAcknowledge(since: before)
+        let acceptedBeforeReplay = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
+        retainReplayDiagnostics(for: acceptedBeforeReplay)
+        var high = try await replayAndAcknowledge(since: before,
+                                                   trackingAcceptedOperations: acceptedBeforeReplay)
         inspectedConversationMetadata = true
-        let attempted = try await drainPending()
+        let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            .map(\.operationID))
+        let attempted: Int
+        do {
+            attempted = try await drainPending()
+        } catch {
+            // A later operation may fail after an earlier operation was
+            // accepted. Record that the accepted operation's terminal replay
+            // was not reached, without attributing the later operation's
+            // transport error to it.
+            let acceptedAfterInterruptedDrain = (try? store.acceptedOperationsAwaitingTerminalReplay(context: context)) ?? []
+            for submission in acceptedAfterInterruptedDrain where !acceptedBeforeDrain.contains(submission.operationID) {
+                diagnoseOperationReplay(.unresolved,
+                         causeCode: "follow_on_replay_not_reached",
+                         submission: submission, receipt: .acceptedAwaitingReplay)
+            }
+            throw error
+        }
         if attempted > 0 {
             // The answer may have created a terminal event after the first
             // replay. Commit and ACK it before publishing the refreshed view;
             // an operation's receipt sequence cannot advance C's cursor.
-            high = try await replayAndAcknowledge(since: store.snapshot(context: context).cursor)
+            high = try await replayAndAcknowledge(since: high,
+                trackingAcceptedOperations: try store.acceptedOperationsAwaitingTerminalReplay(context: context))
         }
         if try !store.conversationSnapshot(context: context).threads.isEmpty,
            let conversationSession = session as? any AuthenticatedConversationSession {
@@ -401,6 +434,77 @@ public actor NativeRelayCore {
             diagnose(.relay, .ordinaryReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
             throw error
+        }
+    }
+
+    private func replayAndAcknowledge(since cursor: UInt64,
+                                      trackingAcceptedOperations submissions: [Submission]) async throws -> UInt64 {
+        guard !submissions.isEmpty else {
+            return try await replayAndAcknowledge(since: cursor)
+        }
+        for submission in submissions where operationReplayDiagnosticStates[submission.operationID] == nil {
+            // Record the first operation-bound pending phase before replay can
+            // suspend. Later refreshes retain the state cache, so this same
+            // unchanged observation is not rewritten on every poll.
+            diagnoseOperationReplay(.began, submission: submission,
+                                    receipt: .acceptedAwaitingReplay)
+        }
+        do {
+            let high = try await replayAndAcknowledge(since: cursor)
+            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            let outstandingOperationIDs = outstanding.map { Set($0.map(\.operationID)) }
+            for submission in submissions {
+                let terminalWasObserved = outstandingOperationIDs.map { !$0.contains(submission.operationID) } ?? false
+                if terminalWasObserved {
+                    diagnoseOperationReplay(.completed, submission: submission, receipt: .terminal)
+                } else {
+                    diagnoseOperationReplay(.unresolved,
+                             causeCode: outstanding == nil ? "original_operation_state_unavailable" :
+                                "original_operation_terminal_not_observed",
+                             submission: submission,
+                             receipt: outstanding == nil ? .unknown : .acceptedAwaitingReplay)
+                }
+            }
+            return high
+        } catch {
+            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            let outstandingOperationIDs = outstanding.map { Set($0.map(\.operationID)) }
+            for submission in submissions {
+                diagnoseOperationReplay(NativeDiagnosticCauseCode.failureTransition(for: error),
+                         causeCode: NativeDiagnosticCauseCode.forError(error),
+                         submission: submission,
+                         receipt: outstandingOperationIDs.map {
+                            $0.contains(submission.operationID) ? .acceptedAwaitingReplay : .terminal
+                         } ?? .unknown)
+            }
+            throw error
+        }
+    }
+
+    private func diagnoseOperationReplay(_ transition: NativeDiagnosticTransition,
+                                        causeCode: String? = nil,
+                                        submission: Submission,
+                                        receipt: NativeDiagnosticReceiptState?) {
+        let state = OperationReplayDiagnosticState(transition: transition,
+                                                   causeCode: causeCode,
+                                                   request: submission.requestKey,
+                                                   revision: submission.requestRevision,
+                                                   receipt: receipt)
+        guard operationReplayDiagnosticStates[submission.operationID] != state else { return }
+        if receipt == .terminal {
+            operationReplayDiagnosticStates.removeValue(forKey: submission.operationID)
+        } else {
+            operationReplayDiagnosticStates[submission.operationID] = state
+        }
+        diagnose(.answer, .ordinaryReplay, transition, causeCode: causeCode,
+                 operationID: submission.operationID, request: submission.requestKey,
+                 revision: submission.requestRevision, receipt: receipt)
+    }
+
+    private func retainReplayDiagnostics(for submissions: [Submission]) {
+        let outstanding = Set(submissions.map(\.operationID))
+        operationReplayDiagnosticStates = operationReplayDiagnosticStates.filter {
+            outstanding.contains($0.key)
         }
     }
 
@@ -535,12 +639,13 @@ public actor NativeRelayCore {
                           _ phase: NativeDiagnosticPhase,
                           _ transition: NativeDiagnosticTransition,
                           error: Error? = nil,
+                          causeCode: String? = nil,
                           operationID: UUID? = nil,
                           request: RequestKey? = nil,
                           revision: UInt64? = nil,
                           receipt: NativeDiagnosticReceiptState? = nil) {
         onDiagnostic(NativeClientDiagnosticEvent(area: area, phase: phase, transition: transition,
-            causeCode: error.map { NativeDiagnosticCauseCode.forError($0) },
+            causeCode: causeCode ?? error.map { NativeDiagnosticCauseCode.forError($0) },
             attemptID: attemptID, transportAttemptID: attemptID,
             operationID: operationID, request: request,
             requestRevision: revision, receiptState: receipt))

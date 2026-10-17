@@ -41,6 +41,7 @@ final class NativeClientDiagnosticJournal {
     var hasEvents: Bool { !events.isEmpty || persistenceStatus != .new }
 
     func record(_ event: NativeClientDiagnosticEvent) {
+        guard !isUnchangedOperationReplayState(event) else { return }
         // URLSession and actor callbacks may reach the main-actor journal in a
         // different order than they occurred. Keep the exported history in
         // event-time order while preserving arrival order for equal timestamps.
@@ -52,6 +53,23 @@ final class NativeClientDiagnosticJournal {
             events.removeFirst(events.count - Self.retainedEventLimit)
         }
         persist()
+    }
+
+    private func isUnchangedOperationReplayState(_ event: NativeClientDiagnosticEvent) -> Bool {
+        guard event.area == .answer,
+              event.phase == .ordinaryReplay,
+              let operationID = event.operationID,
+              let previous = events.last(where: {
+                  $0.area == .answer && $0.phase == .ordinaryReplay && $0.operationID == operationID
+              }) else { return false }
+        // A new transport attempt with the same receipt, phase and cause is not
+        // a new operation state. The connection-level journal still records
+        // that transport attempt; avoid rewriting this same operation summary.
+        return previous.transition == event.transition &&
+            previous.causeCode == event.causeCode &&
+            previous.requestTag == event.requestTag &&
+            previous.requestRevision == event.requestRevision &&
+            previous.receiptState == event.receiptState
     }
 
     func record(area: NativeDiagnosticArea,

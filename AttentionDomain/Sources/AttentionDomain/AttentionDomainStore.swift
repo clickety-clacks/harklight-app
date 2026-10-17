@@ -138,6 +138,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private let conversationFileReferences: (any ConversationFileReferenceStore)?
     private let maximumWireFrameBytes: Int
     private var state: PersistedAttentionState
+    // Accepted answers leave the outbox but remain unresolved until their exact
+    // terminal sequence has been replayed. Keep only those operations in a
+    // request-keyed in-memory index so reconnects do not rescan settled history.
+    private var acceptedAwaitingTerminalReplay: [RequestKey: Submission] = [:]
     private var selectorBindings: [UUID: SelectorBinding] = [:]
     private var changeObservers: [UUID: AsyncStream<UInt64>.Continuation] = [:]
     private var isInvalidated = false
@@ -163,9 +167,19 @@ public final class AttentionDomainStore: @unchecked Sendable {
             let validDrafts = loaded.drafts.keys.allSatisfy { requestKeys.contains($0) }
             let validSessions = loaded.fixtureSessions.keys.allSatisfy { requestKeys.contains($0) }
             let validRemoteStates = loaded.remoteStates.keys.allSatisfy { requestKeys.contains($0) }
-            let validIntents = loaded.intents.allSatisfy { entry in
-                entry.key == entry.value.intentID && requestKeys.contains(entry.value.requestKey) &&
-                    entry.value.requestKey.accountScope == context.identity.personID
+            var validIntents = true
+            var acceptedAwaitingReplay: [RequestKey: Submission] = [:]
+            for entry in loaded.intents {
+                let submission = entry.value
+                guard entry.key == submission.intentID,
+                      requestKeys.contains(submission.requestKey),
+                      submission.requestKey.accountScope == context.identity.personID else {
+                    validIntents = false
+                    break
+                }
+                if Self.isAcceptedAwaitingTerminalReplay(submission, appliedEvents: loaded.appliedEvents) {
+                    acceptedAwaitingReplay[submission.requestKey] = submission
+                }
             }
             let validIntentIndex = loaded.intentByRequest.allSatisfy { entry in
                 loaded.intents[entry.value]?.requestKey == entry.key
@@ -186,6 +200,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             self.state = try Self.externalizingConversationFiles(in: loaded,
                 using: conversationFileReferences,
                 allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+            self.acceptedAwaitingTerminalReplay = acceptedAwaitingReplay
         } else {
             self.state = PersistedAttentionState(profileIdentity: context.identity)
         }
@@ -448,6 +463,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             next.replayPublishedIntents = published
         }
         try commit(next)
+        refreshAcceptedReplayIndex(for: intent.requestKey)
     }
 
     public func recordClosedOperation(_ intentID: UUID,
@@ -489,6 +505,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             next.replayPublishedStates = publishedStates
         }
         try commit(next)
+        refreshAcceptedReplayIndex(for: intent.requestKey)
     }
 
     public func recordFixtureTerminal(_ terminal: FixtureTerminal,
@@ -631,6 +648,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
         }
         try commit(next)
+        if case let .terminal(requestKey, _, _) = event.body {
+            refreshAcceptedReplayIndex(for: requestKey)
+        }
         return state.cursor
     }
 
@@ -855,6 +875,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       replayBarrier: state.replayBarrier,
                                       repairIssues: state.repairIssues,
                                       conversationThreads: state.conversation?.threads ?? [:])
+    }
+
+    /// Returns only accepted original operations whose exact terminal sequence
+    /// has not yet been observed. The store builds this small index at load and
+    /// updates it with the same durable mutations that accept or replay events.
+    public func acceptedOperationsAwaitingTerminalReplay(context suppliedContext: ProfileContext) throws -> [Submission] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        return acceptedAwaitingTerminalReplay.values.sorted {
+            $0.operationID.uuidString < $1.operationID.uuidString
+        }
     }
 
     public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
@@ -1354,10 +1386,40 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 // edits when recovering that older durable snapshot. This scan
                 // runs only after a failed commit, never on the normal edit path.
                 state = normalized
+                acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: normalized)
             }
             if let storeError = error as? AttentionStoreError { throw storeError }
             throw AttentionStoreError.persistence(error.localizedDescription)
         }
+    }
+
+    private func refreshAcceptedReplayIndex(for requestKey: RequestKey) {
+        guard let intentID = state.intentByRequest[requestKey],
+              let submission = state.intents[intentID],
+              Self.isAcceptedAwaitingTerminalReplay(submission, appliedEvents: state.appliedEvents) else {
+            acceptedAwaitingTerminalReplay.removeValue(forKey: requestKey)
+            return
+        }
+        acceptedAwaitingTerminalReplay[requestKey] = submission
+    }
+
+    private static func acceptedAwaitingTerminalReplay(in state: PersistedAttentionState) -> [RequestKey: Submission] {
+        var result: [RequestKey: Submission] = [:]
+        for submission in state.intents.values where
+            isAcceptedAwaitingTerminalReplay(submission, appliedEvents: state.appliedEvents) {
+            result[submission.requestKey] = submission
+        }
+        return result
+    }
+
+    private static func isAcceptedAwaitingTerminalReplay(_ submission: Submission,
+                                                          appliedEvents: [UInt64: RelayEvent]) -> Bool {
+        guard case let .accepted(expectedSequence) = submission.disposition else { return false }
+        guard let expectedSequence,
+              let event = appliedEvents[expectedSequence],
+              case let .terminal(requestKey, _, _) = event.body,
+              requestKey == submission.requestKey else { return true }
+        return false
     }
 
     private static func externalizingConversationFiles(in file: ConversationFile,

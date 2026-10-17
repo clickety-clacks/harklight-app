@@ -66,6 +66,8 @@ targets:
     dependencies:
       - package: AttentionDomain
         product: AttentionDomain
+      - package: HarklightNativeRelay
+        product: HarklightNativeRelay
       - target: AttentionClientDuoPrototype
     settings:
       base:
