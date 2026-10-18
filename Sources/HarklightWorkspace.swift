@@ -157,6 +157,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var navigatedBetweenMessages = false
     @State private var restoreLastViewedOnReturn = false
     @State private var chatOpen = false
+    @State private var conversationPresented = false
     @State private var windowSize: CGSize = .zero
 
     private var rows: [InboxItem] {
@@ -170,7 +171,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func navigate(to next: InboxSelection?) {
         guard selection != next else { return }
+        let previous = selection
         selection = next
+        // Keep departure cleanup bound to the explicit identity transition;
+        // split-view adaptation changes columns without leaving this message.
+        selectionDidChange(from: previous, to: next)
     }
 
     private func selectionDidChange(from previous: InboxSelection?, to next: InboxSelection?) {
@@ -245,6 +250,42 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
     }
 
+    @ViewBuilder
+    private var conversationPresentation: some View {
+        NavigationStack {
+            Group {
+                switch selection {
+                case let .request(key):
+                    if let conversationStore,
+                       let request = conversationStore.request(for: key) {
+                        ConversationPanel(store: conversationStore, key: key,
+                                          sender: key.senderID.rawValue,
+                                          title: request.title?.rawValue ?? "")
+                    } else {
+                        ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right")
+                    }
+                case let .sample(id):
+                    if let message = samples.messages.first(where: { $0.id == id }),
+                       let response = samples.responses[id] {
+                        ConversationPanel(store: response.viewModel, key: response.key,
+                                          sender: message.sender, title: message.title)
+                            .onAppear { response.chatRead = true }
+                    } else {
+                        ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right")
+                    }
+                case nil:
+                    ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right")
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close", systemImage: "xmark") { conversationPresented = false }
+                        .labelStyle(.iconOnly)
+                }
+            }
+        }
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let landscape = windowSize.width > windowSize.height
@@ -270,7 +311,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             switch selection {
                             case let .request(key):
                                 requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
-                                    canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
+                                    canInlineChat: wideChat, openChat: {
+                                        if wideChat { chatOpen.toggle() }
+                                        else { conversationPresented = true }
+                                    }))
                                     .id(key)
                             case let .sample(id):
                                 if showsLocalExamples,
@@ -278,7 +322,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                    let response = samples.responses[id] {
                                     SampleCardScreen(response: response,
                                         context: cardContext(for: .sample(id), inlineChat: inlineChat,
-                                            canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
+                                            canInlineChat: wideChat, openChat: {
+                                                if wideChat { chatOpen.toggle() }
+                                                else { conversationPresented = true }
+                                            }))
                                         .id(id)
                                 }
                             case nil:
@@ -314,10 +361,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .navigationSplitViewStyle(.balanced)
-            .onChange(of: selection) { previous, next in
-                // All detail departures flow through the selected identity, even when
-                // SwiftUI restores sample selection while the layout adapts.
-                selectionDidChange(from: previous, to: next)
+            .sheet(isPresented: $conversationPresented) {
+                conversationPresentation
+                    .presentationDetents([.medium, .large])
             }
             .onChange(of: samples.selectedID) { _, id in
                 guard showsLocalExamples, case .sample = selection else { return }

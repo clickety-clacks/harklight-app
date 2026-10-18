@@ -543,8 +543,12 @@ struct LiveRequestDetail: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 if horizontalSizeClass == .regular && UIDevice.current.userInterfaceIdiom == .phone {
-                    chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                        conversationPanel.frame(idealWidth: 380, idealHeight: 560)
+                    if context.openChat == nil {
+                        chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
+                            conversationPanel.frame(idealWidth: 380, idealHeight: 560)
+                        }
+                    } else {
+                        chatButton
                     }
                 }
             }
@@ -556,16 +560,18 @@ struct LiveRequestDetail: View {
                 .labelStyle(.iconOnly)
                 .disabled(store.isReadOnly || store.isRetracted(request.key) || localExample?.finished == true)
                 Spacer()
-                if context.canInlineChat {
-                    chatButton
-                } else if horizontalSizeClass == .compact {
-                    chatButton.sheet(isPresented: $chatPresented) {
-                        conversationPanel
-                            .presentationDetents([.medium, .large])
-                    }
-                } else if UIDevice.current.userInterfaceIdiom != .phone {
-                    chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                        conversationPanel.frame(idealWidth: 380, idealHeight: 560)
+                if horizontalSizeClass != .regular || UIDevice.current.userInterfaceIdiom != .phone {
+                    if context.openChat != nil || context.canInlineChat {
+                        chatButton
+                    } else if horizontalSizeClass == .compact {
+                        chatButton.sheet(isPresented: $chatPresented) {
+                            conversationPanel
+                                .presentationDetents([.medium, .large])
+                        }
+                    } else if UIDevice.current.userInterfaceIdiom != .phone {
+                        chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
+                            conversationPanel.frame(idealWidth: 380, idealHeight: 560)
+                        }
                     }
                 }
             }
@@ -581,7 +587,8 @@ struct LiveRequestDetail: View {
     private var chatButton: some View {
         Button("Chat", systemImage: "bubble.left.and.bubble.right") {
             localExample?.chatRead = true
-            if context.canInlineChat { context.openChat?() } else { chatPresented = true }
+            if let openChat = context.openChat { openChat() }
+            else { chatPresented = true }
         }
         .labelStyle(.iconOnly)
     }
