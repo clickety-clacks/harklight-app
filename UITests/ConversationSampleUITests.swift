@@ -8,7 +8,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
         enterSearch("Thursday", in: app)
-        let row = app.buttons["sample-information-0"]
+        let row = app.buttons["request-row-sample-information-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         app.buttons["Chat"].tap()
