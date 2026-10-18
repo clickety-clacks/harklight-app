@@ -214,16 +214,18 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     // SwiftUI writes this binding for its native compact Back navigation.
-    // Our adaptive/programmatic changes write state directly, not this setter.
+    // A column change can also come from split-view adaptation, so it never
+    // clears the selected message or records a departure by itself.
     private var compactNavigation: Binding<NavigationSplitViewColumn> {
-        Binding(get: { compactColumn }, set: { column in
-            if compactColumn == .detail, column == .sidebar,
-               horizontalSizeClass == .compact {
-                restoreLastViewedListPosition()
-                navigate(to: nil)
-            }
-            compactColumn = column
-        })
+        Binding(get: { compactColumn }, set: { compactColumn = $0 })
+    }
+
+    private func returnToInbox() {
+        restoreLastViewedListPosition()
+        chatOpen = false
+        navigate(to: nil)
+        compactColumn = .sidebar
+        visibility = .all
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
@@ -264,24 +266,35 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             } detail: {
                 HStack(spacing: 0) {
                     NavigationStack {
-                        switch selection {
-                        case let .request(key):
-                            requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
-                                canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
-                                .id(key)
-                        case let .sample(id):
-                            if showsLocalExamples,
-                               samples.messages.contains(where: { $0.id == id }),
-                               let response = samples.responses[id] {
-                                SampleCardScreen(response: response,
-                                    context: cardContext(for: .sample(id), inlineChat: inlineChat,
-                                        canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
-                                    .id(id)
+                        Group {
+                            switch selection {
+                            case let .request(key):
+                                requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
+                                    canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
+                                    .id(key)
+                            case let .sample(id):
+                                if showsLocalExamples,
+                                   samples.messages.contains(where: { $0.id == id }),
+                                   let response = samples.responses[id] {
+                                    SampleCardScreen(response: response,
+                                        context: cardContext(for: .sample(id), inlineChat: inlineChat,
+                                            canInlineChat: wideChat, openChat: { chatOpen.toggle() }))
+                                        .id(id)
+                                }
+                            case nil:
+                                HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
                             }
-                        case nil:
-                            HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
                         }
+                        .toolbar {
+                            if selection != nil && horizontalSizeClass == .compact {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button("Harklight", systemImage: "chevron.left", action: returnToInbox)
+                                        .accessibilityIdentifier("harklight-detail-back")
+                                }
+                            }
+                        }
+                        .navigationBarBackButtonHidden(selection != nil && horizontalSizeClass == .compact)
                     }
                     .frame(maxWidth: .infinity)
                     if inlineChat, case let .request(key) = selection, let conversationStore,
@@ -312,7 +325,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .onChange(of: showsLocalExamples) { _, visible in
                 if !visible, case .sample = selection {
-                    selection = nil
+                    navigate(to: nil)
                     chatOpen = false
                 }
             }

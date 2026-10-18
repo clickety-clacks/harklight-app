@@ -56,7 +56,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         guard card.exists else { return }
         let searchButton = app.buttons["inbox-search-button"]
         let searchField = app.textFields["inbox-search-field"]
-        let back = app.navigationBars.buttons.firstMatch
+        let back = app.buttons["harklight-detail-back"]
         if back.exists && back.isHittable {
             back.tap()
         } else {

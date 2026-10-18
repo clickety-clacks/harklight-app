@@ -157,7 +157,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let requestRow = app.descendants(matching: .any)["request-row-facilities-01"]
         guard !requestRow.isHittable else { return }
 
-        let backButton = app.navigationBars.buttons.firstMatch
+        let backButton = app.buttons["harklight-detail-back"]
         if backButton.exists && backButton.isHittable {
             backButton.tap()
         } else {
