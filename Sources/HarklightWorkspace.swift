@@ -104,6 +104,11 @@ enum InboxSelection: Hashable {
     case sample(String)
 }
 
+enum InboxMessageTab: String, Hashable {
+    case unseen
+    case seen
+}
+
 struct InboxRequestRow: Identifiable {
     let key: RequestKey
     let title: String
@@ -115,7 +120,18 @@ struct InboxRequestRow: Identifiable {
     var createdAt: Date? = nil
     var isLocalExample = false
     var localStatus: String? = nil
+    var informationalSeenStatus: InformationalSeenStatus? = nil
+    var canMarkSeen = false
+    var localSeenSelected = false
     var id: RequestKey { key }
+
+    var belongsToSeenTab: Bool {
+        if localSeenSelected { return true }
+        switch informationalSeenStatus {
+        case .some(.pending), .some(.confirmed): true
+        case .some(.available), .some(.resolvedWithoutSeen), .none: false
+        }
+    }
 }
 
 /// One ordinary inbox for admitted requests and additive local examples.
@@ -125,6 +141,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let requests: [InboxRequestRow]
     let samples: SampleLibrary
     let selectRequest: (RequestKey) -> Void
+    var markSeenRequest: (RequestKey) -> Void = { _ in }
     @ViewBuilder let requestDetail: (RequestKey, InboxCardContext) -> RequestDetail
     @ViewBuilder let settingsContent: () -> SettingsContent
     var warnings: [String] = []
@@ -135,8 +152,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var visibility: NavigationSplitViewVisibility = .all
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     @State private var settings = false
-    @State private var search = ""
-    @FocusState private var searchFocused: Bool
+    @State private var selectedTab: InboxMessageTab = .unseen
+    @State private var lastViewedSelection: InboxSelection?
+    @State private var navigatedBetweenMessages = false
+    @State private var restoreLastViewedOnReturn = false
     @State private var chatOpen = false
     @State private var windowSize: CGSize = .zero
 
@@ -159,8 +178,35 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newExample: RequestKey? = if case let .sample(id) = next { samples.responses[id]?.key } else { nil }
         samples.fixture?.viewModel.navigateMessage(from: oldExample, to: newExample)
         selection = next
+        if let next { lastViewedSelection = next }
         if let newRequest { selectRequest(newRequest) }
         if case let .sample(id) = next { samples.select(id) }
+    }
+
+    private func markSeen(_ id: InboxSelection) {
+        switch id {
+        case let .request(key):
+            guard rows.first(where: { $0.id == id })?.canMarkSeen == true else { return }
+            markSeenRequest(key)
+        case let .sample(sampleID):
+            guard let response = samples.responses[sampleID], response.canMarkSeenLocally else { return }
+            response.finishLocally()
+        }
+    }
+
+    private func restoreLastViewedListPosition() {
+        guard navigatedBetweenMessages else {
+            restoreLastViewedOnReturn = false
+            return
+        }
+        navigatedBetweenMessages = false
+        guard let lastViewedSelection,
+              let lastViewedItem = rows.first(where: { $0.id == lastViewedSelection }) else {
+            restoreLastViewedOnReturn = false
+            return
+        }
+        selectedTab = lastViewedItem.belongsToSeenTab ? .seen : .unseen
+        restoreLastViewedOnReturn = true
     }
 
     // SwiftUI writes this binding for its native compact Back navigation.
@@ -168,7 +214,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private var compactNavigation: Binding<NavigationSplitViewColumn> {
         Binding(get: { compactColumn }, set: { column in
             if compactColumn == .detail, column == .sidebar,
-               horizontalSizeClass == .compact { navigate(to: nil) }
+               horizontalSizeClass == .compact {
+                restoreLastViewedListPosition()
+                navigate(to: nil)
+            }
             compactColumn = column
         })
     }
@@ -185,6 +234,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 guard let current = orderedIDs.firstIndex(of: id),
                       orderedIDs.indices.contains(current + direction) else { return }
                 let next = orderedIDs[current + direction]
+                navigatedBetweenMessages = true
                 navigate(to: next)
             }
     }
@@ -195,10 +245,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
             NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: compactNavigation) {
-                InboxList(rows: rows, search: $search,
-                          selected: selection, compact: horizontalSizeClass == .compact,
-                          showSettings: { settings = true }, select: { id in
-                    searchFocused = false
+                InboxList(rows: rows, selected: selection, selectedTab: $selectedTab,
+                          lastViewedSelection: lastViewedSelection,
+                          restoreLastViewed: restoreLastViewedOnReturn,
+                          didRestoreLastViewed: { restoreLastViewedOnReturn = false },
+                          showSettings: { settings = true }, markSeen: markSeen, select: { id in
+                    navigatedBetweenMessages = selection != nil && selection != id
+                    restoreLastViewedOnReturn = false
                     navigate(to: id)
                     compactColumn = .detail
                     if !landscape { visibility = .detailOnly }
@@ -244,9 +297,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .navigationSplitViewStyle(.balanced)
-            .searchable(text: $search, placement: horizontalSizeClass == .compact ? .automatic : .navigationBarDrawer(displayMode: .always), prompt: "Search")
-            .searchFocused($searchFocused)
-            .onSubmit(of: .search) { searchFocused = false }
             .onChange(of: samples.selectedID) { _, id in
                 if showsLocalExamples, let id, case .sample = selection { selection = .sample(id) }
             }
@@ -283,16 +333,47 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 @MainActor
 struct InboxList: View {
     let rows: [InboxItem]
-    @Binding var search: String
     let selected: InboxSelection?
-    let compact: Bool
+    @Binding var selectedTab: InboxMessageTab
+    let lastViewedSelection: InboxSelection?
+    let restoreLastViewed: Bool
+    let didRestoreLastViewed: () -> Void
     let showSettings: () -> Void
+    let markSeen: (InboxSelection) -> Void
     let select: (InboxSelection) -> Void
+    @State private var search = ""
+    @State private var searchPresented = false
+    @FocusState private var searchFocused: Bool
 
     private var filteredRows: [InboxItem] {
-        search.isEmpty ? rows : rows.filter {
-            $0.preview.title.localizedCaseInsensitiveContains(search) || $0.preview.sender.localizedCaseInsensitiveContains(search)
+        let inTab = rows.filter { $0.belongsToSeenTab == (selectedTab == .seen) }
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return inTab }
+        return inTab.filter {
+            $0.preview.title.localizedCaseInsensitiveContains(query) ||
+            $0.preview.sender.localizedCaseInsensitiveContains(query) ||
+            $0.preview.body.localizedCaseInsensitiveContains(query)
         }
+    }
+
+    private func restoreLastViewed(using proxy: ScrollViewProxy) {
+        guard restoreLastViewed else { return }
+        guard let lastViewedSelection,
+              rows.contains(where: { $0.id == lastViewedSelection }) else {
+            didRestoreLastViewed()
+            return
+        }
+        if !filteredRows.contains(where: { $0.id == lastViewedSelection }) {
+            search = ""
+            return
+        }
+        proxy.scrollTo(lastViewedSelection, anchor: .center)
+        didRestoreLastViewed()
+    }
+
+    private func openSettings() {
+        searchFocused = false
+        showSettings()
     }
 
     var body: some View {
@@ -300,7 +381,10 @@ struct InboxList: View {
             ScrollView {
                 LazyVStack(spacing: 1) {
                     ForEach(filteredRows) { row in
-                        Button { select(row.id) } label: {
+                        Button {
+                            searchFocused = false
+                            select(row.id)
+                        } label: {
                             switch row {
                             case let .request(request):
                                 InboxRowContent(row: request, selected: selected == row.id)
@@ -313,24 +397,108 @@ struct InboxList: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if row.canMarkSeen {
+                                Button { markSeen(row.id) } label: {
+                                    Label("Seen", systemImage: "checkmark")
+                                }
+                                .tint(.blue)
+                                .accessibilityIdentifier("inbox-mark-seen")
+                            }
+                        }
                         .id(row.id)
                         .accessibilityIdentifier(row.accessibilityID)
                     }
                 }
             }
             .background { Color(uiColor: .systemGroupedBackground).ignoresSafeArea() }
-            .onAppear { if let selected { proxy.scrollTo(selected, anchor: .center) } }
+            .swipeActionsContainer()
+            .scrollDismissesKeyboard(.interactively)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                InboxBottomControls(selectedTab: $selectedTab, search: $search,
+                    isSearchPresented: $searchPresented, searchFocused: $searchFocused,
+                    showSettings: openSettings)
+            }
+            .onAppear { restoreLastViewed(using: proxy) }
+            .onChange(of: restoreLastViewed) { _, shouldRestore in
+                if shouldRestore { restoreLastViewed(using: proxy) }
+            }
+            .onChange(of: search) { _, _ in
+                if restoreLastViewed { restoreLastViewed(using: proxy) }
+            }
             .toolbar {
-                DefaultToolbarItem(kind: .search, placement: compact ? .bottomBar : .automatic)
                 ToolbarItem(placement: .principal) { HarklightBrand() }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("Settings", systemImage: "gearshape", action: showSettings)
-                        .labelStyle(.iconOnly).accessibilityIdentifier("inbox-settings")
+                    if !searchPresented {
+                        Button("Settings", systemImage: "gearshape", action: openSettings)
+                            .labelStyle(.iconOnly).accessibilityIdentifier("inbox-settings")
+                    }
                 }
             }
             .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
             .navigationTitle("Harklight")
             .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+struct InboxBottomControls: View {
+    @Binding var selectedTab: InboxMessageTab
+    @Binding var search: String
+    @Binding var isSearchPresented: Bool
+    @FocusState.Binding var searchFocused: Bool
+    let showSettings: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if isSearchPresented {
+                TextField("Search", text: $search)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 16)
+                    .frame(height: 46)
+                    .glassEffect(.regular, in: Capsule())
+                    .focused($searchFocused)
+                    .submitLabel(.search)
+                    .accessibilityIdentifier("inbox-search-field")
+                    .onSubmit { searchFocused = false }
+                Button("Close search", systemImage: "xmark") {
+                    searchFocused = false
+                    search = ""
+                    withAnimation(.snappy(duration: 0.28)) { isSearchPresented = false }
+                }
+                .labelStyle(.iconOnly)
+                .frame(width: 46, height: 46)
+                .glassEffect(.regular, in: Circle())
+                .accessibilityIdentifier("inbox-search-dismiss")
+                Button("Settings", systemImage: "gearshape", action: showSettings)
+                    .labelStyle(.iconOnly)
+                    .frame(width: 46, height: 46)
+                    .glassEffect(.regular, in: Circle())
+                    .accessibilityIdentifier("inbox-settings-search")
+            } else {
+                Picker("Message status", selection: $selectedTab) {
+                    Label("Unseen", systemImage: "envelope.badge").tag(InboxMessageTab.unseen)
+                    Label("Seen", systemImage: "envelope.open").tag(InboxMessageTab.seen)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 280)
+                .glassEffect(.regular, in: Capsule())
+                .accessibilityIdentifier("inbox-message-tabs")
+                Spacer(minLength: 8)
+                Button("Search", systemImage: "magnifyingglass") {
+                    withAnimation(.snappy(duration: 0.28)) { isSearchPresented = true }
+                }
+                .labelStyle(.iconOnly)
+                .frame(width: 46, height: 46)
+                .glassEffect(.regular, in: Circle())
+                .accessibilityIdentifier("inbox-search-button")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .onChange(of: isSearchPresented) { _, isPresented in
+            searchFocused = isPresented
         }
     }
 }

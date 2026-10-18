@@ -1053,7 +1053,9 @@ final class LivePresentationStore {
                 status: statusParts.joined(separator: " · "),
                 bodyText: $0.body?.rawValue,
                 symbol: $0.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: $0.isResolved, createdAt: $0.createdAt)
+                isResolved: $0.isResolved, createdAt: $0.createdAt,
+                informationalSeenStatus: $0.informationalSeenStatus,
+                canMarkSeen: !isReadOnly && $0.informationalSeenStatus == .available)
         }
     }
 

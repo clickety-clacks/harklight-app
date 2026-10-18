@@ -94,7 +94,7 @@ final class SampleResponse {
         statusParts.append(viewModel.isRetracted(key)
             ? "Retracted"
             : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-        if let seen = request.informationalSeenStatus {
+        if let seen = request.informationalSeenStatus, !localSeenSelected {
             statusParts.append(LiveRequestDetail.informationalSeenText(seen))
         }
         let localStatus: String?
@@ -114,7 +114,22 @@ final class SampleResponse {
             bodyText: request.body?.rawValue,
             symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
             isResolved: request.isResolved, createdAt: request.createdAt,
-            isLocalExample: true, localStatus: localStatus)
+            isLocalExample: true, localStatus: localStatus,
+            informationalSeenStatus: request.informationalSeenStatus,
+            localSeenSelected: localSeenSelected)
+    }
+
+    var localSeenSelected: Bool {
+        guard finished, let request = viewModel.request(for: key) else { return false }
+        return request.informationalSeenStatus == .available
+    }
+
+    var canMarkSeenLocally: Bool {
+        guard let request = viewModel.request(for: key),
+              request.lifecycleStatus == .open,
+              request.intentReceipt == nil,
+              request.informationalSeenStatus == .available else { return false }
+        return !finished && !deferred
     }
 
     var canFinishLocally: Bool {

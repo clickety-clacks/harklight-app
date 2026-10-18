@@ -35,6 +35,7 @@ struct LiveContentView: View {
             })
         HarklightInbox(
             requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
+            markSeenRequest: { store.submitFromUser($0, explicitCompatibilityAction: ExactText("seen")) },
             requestDetail: { key, context in
                 if let request = store.request(for: key) {
                     LiveRequestDetail(request: request, store: store, context: context)

@@ -20,6 +20,20 @@ enum InboxItem: Identifiable {
         }
     }
 
+    @MainActor var belongsToSeenTab: Bool {
+        switch self {
+        case let .request(row): row.belongsToSeenTab
+        case let .example(_, response): response.localSeenSelected
+        }
+    }
+
+    @MainActor var canMarkSeen: Bool {
+        switch self {
+        case let .request(row): row.canMarkSeen
+        case let .example(_, response): response.canMarkSeenLocally
+        }
+    }
+
     var accessibilityID: String {
         switch self {
         case let .request(row): "request-row-" + row.key.messageID.rawValue
