@@ -1252,6 +1252,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"), deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
+        let transportAttemptID = UUID()
         let persistence = MemoryAttentionStatePersistence()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
         let session = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
@@ -1272,7 +1273,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 do { _ = try await core.resyncAndDrainOutbox() }
                 catch { XCTFail("The fixture replay must complete: \(error)"); return .unavailable }
                 currentConfirmation = context
-                return await NativeRelayRefreshResult.afterConfirmedRelay(context: context) { .notAttempted }
+                return await NativeRelayRefreshResult.afterConfirmedRelay(context: context, transportAttemptID: transportAttemptID) { .notAttempted }
             }
             secondStartedSignal.yield()
             for await _ in releaseSecond { break }
@@ -1292,25 +1293,28 @@ final class NativeGuidedTLSTests: XCTestCase {
         for await _ in secondStarted { break }
         let completed = await initial.value
         XCTAssertNil(currentConfirmation, "The old shared confirmation has already been cleared.")
-        XCTAssertTrue(completed.confirms(context),
+        XCTAssertTrue(completed.confirms(context, transportAttemptID: transportAttemptID),
                       "Foreground validation must use the completed flight's profile, not the next flight's state.")
         XCTAssertEqual(session.cursorAtAcknowledgement, 1)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         let saved = try persistence.load(identity: identity)
 
         let replacementGeneration = ProfileContext(identity: identity, transportMode: .relay)
-        XCTAssertFalse(completed.confirms(replacementGeneration),
+        XCTAssertFalse(completed.confirms(replacementGeneration, transportAttemptID: transportAttemptID),
                        "Confirmation cannot cross profile generations even for the same device.")
         let differentDevice = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: identity.trustedRelayAuthority, personID: identity.personID,
             deviceID: ExactText("device-B")), generation: context.generation, transportMode: .relay)
-        XCTAssertFalse(completed.confirms(differentDevice))
-        XCTAssertFalse(NativeRelayRefreshResult.unavailable.confirms(context))
+        XCTAssertFalse(completed.confirms(differentDevice, transportAttemptID: transportAttemptID))
+        XCTAssertFalse(completed.confirms(context, transportAttemptID: UUID()),
+                       "A completed refresh cannot confirm a subsequently replaced transport.")
+        XCTAssertFalse(completed.confirms(context, transportAttemptID: nil))
+        XCTAssertFalse(NativeRelayRefreshResult.unavailable.confirms(context, transportAttemptID: transportAttemptID))
 
         releaseSecondSignal.yield()
         let later = await callback.value
-        XCTAssertFalse(later.confirms(context), "A later failed refresh cannot borrow the earlier success.")
-        XCTAssertTrue(completed.confirms(context), "A later failure cannot rewrite the earlier result.")
+        XCTAssertFalse(later.confirms(context, transportAttemptID: transportAttemptID), "A later failed refresh cannot borrow the earlier success.")
+        XCTAssertTrue(completed.confirms(context, transportAttemptID: transportAttemptID), "A later failure cannot rewrite the earlier result.")
         XCTAssertEqual(try persistence.load(identity: identity), saved)
         await core.deactivate()
     }
@@ -1319,10 +1323,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"), deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let result = await NativeRelayRefreshResult.afterConfirmedRelay(context: context) {
+        let transportAttemptID = UUID()
+        let result = await NativeRelayRefreshResult.afterConfirmedRelay(context: context, transportAttemptID: transportAttemptID) {
             throw URLError(.cannotConnectToHost)
         }
-        XCTAssertTrue(result.confirms(context))
+        XCTAssertTrue(result.confirms(context, transportAttemptID: transportAttemptID))
         XCTAssertEqual(result.pushRegistration, .unconfirmed)
     }
 
