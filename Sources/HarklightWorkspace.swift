@@ -146,6 +146,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder let settingsContent: () -> SettingsContent
     var warnings: [String] = []
     var conversationStore: LivePresentationStore? = nil
+    var fetchOlderInboxPage: (() async -> Bool)? = nil
     var showsLocalExamples = true
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: InboxSelection?
@@ -332,7 +333,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           lastViewedSelection: lastViewedSelection,
                           restoreLastViewed: restoreLastViewedOnReturn,
                           didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                          showSettings: { settings = true }, markSeen: markSeen, select: { id in
+                          showSettings: { settings = true }, markSeen: markSeen,
+                          fetchOlderInboxPage: fetchOlderInboxPage, select: { id in
                     UIDiagnostics.shared.record("inbox.rowTap \(UIDiagnostics.describe(id)) selection=\(UIDiagnostics.describe(selection)) landscape=\(landscape)")
                     restoreLastViewedOnReturn = false
                     navigate(to: id)
@@ -455,10 +457,15 @@ struct InboxList: View {
     let didRestoreLastViewed: () -> Void
     let showSettings: () -> Void
     let markSeen: (InboxSelection) -> Void
+    let fetchOlderInboxPage: (() async -> Bool)?
     let select: (InboxSelection) -> Void
     @State private var search = ""
     @State private var searchPresented = false
     @FocusState private var searchFocused: Bool
+    @State private var scrollMetrics = InboxScrollMetrics.empty
+    @State private var isUserScrolling = false
+    @State private var requestedInGesture = false
+    @State private var isFetchingOlderPage = false
 
     private var filteredRows: [InboxItem] {
         let inTab = rows.filter { $0.belongsToSeenTab == (selectedTab == .seen) }
@@ -514,6 +521,17 @@ struct InboxList: View {
         ].joined(separator: " | ")
     }
 
+    private func requestOlderPage() {
+        guard !requestedInGesture, !isFetchingOlderPage,
+              let fetchOlderInboxPage else { return }
+        requestedInGesture = true
+        isFetchingOlderPage = true
+        Task {
+            _ = await fetchOlderInboxPage()
+            isFetchingOlderPage = false
+        }
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -547,6 +565,9 @@ struct InboxList: View {
                         .id(row.id)
                         .accessibilityIdentifier(row.accessibilityID)
                     }
+                    if isFetchingOlderPage {
+                        ProgressView().frame(maxWidth: .infinity).padding()
+                    }
                 }
             }
             .background { Color(uiColor: .systemGroupedBackground).ignoresSafeArea() }
@@ -567,6 +588,37 @@ struct InboxList: View {
             .onChange(of: selectedTab) { _, _ in
                 if !restoreLastViewed { showFirstRow(using: proxy) }
             }
+            .onScrollGeometryChange(for: InboxScrollMetrics.self) { geometry in
+                let top = geometry.contentOffset.y + geometry.contentInsets.top
+                let extent = max(0, geometry.contentSize.height - geometry.containerSize.height +
+                    geometry.contentInsets.top + geometry.contentInsets.bottom)
+                return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
+                    distanceToBottom: max(0, extent - top), contentFits: extent == 0)
+            } action: { oldMetrics, newMetrics in
+                scrollMetrics = newMetrics
+                guard isUserScrolling,
+                      newMetrics.offsetY > oldMetrics.offsetY + 1,
+                      newMetrics.distanceToBottom <= 80 else { return }
+                requestOlderPage()
+            }
+            .onScrollPhaseChange { oldPhase, newPhase in
+                let scrolling = newPhase == .interacting || newPhase == .decelerating
+                if scrolling && !isUserScrolling { requestedInGesture = false }
+                isUserScrolling = scrolling
+                if oldPhase == .interacting && !scrolling { requestedInGesture = false }
+            }
+            .simultaneousGesture(DragGesture(minimumDistance: 10)
+                .onChanged { value in
+                    guard value.translation.height < -12 else { return }
+                    isUserScrolling = true
+                    if scrollMetrics.contentFits || scrollMetrics.distanceToBottom <= 80 {
+                        requestOlderPage()
+                    }
+                }
+                .onEnded { _ in
+                    isUserScrolling = false
+                    requestedInGesture = false
+                })
             .toolbar {
                 ToolbarItem(placement: .principal) { HarklightBrand() }
                 ToolbarItem(placement: .primaryAction) {
@@ -643,6 +695,15 @@ struct InboxBottomControls: View {
             searchFocused = isPresented
         }
     }
+}
+
+private struct InboxScrollMetrics: Equatable {
+    let offsetY: CGFloat
+    let distanceToBottom: CGFloat
+    let contentFits: Bool
+
+    static let empty = InboxScrollMetrics(offsetY: 0, distanceToBottom: .greatestFiniteMagnitude,
+                                          contentFits: false)
 }
 
 struct InboxRowContent: View {

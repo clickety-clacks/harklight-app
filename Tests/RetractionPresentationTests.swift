@@ -125,7 +125,7 @@ final class RetractionPresentationTests: XCTestCase {
     }
 }
 
-private final class RetractionSession: AuthenticatedConversationSession, @unchecked Sendable {
+private final class RetractionSession: AuthenticatedInboxPagingSession, AuthenticatedConversationSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     let domain: AttentionDomainStore
     let context: ProfileContext

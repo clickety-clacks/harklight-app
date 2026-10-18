@@ -13,20 +13,37 @@ struct NativeRelayRefreshResult: Equatable, Sendable {
 
     let relayConfirmed: Bool
     let pushRegistration: PushRegistration
-    static let unavailable = Self(relayConfirmed: false, pushRegistration: .notAttempted)
+    // Confirmation belongs to the refresh that produced this result. A queued
+    // refresh can start before its predecessor's foreground waiter resumes.
+    let confirmedContext: ProfileContext?
+    let confirmedTransportAttemptID: UUID?
+    static let unavailable = Self(relayConfirmed: false, pushRegistration: .notAttempted,
+                                  confirmedContext: nil, confirmedTransportAttemptID: nil)
+
+    func confirms(_ expected: ProfileContext, transportAttemptID: UUID?) -> Bool {
+        guard let transportAttemptID else { return false }
+        return relayConfirmed && confirmedContext == expected &&
+            confirmedTransportAttemptID == transportAttemptID
+    }
 
     // No pending registration is not proof of notification permission/delivery.
     var completedWithoutError: Bool { relayConfirmed && pushRegistration != .unconfirmed }
 
     @MainActor
     static func afterConfirmedRelay(
+        context: ProfileContext? = nil,
+        transportAttemptID: UUID? = nil,
         onFailure: @MainActor (Error) -> Void = { _ in },
         _ registration: @MainActor () async throws -> PushRegistration
     ) async -> Self {
-        do { return Self(relayConfirmed: true, pushRegistration: try await registration()) }
+        do {
+            return Self(relayConfirmed: true, pushRegistration: try await registration(),
+                        confirmedContext: context, confirmedTransportAttemptID: transportAttemptID)
+        }
         catch {
             onFailure(error)
-            return Self(relayConfirmed: true, pushRegistration: .unconfirmed)
+            return Self(relayConfirmed: true, pushRegistration: .unconfirmed,
+                        confirmedContext: context, confirmedTransportAttemptID: transportAttemptID)
         }
     }
 }
@@ -1015,10 +1032,11 @@ final class NativeRelayLifecycle {
         let epoch = refreshGeneration
         var result = await foregroundDeadline.run(deadline: deadline, operation: { [weak self] in
             guard let self else { return false }
-            let relayConfirmed = await self.refreshFromTrustedRelay()
+            let refresh = await self.refreshResultFromTrustedRelay()
+            let relayConfirmed = refresh.relayConfirmed
             let generationMatches = self.refreshGeneration == epoch
             let profileMatches = self.context == expected
-            let relayContextMatches = self.confirmedRelayContext == expected
+            let relayContextMatches = refresh.confirms(expected, transportAttemptID: self.activeTransportAttemptID)
             guard self.foregroundDeadline.progress.outcome == .connecting else { return false }
             let beforeValidation = self.foregroundDeadline.progress
             let postAckReached = beforeValidation.lastCompletedPostAckBoundary != .none || relayConfirmed
@@ -1139,6 +1157,21 @@ final class NativeRelayLifecycle {
         await refreshFlights.afterCurrent()
     }
 
+    @discardableResult
+    func fetchNextInboxPage() async -> Bool {
+        guard let core, let context, !requiresExplicitForegroundRetry else { return false }
+        do {
+            let fetched = try await core.fetchNextInboxPage()
+            guard self.context == context else { return false }
+            return fetched
+        } catch {
+            recordDiagnostic(.relay, .ordinaryReplay,
+                NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                attemptID: activeTransportAttemptID)
+            return false
+        }
+    }
+
     func recordPushRegistrationFailure(_ error: Error? = nil,
                                       causeCode: String? = nil,
                                       area: NativeDiagnosticArea = .notifications) {
@@ -1238,7 +1271,8 @@ final class NativeRelayLifecycle {
         }
         // Notification setup is a separate fact from the replay/answer receipt
         // already committed above. Its refusal cannot undo that success.
-        return await NativeRelayRefreshResult.afterConfirmedRelay(onFailure: { [weak self] error in
+        return await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: activeTransportAttemptID, onFailure: { [weak self] error in
             self?.recordDiagnostic(.notifications, .pushRegistration, .failed,
                                    error: error, attemptID: self?.activeTransportAttemptID)
         }) {

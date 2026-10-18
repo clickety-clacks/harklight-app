@@ -1,11 +1,83 @@
 import Foundation
 import AttentionDomain
 import CryptoKit
-import HarklightNativeRelay
+@testable import HarklightNativeRelay
 import Network
 import Security
 import XCTest
 @testable import AttentionClientDuoPrototype
+
+private final class PagingExchangeSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var signaled = false
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            let resumeImmediately = signaled
+            if !resumeImmediately { self.continuation = continuation }
+            lock.unlock()
+            if resumeImmediately { continuation.resume() }
+        }
+    }
+
+    func signal() {
+        lock.lock()
+        signaled = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
+
+private actor PagingControlledReplyChannel {
+    private var sentRequests: [String] = []
+    private var pendingRequests: [String] = []
+    private var requestWaiters: [CheckedContinuation<String, Never>] = []
+    private var pendingReplies: [String] = []
+    private var replyWaiters: [CheckedContinuation<String, Never>] = []
+
+    func send(_ request: String) {
+        sentRequests.append(request)
+        if !requestWaiters.isEmpty {
+            requestWaiters.removeFirst().resume(returning: request)
+        } else {
+            pendingRequests.append(request)
+        }
+    }
+
+    func nextRequest() async -> String {
+        await withCheckedContinuation { continuation in
+            if !pendingRequests.isEmpty {
+                continuation.resume(returning: pendingRequests.removeFirst())
+            } else {
+                requestWaiters.append(continuation)
+            }
+        }
+    }
+
+    func receive() async -> String {
+        await withCheckedContinuation { continuation in
+            if !pendingReplies.isEmpty {
+                continuation.resume(returning: pendingReplies.removeFirst())
+            } else {
+                replyWaiters.append(continuation)
+            }
+        }
+    }
+
+    func respond(_ reply: String) {
+        if !replyWaiters.isEmpty {
+            replyWaiters.removeFirst().resume(returning: reply)
+        } else {
+            pendingReplies.append(reply)
+        }
+    }
+
+    func requestsSent() -> [String] { sentRequests }
+}
 
 private final class NativeDiagnosticEventCollector: @unchecked Sendable {
     private let lock = NSLock()
@@ -29,6 +101,58 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
 /// request an optional certificate; that server seam needs server integration.
 @MainActor
 final class NativeGuidedTLSTests: XCTestCase {
+    func testNativeRelayACKAndPushExchangesKeepFIFORepliesWithTheirRequests() async {
+        let pushWaiting = PagingExchangeSignal()
+        let gate = RelaySocketExchangeGate(onWaiterQueued: { pushWaiting.signal() })
+        let channel = PagingControlledReplyChannel()
+
+        func exchange(_ request: String) async -> String {
+            await gate.enter()
+            defer { gate.leave() }
+            await channel.send(request)
+            return await channel.receive()
+        }
+
+        let acknowledgement = Task { await exchange("ack:seq:7") }
+        let firstRequest = await channel.nextRequest()
+        XCTAssertEqual(firstRequest, "ack:seq:7")
+        let pushRegistration = Task { await exchange("push_register:revision:3") }
+        await pushWaiting.wait()
+
+        let requestsWhileACKOwnsReply = await channel.requestsSent()
+        XCTAssertEqual(requestsWhileACKOwnsReply, ["ack:seq:7"],
+                       "Push registration must wait while the ACK owns the FIFO reply waiter.")
+        await channel.respond("ok:ref:native-ack:seq:7")
+        let acknowledgementReply = await acknowledgement.value
+        XCTAssertEqual(acknowledgementReply, "ok:ref:native-ack:seq:7")
+
+        let secondRequest = await channel.nextRequest()
+        XCTAssertEqual(secondRequest, "push_register:revision:3")
+        await channel.respond("ok:ref:native-push:revision:3")
+        let pushReply = await pushRegistration.value
+        XCTAssertEqual(pushReply, "ok:ref:native-push:revision:3")
+        let allRequests = await channel.requestsSent()
+        XCTAssertEqual(allRequests, ["ack:seq:7", "push_register:revision:3"])
+    }
+
+    func testNativeRelayCursorAccessValidatesItsProfileContext() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-A"),
+                                       deviceID: ExactText("installation-A"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        XCTAssertEqual(try store.relayCursor(context: context), 0)
+
+        let otherIdentity = ProfileIdentity(trustedRelayAuthority: context.identity.trustedRelayAuthority,
+                                            personID: ExactText("person-B"),
+                                            deviceID: ExactText("installation-B"))
+        let otherContext = ProfileContext(identity: otherIdentity, transportMode: .relay)
+        XCTAssertThrowsError(try store.relayCursor(context: otherContext))
+
+        store.invalidate()
+        XCTAssertThrowsError(try store.relayCursor(context: context))
+    }
+
     func testOrdinaryInboxGroupsUnresolvedThenResolvedAndUsesDescendingAcceptanceOrder() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-order"), deviceID: ExactText("device-order"))
@@ -161,8 +285,8 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         let secondHigh = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(secondHigh, 4)
-        XCTAssertEqual(session.acknowledgedSequences(), [3, 3, 4],
-                       "The terminal replay is durably applied and ACKed before the refreshed view can confirm Seen.")
+        XCTAssertEqual(session.acknowledgedSequences(), [3, 4],
+                       "The checkpoint at 3 is ACKed separately; only the post-H terminal uses ordinary ACK.")
         let sent = try XCTUnwrap(session.sentOriginalOperation())
         XCTAssertEqual(sent.operationID, receipt.opID)
         let answerFrame = try JSONValue.parse(sent.frame)
@@ -1248,6 +1372,89 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(rejectedIdentity.progress.message.contains("could not offer its identity to the saved relay host"))
     }
 
+    func testCompletedRefreshKeepsItsConfirmedProfileWhileQueuedRefreshBegins() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-A"), deviceID: ExactText("device-A"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let transportAttemptID = UUID()
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let session = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let (firstStarted, firstStartedSignal) = AsyncStream<Void>.makeStream()
+        let (releaseFirst, releaseFirstSignal) = AsyncStream<Void>.makeStream()
+        let (callbackQueued, callbackQueuedSignal) = AsyncStream<Void>.makeStream()
+        let (secondStarted, secondStartedSignal) = AsyncStream<Void>.makeStream()
+        let (releaseSecond, releaseSecondSignal) = AsyncStream<Void>.makeStream()
+        var passes = 0
+        var currentConfirmation: ProfileContext?
+        let flights = RelayRefreshFlights(inactive: NativeRelayRefreshResult.unavailable) {
+            passes += 1
+            currentConfirmation = nil
+            if passes == 1 {
+                firstStartedSignal.yield()
+                for await _ in releaseFirst { break }
+                do { _ = try await core.resyncAndDrainOutbox() }
+                catch { XCTFail("The fixture replay must complete: \(error)"); return .unavailable }
+                currentConfirmation = context
+                return await NativeRelayRefreshResult.afterConfirmedRelay(context: context, transportAttemptID: transportAttemptID) { .notAttempted }
+            }
+            secondStartedSignal.yield()
+            for await _ in releaseSecond { break }
+            return .unavailable
+        }
+
+        let initial = Task { await flights.coalesced() }
+        for await _ in firstStarted { break }
+        let callback = Task {
+            callbackQueuedSignal.yield()
+            return await flights.afterCurrent()
+        }
+        for await _ in callbackQueued { break }
+        releaseFirstSignal.yield()
+        // Model the foreground waiter resuming after a normal APNs/answer
+        // callback has started its queued refresh, without relying on timing.
+        for await _ in secondStarted { break }
+        let completed = await initial.value
+        XCTAssertNil(currentConfirmation, "The old shared confirmation has already been cleared.")
+        XCTAssertTrue(completed.confirms(context, transportAttemptID: transportAttemptID),
+                      "Foreground validation must use the completed flight's profile, not the next flight's state.")
+        XCTAssertEqual(session.cursorAtAcknowledgement, 1)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        let saved = try persistence.load(identity: identity)
+
+        let replacementGeneration = ProfileContext(identity: identity, transportMode: .relay)
+        XCTAssertFalse(completed.confirms(replacementGeneration, transportAttemptID: transportAttemptID),
+                       "Confirmation cannot cross profile generations even for the same device.")
+        let differentDevice = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: identity.trustedRelayAuthority, personID: identity.personID,
+            deviceID: ExactText("device-B")), generation: context.generation, transportMode: .relay)
+        XCTAssertFalse(completed.confirms(differentDevice, transportAttemptID: transportAttemptID))
+        XCTAssertFalse(completed.confirms(context, transportAttemptID: UUID()),
+                       "A completed refresh cannot confirm a subsequently replaced transport.")
+        XCTAssertFalse(completed.confirms(context, transportAttemptID: nil))
+        XCTAssertFalse(NativeRelayRefreshResult.unavailable.confirms(context, transportAttemptID: transportAttemptID))
+
+        releaseSecondSignal.yield()
+        let later = await callback.value
+        XCTAssertFalse(later.confirms(context, transportAttemptID: transportAttemptID), "A later failed refresh cannot borrow the earlier success.")
+        XCTAssertTrue(completed.confirms(context, transportAttemptID: transportAttemptID), "A later failure cannot rewrite the earlier result.")
+        XCTAssertEqual(try persistence.load(identity: identity), saved)
+        await core.deactivate()
+    }
+
+    func testConfirmedRefreshRetainsProfileWhenPushRegistrationFails() async {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-A"), deviceID: ExactText("device-A"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let transportAttemptID = UUID()
+        let result = await NativeRelayRefreshResult.afterConfirmedRelay(context: context, transportAttemptID: transportAttemptID) {
+            throw URLError(.cannotConnectToHost)
+        }
+        XCTAssertTrue(result.confirms(context, transportAttemptID: transportAttemptID))
+        XCTAssertEqual(result.pushRegistration, .unconfirmed)
+    }
+
     func testPostAckForegroundSummaryRetainsBoundaryValidationAndUnknownCause() async throws {
         let transportAttemptID = UUID()
         let failedDeadline = ForegroundConnectDeadline()
@@ -1684,7 +1891,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         _ = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
                                          inputs: [.compatibilityValue(action: ExactText("got-it"))]))
         let originalOperation = try XCTUnwrap(store.snapshot(context: context).outbox.first)
-        let savedBefore = try XCTUnwrap(persistence.load(identity: identity))
         XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
 
         let diagnosticURL = FileManager.default.temporaryDirectory
@@ -1713,8 +1919,15 @@ final class NativeGuidedTLSTests: XCTestCase {
         let connectionClosed = await eventually { server.clientClosed }
         XCTAssertTrue(connectionClosed, "The timed-out matching relay session must close its local TLS connection.")
         XCTAssertFalse(progressUpdates.contains(where: { $0.outcome == .confirmed }))
-        XCTAssertEqual(try persistence.load(identity: identity), savedBefore,
-                       "The stalled connection must preserve the approved profile's local state.")
+        let restoredAfterTimeout = try AttentionDomainStore(context: context, persistence: persistence)
+        let restoredSnapshot = try restoredAfterTimeout.snapshot(context: context)
+        XCTAssertEqual(restoredSnapshot.cursor, 1,
+                       "The stalled connection must preserve the approved profile's replay cursor.")
+        XCTAssertEqual(restoredSnapshot.outbox.first?.operationID, originalOperation.operationID,
+                       "The stalled connection must preserve its exact queued operation.")
+        XCTAssertEqual(try restoredAfterTimeout.conversationSnapshot(context: context)
+            .threads[requestKey]?.drafts[1]?.text, ExactText("Keep this draft"),
+                       "The stalled connection must preserve the saved conversation draft.")
         XCTAssertEqual(try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate().deviceID,
                        installation.deviceID, "The approved device identity remains available after timeout.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
@@ -1793,8 +2006,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         })
         XCTAssertEqual(session.sent.first?.1, receipt.opID,
                        "Replay must keep the accepted operation's original UUID.")
-        XCTAssertEqual(session.acknowledgements.count, 2,
-                       "The terminal replay is durably applied before its cursor ACK.")
+        XCTAssertEqual(session.acknowledgements.count, 1,
+                       "The checkpoint ACK is separate; only terminal sequence 2 uses ordinary ACK.")
+        XCTAssertEqual(try JSONValue.parse(try XCTUnwrap(session.acknowledgements.first))
+            .uniqueValue(named: "seq"), .number(JSONNumber(lexeme: "2")))
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(try store.snapshot(context: context).remoteStates[key]?.state, .answered)
 
@@ -1850,8 +2065,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(replayFailure?.receiptState, .acceptedAwaitingReplay)
         XCTAssertEqual(session.sent.first?.1, receipt.opID,
                        "A retry must stay bound to the accepted operation, never a replacement answer.")
-        XCTAssertEqual(session.acknowledgements.count, 1,
-                       "The failed follow-on replay must not ACK a missing terminal.")
+        XCTAssertEqual(session.acknowledgements.count, 0,
+                       "The checkpoint ACK is separate, and failed terminal replay must not ordinary-ACK.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
                       "The accepted operation is not silently requeued as a new answer.")
@@ -1881,7 +2096,7 @@ final class NativeGuidedTLSTests: XCTestCase {
 
     private func u2Data(_ text: String) -> Data { Data((text + "\n").utf8) }
 
-    private final class U2ReplaySession: AuthenticatedInstallationSession, @unchecked Sendable {
+    private final class U2ReplaySession: AuthenticatedInboxPagingSession, @unchecked Sendable {
         let authenticatedIdentity: ProfileIdentity
         var acknowledgements: [Data] = []
         var sent: [(Data, UUID)] = []
@@ -2133,7 +2348,7 @@ private final class RelayProgressRecorder: @unchecked Sendable {
     }
 }
 
-private final class ForegroundProgressRelaySession: AuthenticatedInstallationSession, @unchecked Sendable {
+private final class ForegroundProgressRelaySession: AuthenticatedInboxPagingSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     private let store: AttentionDomainStore
     private let context: ProfileContext
@@ -2164,7 +2379,7 @@ private final class ForegroundProgressRelaySession: AuthenticatedInstallationSes
 
 /// Feeds exact ordinary v1 relay frames through NativeRelayCore's real decoder,
 /// replay barrier and ACK path without making a network connection.
-private final class OrdinaryOrderingRelaySession: AuthenticatedInstallationSession, @unchecked Sendable {
+private final class OrdinaryOrderingRelaySession: AuthenticatedInboxPagingSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     private let lock = NSLock()
     private var replayCount = 0
