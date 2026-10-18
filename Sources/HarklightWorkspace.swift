@@ -195,9 +195,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
 
-        // The sample library owns the active local example identity. Keep its
-        // departure bound to that identity across NavigationSplitView rebuilds.
-        let oldSampleID = samples.selectedID
+        let oldSampleID: String? = if case let .sample(id) = previous { id }
+            else if previous == nil { samples.selectedID }
+            else { nil }
         let newSampleID: String? = if case let .sample(id) = next { id } else { nil }
 
         if let next { lastViewedSelection = next }
@@ -312,9 +312,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           lastViewedSelection: lastViewedSelection,
                           restoreLastViewed: restoreLastViewedOnReturn,
                           didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                          showSettings: { settings = true }, markSeen: markSeen, select: { previous, id in
+                          showSettings: { settings = true }, markSeen: markSeen, select: { id in
                     restoreLastViewedOnReturn = false
-                    navigate(from: previous, to: id)
+                    navigate(to: id)
                     compactColumn = .detail
                     if !landscape { visibility = .detailOnly }
                 })
@@ -430,7 +430,7 @@ struct InboxList: View {
     let didRestoreLastViewed: () -> Void
     let showSettings: () -> Void
     let markSeen: (InboxSelection) -> Void
-    let select: (InboxSelection?, InboxSelection) -> Void
+    let select: (InboxSelection) -> Void
     @State private var search = ""
     @State private var searchPresented = false
     @FocusState private var searchFocused: Bool
@@ -473,7 +473,7 @@ struct InboxList: View {
                     ForEach(filteredRows) { row in
                         Button {
                             searchFocused = false
-                            select(selected, row.id)
+                            select(row.id)
                         } label: {
                             switch row {
                             case let .request(request):
