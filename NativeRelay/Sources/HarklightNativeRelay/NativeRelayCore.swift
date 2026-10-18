@@ -681,7 +681,10 @@ public actor NativeRelayCore {
                 // persist H+1 onward now, but its ACK pump stays gated until K.
                 startPostCheckpointInboxConsumer(from: eventStream, baseline: checkpointHighWater)
             }
-            if high > checkpointHighWater {
+            // The accepted checkpoint is a lower bound for replay. A replay
+            // that reaches only its starting cursor adds no event and must not
+            // repeat the ordinary ACK for that already durable sequence.
+            if high > replayStart {
                 try await session.acknowledge(wire.acknowledge(high))
                 onProgress(.nativeSyncAcknowledged)
                 diagnose(.relay, .acknowledgement, .completed)
