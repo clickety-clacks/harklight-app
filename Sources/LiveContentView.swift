@@ -96,7 +96,7 @@ struct LiveContentView: View {
 /// Shared message identity header for ordinary live and local-example details.
 /// Only explicit protocol metadata is shown; missing metadata stays absent.
 struct MessageHeading: View {
-    let sender: String
+    let sender: String?
     let initials: String
     let title: String
     var createdAt: Date? = nil
@@ -105,17 +105,21 @@ struct MessageHeading: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 9) {
-                Text(initials)
-                    .font(.caption.bold())
-                    .padding(9)
-                    .background(.quaternary, in: Circle())
+                if !initials.isEmpty {
+                    Text(initials)
+                        .font(.caption.bold())
+                        .padding(9)
+                        .background(.quaternary, in: Circle())
+                }
                 if let symbol {
                     Image(systemName: symbol)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
                 }
-                Text(sender).font(.subheadline.weight(.semibold))
+                if let sender {
+                    Text(sender).font(.subheadline.weight(.semibold))
+                }
                 Spacer(minLength: 0)
                 if let createdAt {
                     Text(createdAt.formatted(date: .abbreviated, time: .shortened))
@@ -330,11 +334,12 @@ struct LiveRequestDetail: View {
     @State private var deferred = false
     @State private var chatPresented = false
     @State private var enlargedPicture: SampleOption?
+    @State private var fixtureOutcomePresented = false
 
     private var controlsReadOnly: Bool {
         if let localExample {
             return store.isReadOnly || request.lifecycleStatus != .open ||
-                request.intentReceipt != nil || localExample.finished
+                request.intentReceipt != nil || store.isRetracted(request.key) || localExample.finished
         }
         return !canAnswer
     }
@@ -352,7 +357,7 @@ struct LiveRequestDetail: View {
     }
 
     var canAnswer: Bool {
-        guard !store.isReadOnly, request.lifecycleStatus == .open,
+        guard !store.isReadOnly, !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         switch request.projection {
         case .sender: return true
@@ -373,9 +378,9 @@ struct LiveRequestDetail: View {
     var body: some View {
         MessageCardSurface(context: context) {
             VStack(alignment: .leading, spacing: 22) {
-                MessageHeading(sender: request.key.senderID.rawValue,
-                               initials: localExample?.message.initials ?? String(request.key.senderID.rawValue.prefix(2)).uppercased(),
-                               title: request.title?.rawValue ?? request.key.senderID.rawValue,
+                MessageHeading(sender: localExample?.message.sender,
+                               initials: localExample?.message.initials ?? "",
+                               title: request.title?.rawValue ?? "Message",
                                createdAt: request.createdAt,
                                symbol: localExample?.message.kind.symbol ?? (request.informationalSeenStatus == nil ? "text.bubble" : "info.circle"))
                 if let localExample {
@@ -461,7 +466,13 @@ struct LiveRequestDetail: View {
                         .disabled(store.isReadOnly)
                 }
                 if let fixtureStore, request.lifecycleStatus == .pending {
-                    Menu("Simulate fixture outcome", systemImage: "testtube.2") {
+                    Button("Simulate fixture outcome", systemImage: "testtube.2") {
+                        fixtureOutcomePresented = true
+                    }
+                    .accessibilityIdentifier("fixture-outcome-menu")
+                    .confirmationDialog("Simulate fixture outcome",
+                                        isPresented: $fixtureOutcomePresented,
+                                        titleVisibility: .visible) {
                         ForEach([DemoTerminalScenario.ownOperationAccepted,
                                  .answerOutcomeUnconfirmed]) { scenario in
                             Button(scenario.simulationTitle) {
@@ -472,7 +483,6 @@ struct LiveRequestDetail: View {
                             .accessibilityIdentifier("fixture-outcome-" + scenario.id)
                         }
                     }
-                    .accessibilityIdentifier("fixture-outcome-menu")
                 }
                 if let actionError = store.actionError {
                     Label(actionError, systemImage: "exclamationmark.triangle")
@@ -534,7 +544,7 @@ struct LiveRequestDetail: View {
                     else { deferred.toggle() }
                 }
                 .labelStyle(.iconOnly)
-                .disabled(store.isReadOnly || localExample?.finished == true)
+                .disabled(store.isReadOnly || store.isRetracted(request.key) || localExample?.finished == true)
                 Spacer()
                 Button("Chat", systemImage: "bubble.left.and.bubble.right") {
                     localExample?.chatRead = true

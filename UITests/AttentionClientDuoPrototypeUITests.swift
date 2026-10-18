@@ -152,14 +152,14 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let requestRow = app.descendants(matching: .any)["request-row-facilities-01"]
         guard !requestRow.isHittable else { return }
 
-        let sidebarButton = app.buttons["Show Sidebar"]
-        if sidebarButton.exists {
-            sidebarButton.tap()
-        } else {
-            let backButton = app.buttons["BackButton"]
-            XCTAssertTrue(backButton.waitForExistence(timeout: 5),
-                          "The selected request must provide a way back to the Requests list.")
+        let backButton = app.navigationBars.buttons.firstMatch
+        if backButton.exists && backButton.isHittable {
             backButton.tap()
+        } else {
+            let sidebarButton = app.buttons["Show Sidebar"]
+            XCTAssertTrue(sidebarButton.waitForExistence(timeout: 5),
+                          "The selected request must provide a way back to the Requests list.")
+            sidebarButton.tap()
         }
         XCTAssertTrue(requestRow.waitForExistence(timeout: 5),
                       "Returning from the selected request should reveal the Requests list.")

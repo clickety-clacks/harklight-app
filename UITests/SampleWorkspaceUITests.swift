@@ -8,9 +8,11 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launch()
         let realRows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
         XCTAssertTrue(realRows.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
-        let original = realRows.firstMatch.identifier
+        let original = app.buttons["request-row-review-01"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
+        let originalID = original.identifier
         capture("ordinary-inbox-before-shake", app)
-        realRows.firstMatch.tap()
+        original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
         let originalChoice = app.buttons["Cover A"]
         XCTAssertTrue(originalChoice.waitForExistence(timeout: 5), app.debugDescription)
@@ -22,8 +24,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.buttons["Add example messages"].tap()
         let row = app.buttons["sample-approval-0"]
         // Both sources remain in this same searchable list.
-        let search = app.searchFields.firstMatch
-        search.tap(); search.typeText("Archive\n")
+        enterSearch("Archive", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         capture("ordinary-inbox-with-examples", app)
         row.tap()
@@ -34,17 +35,46 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Answered locally · nothing sent"].waitForExistence(timeout: 5))
         capture("ordinary-example-card", app)
         showList(app)
-        if app.buttons["Clear text"].exists { app.buttons["Clear text"].tap() }
-        XCTAssertTrue(app.buttons[original].exists, app.debugDescription)
-        app.buttons[original].tap()
+        clearSearch(in: app)
+        XCTAssertTrue(app.buttons[originalID].exists, app.debugDescription)
+        app.buttons[originalID].tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Cover A"].isSelected, "An ordinary draft survives local example actions")
         capture("ordinary-request-after-example", app)
     }
 
     private func showList(_ app: XCUIApplication) {
-        if app.buttons["Show Sidebar"].exists { app.buttons["Show Sidebar"].tap() }
-        else if app.buttons["BackButton"].exists { app.buttons["BackButton"].tap() }
+        let card = app.scrollViews["message-card-scroll"]
+        guard card.exists else { return }
+        let searchButton = app.buttons["inbox-search-button"]
+        let searchField = app.textFields["inbox-search-field"]
+        let back = app.navigationBars.buttons.firstMatch
+        if back.exists && back.isHittable {
+            back.tap()
+        } else {
+            let sidebar = app.buttons["Show Sidebar"]
+            if sidebar.exists && sidebar.isHittable { sidebar.tap() }
+        }
+        XCTAssertTrue(searchButton.waitForExistence(timeout: 5) || searchField.waitForExistence(timeout: 5),
+                      app.debugDescription)
+    }
+
+    private func enterSearch(_ query: String, in app: XCUIApplication) {
+        clearSearch(in: app)
+        let searchButton = app.buttons["inbox-search-button"]
+        let field = app.textFields["inbox-search-field"]
+        if !field.exists {
+            XCTAssertTrue(searchButton.waitForExistence(timeout: 5), app.debugDescription)
+            searchButton.tap()
+        }
+        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        field.tap()
+        field.typeText(query + "\n")
+    }
+
+    private func clearSearch(in app: XCUIApplication) {
+        let dismiss = app.buttons["inbox-search-dismiss"]
+        if dismiss.exists && dismiss.isHittable { dismiss.tap() }
     }
 
     func testDesignedControlsAndComponentScreenshots() {
@@ -54,14 +84,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let kinds = ["textChoice", "pictureChoice", "instructions", "review", "multipleChoice", "value", "point", "colorChoice", "soundChoice", "error", "warning", "information", "completed"]
         for kind in kinds {
-            if !app.searchFields.firstMatch.isHittable {
-                let sidebar = app.buttons["Show Sidebar"]
-                if sidebar.exists { sidebar.tap() }
-                else { app.buttons["BackButton"].tap() }
-            }
-            let search = app.searchFields.firstMatch
-            XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
-            if app.buttons["Clear text"].exists { app.buttons["Clear text"].tap() }
+            showList(app)
             // Search the fictional sender/title so the selected type is reachable
             // through normal navigation without a test-only destination.
             let query: String = switch kind {
@@ -79,7 +102,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             case "information": "Thursday"
             default: "journal is ready"
             }
-            search.tap(); search.typeText(query + "\n")
+            enterSearch(query, in: app)
             let row = app.buttons["sample-\(kind)-0"]
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             row.tap()
@@ -143,8 +166,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let search = app.searchFields.firstMatch
-        search.tap(); search.typeText("Thursday\n")
+        enterSearch("Thursday", in: app)
         app.buttons["sample-information-0"].tap()
         app.buttons["Chat"].tap()
         let composer = app.textFields["sample-chat-composer"]
@@ -186,8 +208,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
             let landscape = orientation == .landscapeLeft || orientation == .landscapeRight
             XCTAssertEqual(app.frame.width > app.frame.height, landscape, app.debugDescription)
-            let search = app.searchFields.firstMatch
-            search.tap(); search.typeText("Archive\n")
+            enterSearch("Archive", in: app)
             XCTAssertTrue(app.buttons["sample-approval-0"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-list", app)
             app.buttons["sample-approval-0"].tap()
@@ -216,8 +237,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let search = app.searchFields.firstMatch
-        search.tap(); search.typeText("Thursday\n")
+        enterSearch("Thursday", in: app)
         app.buttons["sample-information-0"].tap()
         let card = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(card.waitForExistence(timeout: 5))

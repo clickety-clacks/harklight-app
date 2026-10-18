@@ -148,12 +148,16 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
         let port = AttentionDomainPort(store: store)
         let snapshot = try port.observe(context: port.context)
 
-        XCTAssertEqual(snapshot.requests.map(\.key), fixtures.requests.map(\.key))
-        XCTAssertEqual(snapshot.requests.map(\.acceptanceOrder), [UInt64(1), 2, 3])
+        XCTAssertEqual(snapshot.requests.map(\.key), Array(fixtures.requests.reversed()).map(\.key))
+        XCTAssertEqual(snapshot.requests.map(\.acceptanceOrder), [UInt64(3), 2, 1],
+                       "The inbox presents the most recently accepted request first.")
 
-        let review = try XCTUnwrap(fixtures.requests.first)
+        let review = try XCTUnwrap(fixtures.requests.first(where: {
+            $0.key.messageID == ExactText("review-01")
+        }))
+        let reviewProjection = try XCTUnwrap(snapshot.requests.first(where: { $0.key == review.key }))
         guard case let .sender(document) = review.interface,
-              case let .sender(projection) = try XCTUnwrap(snapshot.requests.first?.projection) else {
+              case let .sender(projection) = reviewProjection.projection else {
             return XCTFail("Expected the reviewed sender document projection.")
         }
         XCTAssertEqual(projection.illustrations, document.illustrations)
@@ -204,16 +208,17 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
 
         let port = AttentionDomainPort(store: store)
         let firstSnapshot = try port.observe(context: port.context)
-        XCTAssertEqual(firstSnapshot.requests.map(\.key), acceptedOrder.map(\.key),
-                       "The host receives first-accepted order rather than lexical sender/message order.")
-        XCTAssertEqual(firstSnapshot.requests.map(\.acceptanceOrder), [UInt64(1), 2])
+        let newestFirst = Array(acceptedOrder.reversed())
+        XCTAssertEqual(firstSnapshot.requests.map(\.key), newestFirst.map(\.key),
+                       "The inbox presents the most recently accepted item first while retaining durable order values.")
+        XCTAssertEqual(firstSnapshot.requests.map(\.acceptanceOrder), [UInt64(2), 1])
 
         let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
         let restartedStore = try AttentionDomainStore(context: restartedContext, persistence: persistence)
         let restartedPort = AttentionDomainPort(store: restartedStore)
         let restartedSnapshot = try restartedPort.observe(context: restartedPort.context)
-        XCTAssertEqual(restartedSnapshot.requests.map(\.key), acceptedOrder.map(\.key))
-        XCTAssertEqual(restartedSnapshot.requests.map(\.acceptanceOrder), [UInt64(1), 2])
+        XCTAssertEqual(restartedSnapshot.requests.map(\.key), newestFirst.map(\.key))
+        XCTAssertEqual(restartedSnapshot.requests.map(\.acceptanceOrder), [UInt64(2), 1])
     }
 
     func testMalformedAuthorizedResultPointProjectsTheWholeNeutralScene() throws {

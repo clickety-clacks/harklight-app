@@ -582,15 +582,22 @@ public final class AttentionDomainPort: @unchecked Sendable {
             throw AttentionStoreError.duplicateAcceptanceOrder
         }
         let requests = try orderedRequests.map { item in
+            let session = snapshot.fixtureSessions[item.request.key]
+            // Requests without a conversation thread are still revision one.
+            let currentRevision = snapshot.conversationThreads[item.request.key]?.currentRevision ?? 1
+            let submission = snapshot.intents.values.first(where: {
+                $0.requestKey == item.request.key && $0.requestRevision == currentRevision
+            }) ?? session?.lifecycle.submissionValue.flatMap { value in
+                guard value.requestKey == item.request.key,
+                      value.requestRevision == currentRevision else { return nil }
+                return value
+            }
             try present(item.request,
                         acceptanceOrder: item.order,
                         draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),
-                        session: snapshot.fixtureSessions[item.request.key],
+                        session: session,
                         remote: snapshot.remoteStates[item.request.key],
-                        submission: snapshot.intents.values.first(where: {
-                            $0.requestKey == item.request.key &&
-                            $0.requestRevision == snapshot.conversationThreads[item.request.key]?.currentRevision
-                        }),
+                        submission: submission,
                         selector: selectors?[item.request.key])
         }
         let displayRequests = requests.sorted { left, right in
@@ -827,6 +834,15 @@ private extension PresentationSnapshot {
 }
 
 private extension FixtureLifecycle {
+    var submissionValue: Submission? {
+        switch self {
+        case .open:
+            nil
+        case let .pending(submission), let .terminal(_, submission):
+            submission
+        }
+    }
+
     var terminalValue: FixtureTerminal? {
         if case let .terminal(terminal, _) = self { return terminal }
         return nil

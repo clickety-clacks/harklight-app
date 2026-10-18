@@ -510,7 +510,9 @@ struct InboxRowContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Text(row.sender).font(.caption.weight(.medium))
+                if row.isLocalExample {
+                    Text(row.sender).font(.caption.weight(.medium))
+                }
                 if row.isLocalExample {
                     Text("Local example").font(.caption2).foregroundStyle(.secondary)
                 }

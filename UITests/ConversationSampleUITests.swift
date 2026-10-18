@@ -7,9 +7,8 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
-        let search = app.searchFields.firstMatch
-        search.tap(); search.typeText("Thursday\n")
-        let row = app.buttons["request-row-sample-information-0"]
+        enterSearch("Thursday", in: app)
+        let row = app.buttons["sample-information-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         app.buttons["Chat"].tap()
@@ -37,9 +36,8 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let field = app.searchFields.firstMatch
-        field.tap(); field.typeText("Archive\n")
-        let row = app.buttons["request-row-sample-approval-2"]
+        enterSearch("Archive", in: app)
+        let row = app.buttons["sample-approval-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         XCTAssertTrue(row.label.contains("Updated"))
         row.tap()
@@ -61,9 +59,8 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let search = app.searchFields.firstMatch
-        search.tap(); search.typeText("welcome\n")
-        let row = app.buttons["request-row-sample-review-0"]
+        enterSearch("welcome", in: app)
+        let row = app.buttons["sample-review-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -84,9 +81,8 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let search = app.searchFields.firstMatch
-        search.tap(); search.typeText("welcome\n")
-        let row = app.buttons["request-row-sample-review-2"]
+        enterSearch("welcome", in: app)
+        let row = app.buttons["sample-review-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -98,7 +94,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Closing chat alone does not leave its message")
         app.buttons["Close"].tap()
-        let back = app.buttons["BackButton"].exists ? app.buttons["BackButton"] : app.buttons["Back"]
+        let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5))
@@ -116,9 +112,8 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let search = app.searchFields.firstMatch
-        search.tap(); search.typeText("welcome\n")
-        let row = app.buttons["request-row-sample-review-2"]
+        enterSearch("welcome", in: app)
+        let row = app.buttons["sample-review-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -130,7 +125,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
         capture("upload-before-message-departure", app)
-        let other = app.buttons["request-row-sample-review-0"]
+        let other = app.buttons["sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
         other.tap()
         row.tap()
@@ -152,9 +147,8 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let search = app.searchFields.firstMatch
-        search.tap(); search.typeText("Archive\n")
-        let row = app.buttons["request-row-sample-approval-1"]
+        enterSearch("Archive", in: app)
+        let row = app.buttons["sample-approval-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         XCTAssertTrue(row.label.contains("Retracted"))
         row.tap()
@@ -182,9 +176,8 @@ final class ConversationSampleUITests: XCTestCase {
             app.terminate()
             app.launch()
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-            let field = app.searchFields.firstMatch
-            field.tap(); field.typeText(search + "\n")
-            let row = app.buttons["request-row-" + id]
+            enterSearch(search, in: app)
+            let row = app.buttons[id]
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             row.tap()
             app.buttons["Chat"].tap()
@@ -220,5 +213,19 @@ final class ConversationSampleUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func enterSearch(_ query: String, in app: XCUIApplication) {
+        let dismiss = app.buttons["inbox-search-dismiss"]
+        if dismiss.exists && dismiss.isHittable { dismiss.tap() }
+        let field = app.textFields["inbox-search-field"]
+        if !field.exists {
+            let button = app.buttons["inbox-search-button"]
+            XCTAssertTrue(button.waitForExistence(timeout: 5), app.debugDescription)
+            button.tap()
+        }
+        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        field.tap()
+        field.typeText(query + "\n")
     }
 }

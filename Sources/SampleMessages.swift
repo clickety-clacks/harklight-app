@@ -106,7 +106,7 @@ final class SampleResponse {
             localStatus = nil
         }
         return InboxRequestRow(key: request.key,
-            title: request.title?.rawValue ?? request.key.senderID.rawValue,
+            title: request.title?.rawValue ?? "Message",
             sender: request.key.senderID.rawValue,
             status: statusParts.joined(separator: " · "),
             bodyText: request.body?.rawValue,
@@ -124,6 +124,7 @@ final class SampleResponse {
 
     var canMarkSeenLocally: Bool {
         guard let request = viewModel.request(for: key),
+              !viewModel.isRetracted(key),
               request.lifecycleStatus == .open,
               request.intentReceipt == nil,
               request.informationalSeenStatus == .available else { return false }
@@ -132,6 +133,7 @@ final class SampleResponse {
 
     var canFinishLocally: Bool {
         guard let request = viewModel.request(for: key),
+              !viewModel.isRetracted(key),
               request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         if request.informationalSeenStatus != nil || message.kind == .instructions { return true }
@@ -180,6 +182,7 @@ final class SampleResponse {
     }
 
     func finishLocally() {
+        guard canFinishLocally else { return }
         finished = true
         deferred = false
     }

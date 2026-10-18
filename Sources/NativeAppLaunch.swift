@@ -1071,7 +1071,7 @@ final class LivePresentationStore {
             if let seenStatus = $0.informationalSeenStatus {
                 statusParts.append(informationalSeenRowStatus(seenStatus))
             }
-            return InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
+            return InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? "Message",
                 sender: $0.key.senderID.rawValue,
                 status: statusParts.joined(separator: " · "),
                 bodyText: $0.body?.rawValue,
@@ -1166,7 +1166,7 @@ final class LivePresentationStore {
         guard !isReadOnly else { throw LiveReplyError.disconnected }
         guard permitsDelivery else { throw LiveReplyError.localExample }
         let request = try inspectedRequest(key)
-        guard request.lifecycleStatus == .open,
+        guard !isRetracted(key), request.lifecycleStatus == .open,
               request.intentReceipt == nil,
               let selector = request.selector else {
             throw LiveReplyError.notOpen
@@ -1237,7 +1237,7 @@ final class LivePresentationStore {
         guard !isReadOnly else { return }
         do {
             let request = try inspectedRequest(key)
-            guard request.lifecycleStatus == .open,
+            guard !isRetracted(key), request.lifecycleStatus == .open,
                   request.intentReceipt == nil,
                   let selector = request.selector else { throw LiveReplyError.notOpen }
             var draft = request.draft
