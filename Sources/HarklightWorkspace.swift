@@ -447,7 +447,7 @@ struct InboxList: View {
             $0.preview.body.localizedCaseInsensitiveContains(query)
         }
         if query == "welcome" {
-            print("E2_TRACE inbox query=welcome tab=\(selectedTab.rawValue) inTab=\(inTab.count) filtered=\(filtered.map(\.accessibilityID)) sampleSelected=\(samples.selectedID ?? "nil")")
+            print("E2_TRACE inbox query=welcome tab=\(selectedTab.rawValue) inTab=\(inTab.count) filtered=\(filtered.map(\.accessibilityID))")
         }
         return filtered
     }
