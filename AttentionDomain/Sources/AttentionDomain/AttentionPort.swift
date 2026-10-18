@@ -592,7 +592,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                       value.requestRevision == currentRevision else { return nil }
                 return value
             }
-            try present(item.request,
+            return try present(item.request,
                         acceptanceOrder: item.order,
                         draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),
                         session: session,
