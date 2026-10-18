@@ -242,6 +242,11 @@ public struct PresentedRequest: Equatable, Sendable {
     public let intentReceipt: IntentReceipt?
     public let projection: AdmittedRequestProjection
     public let informationalSeenStatus: InformationalSeenStatus?
+    public let senderDisplay: SenderDisplay?
+
+    public var senderAttribution: String {
+        senderDisplay?.name.rawValue ?? "Sender name unavailable · \(key.senderID.rawValue)"
+    }
 
     public var isResolved: Bool {
         lifecycleStatus != .open && lifecycleStatus != .pending
@@ -258,7 +263,8 @@ public struct PresentedRequest: Equatable, Sendable {
                 receiptFacts: ReceiptPresentationFacts?,
                 intentReceipt: IntentReceipt?,
                 projection: AdmittedRequestProjection,
-                informationalSeenStatus: InformationalSeenStatus? = nil) {
+                informationalSeenStatus: InformationalSeenStatus? = nil,
+                senderDisplay: SenderDisplay? = nil) {
         self.key = key
         self.acceptanceOrder = acceptanceOrder
         self.title = title
@@ -271,6 +277,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.intentReceipt = intentReceipt
         self.projection = projection
         self.informationalSeenStatus = informationalSeenStatus
+        self.senderDisplay = senderDisplay
     }
 }
 
@@ -322,7 +329,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
         let snapshot = try store.snapshot(context: profileContext)
         guard let thread = snapshot.conversationThreads[key], let payload = thread.revisions[revision],
               let draft = thread.answerDrafts?[revision], let stored = snapshot.requests[key] else { return nil }
-        return try present(StoredRequest(key: key, originalPayload: payload), acceptanceOrder: stored.acceptanceOrder ?? 0,
+        return try present(StoredRequest(key: key, originalPayload: payload, senderDisplay: stored.senderDisplay),
+            acceptanceOrder: stored.acceptanceOrder ?? 0,
             draft: draft, session: nil, remote: nil, submission: nil, selector: nil)
     }
 
@@ -735,7 +743,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 intentReceipt: submission.map { receipt($0, context: context) },
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
-                                    status: status, remote: remote, submission: submission))
+                                    status: status, remote: remote, submission: submission),
+                                senderDisplay: request.senderDisplay)
     }
 
     private func informationalSeenStatus(for request: StoredRequest,

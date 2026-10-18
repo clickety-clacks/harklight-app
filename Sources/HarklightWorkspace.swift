@@ -230,7 +230,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                        let request = conversationStore.request(for: key) {
                         Divider()
                         ConversationPanel(store: conversationStore, key: key,
-                            sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                            sender: request.senderAttribution, title: request.title?.rawValue ?? "")
                             .frame(width: min(360, geometry.size.width * 0.34))
                     }
                     if inlineChat, case let .sample(id) = selection,
