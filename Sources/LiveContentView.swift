@@ -403,6 +403,7 @@ struct LiveRequestDetail: View {
                 }
                 Text(store.isRetracted(request.key) ? "Retracted" : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                     .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("request-lifecycle-status")
                 if let seenStatus = request.informationalSeenStatus {
                     Label(Self.informationalSeenText(seenStatus),
                           systemImage: Self.informationalSeenSymbol(seenStatus))
@@ -468,6 +469,7 @@ struct LiveRequestDetail: View {
                                                                     scenario: scenario) else { return }
                                 try? store.refreshFromDurableStore()
                             }
+                            .accessibilityIdentifier("fixture-outcome-" + scenario.id)
                         }
                     }
                     .accessibilityIdentifier("fixture-outcome-menu")
@@ -480,6 +482,7 @@ struct LiveRequestDetail: View {
                     Text(facts.evidenceLabel)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("request-receipt-evidence")
                 }
                 DisclosureGroup("Request details") {
                     Text("Sender: \(request.key.senderID.rawValue)")
@@ -487,14 +490,17 @@ struct LiveRequestDetail: View {
                     Text(request.originalContentJSON)
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
+                        .accessibilityIdentifier("request-original-content-json")
                     if let receipt = request.intentReceipt {
                         Text("Original answer")
                             .font(.headline)
                         Text(receipt.exactAnswerJSON)
                             .font(.caption.monospaced())
                             .textSelection(.enabled)
+                            .accessibilityIdentifier("request-details-original-answer-json")
                     }
                 }
+                .accessibilityIdentifier("request-details-disclosure")
             }
             .padding(.horizontal, 22).padding(.vertical, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -724,6 +730,7 @@ private struct LiveProjectedInputView: View {
                         ))
                         .frame(minHeight: 120)
                         .accessibilityLabel(action.label.rawValue)
+                        .accessibilityIdentifier("request-input-" + input.id.rawValue + "-response")
                         .disabled(readOnly)
                     }
                 }
@@ -742,6 +749,7 @@ private struct LiveProjectedInputView: View {
                     ))
                     .frame(minHeight: 120)
                     .accessibilityLabel(input.label.rawValue)
+                    .accessibilityIdentifier("request-input-" + input.id.rawValue)
                     .disabled(readOnly)
                 }
             }
@@ -804,8 +812,10 @@ private struct LiveProjectedInputView: View {
                                 guard !readOnly else { return }
                                 store.setPoint(PointValue(x: 500, y: 500), input: input.id, for: request.key)
                             }
+                            .accessibilityIdentifier("request-point-" + input.id.rawValue)
                         if let point = draft?.effectivePoint {
                             Text("Horizontal \(point.x), vertical \(point.y)")
+                                .accessibilityIdentifier("request-point-value-" + input.id.rawValue)
                         }
                     }
                 }
