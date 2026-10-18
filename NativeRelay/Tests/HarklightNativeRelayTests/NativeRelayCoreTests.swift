@@ -252,7 +252,8 @@ final class NativeRelayCoreTests: XCTestCase {
                 delivered += 1
             }
             if replayEnd == nil {
-                try await consume(data(#"{"v":1,"type":"resynced","seq":\#(endHigh)}"#))
+                let frame = #"{"v":1,"type":"resynced","seq":\#(endHigh)}"#
+                try await consume(Data((frame + "\n").utf8))
             }
         }
 
@@ -592,7 +593,6 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(hydrated.cursor, 22, "Hydration cannot re-ACK an already contiguous sequence.")
         XCTAssertEqual(hydrated.remoteStates[key(21)]?.state, .answered)
         XCTAssertEqual(hydrated.remoteStates[key(21)]?.eventSequence, 22)
-        XCTAssertEqual(hydrated.appliedEvents[22]?.sequence, 22)
         XCTAssertNil(hydrated.pendingRelayOverlays[22])
         XCTAssertTrue(hydrated.inboxCurrentKeys?.contains(key(21)) == true)
     }
@@ -828,7 +828,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let settled = try restarted.snapshot(context: restartedContext)
         XCTAssertEqual(settled.cursor, 10)
         XCTAssertEqual(settled.remoteStates[key]?.state, .answered)
-        XCTAssertEqual(settled.appliedEvents[2]?.sequence, 2)
+        XCTAssertEqual(settled.remoteStates[key]?.eventSequence, 2)
         XCTAssertTrue(settled.inboxCurrentKeys?.contains(key) == true,
                       "An exact terminal receipt makes its cached message current at H.")
         XCTAssertTrue(try restarted.acceptedOperationsAwaitingTerminalReplay(context: restartedContext).isEmpty)
@@ -845,7 +845,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let recoveredContext = ProfileContext(identity: identity, transportMode: .relay)
         let recovered = try AttentionDomainStore(context: recoveredContext, persistence: persistence)
         XCTAssertEqual(try recovered.acceptedOperationsAwaitingTerminalReplay(context: recoveredContext).count, 0)
-        XCTAssertEqual(try recovered.snapshot(context: recoveredContext).appliedEvents[2]?.sequence, 2)
+        XCTAssertEqual(try recovered.snapshot(context: recoveredContext).remoteStates[key]?.eventSequence, 2)
     }
 
     func testAcceptedOriginalOperationReplayIsJoinedToItsSavedBinding() async throws {
