@@ -119,6 +119,51 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
+    func testBackWithoutSwitchingKeepsListPositionWhenAnsweredRequestMovesDown() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let list = app.scrollViews.firstMatch
+        let facilities = app.buttons["request-row-facilities-01"]
+        let others = [app.buttons["request-row-unknown-01"], app.buttons["request-row-review-01"]]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(others.allSatisfy { $0.waitForExistence(timeout: 5) }, app.debugDescription)
+        let examples = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'"))
+        XCTAssertTrue(examples.firstMatch.waitForExistence(timeout: 10),
+                      "Local examples make the list long enough to scroll.")
+        XCTAssertTrue(others.contains { $0.frame.minY > facilities.frame.minY },
+                      "The open request starts above another open request, so finishing it moves it down.")
+
+        // Scroll part of a row so the position Back must keep is not the list's top.
+        let top = ([facilities] + others).min { $0.frame.minY < $1.frame.minY }!
+        let unscrolledTop = top.frame.minY
+        let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -(top.frame.height * 0.5 + 20))),
+                    withVelocity: .slow, thenHoldForDuration: 0.5)
+        let scrolledTop = top.frame.minY
+        XCTAssertLessThan(scrolledTop, unscrolledTop - 10, "The list must be scrolled away from its top.")
+
+        XCTAssertTrue(facilities.isHittable, app.debugDescription)
+        facilities.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        _ = answerSelectedFacilitiesRequest(in: app, x: 240, y: 610)
+        applyFixtureOutcome("ownOperationAccepted", in: app)
+        let status = app.staticTexts["request-lifecycle-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.label, "Answered")
+
+        let back = app.buttons["harklight-detail-back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
+        let movedDown = NSPredicate { _, _ in others.allSatisfy { $0.frame.minY < facilities.frame.minY } }
+        wait(for: [XCTNSPredicateExpectation(predicate: movedDown, object: nil)], timeout: 5)
+        let kept = NSPredicate { _, _ in abs(top.frame.minY - scrolledTop) <= 1 }
+        let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
+                       "Back without switching messages must return to the exact list position: top row at \(top.frame.minY), expected \(scrolledTop).\n\(app.debugDescription)")
+    }
+
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
         let outcomeButton = app.buttons["fixture-outcome-menu"]
         XCTAssertTrue(outcomeButton.waitForExistence(timeout: 5),
@@ -211,6 +256,10 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
 
     private func submitFacilitiesAnswer(in app: XCUIApplication, x: Int, y: Int) -> PointValue {
         selectFacilitiesRequest(in: app)
+        return answerSelectedFacilitiesRequest(in: app, x: x, y: y)
+    }
+
+    private func answerSelectedFacilitiesRequest(in app: XCUIApplication, x: Int, y: Int) -> PointValue {
         let selectedPoint = setFacilitiesPoint(in: app, x: x, y: y)
         let note = app.textViews["request-input-note"]
         revealInCard(note, in: app)
