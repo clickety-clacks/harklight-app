@@ -37,7 +37,14 @@ struct AttentionClientDuoPrototypeApp: App {
                         case let .enrollmentPending(record):
                             NativeEnrollmentView(launch: launch, pending: record)
                         case let .fixture(store):
-                            ContentView(store: store, samples: samples)
+                            if let presentation = store.presentationStore {
+                                LiveContentView(store: presentation, samples: samples,
+                                                fixtureStore: store)
+                            } else {
+                                ContentUnavailableView(
+                                    store.loadError ?? "The local example could not be opened.",
+                                    systemImage: "exclamationmark.triangle")
+                            }
                         case .live, .disconnected:
                             DisconnectedAccountRecoveryView(launch: launch)
                         }

@@ -52,8 +52,9 @@ struct SampleMessage: Identifiable, Equatable {
     let revised: Bool
     let chatUnread: Bool
     let hasChat: Bool
-    // Prescribed fixture emphasis, never computed from deadlines or live requests.
-    let emphasis: Int
+    // Stable per fixture identity so repeated registration keeps the original
+    // payload instead of looking like an update to an existing request.
+    let fixtureCreatedAtMilliseconds: Int
 }
 
 struct SampleMark: Identifiable, Equatable, Codable {
@@ -84,6 +85,105 @@ final class SampleResponse {
     }
 
     private var draft: RequestDraft? { viewModel.request(for: key)?.draft }
+    var inboxRow: InboxRequestRow? {
+        guard let request = viewModel.request(for: key) else { return nil }
+        var statusParts: [String] = []
+        if viewModel.hasAcceptedUpdate(for: key) { statusParts.append("Updated") }
+        statusParts.append(viewModel.isRetracted(key)
+            ? "Retracted"
+            : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
+        if let seen = request.informationalSeenStatus, !localSeenSelected {
+            statusParts.append(LiveRequestDetail.informationalSeenText(seen))
+        }
+        let localStatus: String?
+        if finished {
+            localStatus = request.informationalSeenStatus == nil
+                ? "Answered locally · nothing sent"
+                : "Seen selected locally · nothing sent"
+        } else if deferred {
+            localStatus = "Deferred locally"
+        } else {
+            localStatus = nil
+        }
+        return InboxRequestRow(key: request.key,
+            title: request.title?.rawValue ?? request.key.senderID.rawValue,
+            sender: request.key.senderID.rawValue,
+            status: statusParts.joined(separator: " · "),
+            bodyText: request.body?.rawValue,
+            symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
+            isResolved: request.isResolved, createdAt: request.createdAt,
+            isLocalExample: true, localStatus: localStatus,
+            informationalSeenStatus: request.informationalSeenStatus,
+            localSeenSelected: localSeenSelected)
+    }
+
+    var localSeenSelected: Bool {
+        guard finished, let request = viewModel.request(for: key) else { return false }
+        return request.informationalSeenStatus == .available
+    }
+
+    var canMarkSeenLocally: Bool {
+        guard let request = viewModel.request(for: key),
+              request.lifecycleStatus == .open,
+              request.intentReceipt == nil,
+              request.informationalSeenStatus == .available else { return false }
+        return !finished && !deferred
+    }
+
+    var canFinishLocally: Bool {
+        guard let request = viewModel.request(for: key),
+              request.lifecycleStatus == .open,
+              request.intentReceipt == nil else { return false }
+        if request.informationalSeenStatus != nil || message.kind == .instructions { return true }
+        if message.kind == .multipleChoice {
+            if ownAnswer {
+                return request.draft.inputs[ExactText("answer")]?.textByActionID[ExactText("own")]?.rawValue
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            }
+            return !choices.isEmpty
+        }
+        switch request.projection {
+        case let .sender(sender):
+            var hasAnswerInput = false
+            for input in sender.inputs {
+                switch input.kind {
+                case let .response(actions):
+                    hasAnswerInput = true
+                    guard let selected = request.draft.inputs[input.id]?.selectedActionID,
+                          let action = actions.first(where: { $0.id == selected }) else { return false }
+                    if action.kind == .text,
+                       request.draft.inputs[input.id]?.textByActionID[selected]?.rawValue
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                        return false
+                    }
+                case .text:
+                    if input.id.rawValue == "value" {
+                        hasAnswerInput = true
+                        guard let rawValue = request.draft.inputs[input.id]?.text?.rawValue,
+                              let value = Double(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+                              (7...90).contains(value) else { return false }
+                    }
+                case .point:
+                    hasAnswerInput = true
+                    guard request.draft.inputs[input.id]?.effectivePoint != nil else { return false }
+                }
+            }
+            return hasAnswerInput
+        case let .compatibility(actions):
+            guard let selected = request.draft.compatibility.selectedActionID,
+                  let action = actions.first(where: { $0.id == selected }) else { return false }
+            return action.kind != .text || request.draft.compatibility.textByActionID[selected]?.rawValue
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        case .unsupported:
+            return false
+        }
+    }
+
+    func finishLocally() {
+        finished = true
+        deferred = false
+    }
+
     var isClosed: Bool {
         guard let status = viewModel.request(for: key)?.lifecycleStatus else { return false }
         return status != .open && status != .pending
@@ -257,7 +357,7 @@ final class SampleLibrary {
                 title: request.title?.rawValue ?? "", body: request.body?.rawValue ?? "",
                 options: metadata.options, deadline: metadata.deadline, missed: metadata.missed,
                 revised: metadata.revised, chatUnread: metadata.chatUnread, hasChat: metadata.hasChat,
-                emphasis: metadata.emphasis)
+                fixtureCreatedAtMilliseconds: metadata.fixtureCreatedAtMilliseconds)
         }
         guard !reorderedIDs.isEmpty else { return projected }
         let byID = Dictionary(uniqueKeysWithValues: projected.map { ($0.id, $0) })
@@ -323,7 +423,8 @@ enum SampleCatalog {
                                  deadline: index.isMultiple(of: 3) ? (variation == 1 ? "Due yesterday" : "By 5 PM") : nil,
                                  missed: variation == 1 && index.isMultiple(of: 3), revised: variation == 2,
                                  chatUnread: variation == 0 && index.isMultiple(of: 2), hasChat: variation != 1,
-                                 emphasis: variation == 0 ? max(0, 3 - index / 3) : (variation == 1 ? 1 : 0))
+                                 fixtureCreatedAtMilliseconds: 1_790_000_000_000
+                                    + (variation * SampleKind.allCases.count + index) * 60_000)
         }
     }
 
