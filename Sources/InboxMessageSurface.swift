@@ -8,12 +8,6 @@ private struct MessageCardContentHeightKey: PreferenceKey {
     }
 }
 
-private struct MessageCardScrollMetrics: Equatable {
-    var containerHeight: CGFloat = 0
-    var topInset: CGFloat = 0
-    var systemBottomInset: CGFloat = 0
-}
-
 struct InboxCardPreview {
     let sender: String
     let title: String
@@ -42,90 +36,75 @@ struct MessageCardSurface<Content: View>: View {
     @State private var pull: CGFloat = 0
     @State private var armedDirection = 0
     @State private var contentHeight: CGFloat = 0
-    @State private var scrollMetrics = MessageCardScrollMetrics()
 
     private let bottomToolbarClearance: CGFloat = 72
 
-    private var needsBottomToolbarClearance: Bool {
-        guard scrollMetrics.containerHeight > 0 else { return false }
-        let visibleHeight = max(0, scrollMetrics.containerHeight
-            - scrollMetrics.topInset
-            - scrollMetrics.systemBottomInset
-            - bottomToolbarClearance)
-        return contentHeight > visibleHeight + 1
-    }
-
     var body: some View {
-        ScrollView {
-            content()
-                .frame(maxWidth: 680)
-                .frame(maxWidth: .infinity)
-                .background {
-                    GeometryReader { geometry in
-                        Color.clear.preference(key: MessageCardContentHeightKey.self,
-                                               value: geometry.size.height)
+        GeometryReader { viewport in
+            let availableHeight = max(0, viewport.size.height - bottomToolbarClearance)
+            let needsBottomToolbarClearance = contentHeight > availableHeight + 1
+
+            ScrollView {
+                content()
+                    .frame(maxWidth: 680)
+                    .frame(maxWidth: .infinity)
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(key: MessageCardContentHeightKey.self,
+                                                   value: geometry.size.height)
+                        }
+                        .allowsHitTesting(false)
                     }
+            }
+            .accessibilityIdentifier("message-card-scroll")
+            .scrollBounceBehavior(.always)
+            .scrollDismissesKeyboard(.interactively)
+            .onPreferenceChange(MessageCardContentHeightKey.self) { contentHeight = $0 }
+            // Only add scroll room when the card is taller than the usable area.
+            // Short cards stay at the true boundary for the next/previous pull gesture.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if needsBottomToolbarClearance {
+                    Color.clear.frame(height: bottomToolbarClearance).accessibilityHidden(true)
                 }
-        }
-        .accessibilityIdentifier("message-card-scroll")
-        .scrollBounceBehavior(.always)
-        .scrollDismissesKeyboard(.interactively)
-        .onPreferenceChange(MessageCardContentHeightKey.self) { contentHeight = $0 }
-        .onScrollGeometryChange(for: MessageCardScrollMetrics.self) { geometry in
-            MessageCardScrollMetrics(containerHeight: geometry.containerSize.height,
-                                     topInset: geometry.contentInsets.top,
-                                     systemBottomInset: geometry.contentInsets.bottom)
-        } action: { _, metrics in
-            let insetAddedByThisView = needsBottomToolbarClearance ? bottomToolbarClearance : 0
-            scrollMetrics = MessageCardScrollMetrics(
-                containerHeight: metrics.containerHeight,
-                topInset: metrics.topInset,
-                systemBottomInset: max(0, metrics.systemBottomInset - insetAddedByThisView))
-        }
-        // Only add scroll room when the card is taller than the usable area.
-        // Short cards stay at the true boundary for the next/previous pull gesture.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if needsBottomToolbarClearance {
-                Color.clear.frame(height: bottomToolbarClearance).accessibilityHidden(true)
             }
-        }
-        .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
-        .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
-        .navigationBarTitleDisplayMode(.inline)
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            let top = geometry.contentOffset.y + geometry.contentInsets.top
-            let extent = max(0, geometry.contentSize.height - geometry.containerSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom)
-            let bottom = top - extent
-            if top < 0 { return -top }
-            if bottom > 0 { return -bottom }
-            return 0
-        } action: { _, value in
-            pull = value
-            let direction = value > 0 ? -1 : 1
-            let neighbor = direction < 0 ? context.previous : context.next
-            armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
-        }
-        .onScrollPhaseChange { oldPhase, newPhase in
-            if oldPhase == .interacting && newPhase != .interacting && armedDirection != 0 {
-                context.move(armedDirection)
+            .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
+            .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
+            .navigationBarTitleDisplayMode(.inline)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                let top = geometry.contentOffset.y + geometry.contentInsets.top
+                let extent = max(0, geometry.contentSize.height - geometry.containerSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom)
+                let bottom = top - extent
+                if top < 0 { return -top }
+                if bottom > 0 { return -bottom }
+                return 0
+            } action: { _, value in
+                pull = value
+                let direction = value > 0 ? -1 : 1
+                let neighbor = direction < 0 ? context.previous : context.next
+                armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
             }
-        }
-        .overlay(alignment: pull > 0 ? .top : .bottom) {
-            if abs(pull) > 8, let neighbor = pull > 0 ? context.previous : context.next {
-                MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0, armed: armedDirection != 0)
-                    .frame(height: armedDirection != 0 ? 104 : min(80, abs(pull)), alignment: pull > 0 ? .bottom : .top)
-                    .clipped().allowsHitTesting(false)
-                    .animation(.snappy, value: armedDirection)
+            .onScrollPhaseChange { oldPhase, newPhase in
+                if oldPhase == .interacting && newPhase != .interacting && armedDirection != 0 {
+                    context.move(armedDirection)
+                }
             }
-        }
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("\(context.position) of \(context.total)").font(.subheadline.monospacedDigit())
-                    .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
+            .overlay(alignment: pull > 0 ? .top : .bottom) {
+                if abs(pull) > 8, let neighbor = pull > 0 ? context.previous : context.next {
+                    MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0, armed: armedDirection != 0)
+                        .frame(height: armedDirection != 0 ? 104 : min(80, abs(pull)), alignment: pull > 0 ? .bottom : .top)
+                        .clipped().allowsHitTesting(false)
+                        .animation(.snappy, value: armedDirection)
+                }
             }
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text("\(context.position) of \(context.total)").font(.subheadline.monospacedDigit())
+                        .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
+                }
+            }
+            .accessibilityAction(named: "Previous message") { if context.previous != nil { context.move(-1) } }
+            .accessibilityAction(named: "Next message") { if context.next != nil { context.move(1) } }
         }
-        .accessibilityAction(named: "Previous message") { if context.previous != nil { context.move(-1) } }
-        .accessibilityAction(named: "Next message") { if context.next != nil { context.move(1) } }
     }
 }
 

@@ -2,6 +2,14 @@ import XCTest
 
 @MainActor
 final class SampleWorkspaceUITests: XCTestCase {
+    override func setUpWithError() throws {
+        XCUIDevice.shared.orientation = .portrait
+    }
+
+    override func tearDownWithError() throws {
+        XCUIDevice.shared.orientation = .portrait
+    }
+
     func testOrdinaryInboxKeepsRequestsWhenExamplesAreAdded() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture"]
@@ -168,8 +176,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
         for _ in 0..<8 {
             if element.isHittable { return }
-            let start = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.82))
-            let end = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.28))
+            let start = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.82))
+            let end = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.28))
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast,
                         thenHoldForDuration: 0)
         }

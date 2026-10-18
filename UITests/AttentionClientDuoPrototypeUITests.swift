@@ -5,6 +5,7 @@ import AttentionDomain
 final class AttentionClientDuoPrototypeUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
     }
 
     func testUnjoinedDeviceCanPasteAnInvitationWithoutAssemblingCredentials() throws {
@@ -174,9 +175,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let scroll = app.scrollViews["message-card-scroll"]
         for _ in 0..<8 {
             if element.isHittable { return }
-            // The right gutter remains a scroll surface beside direct point input.
-            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.82))
-            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.28))
+            // Keep the gesture outside the system scroll indicator and point canvas.
+            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.82))
+            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.28))
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast,
                         thenHoldForDuration: 0)
         }
