@@ -892,10 +892,16 @@ final class LivePresentationStore {
     /// The ordinary inbox calls this only for explicit selection/back navigation.
     /// Rebuilding a detail or losing transport never calls it.
     func navigateMessage(from previous: RequestKey?, to next: RequestKey?) {
+        if profileContext.transportMode == .fixture {
+            print("E2_TRACE model-navigation previous=\(previous?.messageID.rawValue ?? "nil") next=\(next?.messageID.rawValue ?? "nil") readOnly=\(isReadOnly)")
+        }
         guard previous != next else { return }
         if !isReadOnly, let previous {
             do {
                 let pending = try port.abandonConversationUploads(for: previous, context: port.context)
+                if profileContext.transportMode == .fixture {
+                    print("E2_TRACE model-cleanup request=\(previous.messageID.rawValue) pending=\(pending.count)")
+                }
                 try refreshFromDurableStore()
                 if !pending.isEmpty {
                     if permitsDelivery { Task { await retryUploadCleanup(for: previous) } }

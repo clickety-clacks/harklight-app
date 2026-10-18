@@ -191,6 +191,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func selectionDidChange(from previous: InboxSelection?, to next: InboxSelection?) {
+        print("E2_TRACE selection previous=\(String(describing: previous)) next=\(String(describing: next)) sampleSelected=\(samples.selectedID ?? "nil") sampleLast=\(samples.lastViewedID ?? "nil")")
         let oldRequest: RequestKey? = if case let .request(key) = previous { key } else { nil }
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
@@ -440,11 +441,15 @@ struct InboxList: View {
         let inTab = rows.filter { $0.belongsToSeenTab == (selectedTab == .seen) }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return inTab }
-        return inTab.filter {
+        let filtered = inTab.filter {
             $0.preview.title.localizedCaseInsensitiveContains(query) ||
             $0.preview.sender.localizedCaseInsensitiveContains(query) ||
             $0.preview.body.localizedCaseInsensitiveContains(query)
         }
+        if query == "welcome" {
+            print("E2_TRACE inbox query=welcome tab=\(selectedTab.rawValue) inTab=\(inTab.count) filtered=\(filtered.map(\\.accessibilityID)) sampleSelected=\(samples.selectedID ?? "nil")")
+        }
+        return filtered
     }
 
     private func restoreLastViewed(using proxy: ScrollViewProxy) {

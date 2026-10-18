@@ -398,6 +398,7 @@ final class SampleLibrary {
     }
 
     func select(_ id: String?, departingFrom previousID: String?) {
+        print("E2_TRACE sample-select previous=\(previousID ?? "nil") next=\(id ?? "nil") selectedBefore=\(selectedID ?? "nil") lastBefore=\(lastViewedID ?? "nil") fixture=\(fixture != nil)")
         let previousKey = previousID.flatMap { responses[$0]?.key }
         let nextKey = id.flatMap { responses[$0]?.key }
         fixture?.viewModel.navigateMessage(from: previousKey, to: nextKey)
