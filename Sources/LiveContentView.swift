@@ -495,7 +495,7 @@ struct LiveRequestDetail: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-receipt-evidence")
                 }
-                DisclosureGroup("Request details") {
+                DisclosureGroup {
                     Text("Sender: \(request.key.senderID.rawValue)")
                     Text("Message: \(request.key.messageID.rawValue)")
                     Text(request.originalContentJSON)
@@ -510,8 +510,10 @@ struct LiveRequestDetail: View {
                             .textSelection(.enabled)
                             .accessibilityIdentifier("request-details-original-answer-json")
                     }
+                } label: {
+                    Text("Request details")
+                        .accessibilityIdentifier("request-details-disclosure")
                 }
-                .accessibilityIdentifier("request-details-disclosure")
             }
             .padding(.horizontal, 22).padding(.vertical, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -861,10 +863,14 @@ private struct LiveProjectedInputView: View {
             .disabled(readOnly)
         } else {
             Button {
-                if localExample?.message.kind == .multipleChoice && action.id.rawValue == "own" {
-                    localExample?.choices = []
+                if let localExample, action.id.rawValue == "own" {
+                    if localExample.message.kind == .multipleChoice {
+                        localExample.choices = []
+                    }
+                    localExample.ownAnswer = true
+                } else {
+                    store.selectAction(action.id, input: input.id, for: request.key)
                 }
-                store.selectAction(action.id, input: input.id, for: request.key)
             } label: {
                 VStack(alignment: .leading, spacing: 8) {
                     if let artID = action.illustrationID,

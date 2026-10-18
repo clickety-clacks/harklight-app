@@ -134,6 +134,8 @@ final class ConversationSampleUITests: XCTestCase {
         showInbox(app)
         reveal(row, in: app.scrollViews.firstMatch, app: app)
         row.tap()
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep this file note.")
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)

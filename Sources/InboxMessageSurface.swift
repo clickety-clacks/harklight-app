@@ -1,5 +1,19 @@
 import SwiftUI
 
+private struct MessageCardContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct MessageCardScrollMetrics: Equatable {
+    var containerHeight: CGFloat = 0
+    var topInset: CGFloat = 0
+    var systemBottomInset: CGFloat = 0
+}
+
 struct InboxCardPreview {
     let sender: String
     let title: String
@@ -27,18 +41,53 @@ struct MessageCardSurface<Content: View>: View {
     @ViewBuilder let content: () -> Content
     @State private var pull: CGFloat = 0
     @State private var armedDirection = 0
+    @State private var contentHeight: CGFloat = 0
+    @State private var scrollMetrics = MessageCardScrollMetrics()
+
+    private let bottomToolbarClearance: CGFloat = 72
+
+    private var needsBottomToolbarClearance: Bool {
+        guard scrollMetrics.containerHeight > 0 else { return false }
+        let visibleHeight = max(0, scrollMetrics.containerHeight
+            - scrollMetrics.topInset
+            - scrollMetrics.systemBottomInset
+            - bottomToolbarClearance)
+        return contentHeight > visibleHeight + 1
+    }
 
     var body: some View {
         ScrollView {
-            content().frame(maxWidth: 680).frame(maxWidth: .infinity)
+            content()
+                .frame(maxWidth: 680)
+                .frame(maxWidth: .infinity)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(key: MessageCardContentHeightKey.self,
+                                               value: geometry.size.height)
+                    }
+                }
         }
         .accessibilityIdentifier("message-card-scroll")
         .scrollBounceBehavior(.always)
         .scrollDismissesKeyboard(.interactively)
-        // Keep the last answer and receipt controls scrollable above the
-        // overlaid bottom toolbar.
+        .onPreferenceChange(MessageCardContentHeightKey.self) { contentHeight = $0 }
+        .onScrollGeometryChange(for: MessageCardScrollMetrics.self) { geometry in
+            MessageCardScrollMetrics(containerHeight: geometry.containerSize.height,
+                                     topInset: geometry.contentInsets.top,
+                                     systemBottomInset: geometry.contentInsets.bottom)
+        } action: { _, metrics in
+            let insetAddedByThisView = needsBottomToolbarClearance ? bottomToolbarClearance : 0
+            scrollMetrics = MessageCardScrollMetrics(
+                containerHeight: metrics.containerHeight,
+                topInset: metrics.topInset,
+                systemBottomInset: max(0, metrics.systemBottomInset - insetAddedByThisView))
+        }
+        // Only add scroll room when the card is taller than the usable area.
+        // Short cards stay at the true boundary for the next/previous pull gesture.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            Color.clear.frame(height: 72).accessibilityHidden(true)
+            if needsBottomToolbarClearance {
+                Color.clear.frame(height: bottomToolbarClearance).accessibilityHidden(true)
+            }
         }
         .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
         .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)

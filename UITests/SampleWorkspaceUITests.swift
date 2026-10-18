@@ -168,7 +168,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
         for _ in 0..<8 {
             if element.isHittable { return }
-            scrollView.swipeUp()
+            let start = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.82))
+            let end = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.28))
+            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast)
         }
         XCTAssertTrue(element.isHittable, app.debugDescription)
     }

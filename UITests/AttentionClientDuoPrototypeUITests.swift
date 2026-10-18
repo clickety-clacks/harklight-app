@@ -174,7 +174,10 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let scroll = app.scrollViews["message-card-scroll"]
         for _ in 0..<8 {
             if element.isHittable { return }
-            scroll.swipeUp()
+            // The right gutter remains a scroll surface beside direct point input.
+            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.82))
+            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.28))
+            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast)
         }
         XCTAssertTrue(element.isHittable,
                       "The shared message card should make its existing control reachable.\n\(app.debugDescription)")
