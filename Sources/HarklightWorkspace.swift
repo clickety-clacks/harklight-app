@@ -170,8 +170,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func navigate(to next: InboxSelection?) {
-        guard selection != next else { return }
-        let previous = selection
+        navigate(from: selection, to: next)
+    }
+
+    private func navigate(from previous: InboxSelection?, to next: InboxSelection?) {
+        guard previous != next else { return }
         selection = next
         // Keep departure cleanup bound to the explicit identity transition;
         // split-view adaptation changes columns without leaving this message.
@@ -183,16 +186,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
 
-        // SampleLibrary retains the selected example across adaptive view
-        // reconstruction. Use it when selection has no prior value, and clear
-        // it whenever navigation leaves the example domain.
-        let oldSampleID: String? = if case let .sample(id) = previous { id }
-            else if previous == nil { samples.selectedID }
-            else { nil }
         let newSampleID: String? = if case let .sample(id) = next { id } else { nil }
-        let oldExample = oldSampleID.flatMap { samples.responses[$0]?.key }
-        let newExample = newSampleID.flatMap { samples.responses[$0]?.key }
-        samples.fixture?.viewModel.navigateMessage(from: oldExample, to: newExample)
 
         if let next { lastViewedSelection = next }
         if let newRequest { selectRequest(newRequest) }
@@ -303,10 +297,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           lastViewedSelection: lastViewedSelection,
                           restoreLastViewed: restoreLastViewedOnReturn,
                           didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                          showSettings: { settings = true }, markSeen: markSeen, select: { id in
-                    navigatedBetweenMessages = selection != nil && selection != id
+                          showSettings: { settings = true }, markSeen: markSeen, select: { previous, id in
+                    navigatedBetweenMessages = previous != nil && previous != id
                     restoreLastViewedOnReturn = false
-                    navigate(to: id)
+                    navigate(from: previous, to: id)
                     compactColumn = .detail
                     if !landscape { visibility = .detailOnly }
                 })
@@ -422,7 +416,7 @@ struct InboxList: View {
     let didRestoreLastViewed: () -> Void
     let showSettings: () -> Void
     let markSeen: (InboxSelection) -> Void
-    let select: (InboxSelection) -> Void
+    let select: (InboxSelection?, InboxSelection) -> Void
     @State private var search = ""
     @State private var searchPresented = false
     @FocusState private var searchFocused: Bool
@@ -465,7 +459,7 @@ struct InboxList: View {
                     ForEach(filteredRows) { row in
                         Button {
                             searchFocused = false
-                            select(row.id)
+                            select(selected, row.id)
                         } label: {
                             switch row {
                             case let .request(request):

@@ -394,6 +394,9 @@ final class SampleLibrary {
     }
 
     func select(_ id: String?) {
+        let previousKey = selectedID.flatMap { responses[$0]?.key }
+        let nextKey = id.flatMap { responses[$0]?.key }
+        fixture?.viewModel.navigateMessage(from: previousKey, to: nextKey)
         selectedID = id
         if let id {
             lastViewedID = id
