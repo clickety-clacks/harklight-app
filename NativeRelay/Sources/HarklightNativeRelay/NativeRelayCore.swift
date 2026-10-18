@@ -16,6 +16,14 @@ public protocol AuthenticatedInstallationSession: AnyObject, Sendable {
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult
 }
 
+/// Opt-in FORMAT17 v25 enrolled-device paging. Keeping this separate prevents
+/// an older transport from silently falling back to an unbounded `resync`.
+public protocol AuthenticatedInboxPagingSession: AuthenticatedInstallationSession {
+    func inboxRequest(_ request: Data, ref: String) async throws -> Data
+    func attachInboxReplay(_ request: Data, ref: String,
+                           consume: @Sendable (Data) async throws -> Void) async throws
+}
+
 public extension AuthenticatedInstallationSession {
     var relayEndpointHost: String { authenticatedIdentity.trustedRelayAuthority.rawValue }
 }
@@ -50,6 +58,8 @@ public enum NativeRelayCoreError: Error, Equatable {
     case missingOriginContent
     case eventRejected
     case mismatchedOperationResult
+    case inboxPagingUnavailable
+    case inboxPagingBusy
 }
 
 /// The first native relay seam. C is the only durable owner of events, cursor,
@@ -67,12 +77,16 @@ public actor NativeRelayCore {
     private let context: ProfileContext
     private let session: any AuthenticatedInstallationSession
     private let wire: RelayWire
+    private let inboxWire: InboxPagingWire
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
     private let attemptID: UUID?
     private var active = true
     private var busy = false
-    private var activeReplay: ReplayProgress?
+    private var activeInboxReplay: ReplayProgress?
+    private var inboxBootstrapped = false
+    private var activeInboxStartupID: String?
+    private var pendingInboxPageWaiters: [CheckedContinuation<Bool, Error>] = []
     private var conversationReplay: ConversationReplayProgress?
     private var inspectedConversationMetadata = false
     private var discoveredOriginURL: URL?
@@ -142,7 +156,7 @@ public actor NativeRelayCore {
                  revision: binding.revision)
         guard !busy else { throw NativeRelayCoreError.inactive }
         busy = true
-        defer { busy = false }
+        defer { releaseBusy() }
         try validate()
         guard let transport = session as? any AuthenticatedConversationFileSession,
               let draft = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
@@ -265,7 +279,6 @@ public actor NativeRelayCore {
     private struct ReplayProgress {
         var expected: UInt64
         let durableCursor: UInt64
-        let retained: Set<RequestKey>
         var accepted = false
         var high: UInt64?
     }
@@ -288,6 +301,7 @@ public actor NativeRelayCore {
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
         self.wire = try RelayWire(profile: context)
+        self.inboxWire = try InboxPagingWire(profile: context)
     }
 
     public func deactivate() {
@@ -300,18 +314,24 @@ public actor NativeRelayCore {
     public func resyncAndDrainOutbox() async throws -> UInt64 {
         guard !busy else { throw NativeRelayCoreError.inactive }
         busy = true
-        defer { busy = false }
+        defer { releaseBusy() }
         try validate()
-        let snapshot = try store.snapshot(context: context)
-        // An upgraded store can have ordinary delivery history predating the
-        // additive metadata. Replay enriches it without replacing drafts or cursor.
-        let enrich = session is any AuthenticatedConversationSession && !inspectedConversationMetadata &&
-            snapshot.conversationThreads.isEmpty && !snapshot.requests.isEmpty
-        let before = enrich ? 0 : snapshot.cursor
+        guard let pagingSession = session as? any AuthenticatedInboxPagingSession else {
+            throw NativeRelayCoreError.inboxPagingUnavailable
+        }
         let acceptedBeforeReplay = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
         retainReplayDiagnostics(for: acceptedBeforeReplay)
-        var high = try await replayAndAcknowledge(since: before,
-                                                   trackingAcceptedOperations: acceptedBeforeReplay)
+        var high: UInt64
+        if inboxBootstrapped {
+            high = try await replayInboxAndAcknowledge(
+                since: store.snapshot(context: context).cursor,
+                trackingAcceptedOperations: acceptedBeforeReplay,
+                using: pagingSession)
+        } else {
+            high = try await bootstrapInbox(using: pagingSession,
+                                            trackingAcceptedOperations: acceptedBeforeReplay)
+            inboxBootstrapped = true
+        }
         inspectedConversationMetadata = true
         let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
             .map(\.operationID))
@@ -332,17 +352,380 @@ public actor NativeRelayCore {
             throw error
         }
         if attempted > 0 {
-            // The answer may have created a terminal event after the first
-            // replay. Commit and ACK it before publishing the refreshed view;
-            // an operation's receipt sequence cannot advance C's cursor.
-            high = try await replayAndAcknowledge(since: high,
-                trackingAcceptedOperations: try store.acceptedOperationsAwaitingTerminalReplay(context: context))
+            high = try await replayInboxAndAcknowledge(
+                since: high,
+                trackingAcceptedOperations: try store.acceptedOperationsAwaitingTerminalReplay(context: context),
+                using: pagingSession)
         }
         if try !store.conversationSnapshot(context: context).threads.isEmpty,
            let conversationSession = session as? any AuthenticatedConversationSession {
             try await replayConversationAndAcknowledge(using: conversationSession)
         }
         return high
+    }
+
+    /// A page request originates only from a deliberate downward-scroll signal.
+    /// Coalesce queued scroll demand while another relay operation owns the
+    /// socket, then return only after the page has been durably saved.
+    @discardableResult
+    public func fetchNextInboxPage() async throws -> Bool {
+        guard let pagingSession = session as? any AuthenticatedInboxPagingSession else {
+            throw NativeRelayCoreError.inboxPagingUnavailable
+        }
+        guard !busy else {
+            return try await withCheckedThrowingContinuation { continuation in
+                pendingInboxPageWaiters.append(continuation)
+            }
+        }
+        busy = true
+        defer { releaseBusy() }
+        do {
+            try validate()
+            let checkpoint = try store.snapshot(context: context).inboxCheckpoint
+            guard let checkpoint, checkpoint.checkpointAccepted,
+                  checkpoint.hasInitialPage,
+                  let snapshotID = checkpoint.snapshotID,
+                  let highWater = checkpoint.highWater,
+                  let cursor = checkpoint.nextCursor else {
+                return false
+            }
+            let ref = Self.inboxRef("page")
+            let reply = try await pagingSession.inboxRequest(
+                inboxWire.inboxPage(snapshotID: snapshotID, cursor: cursor, ref: ref), ref: ref)
+            try validate()
+            let page = try inboxWire.decodePage(reply, ref: ref,
+                                                snapshotID: snapshotID, highWater: highWater)
+            try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
+                cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context)
+            return true
+        } catch {
+            throw error
+        }
+    }
+
+    private func bootstrapInbox(using transport: any AuthenticatedInboxPagingSession,
+                                trackingAcceptedOperations accepted: [Submission]) async throws -> UInt64 {
+        let snapshot = try store.snapshot(context: context)
+        if let candidate = snapshot.inboxCandidate {
+            let isCurrentStartup = activeInboxStartupID == candidate.startupID
+            if candidate.checkpointRequestStarted {
+                do {
+                    try await recoverInboxCheckpoint(candidate, using: transport)
+                    if isCurrentStartup, let checkpoint = try store.snapshot(context: context).inboxCheckpoint,
+                       checkpoint.checkpointAccepted, let high = checkpoint.highWater {
+                        return try await replayInboxAndAcknowledge(
+                            since: high,
+                            trackingAcceptedOperations: accepted,
+                            using: transport)
+                    }
+                } catch InboxPagingWireError.serverRefused("snapshot_replaced") {
+                    guard let snapshotID = candidate.snapshotID else { throw NativeRelayCoreError.invalidReplay }
+                    try store.discardReplacedInboxCandidate(snapshotID: snapshotID, context: context)
+                }
+            } else if isCurrentStartup {
+                return try await completeInboxCandidate(candidate, using: transport,
+                    trackingAcceptedOperations: accepted)
+            } else {
+                // A prior launch may have persisted page/receipt work before it
+                // requested the checkpoint. Keep that work and originals, then
+                // capture this launch's one fresh bounded B2 snapshot.
+                try store.discardInboxCandidate(context: context)
+            }
+        }
+        return try await createInboxCheckpoint(using: transport,
+                                               trackingAcceptedOperations: accepted)
+    }
+
+    private func recoverInboxCheckpoint(_ candidate: InboxPagingCheckpoint,
+                                        using transport: any AuthenticatedInboxPagingSession) async throws {
+        guard candidate.checkpointEligible, candidate.checkpointRequestStarted,
+              let snapshotID = candidate.snapshotID,
+              let highWater = candidate.highWater else { throw NativeRelayCoreError.invalidReplay }
+        let statusRef = Self.inboxRef("status")
+        let statusReply = try await transport.inboxRequest(
+            inboxWire.inboxCheckpointStatus(snapshotID: snapshotID, since: candidate.since,
+                candidateHighWater: highWater, ref: statusRef), ref: statusRef)
+        let accepted = try inboxWire.decodeCheckpointStatus(statusReply, ref: statusRef,
+            snapshotID: snapshotID, highWater: highWater)
+        if !accepted { try await acknowledgeInboxCheckpoint(candidate, using: transport) }
+        _ = try store.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: highWater,
+                                            context: context)
+    }
+
+    private func createInboxCheckpoint(using transport: any AuthenticatedInboxPagingSession,
+                                       trackingAcceptedOperations accepted: [Submission]) async throws -> UInt64 {
+        let cursor = try store.snapshot(context: context).cursor
+        let inventory = try store.inboxOperationInventory(context: context)
+        let candidate = try store.beginInboxCandidate(startupID: UUID().uuidString.lowercased(),
+            since: cursor, batches: Self.makeInboxBatches(inventory), context: context)
+        activeInboxStartupID = candidate.startupID
+
+        return try await completeInboxCandidate(candidate, using: transport,
+                                                trackingAcceptedOperations: accepted)
+    }
+
+    private func completeInboxCandidate(_ candidate: InboxPagingCheckpoint,
+                                        using transport: any AuthenticatedInboxPagingSession,
+                                        trackingAcceptedOperations accepted: [Submission]) async throws -> UInt64 {
+        if !candidate.hasInitialPage {
+            let startRef = Self.inboxRef("start")
+            let startReply = try await transport.inboxRequest(
+                inboxWire.inboxStart(startupID: candidate.startupID, since: candidate.since,
+                                     ref: startRef), ref: startRef)
+            try validate()
+            let firstPage = try inboxWire.decodeStart(startReply, ref: startRef)
+            try store.saveInboxInitialPage(snapshotID: firstPage.snapshotID,
+                highWater: firstPage.highWater, items: firstPage.items,
+                nextCursor: firstPage.nextCursor, receiptCursor: firstPage.receiptCursor,
+                context: context)
+        }
+
+        let eligible = try await prepareInboxCandidate(using: transport)
+        try await acknowledgeInboxCheckpoint(eligible, using: transport)
+        guard let snapshotID = eligible.snapshotID, let highWater = eligible.highWater else {
+            throw NativeRelayCoreError.invalidReplay
+        }
+        let high = try store.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: highWater,
+                                                   context: context)
+        return try await replayInboxAndAcknowledge(since: high,
+            trackingAcceptedOperations: accepted, using: transport)
+    }
+
+    private func prepareInboxCandidate(using transport: any AuthenticatedInboxPagingSession) async throws -> InboxPagingCheckpoint {
+        while true {
+            try await reconcilePendingInboxBatches(using: transport)
+            try await drainInboxReceiptCursor(using: transport)
+            let candidate = try currentInboxCandidate()
+            let covered = Set(candidate.batches.flatMap(\.operationIDs))
+            let inventory = try store.inboxOperationInventory(context: context)
+            let missing = inventory.filter { !covered.contains($0.operationID) }
+            if !missing.isEmpty {
+                try store.appendInboxReceiptBatches(Self.makeInboxBatches(missing), context: context)
+                continue
+            }
+            do {
+                return try store.prepareInboxCheckpointAcknowledgement(context: context)
+            } catch AttentionStoreError.inboxCheckpointIncomplete {
+                let refreshed = try store.inboxOperationInventory(context: context)
+                let refreshedMissing = refreshed.filter { !covered.contains($0.operationID) }
+                guard !refreshedMissing.isEmpty else { throw AttentionStoreError.inboxCheckpointIncomplete }
+                try store.appendInboxReceiptBatches(Self.makeInboxBatches(refreshedMissing), context: context)
+            }
+        }
+    }
+
+    private func reconcilePendingInboxBatches(using transport: any AuthenticatedInboxPagingSession) async throws {
+        while true {
+            let candidate = try currentInboxCandidate()
+            guard let snapshotID = candidate.snapshotID,
+                  let highWater = candidate.highWater else { throw NativeRelayCoreError.invalidReplay }
+            guard let batch = candidate.batches.first(where: { $0.results == nil }) else { return }
+            let snapshot = try store.snapshot(context: context)
+            let submissionsByOperation = Dictionary(uniqueKeysWithValues:
+                snapshot.intents.values.map { ($0.operationID, $0) })
+            let submissions = try batch.operationIDs.map { operationID -> Submission in
+                guard let submission = submissionsByOperation[operationID] else {
+                    throw AttentionStoreError.inboxCheckpointIncomplete
+                }
+                return submission
+            }
+            let ref = Self.inboxRef("reconcile")
+            let reply = try await transport.inboxRequest(
+                inboxWire.inboxReconcile(snapshotID: snapshotID, batchID: batch.batchID,
+                    operations: submissions.map(\.operation), ref: ref), ref: ref)
+            try validate()
+            let results = try inboxWire.decodeReconciliation(reply, ref: ref,
+                snapshotID: snapshotID, highWater: highWater,
+                batchID: batch.batchID,
+                operationIDs: batch.operationIDs)
+            try store.saveInboxReceiptBatch(batch.batchID, results: results, context: context)
+        }
+    }
+
+    private func drainInboxReceiptCursor(using transport: any AuthenticatedInboxPagingSession) async throws {
+        while true {
+            let candidate = try currentInboxCandidate()
+            guard let snapshotID = candidate.snapshotID,
+                  let highWater = candidate.highWater,
+                  let cursor = candidate.receiptCursor else { return }
+            let ref = Self.inboxRef("receipts")
+            let reply = try await transport.inboxRequest(
+                inboxWire.inboxReceipts(snapshotID: snapshotID, cursor: cursor, ref: ref), ref: ref)
+            try validate()
+            let page = try inboxWire.decodeReceipts(reply, ref: ref,
+                snapshotID: snapshotID, highWater: highWater)
+            guard !page.events.isEmpty || page.nextCursor == nil else {
+                throw InboxPagingWireError.invalidFrame
+            }
+            try store.saveInboxReceiptChunk(snapshotID: snapshotID, cursor: cursor,
+                events: page.events, nextCursor: page.nextCursor, context: context)
+        }
+    }
+
+    private func acknowledgeInboxCheckpoint(_ candidate: InboxPagingCheckpoint,
+                                            using transport: any AuthenticatedInboxPagingSession) async throws {
+        guard let snapshotID = candidate.snapshotID, let highWater = candidate.highWater else {
+            throw NativeRelayCoreError.invalidReplay
+        }
+        let ref = Self.inboxRef("checkpoint")
+        let reply = try await transport.inboxRequest(
+            inboxWire.inboxCheckpointAck(snapshotID: snapshotID, highWater: highWater,
+                batchIDs: candidate.batches.map(\.batchID), ref: ref), ref: ref)
+        try validate()
+        try inboxWire.decodeCheckpointAck(reply, ref: ref,
+                                          snapshotID: snapshotID, highWater: highWater)
+    }
+
+    private func currentInboxCandidate() throws -> InboxPagingCheckpoint {
+        guard let candidate = try store.snapshot(context: context).inboxCandidate else {
+            throw AttentionStoreError.inboxCheckpointIncomplete
+        }
+        return candidate
+    }
+
+    private static func makeInboxBatches(_ submissions: [Submission]) -> [InboxReceiptBatch] {
+        let batchSize = 8
+        return stride(from: 0, to: submissions.count, by: batchSize).map { start in
+            let slice = submissions[start..<min(start + batchSize, submissions.count)]
+            return InboxReceiptBatch(batchID: UUID().uuidString.lowercased(),
+                                     operationIDs: slice.map(\.operationID))
+        }
+    }
+
+    private static func inboxRef(_ operation: String) -> String {
+        "native-inbox-\(operation)-\(UUID().uuidString.lowercased())"
+    }
+
+    private func replayInboxAndAcknowledge(since cursor: UInt64,
+                                           trackingAcceptedOperations submissions: [Submission] = [],
+                                           using transport: any AuthenticatedInboxPagingSession) async throws -> UInt64 {
+        for submission in submissions where operationReplayDiagnosticStates[submission.operationID] == nil {
+            diagnoseOperationReplay(.began, submission: submission, receipt: .acceptedAwaitingReplay)
+        }
+        onProgress(.nativeSyncReplayRequested)
+        diagnose(.relay, .ordinaryReplay, .began)
+        do {
+            let replayStart = try store.snapshot(context: context).cursor
+            guard replayStart == cursor else { throw NativeRelayCoreError.invalidReplay }
+            var high = try await replayInbox(since: replayStart, using: transport)
+            onProgress(.nativeSyncResynced)
+            var ordinaryAcknowledgementConfirmed = false
+            if high > replayStart {
+                do {
+                    try await session.acknowledge(wire.acknowledge(high))
+                    ordinaryAcknowledgementConfirmed = true
+                    onProgress(.nativeSyncAcknowledged)
+                } catch InstallationTransportError.acknowledgementBehind {
+                    diagnose(.relay, .acknowledgement, .retrying,
+                             error: InstallationTransportError.acknowledgementBehind)
+                    // A checkpoint is the lower replay boundary. Reattach only
+                    // from C's actual durable cursor; never restart FORMAT17 at 0.
+                    let durableCursor = try store.snapshot(context: context).cursor
+                    high = try await replayInbox(since: durableCursor, using: transport)
+                    onProgress(.nativeSyncResynced)
+                    guard high > durableCursor else {
+                        // The checkpoint ACK already establishes H. A replay
+                        // with no new event has no ordinary ACK to repeat.
+                        throw InstallationTransportError.acknowledgementBehind
+                    }
+                    try await session.acknowledge(wire.acknowledge(high))
+                    ordinaryAcknowledgementConfirmed = true
+                    onProgress(.nativeSyncAcknowledged)
+                }
+            }
+            if ordinaryAcknowledgementConfirmed {
+                diagnose(.relay, .acknowledgement, .completed)
+            }
+            diagnose(.relay, .ordinaryReplay, .completed)
+            if !submissions.isEmpty {
+                let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
+                let ids = outstanding.map { Set($0.map(\.operationID)) }
+                for submission in submissions {
+                    let settled = ids.map { !$0.contains(submission.operationID) } ?? false
+                    diagnoseOperationReplay(settled ? .completed : .unresolved,
+                        causeCode: settled ? nil : (outstanding == nil ? "original_operation_state_unavailable" :
+                            "original_operation_terminal_not_observed"),
+                        submission: submission,
+                        receipt: settled ? .terminal : (outstanding == nil ? .unknown : .acceptedAwaitingReplay))
+                }
+            }
+            return high
+        } catch {
+            diagnose(.relay, .ordinaryReplay,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            let ids = outstanding.map { Set($0.map(\.operationID)) }
+            for submission in submissions {
+                diagnoseOperationReplay(NativeDiagnosticCauseCode.failureTransition(for: error),
+                    causeCode: NativeDiagnosticCauseCode.forError(error), submission: submission,
+                    receipt: ids.map { $0.contains(submission.operationID) ? .acceptedAwaitingReplay : .terminal } ?? .unknown)
+            }
+            throw error
+        }
+    }
+
+    private func replayInbox(since cursor: UInt64,
+                             using transport: any AuthenticatedInboxPagingSession) async throws -> UInt64 {
+        try validate()
+        let snapshot = try store.snapshot(context: context)
+        guard let checkpoint = snapshot.inboxCheckpoint,
+              checkpoint.checkpointAccepted,
+              let snapshotID = checkpoint.snapshotID,
+              let highWater = checkpoint.highWater,
+              cursor == snapshot.cursor,
+              cursor >= highWater else { throw NativeRelayCoreError.invalidReplay }
+        activeInboxReplay = ReplayProgress(expected: cursor, durableCursor: snapshot.cursor)
+        defer { activeInboxReplay = nil }
+        let ref = Self.inboxRef("replay")
+        try await transport.attachInboxReplay(
+            inboxWire.inboxReplayAttach(snapshotID: snapshotID, since: cursor, ref: ref), ref: ref) { frame in
+                try await self.consumeInboxReplay(frame, ref: ref,
+                                                   snapshotID: snapshotID, highWater: highWater)
+            }
+        try validate()
+        guard let high = activeInboxReplay?.high else { throw NativeRelayCoreError.invalidReplay }
+        return high
+    }
+
+    private func consumeInboxReplay(_ frame: Data, ref: String,
+                                    snapshotID: String, highWater: UInt64) throws {
+        try validate()
+        guard var replay = activeInboxReplay, replay.high == nil else {
+            throw NativeRelayCoreError.invalidReplay
+        }
+        if !replay.accepted {
+            guard try inboxWire.isReplayAccepted(frame, ref: ref,
+                                                 snapshotID: snapshotID, highWater: highWater) else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            try store.beginReplay(through: UInt64.max, context: context)
+            replay.accepted = true
+            activeInboxReplay = replay
+            return
+        }
+        if let high = try? wire.decodeResynced(frame) {
+            guard high >= replay.durableCursor, high == replay.expected else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            try store.finishReplay(at: high, context: context)
+            replay.high = high
+            activeInboxReplay = replay
+            return
+        }
+        let event = try wire.decodeEvent(frame)
+        guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
+            throw NativeRelayCoreError.invalidReplay
+        }
+        switch store.applyRelayEvent(event, context: context) {
+        case .committed, .compatibleRepeat:
+            break
+        case let .deferred(cursor) where cursor == event.sequence:
+            break
+        case .gap, .conflict, .repairRequired, .deferred:
+            throw NativeRelayCoreError.eventRejected
+        }
+        replay.expected = event.sequence
+        activeInboxReplay = replay
     }
 
     private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
@@ -404,83 +787,6 @@ public actor NativeRelayCore {
         conversationReplay = replay
     }
 
-    private func replayAndAcknowledge(since cursor: UInt64) async throws -> UInt64 {
-        // This is a local intent signal only; relay admission is observed
-        // later from the session's authenticated response.
-        onProgress(.nativeSyncReplayRequested)
-        diagnose(.relay, .ordinaryReplay, .began)
-        do {
-            var high = try await replay(since: cursor)
-            onProgress(.nativeSyncResynced)
-            do {
-                try await session.acknowledge(wire.acknowledge(high))
-                onProgress(.nativeSyncAcknowledged)
-            } catch InstallationTransportError.acknowledgementBehind {
-                // C may have durably committed a prior replay whose ACK never
-                // reached the server. Re-present the server's complete streamed
-                // history so this session may ACK contiguously from its cursor.
-                diagnose(.relay, .acknowledgement, .retrying,
-                         error: InstallationTransportError.acknowledgementBehind)
-                onProgress(.nativeSyncReplayRequested)
-                high = try await replay(since: 0)
-                onProgress(.nativeSyncResynced)
-                try await session.acknowledge(wire.acknowledge(high))
-                onProgress(.nativeSyncAcknowledged)
-            }
-            diagnose(.relay, .acknowledgement, .completed)
-            diagnose(.relay, .ordinaryReplay, .completed)
-            return high
-        } catch {
-            diagnose(.relay, .ordinaryReplay,
-                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
-            throw error
-        }
-    }
-
-    private func replayAndAcknowledge(since cursor: UInt64,
-                                      trackingAcceptedOperations submissions: [Submission]) async throws -> UInt64 {
-        guard !submissions.isEmpty else {
-            return try await replayAndAcknowledge(since: cursor)
-        }
-        for submission in submissions where operationReplayDiagnosticStates[submission.operationID] == nil {
-            // Record the first operation-bound pending phase before replay can
-            // suspend. Later refreshes retain the state cache, so this same
-            // unchanged observation is not rewritten on every poll.
-            diagnoseOperationReplay(.began, submission: submission,
-                                    receipt: .acceptedAwaitingReplay)
-        }
-        do {
-            let high = try await replayAndAcknowledge(since: cursor)
-            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
-            let outstandingOperationIDs = outstanding.map { Set($0.map(\.operationID)) }
-            for submission in submissions {
-                let terminalWasObserved = outstandingOperationIDs.map { !$0.contains(submission.operationID) } ?? false
-                if terminalWasObserved {
-                    diagnoseOperationReplay(.completed, submission: submission, receipt: .terminal)
-                } else {
-                    diagnoseOperationReplay(.unresolved,
-                             causeCode: outstanding == nil ? "original_operation_state_unavailable" :
-                                "original_operation_terminal_not_observed",
-                             submission: submission,
-                             receipt: outstanding == nil ? .unknown : .acceptedAwaitingReplay)
-                }
-            }
-            return high
-        } catch {
-            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
-            let outstandingOperationIDs = outstanding.map { Set($0.map(\.operationID)) }
-            for submission in submissions {
-                diagnoseOperationReplay(NativeDiagnosticCauseCode.failureTransition(for: error),
-                         causeCode: NativeDiagnosticCauseCode.forError(error),
-                         submission: submission,
-                         receipt: outstandingOperationIDs.map {
-                            $0.contains(submission.operationID) ? .acceptedAwaitingReplay : .terminal
-                         } ?? .unknown)
-            }
-            throw error
-        }
-    }
-
     private func diagnoseOperationReplay(_ transition: NativeDiagnosticTransition,
                                         causeCode: String? = nil,
                                         submission: Submission,
@@ -508,73 +814,28 @@ public actor NativeRelayCore {
         }
     }
 
-    private func replay(since cursor: UInt64) async throws -> UInt64 {
-        try validate()
-        let snapshot = try store.snapshot(context: context)
-        activeReplay = ReplayProgress(expected: cursor,
-                                      durableCursor: snapshot.cursor,
-                                      retained: Set(snapshot.requests.keys))
-        defer { activeReplay = nil }
-        try await session.resync(wire.resync(since: cursor)) { frame in
-            try await self.consumeReplay(frame)
-        }
-        try validate()
-        guard let high = activeReplay?.high else { throw NativeRelayCoreError.invalidReplay }
-        // The caller ACKs even when C's cursor did not advance: a previous
-        // ACK may have been lost after this durable local commit.
-        return high
-    }
-
-    private func consumeReplay(_ frame: Data) throws {
-        try validate()
-        guard var replay = activeReplay, replay.high == nil else {
-            throw NativeRelayCoreError.invalidReplay
-        }
-        if !replay.accepted {
-            guard try wire.isResyncAccepted(frame) else { throw NativeRelayCoreError.invalidReplay }
-            // The server sends no high-water mark before its event stream.
-            // Keep C's published view behind one durable barrier until the
-            // final resynced frame names the exact contiguous cursor.
-            try store.beginReplay(through: UInt64.max, context: context)
-            replay.accepted = true
-            activeReplay = replay
-            return
-        }
-        if let high = try? wire.decodeResynced(frame) {
-            guard high >= replay.durableCursor, high == replay.expected else {
-                throw NativeRelayCoreError.invalidReplay
-            }
-            try store.finishReplay(at: high, context: context)
-            replay.high = high
-            activeReplay = replay
-            return
-        }
-        let event = try wire.decodeEvent(frame)
-        guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
-            throw NativeRelayCoreError.invalidReplay
-        }
-        if case let .originReference(key) = event.body, !replay.retained.contains(key) {
-            throw NativeRelayCoreError.missingOriginContent
-        }
-        switch store.applyRelayEvent(event, context: context) {
-        case .committed, .compatibleRepeat:
-            break
-        case .repairRequired where isOriginReference(event):
-            throw NativeRelayCoreError.missingOriginContent
-        case .gap, .conflict, .repairRequired:
-            throw NativeRelayCoreError.eventRejected
-        }
-        replay.expected = event.sequence
-        activeReplay = replay
-    }
-
     /// An uncertain result leaves the exact original C operation in the outbox.
     @discardableResult
     public func sendPendingOriginalOperations() async throws -> Int {
         guard !busy else { throw NativeRelayCoreError.inactive }
         busy = true
-        defer { busy = false }
+        defer { releaseBusy() }
         return try await drainPending()
+    }
+
+    private func releaseBusy() {
+        busy = false
+        guard !pendingInboxPageWaiters.isEmpty else { return }
+        let waiters = pendingInboxPageWaiters
+        pendingInboxPageWaiters.removeAll()
+        Task {
+            do {
+                let result = try await fetchNextInboxPage()
+                for waiter in waiters { waiter.resume(returning: result) }
+            } catch {
+                for waiter in waiters { waiter.resume(throwing: error) }
+            }
+        }
     }
 
     private func drainPending() async throws -> Int {
@@ -628,11 +889,6 @@ public actor NativeRelayCore {
             }
         }
         return attempted
-    }
-
-    private func isOriginReference(_ event: RelayEvent) -> Bool {
-        if case .originReference = event.body { return true }
-        return false
     }
 
     private func diagnose(_ area: NativeDiagnosticArea,

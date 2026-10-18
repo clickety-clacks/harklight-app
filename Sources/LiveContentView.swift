@@ -50,6 +50,7 @@ struct LiveContentView: View {
                        launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
                 .compactMap { $0 },
             conversationStore: store,
+            fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
             showsLocalExamples: !store.isReadOnly)
         .alert("Connection needs attention", isPresented: failureAlertPresented,
                presenting: diagnostic) { diagnostic in
@@ -256,7 +257,7 @@ struct LiveRequestDetail: View {
     @State private var chatPresented = false
 
     var canAnswer: Bool {
-        guard !store.isReadOnly, request.lifecycleStatus == .open,
+        guard request.inboxStateIsCurrent, !store.isReadOnly, request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         switch request.projection {
         case .sender: return true
@@ -285,13 +286,22 @@ struct LiveRequestDetail: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-update-fact")
                 }
-                Text(store.isRetracted(request.key) ? "Retracted" : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-                    .font(.caption).foregroundStyle(.secondary)
-                if let seenStatus = request.informationalSeenStatus {
-                    Label(Self.informationalSeenText(seenStatus),
-                          systemImage: Self.informationalSeenSymbol(seenStatus))
+                if request.inboxStateIsCurrent {
+                    Text(store.isRetracted(request.key) ? "Retracted" : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                         .font(.caption).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("informational-seen-status")
+                    if let seenStatus = request.informationalSeenStatus {
+                        Label(Self.informationalSeenText(seenStatus),
+                              systemImage: Self.informationalSeenSymbol(seenStatus))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("informational-seen-status")
+                    }
+                } else {
+                    Label("Cached history · status not refreshed", systemImage: "clock.arrow.circlepath")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("inbox-status-unrefreshed")
+                    if let localStatus = Self.cachedOperationStatus(request.intentReceipt?.localState) {
+                        Text(localStatus).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 if store.isRetracted(request.key) {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
@@ -333,7 +343,7 @@ struct LiveRequestDetail: View {
                     Label(actionError, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
                 }
-                if let facts = request.receiptFacts {
+                if request.inboxStateIsCurrent, let facts = request.receiptFacts {
                     Text(facts.evidenceLabel)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -408,6 +418,16 @@ struct LiveRequestDetail: View {
         case .pending: "clock"
         case .confirmed: "checkmark.circle.fill"
         case .resolvedWithoutSeen: "checkmark.circle"
+        }
+    }
+
+    private static func cachedOperationStatus(_ state: LocalIntentState?) -> String? {
+        guard let state else { return nil }
+        switch state {
+        case .durable, .queuedForRelay: "Answer pending on this device"
+        case .accepted: "Answer accepted · terminal status pending"
+        case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .repairRequired: "Answer needs recovery"
         }
     }
 }

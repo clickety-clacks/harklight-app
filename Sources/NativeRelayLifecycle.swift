@@ -848,6 +848,21 @@ final class NativeRelayLifecycle {
         await refreshFlights.afterCurrent()
     }
 
+    @discardableResult
+    func fetchNextInboxPage() async -> Bool {
+        guard let core, let context, !requiresExplicitForegroundRetry else { return false }
+        do {
+            let fetched = try await core.fetchNextInboxPage()
+            guard self.context == context else { return false }
+            return fetched
+        } catch {
+            recordDiagnostic(.relay, .ordinaryReplay,
+                NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                attemptID: activeTransportAttemptID)
+            return false
+        }
+    }
+
     func recordPushRegistrationFailure(_ error: Error? = nil,
                                       causeCode: String? = nil,
                                       area: NativeDiagnosticArea = .notifications) {

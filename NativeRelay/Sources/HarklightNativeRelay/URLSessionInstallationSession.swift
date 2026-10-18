@@ -42,7 +42,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// A keychain-backed installation certificate and an enrollment-approved relay
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
-public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession {
+public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession, AuthenticatedInboxPagingSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
     private let delegate: DeviceTLSDelegate
@@ -109,6 +109,93 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     public func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await replay(request, ref: "native-sync", event: "delivery", end: "resynced", consume: consume)
+    }
+
+    /// Reads one correlated paging or receipt response on the enrolled relay
+    /// socket. It never starts replay or sends a mutation.
+    public func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        do {
+            try await send(request)
+            while true {
+                let frame = try await receive()
+                guard let value = try? JSONValue.parse(frame),
+                      case .object = value,
+                      value.hasUniqueObjectKeys else {
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+                let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+                if kind == "ok" || kind == "error" {
+                    guard value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref else {
+                        throw InstallationTransportError.unexpectedServerFrame
+                    }
+                    return frame
+                }
+                throw InstallationTransportError.unexpectedServerFrame
+            }
+        } catch {
+            close()
+            throw error
+        }
+    }
+
+    /// Opens only the explicit replay half of a confirmed paging checkpoint.
+    /// The accepted reply is delivered first, followed by ordinary projections
+    /// through `resynced`; the caller owns contiguous validation and ACK.
+    public func attachInboxReplay(_ request: Data, ref: String,
+                                  consume: @Sendable (Data) async throws -> Void) async throws {
+        do {
+            try await send(request)
+            var accepted = false
+            while true {
+                let frame = try await receive()
+                guard let value = try? JSONValue.parse(frame),
+                      case .object = value,
+                      value.hasUniqueObjectKeys,
+                      value.uniqueValue(named: "v")?.integerValue == 1 else {
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+                let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+                if !accepted {
+                    if kind == "error" {
+                        guard value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref else {
+                            throw InstallationTransportError.unexpectedServerFrame
+                        }
+                        diagnose(.relay, .ordinaryReplay, .rejected,
+                                 causeCode: NativeDiagnosticCauseCode.serverReason(
+                                    value.uniqueValue(named: "reason")?.stringValue?.rawValue))
+                        throw InstallationTransportError.serverRejected
+                    }
+                    guard kind == "ok",
+                          value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref,
+                          value.uniqueValue(named: "paging_version")?.integerValue == 1,
+                          value.uniqueValue(named: "checkpoint_accepted") == .bool(true),
+                          value.uniqueValue(named: "replay_started") == .bool(true) else {
+                        throw InstallationTransportError.unexpectedServerFrame
+                    }
+                    accepted = true
+                    onProgress(.relayAdmitted)
+                    diagnose(.connection, .relayAdmission, .completed)
+                    try await consume(frame)
+                    continue
+                }
+                if kind == "error" {
+                    diagnose(.relay, .ordinaryReplay, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(
+                                value.uniqueValue(named: "reason")?.stringValue?.rawValue))
+                    throw InstallationTransportError.serverRejected
+                }
+                guard kind == "delivery" || kind == "lifecycle" || kind == "resynced" else {
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+                try await consume(frame)
+                if kind == "resynced" { return }
+            }
+        } catch {
+            diagnose(.relay, .ordinaryReplay,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            close()
+            throw error
+        }
     }
 
     public func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
