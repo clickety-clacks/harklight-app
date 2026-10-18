@@ -1077,7 +1077,7 @@ final class LivePresentationStore {
 
     private func cachedOperationStatus(_ state: LocalIntentState?) -> String? {
         guard let state else { return nil }
-        switch state {
+        return switch state {
         case .durable, .queuedForRelay: "Answer pending on this device"
         case .accepted: "Answer accepted · terminal status pending"
         case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
