@@ -170,7 +170,8 @@ final class SampleWorkspaceUITests: XCTestCase {
             if element.isHittable { return }
             let start = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.82))
             let end = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.28))
-            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast)
+            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast,
+                        thenHoldForDuration: 0)
         }
         XCTAssertTrue(element.isHittable, app.debugDescription)
     }
