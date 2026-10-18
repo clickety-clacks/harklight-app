@@ -41,6 +41,11 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case draftSave
     case draftLoad
     case projectionRefresh
+    case postAckDrain
+    case foregroundGenerationValidation
+    case foregroundProfileValidation
+    case foregroundContextValidation
+    case foregroundCompletion
 }
 
 public enum NativeDiagnosticTransition: String, Codable, Sendable {
@@ -54,6 +59,28 @@ public enum NativeDiagnosticTransition: String, Codable, Sendable {
     case accepted
     case rejected
     case unresolved
+}
+
+/// A bounded terminal state for a connection attempt. Kept separate from
+/// `causeCode`: a timeout or context invalidation is an observed outcome even
+/// when no underlying transport cause was observed.
+public enum NativeDiagnosticTerminalReason: String, Codable, Sendable {
+    case confirmed = "foreground_confirmed"
+    case connectionNotConfirmed = "connection_not_confirmed"
+    case deadlineExceeded = "foreground_deadline"
+    case cancelled
+    case generationInvalidated = "generation_invalidated"
+    case profileContextChanged = "profile_context_changed"
+    case relayContextUnconfirmed = "relay_context_unconfirmed"
+}
+
+/// The furthest post-ACK foreground boundary that actually completed.
+public enum NativeDiagnosticPostAckBoundary: String, Codable, Sendable {
+    case none = "none_observed"
+    case nativeCursorAcknowledged = "native_sync_acknowledged"
+    case coreDrainCompleted = "post_ack_core_drain_completed"
+    case relayRefreshReturned = "post_ack_relay_refresh_returned"
+    case foregroundConfirmed = "foreground_confirmed"
 }
 
 public enum NativeDiagnosticReceiptState: String, Codable, Sendable {
@@ -75,6 +102,9 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public let phase: NativeDiagnosticPhase
     public let transition: NativeDiagnosticTransition
     public let causeCode: String?
+    public let terminalReason: NativeDiagnosticTerminalReason?
+    public let postAckBoundary: NativeDiagnosticPostAckBoundary?
+    public let postAckDrainTransition: NativeDiagnosticTransition?
     public let attemptID: UUID?
     public let transportAttemptID: UUID?
     public let operationID: UUID?
@@ -83,7 +113,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public let receiptState: NativeDiagnosticReceiptState?
 
     private enum CodingKeys: String, CodingKey {
-        case id, occurredAtMilliseconds, area, phase, transition, causeCode
+        case id, occurredAtMilliseconds, area, phase, transition, causeCode, terminalReason
+        case postAckBoundary, postAckDrainTransition
         case attemptID, transportAttemptID, operationID, requestTag, requestRevision, receiptState
     }
 
@@ -91,6 +122,9 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
                 phase: NativeDiagnosticPhase,
                 transition: NativeDiagnosticTransition,
                 causeCode: String? = nil,
+                terminalReason: NativeDiagnosticTerminalReason? = nil,
+                postAckBoundary: NativeDiagnosticPostAckBoundary? = nil,
+                postAckDrainTransition: NativeDiagnosticTransition? = nil,
                 attemptID: UUID? = nil,
                 transportAttemptID: UUID? = nil,
                 operationID: UUID? = nil,
@@ -105,6 +139,9 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         self.phase = phase
         self.transition = transition
         self.causeCode = Self.safeCauseCode(causeCode)
+        self.terminalReason = terminalReason
+        self.postAckBoundary = postAckBoundary
+        self.postAckDrainTransition = postAckDrainTransition
         self.attemptID = attemptID
         self.transportAttemptID = transportAttemptID
         self.operationID = operationID
@@ -121,6 +158,9 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         phase = try values.decode(NativeDiagnosticPhase.self, forKey: .phase)
         transition = try values.decode(NativeDiagnosticTransition.self, forKey: .transition)
         causeCode = Self.safeCauseCode(try values.decodeIfPresent(String.self, forKey: .causeCode))
+        terminalReason = try values.decodeIfPresent(NativeDiagnosticTerminalReason.self, forKey: .terminalReason)
+        postAckBoundary = try values.decodeIfPresent(NativeDiagnosticPostAckBoundary.self, forKey: .postAckBoundary)
+        postAckDrainTransition = try values.decodeIfPresent(NativeDiagnosticTransition.self, forKey: .postAckDrainTransition)
         attemptID = try values.decodeIfPresent(UUID.self, forKey: .attemptID)
         transportAttemptID = try values.decodeIfPresent(UUID.self, forKey: .transportAttemptID)
         operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
@@ -155,7 +195,8 @@ public typealias NativeClientDiagnosticSink = @Sendable (NativeClientDiagnosticE
 public enum NativeDiagnosticCauseCode {
     private static let knownCodes: Set<String> = [
         "cancelled", "unknown_error", "unknown_error_class", "unknown_server_reason",
-        "foreground_deadline", "foreground_connection_not_confirmed", "approved_profile_not_active",
+        "foreground_deadline", "foreground_connection_confirmed", "foreground_connection_not_confirmed", "foreground_generation_invalidated",
+        "foreground_profile_context_changed", "foreground_relay_context_unconfirmed", "approved_profile_not_active",
         "server_trust_rejected", "client_identity_challenge_rejected", "relay_protocol_error",
         "native_sync_error", "relay_redirect_refused", "notification_permission_not_granted", "application_support_unavailable",
         "unsupported_journal_version", "invalid_acceptance_sequence", "unexpected_relay_frame",

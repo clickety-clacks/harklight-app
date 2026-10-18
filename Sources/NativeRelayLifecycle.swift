@@ -32,6 +32,62 @@ struct NativeRelayRefreshResult: Equatable, Sendable {
 }
 
 struct NativeForegroundConnectProgress: Equatable, Sendable {
+    enum Validation: String, Equatable, Sendable {
+        case notChecked = "not_checked"
+        case passed
+        case failed
+    }
+
+    enum PostAckBoundary: String, Equatable, Sendable {
+        case none = "none_observed"
+        case nativeCursorAcknowledged = "native_sync_acknowledged"
+        case coreDrainCompleted = "post_ack_core_drain_completed"
+        case relayRefreshReturned = "post_ack_relay_refresh_returned"
+        case foregroundConfirmed = "foreground_confirmed"
+
+        var journalValue: NativeDiagnosticPostAckBoundary {
+            switch self {
+            case .none: .none
+            case .nativeCursorAcknowledged: .nativeCursorAcknowledged
+            case .coreDrainCompleted: .coreDrainCompleted
+            case .relayRefreshReturned: .relayRefreshReturned
+            case .foregroundConfirmed: .foregroundConfirmed
+            }
+        }
+
+        fileprivate var rank: Int {
+            switch self {
+            case .none: 0
+            case .nativeCursorAcknowledged: 1
+            case .coreDrainCompleted: 2
+            case .relayRefreshReturned: 3
+            case .foregroundConfirmed: 4
+            }
+        }
+    }
+
+    enum TerminalReason: String, Equatable, Sendable {
+        case confirmed = "foreground_confirmed"
+        case connectionNotConfirmed = "connection_not_confirmed"
+        case deadlineExceeded = "foreground_deadline"
+        case cancelled
+        case generationInvalidated = "generation_invalidated"
+        case profileContextChanged = "profile_context_changed"
+        case relayContextUnconfirmed = "relay_context_unconfirmed"
+
+        var journalValue: NativeDiagnosticTerminalReason {
+            switch self {
+            case .confirmed: .confirmed
+            case .connectionNotConfirmed: .connectionNotConfirmed
+            case .deadlineExceeded: .deadlineExceeded
+            case .cancelled: .cancelled
+            case .generationInvalidated: .generationInvalidated
+            case .profileContextChanged: .profileContextChanged
+            case .relayContextUnconfirmed: .relayContextUnconfirmed
+            }
+        }
+    }
+
     enum Stage: Equatable, Sendable {
         case serverTrustValidated
         case clientIdentityOffered
@@ -89,10 +145,18 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         let nativeSyncReplayRequested: Bool
         let issue: Issue?
         let failureClass: FailureClass?
+        let lastCompletedPostAckBoundary: PostAckBoundary
+        let postAckRelayRefresh: Validation
+        let postAckDrainTransition: NativeDiagnosticTransition?
+        let generationValidation: Validation
+        let profileContextValidation: Validation
+        let relayContextValidation: Validation
+        let terminalReason: TerminalReason?
     }
 
     enum FailureClass: Equatable, Sendable {
         case foregroundDeadline
+        case cancelled
         case serverTrustRejected
         case clientIdentityChallengeRejected
         case urlSession(code: Int)
@@ -103,6 +167,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         var diagnosticValue: String {
             switch self {
             case .foregroundDeadline: "foreground_deadline"
+            case .cancelled: "cancelled"
             case .serverTrustRejected: "server_trust_rejected"
             case .clientIdentityChallengeRejected: "client_identity_challenge_rejected"
             case let .urlSession(code): "url_session_error_code_\(code)"
@@ -113,6 +178,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         }
 
         static func classify(_ error: Error) -> Self {
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return .cancelled }
             let value = error as NSError
             if value.domain == NSURLErrorDomain { return .urlSession(code: value.code) }
             if error is InstallationTransportError { return .relayProtocol }
@@ -130,6 +196,23 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var transportAttemptID: UUID? = nil
     var nativeSyncReplayRequested = false
     var previousTransportAttempt: PreviousTransportAttempt? = nil
+    var lastCompletedPostAckBoundary: PostAckBoundary = .none
+    var postAckRelayRefresh: Validation = .notChecked
+    var postAckDrainTransition: NativeDiagnosticTransition? = nil
+    var generationValidation: Validation = .notChecked
+    var profileContextValidation: Validation = .notChecked
+    var relayContextValidation: Validation = .notChecked
+    var terminalReason: TerminalReason? = nil
+
+    private var observedCauseText: String {
+        failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? "Cause was not observed. "
+    }
+
+    mutating func markGenerationInvalidated() {
+        outcome = .incomplete
+        generationValidation = .failed
+        terminalReason = .generationInvalidated
+    }
 
     var headline: String {
         guard outcome != .confirmed else { return "Connected" }
@@ -153,11 +236,9 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             case .connecting:
                 return "\(status) The foreground attempt is still running."
             case .incomplete:
-                let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
-                return "Foreground sync remains incomplete. \(status)\(failureText)Retry with the same approved identity."
+                return "Foreground sync remains incomplete. \(status)\(observedCauseText)Retry with the same approved identity."
             case .timedOut:
-                let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
-                return "Foreground attempt timed out after the ordinary cursor ACK. \(status)\(failureText)Saved state is preserved. Retry with the same approved identity."
+                return "Foreground attempt timed out after the ordinary cursor ACK. \(status)\(observedCauseText)Saved state is preserved. Retry with the same approved identity."
             case .confirmed:
                 break
             }
@@ -168,11 +249,9 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             case .connecting:
                 return "\(status) The foreground attempt is still running."
             case .incomplete:
-                let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
-                return "Foreground sync remains incomplete. \(status)\(failureText)Retry with the same approved identity."
+                return "Foreground sync remains incomplete. \(status)\(observedCauseText)Retry with the same approved identity."
             case .timedOut:
-                let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
-                return "Foreground attempt timed out before cursor acknowledgement. \(status)\(failureText)Saved state is preserved. Retry with the same approved identity."
+                return "Foreground attempt timed out before cursor acknowledgement. \(status)\(observedCauseText)Saved state is preserved. Retry with the same approved identity."
             case .confirmed:
                 break
             }
@@ -182,15 +261,13 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             return issue?.message ?? last
         case .incomplete:
             let issueText = issue.map { "\($0.message) " } ?? ""
-            let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
-            return "The connection was not confirmed. \(issueText)\(failureText)Last confirmed step: \(last) Try again with the same approved identity."
+            return "The connection was not confirmed. \(issueText)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity."
         case .timedOut:
             let setupLimit = !webSocketOpenObserved && issue == nil
                 ? "No WebSocket-open event arrived. Secure relay setup did not complete; this client cannot distinguish a TLS failure from a WebSocket-upgrade timeout. "
                 : ""
             let issueText = issue.map { "\($0.message) " } ?? ""
-            let failureText = failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? ""
-            return "The connection timed out. \(issueText)\(setupLimit)\(failureText)Last confirmed step: \(last) Try again with the same approved identity. Saved profile, local content and pending operation state were preserved; any replay already saved remains saved."
+            return "The connection timed out. \(issueText)\(setupLimit)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity. Saved profile, local content and pending operation state were preserved; any replay already saved remains saved."
         case .confirmed:
             return lastConfirmedStage?.label ?? "Foreground connection is confirmed."
         }
@@ -281,7 +358,13 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
         case .clientIdentityChallengeRejected: issue = "client_identity_challenge_rejected"
         case nil: issue = "none_observed"
         }
-        let failure = progress.failureClass?.diagnosticValue ?? "none_observed"
+        let terminal = progress.terminalReason?.rawValue ?? "none_observed"
+        let failure = progress.failureClass?.diagnosticValue ?? {
+            switch progress.outcome {
+            case .incomplete, .timedOut: "unknown_error_class"
+            case .connecting, .confirmed: "none_observed"
+            }
+        }()
         let websocket = progress.webSocketOpenObserved ? "yes" : "no"
         var lines = [
             "Harklight connection diagnostics",
@@ -291,6 +374,13 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             "attempt_id=\(progress.attemptID?.uuidString.lowercased() ?? "unavailable")",
             "outcome=\(outcome)",
             "last_confirmed_phase=\(stage)",
+            "last_completed_post_ack_boundary=\(progress.lastCompletedPostAckBoundary.rawValue)",
+            "post_ack_relay_refresh=\(progress.postAckRelayRefresh.rawValue)",
+            "post_ack_drain=\(progress.postAckDrainTransition?.rawValue ?? "not_started")",
+            "generation_validated=\(progress.generationValidation.rawValue)",
+            "profile_context_validated=\(progress.profileContextValidation.rawValue)",
+            "relay_context_validated=\(progress.relayContextValidation.rawValue)",
+            "terminal_reason=\(terminal)",
             "transport_attempt_id=\(progress.transportAttemptID?.uuidString.lowercased() ?? "unavailable")",
             "native_sync_replay_requested_locally=\(progress.nativeSyncReplayRequested ? "yes" : "no")",
             "websocket_open_observed=\(websocket)",
@@ -304,6 +394,13 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             lines.append("previous_native_sync_replay_requested_locally=\(previous.nativeSyncReplayRequested ? "yes" : "no")")
             lines.append("previous_issue=\(Self.issueValue(previous.issue))")
             lines.append("previous_error_class=\(previous.failureClass?.diagnosticValue ?? "none_observed")")
+            lines.append("previous_last_completed_post_ack_boundary=\(previous.lastCompletedPostAckBoundary.rawValue)")
+            lines.append("previous_post_ack_relay_refresh=\(previous.postAckRelayRefresh.rawValue)")
+            lines.append("previous_post_ack_drain=\(previous.postAckDrainTransition?.rawValue ?? "not_started")")
+            lines.append("previous_generation_validated=\(previous.generationValidation.rawValue)")
+            lines.append("previous_profile_context_validated=\(previous.profileContextValidation.rawValue)")
+            lines.append("previous_relay_context_validated=\(previous.relayContextValidation.rawValue)")
+            lines.append("previous_terminal_reason=\(previous.terminalReason?.rawValue ?? "none_observed")")
         }
         guard operationSnapshot.available else {
             lines.append("queued_operation_state=unavailable; outcome remains unknown")
@@ -404,7 +501,14 @@ final class ForegroundConnectDeadline {
                 webSocketOpenObserved: progress.webSocketOpenObserved,
                 nativeSyncReplayRequested: progress.nativeSyncReplayRequested,
                 issue: progress.issue,
-                failureClass: progress.failureClass)
+                failureClass: progress.failureClass,
+                lastCompletedPostAckBoundary: progress.lastCompletedPostAckBoundary,
+                postAckRelayRefresh: progress.postAckRelayRefresh,
+                postAckDrainTransition: progress.postAckDrainTransition,
+                generationValidation: progress.generationValidation,
+                profileContextValidation: progress.profileContextValidation,
+                relayContextValidation: progress.relayContextValidation,
+                terminalReason: progress.terminalReason)
         }
         activeTransportAttemptID = transportAttemptID
         progress.transportAttemptID = transportAttemptID
@@ -414,6 +518,13 @@ final class ForegroundConnectDeadline {
         progress.issue = nil
         progress.failureClass = nil
         progress.outcome = .connecting
+        progress.lastCompletedPostAckBoundary = .none
+        progress.postAckRelayRefresh = .notChecked
+        progress.postAckDrainTransition = nil
+        progress.generationValidation = .notChecked
+        progress.profileContextValidation = .notChecked
+        progress.relayContextValidation = .notChecked
+        progress.terminalReason = nil
         publishProgress()
     }
 
@@ -444,13 +555,20 @@ final class ForegroundConnectDeadline {
             candidate = .nativeSyncResynced; issue = nil
         case .nativeSyncAcknowledged:
             candidate = .nativeSyncAcknowledged; issue = nil
+            advancePostAckBoundary(.nativeCursorAcknowledged)
+        case .postAckDrainBegan:
+            candidate = nil; issue = nil
+            progress.postAckDrainTransition = .began
+        case let .postAckDrainFinished(transition):
+            candidate = nil; issue = nil
+            progress.postAckDrainTransition = transition
+            if transition == .completed { advancePostAckBoundary(.coreDrainCompleted) }
         }
         if let candidate,
            progress.lastConfirmedStage.map({ candidate.rank >= $0.rank }) ?? true {
             progress.lastConfirmedStage = candidate
         }
         progress.issue = issue
-        if issue == nil { progress.failureClass = nil }
         progress.outcome = .connecting
         publishProgress()
     }
@@ -482,16 +600,92 @@ final class ForegroundConnectDeadline {
     }
 
     func finishWithoutAttempt(confirmed: Bool) -> NativeForegroundConnectProgress {
+        finishWithoutAttempt(confirmed: confirmed,
+                             terminalReason: confirmed ? .confirmed : .connectionNotConfirmed)
+    }
+
+    func finishWithoutAttempt(confirmed: Bool,
+                              terminalReason: NativeForegroundConnectProgress.TerminalReason) -> NativeForegroundConnectProgress {
         guard attempt == nil else { return progress }
         acceptsEvents = false
         progress.outcome = confirmed ? .confirmed : .incomplete
+        progress.terminalReason = terminalReason
+        if terminalReason == .generationInvalidated { progress.generationValidation = .failed }
+        if terminalReason == .profileContextChanged { progress.profileContextValidation = .failed }
+        if confirmed { advancePostAckBoundary(.foregroundConfirmed) }
         return progress
+    }
+
+    func recordPostAckCompletion(postAckReached: Bool,
+                                 relayRefreshConfirmed: Bool,
+                                 generationMatches: Bool,
+                                 profileMatches: Bool,
+                                 relayContextMatches: Bool) {
+        guard acceptsEvents, attempt != nil else { return }
+        if postAckReached {
+            progress.postAckRelayRefresh = relayRefreshConfirmed ? .passed : .failed
+            if relayRefreshConfirmed {
+                progress.postAckDrainTransition = .completed
+                advancePostAckBoundary(.coreDrainCompleted)
+            }
+            advancePostAckBoundary(.relayRefreshReturned)
+        }
+        progress.generationValidation = generationMatches ? .passed : .failed
+        progress.profileContextValidation = profileMatches ? .passed : .failed
+        progress.relayContextValidation = relayContextMatches ? .passed : .failed
+        if progress.failureClass == .cancelled {
+            progress.terminalReason = .cancelled
+        } else if !generationMatches {
+            progress.terminalReason = .generationInvalidated
+        } else if !profileMatches {
+            progress.terminalReason = .profileContextChanged
+        } else if !relayContextMatches || !relayRefreshConfirmed {
+            progress.terminalReason = .relayContextUnconfirmed
+        }
+        if postAckReached, !relayRefreshConfirmed,
+           (progress.postAckDrainTransition == nil || progress.postAckDrainTransition == .began) {
+            switch progress.terminalReason {
+            case .cancelled, .generationInvalidated, .profileContextChanged:
+                progress.postAckDrainTransition = .cancelled
+            case .deadlineExceeded:
+                progress.postAckDrainTransition = .timedOut
+            default:
+                progress.postAckDrainTransition = progress.failureClass == nil ? .unresolved : .failed
+            }
+        }
+        publishProgress()
+    }
+
+    func recordTimedOutValidation(attemptID: UUID,
+                                  generationMatches: Bool,
+                                  profileMatches: Bool,
+                                  relayContextMatches: Bool) {
+        guard progress.attemptID == attemptID, progress.outcome == .timedOut else { return }
+        progress.generationValidation = generationMatches ? .passed : .failed
+        progress.profileContextValidation = profileMatches ? .passed : .failed
+        progress.relayContextValidation = relayContextMatches ? .passed : .failed
+        if progress.lastCompletedPostAckBoundary != .none {
+            progress.postAckRelayRefresh = .failed
+        }
+        if progress.postAckDrainTransition == .began ||
+            progress.lastCompletedPostAckBoundary == .nativeCursorAcknowledged {
+            progress.postAckDrainTransition = .timedOut
+        }
+        // Timeout invalidates this transport generation during cleanup. Keep
+        // the deadline as the terminal reason and report validation separately.
+        progress.terminalReason = .deadlineExceeded
     }
 
     func recordFailure(_ error: Error) {
         guard acceptsEvents, attempt != nil else { return }
         progress.failureClass = NativeForegroundConnectProgress.FailureClass.classify(error)
+        if progress.failureClass == .cancelled { progress.terminalReason = .cancelled }
         publishProgress()
+    }
+
+    private func advancePostAckBoundary(_ candidate: NativeForegroundConnectProgress.PostAckBoundary) {
+        guard candidate.rank >= progress.lastCompletedPostAckBoundary.rank else { return }
+        progress.lastCompletedPostAckBoundary = candidate
     }
 
     private func publishProgress() {
@@ -513,8 +707,14 @@ final class ForegroundConnectDeadline {
             progress.issue = nil
             progress.failureClass = nil
             progress.outcome = .confirmed
+            progress.terminalReason = .confirmed
+            advancePostAckBoundary(.foregroundConfirmed)
         } else {
             progress.outcome = .incomplete
+            if progress.terminalReason == nil {
+                progress.terminalReason = progress.failureClass == .cancelled
+                    ? .cancelled : .connectionNotConfirmed
+            }
         }
         active.onProgress(progress)
         active.continuation.resume(returning: progress)
@@ -530,6 +730,7 @@ final class ForegroundConnectDeadline {
         progress = active.progress
         progress.failureClass = .foregroundDeadline
         progress.outcome = .timedOut
+        progress.terminalReason = .deadlineExceeded
         active.onProgress(progress)
         await active.onTimeout()
         active.continuation.resume(returning: progress)
@@ -715,15 +916,70 @@ final class NativeRelayLifecycle {
         return await refreshFlights.coalesced()
     }
 
+    /// The terminal event batch used by the foreground lifecycle and its
+    /// focused behavior test. Keeping the mapping here makes the emitted
+    /// boundary and validation facts testable without constructing journal
+    /// events by hand.
+    static func foregroundTerminalDiagnosticEvents(
+        progress: NativeForegroundConnectProgress,
+        confirmed: Bool,
+        timedOut: Bool = false,
+        fallbackTransportAttemptID: UUID? = nil,
+        generationMatches: Bool,
+        profileMatches: Bool,
+        relayContextMatches: Bool
+    ) -> [NativeClientDiagnosticEvent] {
+        let attemptID = progress.attemptID
+        let transportAttemptID = progress.transportAttemptID ?? fallbackTransportAttemptID
+        let cancelled = progress.failureClass == .cancelled || !generationMatches || !profileMatches
+        let transition: NativeDiagnosticTransition = timedOut ? .timedOut :
+            (confirmed ? .completed : (cancelled ? .cancelled : .failed))
+        let terminalReason = confirmed ? NativeDiagnosticTerminalReason.confirmed :
+            progress.terminalReason?.journalValue
+        let postAckBoundary = confirmed ? NativeDiagnosticPostAckBoundary.foregroundConfirmed :
+            progress.lastCompletedPostAckBoundary.journalValue
+
+        return [
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundGenerationValidation,
+                transition: generationMatches ? .completed : .cancelled,
+                causeCode: generationMatches ? nil : "foreground_generation_invalidated",
+                attemptID: attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundProfileValidation,
+                transition: profileMatches ? .completed : .cancelled,
+                causeCode: profileMatches ? nil : "foreground_profile_context_changed",
+                attemptID: attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundContextValidation,
+                transition: relayContextMatches ? .completed : .unresolved,
+                causeCode: relayContextMatches ? nil : "foreground_relay_context_unconfirmed",
+                attemptID: attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
+                transition: transition,
+                causeCode: progress.failureClass?.diagnosticValue,
+                terminalReason: terminalReason,
+                postAckBoundary: postAckBoundary,
+                postAckDrainTransition: progress.postAckDrainTransition,
+                attemptID: attemptID, transportAttemptID: transportAttemptID)
+        ]
+    }
+
     /// Enrollment readiness is actual authenticated replay progress. A later
     /// push-register failure must not hide a working foreground connection.
     func confirmForegroundProgress(for expected: ProfileContext,
                                    deadline: Duration = .seconds(30),
                                    onProgress: @escaping @MainActor (NativeForegroundConnectProgress) -> Void = { _ in }) async -> NativeForegroundConnectProgress {
         guard context == expected else {
-            let failed = foregroundDeadline.finishWithoutAttempt(confirmed: false)
+            let failed = foregroundDeadline.finishWithoutAttempt(
+                confirmed: false, terminalReason: .profileContextChanged)
             recordDiagnostic(.connection, .approvedConnection, .failed,
-                             causeCode: "approved_profile_not_active")
+                             causeCode: "approved_profile_not_active",
+                             terminalReason: NativeDiagnosticTerminalReason.profileContextChanged)
+            recordDiagnostic(.connection, .foregroundProfileValidation, .cancelled,
+                             causeCode: "foreground_profile_context_changed",
+                             terminalReason: NativeDiagnosticTerminalReason.profileContextChanged)
+            recordDiagnostic(.connection, .foregroundCompletion, .cancelled,
+                             causeCode: "foreground_profile_context_changed",
+                             terminalReason: NativeDiagnosticTerminalReason.profileContextChanged)
+            onProgress(failed)
             return failed
         }
         foregroundDiagnosticContext = expected
@@ -757,10 +1013,29 @@ final class NativeRelayLifecycle {
             foregroundDiagnosticIntentIDs = [:]
         }
         let epoch = refreshGeneration
-        let result = await foregroundDeadline.run(deadline: deadline, operation: { [weak self] in
+        var result = await foregroundDeadline.run(deadline: deadline, operation: { [weak self] in
             guard let self else { return false }
-            _ = await self.refreshFromTrustedRelay()
-            return self.refreshGeneration == epoch && self.context == expected && self.confirmedRelayContext == expected
+            let relayConfirmed = await self.refreshFromTrustedRelay()
+            let generationMatches = self.refreshGeneration == epoch
+            let profileMatches = self.context == expected
+            let relayContextMatches = self.confirmedRelayContext == expected
+            guard self.foregroundDeadline.progress.outcome == .connecting else { return false }
+            let beforeValidation = self.foregroundDeadline.progress
+            let postAckReached = beforeValidation.lastCompletedPostAckBoundary != .none || relayConfirmed
+            self.foregroundDeadline.recordPostAckCompletion(
+                postAckReached: postAckReached,
+                relayRefreshConfirmed: relayConfirmed,
+                generationMatches: generationMatches,
+                profileMatches: profileMatches,
+                relayContextMatches: relayContextMatches)
+            let reached = relayConfirmed && generationMatches && profileMatches && relayContextMatches
+            let terminalProgress = self.foregroundDeadline.progress
+            self.recordDiagnosticEvents(Self.foregroundTerminalDiagnosticEvents(
+                progress: terminalProgress, confirmed: reached,
+                fallbackTransportAttemptID: self.activeTransportAttemptID,
+                generationMatches: generationMatches, profileMatches: profileMatches,
+                relayContextMatches: relayContextMatches))
+            return reached
         }, onTimeout: { [weak self] in
             await self?.cancelTimedOutSession(generation: epoch, expected: expected)
         }, onBegin: { [weak self] foregroundAttemptID in
@@ -768,15 +1043,31 @@ final class NativeRelayLifecycle {
                                    attemptID: foregroundAttemptID,
                                    transportAttemptID: self?.activeTransportAttemptID)
         }, onProgress: onProgress)
+        if result.outcome == .timedOut, let attemptID = result.attemptID {
+            let generationMatches = refreshGeneration == epoch
+            let profileMatches = context == expected
+            let relayContextMatches = confirmedRelayContext == expected
+            foregroundDeadline.recordTimedOutValidation(attemptID: attemptID,
+                generationMatches: generationMatches, profileMatches: profileMatches,
+                relayContextMatches: relayContextMatches)
+            result = foregroundDeadline.progress
+            onProgress(result)
+
+            recordDiagnosticEvents(Self.foregroundTerminalDiagnosticEvents(
+                progress: result, confirmed: false, timedOut: true,
+                generationMatches: generationMatches, profileMatches: profileMatches,
+                relayContextMatches: relayContextMatches))
+        }
         let transition: NativeDiagnosticTransition
         switch result.outcome {
         case .connecting: transition = .observed
-        case .incomplete: transition = .failed
+        case .incomplete: transition = result.failureClass == .cancelled ? .cancelled : .failed
         case .timedOut: transition = .timedOut
         case .confirmed: transition = .completed
         }
         recordDiagnostic(.connection, .approvedConnection, transition,
                          causeCode: result.failureClass?.diagnosticValue,
+                         terminalReason: result.terminalReason?.journalValue,
                          attemptID: result.attemptID ?? activeTransportAttemptID,
                          transportAttemptID: result.transportAttemptID ?? activeTransportAttemptID,
                          receipt: nil)
@@ -971,8 +1262,25 @@ final class NativeRelayLifecycle {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let configuration else { throw NativeRelayCoreError.inactive }
         let transportAttemptID = UUID()
-        recordDiagnostic(.connection, .approvedConnection, .retrying,
-                         attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
+        let previousProgress = foregroundDeadline.progress
+        var retryEvents: [NativeClientDiagnosticEvent] = []
+        if previousProgress.postAckDrainTransition == .completed,
+           previousProgress.lastCompletedPostAckBoundary != .none,
+           let previousTransportAttemptID = activeTransportAttemptID {
+            // A completed drain can be followed by a later refresh failure
+            // before foreground completion. Preserve that transport's boundary
+            // before the retry resets the in-memory progress to a new attempt.
+            retryEvents.append(NativeClientDiagnosticEvent(area: .relay, phase: .postAckDrain,
+                transition: .completed,
+                postAckBoundary: previousProgress.lastCompletedPostAckBoundary.journalValue,
+                postAckDrainTransition: .completed,
+                attemptID: previousProgress.attemptID,
+                transportAttemptID: previousTransportAttemptID))
+        }
+        retryEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .approvedConnection,
+            transition: .retrying, attemptID: transportAttemptID,
+            transportAttemptID: transportAttemptID))
+        diagnosticJournal?.record(retryEvents)
         foregroundDeadline.beginTransportAttempt(transportAttemptID)
         activeTransportAttemptID = transportAttemptID
         let priorCore = core
@@ -1050,6 +1358,8 @@ final class NativeRelayLifecycle {
                     self.recordDiagnostic(.relay, .ordinaryReplay, .completed, attemptID: transportAttemptID)
                 case .nativeSyncAcknowledged:
                     self.recordDiagnostic(.relay, .acknowledgement, .completed, attemptID: transportAttemptID)
+                case .postAckDrainBegan, .postAckDrainFinished(_):
+                    break
                 }
             }
         }
@@ -1067,6 +1377,9 @@ final class NativeRelayLifecycle {
                                   _ transition: NativeDiagnosticTransition,
                                   error: Error? = nil,
                                   causeCode: String? = nil,
+                                  terminalReason: NativeDiagnosticTerminalReason? = nil,
+                                  postAckBoundary: NativeDiagnosticPostAckBoundary? = nil,
+                                  postAckDrainTransition: NativeDiagnosticTransition? = nil,
                                   attemptID: UUID? = nil,
                                   transportAttemptID: UUID? = nil,
                                   operationID: UUID? = nil,
@@ -1075,9 +1388,15 @@ final class NativeRelayLifecycle {
                                   receipt: NativeDiagnosticReceiptState? = nil) {
         let associatedTransport = transportAttemptID ?? (attemptID == activeTransportAttemptID ? attemptID : nil)
         diagnosticJournal?.record(area: area, phase: phase, transition: transition,
-            error: error, causeCode: causeCode, attemptID: attemptID,
+            error: error, causeCode: causeCode, terminalReason: terminalReason,
+            postAckBoundary: postAckBoundary, postAckDrainTransition: postAckDrainTransition,
+            attemptID: attemptID,
             transportAttemptID: associatedTransport, operationID: operationID,
             request: request, requestRevision: revision, receiptState: receipt)
+    }
+
+    private func recordDiagnosticEvents(_ events: [NativeClientDiagnosticEvent]) {
+        diagnosticJournal?.record(events)
     }
 
     private func cancelTimedOutSession(generation: UUID, expected: ProfileContext) async {
