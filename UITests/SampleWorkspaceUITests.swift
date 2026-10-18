@@ -105,13 +105,17 @@ final class SampleWorkspaceUITests: XCTestCase {
             enterSearch(query, in: app)
             let row = app.buttons["sample-\(kind)-0"]
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+            reveal(row, in: app.scrollViews.firstMatch, app: app)
             row.tap()
             XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5))
             capture("component-\(kind)", app)
             if ["textChoice", "review", "multipleChoice", "colorChoice", "soundChoice"].contains(kind) {
-                app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch.tap()
+                let ownAnswer = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
+                reveal(ownAnswer, in: app.scrollViews["message-card-scroll"], app: app)
+                ownAnswer.tap()
                 let answer = app.textViews["request-input-answer-response"]
                 XCTAssertTrue(answer.waitForExistence(timeout: 5))
+                reveal(answer, in: app.scrollViews["message-card-scroll"], app: app)
                 answer.tap(); answer.typeText("Leave room for a quiet corner.")
                 capture("component-own-answer", app)
                 app.buttons["sample-finish"].tap()
@@ -158,6 +162,15 @@ final class SampleWorkspaceUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) {
+        XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<8 {
+            if element.isHittable { return }
+            scrollView.swipeUp()
+        }
+        XCTAssertTrue(element.isHittable, app.debugDescription)
     }
 
     func testComposerControlsFitSingleLineInput() {

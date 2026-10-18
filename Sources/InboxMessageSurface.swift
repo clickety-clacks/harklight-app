@@ -35,6 +35,11 @@ struct MessageCardSurface<Content: View>: View {
         .accessibilityIdentifier("message-card-scroll")
         .scrollBounceBehavior(.always)
         .scrollDismissesKeyboard(.interactively)
+        // Keep the last answer and receipt controls scrollable above the
+        // overlaid bottom toolbar.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: 72).accessibilityHidden(true)
+        }
         .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
         .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
         .navigationBarTitleDisplayMode(.inline)

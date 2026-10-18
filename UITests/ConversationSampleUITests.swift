@@ -125,9 +125,14 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
         capture("upload-before-message-departure", app)
+        app.buttons["Close"].tap()
+        showInbox(app)
         let other = app.buttons["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
+        reveal(other, in: app.scrollViews.firstMatch, app: app)
         other.tap()
+        showInbox(app)
+        reveal(row, in: app.scrollViews.firstMatch, app: app)
         row.tap()
         XCTAssertTrue(app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep this file note.")
@@ -227,5 +232,29 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         field.tap()
         field.typeText(query + "\n")
+    }
+
+    private func showInbox(_ app: XCUIApplication) {
+        let searchButton = app.buttons["inbox-search-button"]
+        let searchField = app.textFields["inbox-search-field"]
+        guard !searchButton.exists && !searchField.exists else { return }
+        let back = app.navigationBars.buttons.firstMatch
+        if back.exists && back.isHittable {
+            back.tap()
+        } else {
+            let sidebar = app.buttons["Show Sidebar"]
+            if sidebar.exists && sidebar.isHittable { sidebar.tap() }
+        }
+        XCTAssertTrue(searchButton.waitForExistence(timeout: 5) || searchField.waitForExistence(timeout: 5),
+                      app.debugDescription)
+    }
+
+    private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) {
+        XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<8 {
+            if element.isHittable { return }
+            scrollView.swipeUp()
+        }
+        XCTAssertTrue(element.isHittable, app.debugDescription)
     }
 }
