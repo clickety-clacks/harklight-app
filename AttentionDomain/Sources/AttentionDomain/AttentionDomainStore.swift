@@ -167,6 +167,22 @@ public final class AttentionDomainStore: @unchecked Sendable {
             let validDrafts = loaded.drafts.keys.allSatisfy { requestKeys.contains($0) }
             let validSessions = loaded.fixtureSessions.keys.allSatisfy { requestKeys.contains($0) }
             let validRemoteStates = loaded.remoteStates.keys.allSatisfy { requestKeys.contains($0) }
+            let validInboxReferences = (loaded.inboxReferences?.keys.allSatisfy {
+                $0.accountScope == context.identity.personID && !requestKeys.contains($0)
+            } ?? true)
+            let validInboxOverlays = (loaded.pendingRelayOverlays?.allSatisfy { entry in
+                entry.key == entry.value.sequence &&
+                    Self.requestKey(in: entry.value)?.accountScope == context.identity.personID
+            } ?? true)
+            let validInboxCheckpoints = [loaded.inboxCheckpoint, loaded.inboxCandidate].compactMap { $0 }.allSatisfy { checkpoint in
+                checkpoint.loadedKeys.allSatisfy { $0.accountScope == context.identity.personID } &&
+                (checkpoint.freshKeys ?? []).allSatisfy { $0.accountScope == context.identity.personID } &&
+                (checkpoint.receiptLastSequence.map { last in
+                    last >= checkpoint.since && (checkpoint.highWater.map { $0 >= last } ?? true)
+                } ?? true) &&
+                Set(checkpoint.batches.flatMap(\.operationIDs)).count == checkpoint.batches.flatMap(\.operationIDs).count
+            } &&
+            (loaded.replayPublishedInboxCurrentKeys ?? []).allSatisfy { $0.accountScope == context.identity.personID }
             var validIntents = true
             var acceptedAwaitingReplay: [RequestKey: Submission] = [:]
             for entry in loaded.intents {
@@ -190,6 +206,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             let validOutbox = Set(loaded.outboxOrder).count == loaded.outboxOrder.count &&
                 loaded.outboxOrder.allSatisfy { loaded.intents[$0] != nil }
             guard validRequestScope, validDrafts, validSessions, validRemoteStates,
+                  validInboxReferences, validInboxOverlays, validInboxCheckpoints,
                   validIntents, validIntentIndex, validFences, validOutbox else {
                 throw AttentionStoreError.persistence("The profile store contains cross-account or inconsistent request state.")
             }
@@ -369,6 +386,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.competingIntent(activeID)
         }
         guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
+        if state.inboxCandidate != nil {
+            throw AttentionStoreError.inboxCheckpointPending
+        }
+        if let checkpoint = state.inboxCheckpoint,
+           checkpoint.checkpointAccepted,
+           !checkpoint.currentKeys.contains(request.key) {
+            throw AttentionStoreError.inboxStateUnrefreshed
+        }
 
         let operationID = UUID()
         let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID,
@@ -533,6 +558,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
             allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
 
         if event.sequence <= state.cursor {
+            if let deferred = state.pendingRelayOverlays?[event.sequence] {
+                guard deferred.hasSameSemanticContent(as: event) else {
+                    try recordRepair(.conflictingEvent(sequence: event.sequence))
+                    throw AttentionStoreError.eventConflict(event.sequence)
+                }
+                return state.cursor
+            }
             guard let previous = state.appliedEvents[event.sequence],
                   previous.hasSameSemanticContent(as: event) else {
                 try recordRepair(.conflictingEvent(sequence: event.sequence))
@@ -593,7 +625,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 let currentPayload = thread?.currentQuestionPayload ?? request.originalPayload
                 next.drafts[request.key] = RequestDraft(interface: StoredRequest(key: request.key, originalPayload: currentPayload).interface)
             }
-            let previous = next.remoteStates[request.key]
+            let reference = next.inboxReferences?.removeValue(forKey: request.key)
+            let previous = next.remoteStates[request.key] ?? reference
             next.remoteStates[request.key] = RemoteRequestState(state: previous?.state ?? next.conversation?.threads[request.key]?.terminal,
                                                                 authorizedOriginAnswer: previous?.authorizedOriginAnswer,
                                                                 classification: classification,
@@ -638,6 +671,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
         }
         try applyOrdinaryConversationMetadata(event, to: &next)
+        if let requestKey = Self.requestKey(in: event) {
+            Self.markInboxCurrent(requestKey, at: event.sequence, in: &next)
+        }
         next.appliedEvents[event.sequence] = event
         next.cursor = event.sequence
         next.repairIssues.removeAll { issue in
@@ -734,8 +770,243 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.conversation = conversation
     }
 
+    private func applyInboxSnapshotItem(_ item: InboxSnapshotItem,
+                                        highWater: UInt64,
+                                        to next: inout PersistedAttentionState) throws {
+        let acceptance = item.acceptance
+        let key = item.key
+        guard acceptance.sequence > 0, acceptance.sequence <= highWater,
+              key.accountScope == context.identity.personID else {
+            throw AttentionStoreError.inboxPageConflict
+        }
+        let classification: RemoteDeliveryClassification?
+        switch acceptance.body {
+        case let .delivery(request, value):
+            guard request.key == key else { throw AttentionStoreError.inboxPageConflict }
+            try validate(request.key, in: context.identity)
+            classification = value
+            if let existing = next.requests[key] {
+                guard existing.originalPayload.semanticallyEquals(request.originalPayload),
+                      existing.acceptanceOrder == nil || existing.acceptanceOrder == acceptance.sequence else {
+                    throw AttentionStoreError.requestConflict
+                }
+                if existing.acceptanceOrder == nil {
+                    next.requests[key] = existing.assigningAcceptanceOrder(acceptance.sequence)
+                }
+            } else {
+                next.requests[key] = request.assigningAcceptanceOrder(acceptance.sequence)
+                let thread = next.conversation?.threads[key]
+                let payload = thread?.currentQuestionPayload ?? request.originalPayload
+                next.drafts[key] = RequestDraft(interface: StoredRequest(key: key, originalPayload: payload).interface)
+            }
+            if let reference = next.inboxReferences?.removeValue(forKey: key), next.remoteStates[key] == nil {
+                next.remoteStates[key] = reference
+            }
+        case .originReference:
+            classification = nil
+            if let existing = next.requests[key] {
+                guard existing.acceptanceOrder == nil || existing.acceptanceOrder == acceptance.sequence else {
+                    throw AttentionStoreError.requestConflict
+                }
+                if existing.acceptanceOrder == nil {
+                    next.requests[key] = existing.assigningAcceptanceOrder(acceptance.sequence)
+                }
+            }
+        case .terminal:
+            throw AttentionStoreError.inboxPageConflict
+        }
+        let hasContent = next.requests[key] != nil
+        let previous = hasContent ? next.remoteStates[key] : next.inboxReferences?[key]
+        if let terminal = item.terminal {
+            guard case let .terminal(terminalKey, terminalState, answer) = terminal.body,
+                  terminalKey == key,
+                  terminal.sequence > acceptance.sequence,
+                  terminal.sequence <= highWater else { throw AttentionStoreError.inboxPageConflict }
+            if (previous?.eventSequence ?? 0) <= highWater {
+                let current = RemoteRequestState(state: terminalState,
+                    authorizedOriginAnswer: answer ?? previous?.authorizedOriginAnswer,
+                    classification: classification ?? previous?.classification,
+                    eventSequence: terminal.sequence)
+                if hasContent {
+                    next.remoteStates[key] = current
+                    try applyOrdinaryConversationMetadata(terminal, to: &next)
+                } else {
+                    var references = next.inboxReferences ?? [:]
+                    references[key] = current
+                    next.inboxReferences = references
+                }
+            }
+        } else {
+            if (previous?.eventSequence ?? 0) <= highWater {
+                guard previous?.state == nil else { throw AttentionStoreError.inboxPageConflict }
+                let current = RemoteRequestState(state: nil,
+                    authorizedOriginAnswer: previous?.authorizedOriginAnswer,
+                    classification: classification ?? previous?.classification,
+                    eventSequence: acceptance.sequence)
+                if hasContent {
+                    next.remoteStates[key] = current
+                } else {
+                    var references = next.inboxReferences ?? [:]
+                    references[key] = current
+                    next.inboxReferences = references
+                }
+            }
+        }
+        if hasContent { try applyOrdinaryConversationMetadata(acceptance, to: &next) }
+
+        let pending = (next.pendingRelayOverlays ?? [:]).values
+            .filter { Self.requestKey(in: $0) == key }
+            .sorted { $0.sequence < $1.sequence }
+        for event in pending where next.requests[key] != nil || next.inboxReferences?[key] != nil {
+            try applyInboxProjection(event, to: &next)
+            next.appliedEvents[event.sequence] = event
+            next.pendingRelayOverlays?.removeValue(forKey: event.sequence)
+        }
+    }
+
+    /// Applies a terminal/reference fact without claiming that its sequence was contiguous.
+    /// Missing message content is kept as exact pending work until a later page hydrates G.
+    private func recordInboxTerminalProjection(_ event: RelayEvent,
+                                               into next: inout PersistedAttentionState) throws {
+        guard let key = Self.requestKey(in: event),
+              key.accountScope == context.identity.personID,
+              event.sequence > 0 else { throw AttentionStoreError.inboxPageConflict }
+        switch event.body {
+        case .originReference:
+            try validate(key, in: context.identity)
+            if let prior = next.appliedEvents[event.sequence] {
+                guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
+                return
+            }
+            if let prior = next.pendingRelayOverlays?[event.sequence] {
+                guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
+                return
+            }
+            guard next.requests[key] != nil || next.inboxReferences?[key] != nil else {
+                var overlays = next.pendingRelayOverlays ?? [:]
+                overlays[event.sequence] = event
+                next.pendingRelayOverlays = overlays
+                return
+            }
+            try applyInboxProjection(event, to: &next)
+            next.appliedEvents[event.sequence] = event
+            return
+        case .delivery:
+            throw AttentionStoreError.inboxPageConflict
+        case .terminal:
+            break
+        }
+        try validate(key, in: context.identity)
+        if let prior = next.appliedEvents[event.sequence] {
+            guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
+            return
+        }
+        if let prior = next.pendingRelayOverlays?[event.sequence] {
+            guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
+            return
+        }
+        guard next.requests[key] != nil || next.inboxReferences?[key] != nil else {
+            var overlays = next.pendingRelayOverlays ?? [:]
+            overlays[event.sequence] = event
+            next.pendingRelayOverlays = overlays
+            return
+        }
+        try applyInboxProjection(event, to: &next)
+        next.appliedEvents[event.sequence] = event
+    }
+
+    private func applyInboxProjection(_ event: RelayEvent,
+                                      to next: inout PersistedAttentionState) throws {
+        guard let key = Self.requestKey(in: event),
+              next.requests[key] != nil || next.inboxReferences?[key] != nil else {
+            throw AttentionStoreError.inboxPageConflict
+        }
+        let hasContent = next.requests[key] != nil
+        let previous = hasContent ? next.remoteStates[key] : next.inboxReferences?[key]
+        let currentPrevious = previous ?? RemoteRequestState()
+        switch event.body {
+        case let .terminal(_, terminalState, answer):
+            if event.sequence < (currentPrevious.eventSequence ?? 0) { return }
+            if event.sequence == (currentPrevious.eventSequence ?? 0),
+               let oldState = currentPrevious.state, oldState != terminalState {
+                throw AttentionStoreError.eventConflict(event.sequence)
+            }
+            let updated = RemoteRequestState(state: terminalState,
+                authorizedOriginAnswer: answer ?? currentPrevious.authorizedOriginAnswer,
+                classification: currentPrevious.classification,
+                eventSequence: event.sequence)
+            if hasContent {
+                next.remoteStates[key] = updated
+                try applyOrdinaryConversationMetadata(event, to: &next)
+            } else {
+                var references = next.inboxReferences ?? [:]
+                references[key] = updated
+                next.inboxReferences = references
+            }
+        case .originReference:
+            if event.sequence < (currentPrevious.eventSequence ?? 0) { return }
+            let updated = RemoteRequestState(state: currentPrevious.state,
+                authorizedOriginAnswer: currentPrevious.authorizedOriginAnswer,
+                classification: nil,
+                eventSequence: event.sequence)
+            if hasContent {
+                next.remoteStates[key] = updated
+                try applyOrdinaryConversationMetadata(event, to: &next)
+            } else {
+                var references = next.inboxReferences ?? [:]
+                references[key] = updated
+                next.inboxReferences = references
+            }
+        case .delivery:
+            throw AttentionStoreError.inboxPageConflict
+        }
+    }
+
+    private func refreshAcceptedReplayIndexes(for requestKeys: some Sequence<RequestKey>) {
+        for key in requestKeys { refreshAcceptedReplayIndex(for: key) }
+    }
+
+    private static func requestKey(in event: RelayEvent) -> RequestKey? {
+        switch event.body {
+        case let .delivery(request, _): request.key
+        case let .originReference(key), let .terminal(key, _, _): key
+        }
+    }
+
+    private static func markInboxCurrent(_ key: RequestKey,
+                                         at sequence: UInt64,
+                                         in next: inout PersistedAttentionState) {
+        guard var checkpoint = next.inboxCheckpoint,
+              checkpoint.checkpointAccepted,
+              let highWater = checkpoint.highWater,
+              sequence > highWater else { return }
+        var current = checkpoint.currentKeys
+        current.insert(key)
+        checkpoint.freshKeys = current
+        next.inboxCheckpoint = checkpoint
+    }
+
+    private static func acceptedSequence(_ submission: Submission) -> UInt64 {
+        guard case let .accepted(sequence) = submission.disposition else { return .max }
+        return sequence ?? .max
+    }
+
+    private static func isAccepted(_ submission: Submission) -> Bool {
+        if case .accepted = submission.disposition { return true }
+        return false
+    }
+
+    private static func resultSequence(_ result: JSONValue) -> UInt64? {
+        guard let raw = result.uniqueValue(named: "seq"),
+              case let .number(number) = raw else { return nil }
+        return UInt64(number.lexeme)
+    }
+
     public func applyRelayEvent(_ event: RelayEvent,
                                 context suppliedContext: ProfileContext) -> ApplyEventResult {
+        if let result = deferUnloadedContiguousFact(event, context: suppliedContext) {
+            return result
+        }
         let prior = try? snapshot(context: suppliedContext)
         let wasRepeat = event.sequence <= (prior?.cursor ?? 0)
         let priorClassification: RemoteDeliveryClassification?
@@ -776,6 +1047,42 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
     }
 
+    private func deferUnloadedContiguousFact(_ event: RelayEvent,
+                                             context suppliedContext: ProfileContext) -> ApplyEventResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        do {
+            try validate(suppliedContext)
+            guard suppliedContext.transportMode == .relay,
+                  event.sequence == state.cursor + 1,
+                  let key = Self.requestKey(in: event),
+                  key.accountScope == context.identity.personID,
+                  state.requests[key] == nil else { return nil }
+            switch event.body {
+            case .terminal, .originReference: break
+            case .delivery: return nil
+            }
+            if let barrier = state.replayBarrier, event.sequence > barrier { return .gap(expected: barrier) }
+            var next = state
+            var overlays = next.pendingRelayOverlays ?? [:]
+            if let prior = overlays[event.sequence], !prior.hasSameSemanticContent(as: event) {
+                return .conflict
+            }
+            overlays[event.sequence] = event
+            next.pendingRelayOverlays = overlays
+            Self.markInboxCurrent(key, at: event.sequence, in: &next)
+            next.cursor = event.sequence
+            try commit(next)
+            return .deferred(contiguousCursor: state.cursor)
+        } catch let error as AttentionStoreError {
+            if case let .eventGap(expected, _) = error { return .gap(expected: expected) }
+            if case .eventConflict = error { return .conflict }
+            return .repairRequired
+        } catch {
+            return .repairRequired
+        }
+    }
+
     public func beginReplay(through highWaterSequence: UInt64,
                             context suppliedContext: ProfileContext) throws {
         lock.lock()
@@ -800,6 +1107,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.replayPublishedRequests = state.requests
         next.replayPublishedStates = state.remoteStates
         next.replayPublishedIntents = state.intents
+        next.replayPublishedInboxCurrentKeys = state.inboxCandidate != nil
+            ? []
+            : state.inboxCheckpoint.flatMap { $0.checkpointAccepted ? $0.currentKeys : nil }
         try commit(next)
     }
 
@@ -818,6 +1128,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.replayPublishedRequests = nil
         next.replayPublishedStates = nil
         next.replayPublishedIntents = nil
+        next.replayPublishedInboxCurrentKeys = nil
         try commit(next)
     }
 
@@ -853,6 +1164,375 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return state.cursor
     }
 
+    /// Exact operation originals that must be covered before a new paging checkpoint.
+    /// The ordinary outbox and accepted-awaiting-terminal index are disjoint by design.
+    public func inboxOperationInventory(context suppliedContext: ProfileContext) throws -> [Submission] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var seen = Set<UUID>()
+        var inventory: [Submission] = []
+        for id in state.outboxOrder {
+            guard let submission = state.intents[id], seen.insert(submission.operationID).inserted else { continue }
+            inventory.append(submission)
+        }
+        let accepted = acceptedAwaitingTerminalReplay.values.sorted { left, right in
+            let l = Self.acceptedSequence(left)
+            let r = Self.acceptedSequence(right)
+            if l != r { return l < r }
+            return left.operationID.uuidString < right.operationID.uuidString
+        }
+        for submission in accepted where seen.insert(submission.operationID).inserted {
+            inventory.append(submission)
+        }
+        return inventory
+    }
+
+    public func beginInboxCandidate(startupID: String,
+                                    since: UInt64,
+                                    batches: [InboxReceiptBatch],
+                                    context suppliedContext: ProfileContext) throws -> InboxPagingCheckpoint {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        if let existing = state.inboxCandidate {
+            guard existing.since == state.cursor else { throw AttentionStoreError.inboxCheckpointIncomplete }
+            return existing
+        }
+        guard !startupID.isEmpty, since == state.cursor else {
+            throw AttentionStoreError.inboxCheckpointIncomplete
+        }
+        let inventory = try inboxOperationInventory(context: suppliedContext)
+        let expected = inventory.map(\.operationID)
+        let submitted = batches.flatMap(\.operationIDs)
+        guard Set(submitted).count == submitted.count,
+              Set(submitted) == Set(expected),
+              Set(batches.map(\.batchID)).count == batches.count,
+              batches.allSatisfy({ !$0.batchID.isEmpty && !$0.operationIDs.isEmpty && $0.results == nil }) else {
+            throw AttentionStoreError.inboxCheckpointIncomplete
+        }
+        let candidate = InboxPagingCheckpoint(startupID: startupID, since: since, batches: batches)
+        var next = state
+        next.inboxCandidate = candidate
+        try commit(next)
+        return candidate
+    }
+
+    public func discardInboxCandidate(context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard let candidate = state.inboxCandidate else { return }
+        guard !candidate.checkpointRequestStarted else { throw AttentionStoreError.inboxCheckpointPending }
+        var next = state
+        next.inboxCandidate = nil
+        try commit(next)
+    }
+
+    /// A server `snapshot_replaced` refusal proves the saved continuation no
+    /// longer names the current generation. Retain every receipt/overlay and
+    /// operation record, but allow a new bounded candidate from the durable C.
+    public func discardReplacedInboxCandidate(snapshotID: String,
+                                              context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard let candidate = state.inboxCandidate,
+              candidate.snapshotID == snapshotID else {
+            throw AttentionStoreError.inboxCheckpointIncomplete
+        }
+        var next = state
+        next.inboxCandidate = nil
+        try commit(next)
+    }
+
+    public func saveInboxInitialPage(snapshotID: String,
+                                     highWater: UInt64,
+                                     items: [InboxSnapshotItem],
+                                     nextCursor: String?,
+                                     receiptCursor: String?,
+                                     context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var candidate = state.inboxCandidate,
+              !snapshotID.isEmpty,
+              highWater >= candidate.since,
+              items.count <= 20 else { throw AttentionStoreError.inboxCheckpointIncomplete }
+        let keys = items.map(\.key)
+        guard Set(keys).count == keys.count,
+              keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
+            throw AttentionStoreError.inboxPageConflict
+        }
+        if candidate.hasInitialPage {
+            guard candidate.snapshotID == snapshotID,
+                  candidate.highWater == highWater,
+                  candidate.nextCursor == nextCursor,
+                  candidate.receiptCursor == receiptCursor,
+                  candidate.loadedKeys == Set(keys) else { throw AttentionStoreError.inboxPageConflict }
+            return
+        }
+        var next = state
+        for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        candidate.snapshotID = snapshotID
+        candidate.highWater = highWater
+        candidate.nextCursor = nextCursor
+        candidate.receiptCursor = receiptCursor
+        candidate.hasInitialPage = true
+        candidate.loadedKeys = Set(keys)
+        candidate.freshKeys = Set(keys)
+        candidate.receiptLastSequence = candidate.since
+        candidate.checkpointEligible = false
+        candidate.checkpointRequestStarted = false
+        candidate.checkpointAccepted = false
+        next.inboxCandidate = candidate
+        try commit(next)
+        refreshAcceptedReplayIndexes(for: keys)
+    }
+
+    public func saveInboxOlderPage(snapshotID: String,
+                                   highWater: UInt64,
+                                   cursor: String,
+                                   items: [InboxSnapshotItem],
+                                   nextCursor: String?,
+                                   context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var checkpoint = state.inboxCheckpoint,
+              checkpoint.checkpointAccepted,
+              checkpoint.snapshotID == snapshotID,
+              checkpoint.highWater == highWater,
+              checkpoint.hasInitialPage,
+              checkpoint.nextCursor == cursor,
+              items.count <= 20,
+              (items.count > 0 || nextCursor == nil) else {
+            throw AttentionStoreError.inboxPageConflict
+        }
+        let keys = items.map(\.key)
+        guard Set(keys).count == keys.count,
+              keys.allSatisfy({ $0.accountScope == context.identity.personID }),
+              keys.allSatisfy({ !checkpoint.loadedKeys.contains($0) }),
+              nextCursor != cursor else { throw AttentionStoreError.inboxPageConflict }
+        var next = state
+        for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        checkpoint.loadedKeys.formUnion(keys)
+        checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
+        checkpoint.nextCursor = nextCursor
+        next.inboxCheckpoint = checkpoint
+        try commit(next)
+        refreshAcceptedReplayIndexes(for: keys)
+    }
+
+    public func appendInboxReceiptBatches(_ batches: [InboxReceiptBatch],
+                                         context suppliedContext: ProfileContext) throws {
+        guard !batches.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var candidate = state.inboxCandidate,
+              candidate.hasInitialPage,
+              !candidate.checkpointRequestStarted else { throw AttentionStoreError.inboxCheckpointPending }
+        let existingIDs = Set(candidate.batches.flatMap(\.operationIDs))
+        let newIDs = batches.flatMap(\.operationIDs)
+        let inventoryIDs = Set(try inboxOperationInventory(context: suppliedContext).map(\.operationID))
+        guard Set(newIDs).count == newIDs.count,
+              Set(newIDs).isDisjoint(with: existingIDs),
+              Set(newIDs).isSubset(of: inventoryIDs),
+              Set(batches.map(\.batchID)).count == batches.count,
+              batches.allSatisfy({ !$0.batchID.isEmpty && !$0.operationIDs.isEmpty && $0.results == nil }) else {
+            throw AttentionStoreError.inboxCheckpointIncomplete
+        }
+        candidate.batches.append(contentsOf: batches)
+        candidate.checkpointEligible = false
+        var next = state
+        next.inboxCandidate = candidate
+        try commit(next)
+    }
+
+    public func saveInboxReceiptBatch(_ batchID: String,
+                                      results: [InboxOperationReceipt],
+                                      context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var candidate = state.inboxCandidate,
+              candidate.hasInitialPage,
+              !candidate.checkpointRequestStarted,
+              let index = candidate.batches.firstIndex(where: { $0.batchID == batchID }) else {
+            throw AttentionStoreError.inboxCheckpointIncomplete
+        }
+        let batch = candidate.batches[index]
+        guard results.map(\.operationID) == batch.operationIDs else { throw AttentionStoreError.inboxPageConflict }
+        if let existing = batch.results {
+            guard existing == results else { throw AttentionStoreError.inboxPageConflict }
+            return
+        }
+        var next = state
+        var touchedKeys = Set<RequestKey>()
+        var refreshedKeys = Set<RequestKey>()
+        for receipt in results {
+            guard let submission = next.intents.values.first(where: { $0.operationID == receipt.operationID }) else {
+                throw AttentionStoreError.inboxCheckpointIncomplete
+            }
+            touchedKeys.insert(submission.requestKey)
+            switch receipt.status {
+            case .committed:
+                guard let result = receipt.result,
+                      let sequence = Self.resultSequence(result),
+                      let terminal = receipt.terminal,
+                      case let .terminal(key, _, _) = terminal.body,
+                      key == submission.requestKey,
+                      terminal.sequence == sequence,
+                      terminal.sequence <= (candidate.highWater ?? 0) else {
+                    throw AttentionStoreError.inboxPageConflict
+                }
+                if case let .accepted(priorSequence) = submission.disposition {
+                    guard priorSequence == sequence else { throw AttentionStoreError.inboxPageConflict }
+                } else {
+                    var accepted = submission
+                    accepted.disposition = .accepted(sequence: sequence)
+                    next.intents[submission.intentID] = accepted
+                    next.outboxOrder.removeAll(where: { $0 == submission.intentID })
+                    if var published = next.replayPublishedIntents {
+                        published[submission.intentID] = accepted
+                        next.replayPublishedIntents = published
+                    }
+                }
+                try recordInboxTerminalProjection(terminal, into: &next)
+                touchedKeys.insert(submission.requestKey)
+                refreshedKeys.insert(submission.requestKey)
+            case .operationConflict:
+                guard receipt.result == nil, receipt.terminal == nil,
+                      !Self.isAccepted(submission) else { throw AttentionStoreError.inboxPageConflict }
+            case .notCommittedAtSnapshot:
+                guard receipt.result == nil, !Self.isAccepted(submission) else {
+                    throw AttentionStoreError.inboxPageConflict
+                }
+                if let terminal = receipt.terminal {
+                    guard case let .terminal(key, _, _) = terminal.body,
+                          key == submission.requestKey,
+                          terminal.sequence <= (candidate.highWater ?? 0) else {
+                        throw AttentionStoreError.inboxPageConflict
+                    }
+                    try recordInboxTerminalProjection(terminal, into: &next)
+                    touchedKeys.insert(submission.requestKey)
+                    refreshedKeys.insert(submission.requestKey)
+                }
+            }
+        }
+        candidate.batches[index].results = results
+        candidate.freshKeys = candidate.currentKeys.union(refreshedKeys)
+        next.inboxCandidate = candidate
+        try commit(next)
+        refreshAcceptedReplayIndexes(for: touchedKeys)
+    }
+
+    public func saveInboxReceiptChunk(snapshotID: String,
+                                      cursor: String,
+                                      events: [RelayEvent],
+                                      nextCursor: String?,
+                                      context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var candidate = state.inboxCandidate,
+              !candidate.checkpointRequestStarted,
+              candidate.snapshotID == snapshotID,
+              candidate.highWater != nil,
+              candidate.receiptCursor == cursor,
+              nextCursor != cursor,
+              let highWater = candidate.highWater else { throw AttentionStoreError.inboxPageConflict }
+        var priorSequence = candidate.receiptLastSequence ?? candidate.since
+        var touchedKeys = Set<RequestKey>()
+        var next = state
+        for event in events {
+            guard event.sequence > priorSequence, event.sequence <= highWater,
+                  event.sequence > candidate.since else {
+                throw AttentionStoreError.inboxPageConflict
+            }
+            switch event.body {
+            case let .terminal(key, _, _):
+                guard key.accountScope == context.identity.personID else { throw AttentionStoreError.wrongAccount }
+                touchedKeys.insert(key)
+                try recordInboxTerminalProjection(event, into: &next)
+            default:
+                throw AttentionStoreError.inboxPageConflict
+            }
+            priorSequence = event.sequence
+        }
+        if !events.isEmpty { candidate.receiptLastSequence = priorSequence }
+        candidate.freshKeys = candidate.currentKeys.union(touchedKeys)
+        candidate.receiptCursor = nextCursor
+        next.inboxCandidate = candidate
+        try commit(next)
+        refreshAcceptedReplayIndexes(for: touchedKeys)
+    }
+
+    /// Durably freezes the exact manifest immediately before the distinct server checkpoint ACK.
+    public func prepareInboxCheckpointAcknowledgement(context suppliedContext: ProfileContext) throws -> InboxPagingCheckpoint {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var candidate = state.inboxCandidate,
+              candidate.hasInitialPage,
+              candidate.snapshotID != nil,
+              candidate.highWater != nil,
+              candidate.receiptCursor == nil,
+              candidate.batches.allSatisfy({ $0.results != nil }) else {
+            throw AttentionStoreError.inboxCheckpointIncomplete
+        }
+        let operationIDs = candidate.batches.flatMap(\.operationIDs)
+        let inventoryIDs = try inboxOperationInventory(context: suppliedContext).map(\.operationID)
+        guard Set(operationIDs).count == operationIDs.count,
+              Set(inventoryIDs).isSubset(of: Set(operationIDs)) else {
+            throw AttentionStoreError.inboxCheckpointIncomplete
+        }
+        candidate.checkpointEligible = true
+        candidate.checkpointRequestStarted = true
+        var next = state
+        next.inboxCandidate = candidate
+        try commit(next)
+        return candidate
+    }
+
+    /// This is the only local operation that promotes a checkpoint H to the event cursor.
+    @discardableResult
+    public func acceptInboxCheckpoint(snapshotID: String,
+                                      highWater: UInt64,
+                                      context suppliedContext: ProfileContext) throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var candidate = state.inboxCandidate,
+              candidate.checkpointEligible,
+              candidate.checkpointRequestStarted,
+              candidate.snapshotID == snapshotID,
+              candidate.highWater == highWater,
+              state.cursor == candidate.since else { throw AttentionStoreError.inboxCheckpointIncomplete }
+        candidate.checkpointAccepted = true
+        var next = state
+        next.inboxCheckpoint = candidate
+        next.inboxCandidate = nil
+        next.cursor = highWater
+        next.replayBarrier = nil
+        next.replayPublishedRequests = nil
+        next.replayPublishedStates = nil
+        next.replayPublishedIntents = nil
+        next.replayPublishedInboxCurrentKeys = nil
+        try commit(next)
+        return state.cursor
+    }
+
     public func snapshot(context suppliedContext: ProfileContext) throws -> AttentionStoreSnapshot {
         lock.lock()
         defer { lock.unlock() }
@@ -864,6 +1544,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let visibleDrafts = state.drafts.filter { visibleKeys.contains($0.key) }
         let visibleSessions = state.fixtureSessions.filter { visibleKeys.contains($0.key) }
         let sortedOutbox = state.outboxOrder.compactMap { state.intents[$0] }
+        let inboxCurrentKeys: Set<RequestKey>?
+        if state.replayBarrier != nil {
+            inboxCurrentKeys = state.replayPublishedInboxCurrentKeys
+        } else if state.inboxCandidate != nil {
+            inboxCurrentKeys = []
+        } else if let checkpoint = state.inboxCheckpoint, checkpoint.checkpointAccepted {
+            inboxCurrentKeys = checkpoint.currentKeys
+        } else {
+            inboxCurrentKeys = nil
+        }
         return AttentionStoreSnapshot(requests: publishedRequests,
                                       drafts: visibleDrafts,
                                       intents: state.replayPublishedIntents ?? state.intents,
@@ -874,7 +1564,24 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       cursor: state.cursor,
                                       replayBarrier: state.replayBarrier,
                                       repairIssues: state.repairIssues,
-                                      conversationThreads: state.conversation?.threads ?? [:])
+                                      conversationThreads: state.conversation?.threads ?? [:],
+                                      inboxCheckpoint: state.inboxCheckpoint,
+                                      inboxCandidate: state.inboxCandidate,
+                                      inboxCurrentKeys: inboxCurrentKeys,
+                                      pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
+                                      inboxReferences: state.inboxReferences ?? [:])
+    }
+
+    /// Returns only the contiguous relay cursor after validating the profile.
+    /// Unlike `snapshot(context:)`, this does not project retained presentation history.
+    public func relayCursor(context suppliedContext: ProfileContext) throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        return state.cursor
     }
 
     /// Checks that a caller still owns the active profile without materializing
@@ -1492,6 +2199,26 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata)
     }
 
+    private static func externalizingConversationFiles(in checkpoint: InboxPagingCheckpoint,
+        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> InboxPagingCheckpoint {
+        var next = checkpoint
+        next.batches = try checkpoint.batches.map { batch in
+            var updated = batch
+            updated.results = try batch.results.map { results in
+                try results.map { receipt in
+                    InboxOperationReceipt(operationID: receipt.operationID, status: receipt.status,
+                        result: receipt.result,
+                        terminal: try receipt.terminal.map {
+                            try externalizingConversationFiles(in: $0, using: references,
+                                                              allowInlinePersistence: allowInlinePersistence)
+                        })
+                }
+            }
+            return updated
+        }
+        return next
+    }
+
     private static func externalizingConversationFiles(in thread: ConversationThread,
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationThread {
         var next = thread
@@ -1512,6 +2239,15 @@ public final class AttentionDomainStore: @unchecked Sendable {
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> PersistedAttentionState {
         var next = state
         next.appliedEvents = try state.appliedEvents.mapValues {
+            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+        }
+        next.pendingRelayOverlays = try state.pendingRelayOverlays?.mapValues {
+            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+        }
+        next.inboxCheckpoint = try state.inboxCheckpoint.map {
+            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
+        }
+        next.inboxCandidate = try state.inboxCandidate.map {
             try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
         }
         if let oldConversation = state.conversation {
@@ -1778,7 +2514,13 @@ private struct PersistedAttentionState: Codable {
     var replayPublishedRequests: [RequestKey: StoredRequest]?
     var replayPublishedStates: [RequestKey: RemoteRequestState]?
     var replayPublishedIntents: [UUID: Submission]?
+    var replayPublishedInboxCurrentKeys: Set<RequestKey>?
     var repairIssues: [StoreRepairIssue] = []
+    // Optional fields preserve readability of existing schema-2 profile files.
+    var inboxCheckpoint: InboxPagingCheckpoint?
+    var inboxCandidate: InboxPagingCheckpoint?
+    var pendingRelayOverlays: [UInt64: RelayEvent]?
+    var inboxReferences: [RequestKey: RemoteRequestState]?
     // Optional keeps existing schema-2 account files readable without resetting their data.
     var conversation: ConversationState?
 

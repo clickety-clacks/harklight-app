@@ -126,6 +126,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder let settingsContent: () -> SettingsContent
     var warnings: [String] = []
     var conversationStore: LivePresentationStore? = nil
+    var fetchOlderInboxPage: (() async -> Bool)? = nil
     var showsLocalExamples = true
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: InboxSelection?
@@ -194,7 +195,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: compactNavigation) {
                 InboxList(rows: rows, search: $search,
                           selected: selection, compact: horizontalSizeClass == .compact,
-                          showSettings: { settings = true }, select: { id in
+                          showSettings: { settings = true },
+                          fetchOlderInboxPage: fetchOlderInboxPage, select: { id in
                     searchFocused = false
                     navigate(to: id)
                     compactColumn = .detail
@@ -285,11 +287,27 @@ struct InboxList: View {
     let selected: InboxSelection?
     let compact: Bool
     let showSettings: () -> Void
+    let fetchOlderInboxPage: (() async -> Bool)?
     let select: (InboxSelection) -> Void
+    @State private var scrollMetrics = InboxScrollMetrics.empty
+    @State private var isUserScrolling = false
+    @State private var requestedInGesture = false
+    @State private var isFetchingOlderPage = false
 
     private var filteredRows: [InboxItem] {
         search.isEmpty ? rows : rows.filter {
             $0.preview.title.localizedCaseInsensitiveContains(search) || $0.preview.sender.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    private func requestOlderPage() {
+        guard !requestedInGesture, !isFetchingOlderPage,
+              let fetchOlderInboxPage else { return }
+        requestedInGesture = true
+        isFetchingOlderPage = true
+        Task {
+            _ = await fetchOlderInboxPage()
+            isFetchingOlderPage = false
         }
     }
 
@@ -312,9 +330,43 @@ struct InboxList: View {
                         .id(row.id)
                         .accessibilityIdentifier(row.accessibilityID)
                     }
+                    if isFetchingOlderPage {
+                        ProgressView().frame(maxWidth: .infinity).padding()
+                    }
                 }
             }
             .background { Color(uiColor: .systemGroupedBackground).ignoresSafeArea() }
+            .onScrollGeometryChange(for: InboxScrollMetrics.self) { geometry in
+                let top = geometry.contentOffset.y + geometry.contentInsets.top
+                let extent = max(0, geometry.contentSize.height - geometry.containerSize.height +
+                    geometry.contentInsets.top + geometry.contentInsets.bottom)
+                return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
+                    distanceToBottom: max(0, extent - top), contentFits: extent == 0)
+            } action: { oldMetrics, newMetrics in
+                scrollMetrics = newMetrics
+                guard isUserScrolling,
+                      newMetrics.offsetY > oldMetrics.offsetY + 1,
+                      newMetrics.distanceToBottom <= 80 else { return }
+                requestOlderPage()
+            }
+            .onScrollPhaseChange { oldPhase, newPhase in
+                let scrolling = newPhase == .interacting || newPhase == .decelerating
+                if scrolling && !isUserScrolling { requestedInGesture = false }
+                isUserScrolling = scrolling
+                if oldPhase == .interacting && !scrolling { requestedInGesture = false }
+            }
+            .simultaneousGesture(DragGesture(minimumDistance: 10)
+                .onChanged { value in
+                    guard value.translation.height < -12 else { return }
+                    isUserScrolling = true
+                    if scrollMetrics.contentFits || scrollMetrics.distanceToBottom <= 80 {
+                        requestOlderPage()
+                    }
+                }
+                .onEnded { _ in
+                    isUserScrolling = false
+                    requestedInGesture = false
+                })
             .onAppear { if let selected { proxy.scrollTo(selected, anchor: .center) } }
             .toolbar {
                 DefaultToolbarItem(kind: .search, placement: compact ? .bottomBar : .automatic)
@@ -329,6 +381,15 @@ struct InboxList: View {
             .navigationBarTitleDisplayMode(.inline)
         }
     }
+}
+
+private struct InboxScrollMetrics: Equatable {
+    let offsetY: CGFloat
+    let distanceToBottom: CGFloat
+    let contentFits: Bool
+
+    static let empty = InboxScrollMetrics(offsetY: 0, distanceToBottom: .greatestFiniteMagnitude,
+                                          contentFits: false)
 }
 
 struct InboxRowContent: View {

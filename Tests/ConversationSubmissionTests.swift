@@ -3,7 +3,7 @@ import HarklightNativeRelay
 import XCTest
 
 final class ConversationSubmissionTests: XCTestCase {
-    private final class Session: AuthenticatedConversationCleanupSession, @unchecked Sendable {
+    private final class Session: AuthenticatedInboxPagingSession, AuthenticatedConversationCleanupSession, @unchecked Sendable {
         let authenticatedIdentity: ProfileIdentity
         var result: DiscussionOperationResult = .unresolved
         var sent: [(Data, UUID)] = []

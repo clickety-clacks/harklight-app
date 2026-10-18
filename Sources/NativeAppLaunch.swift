@@ -939,6 +939,17 @@ final class LivePresentationStore {
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
     }
 
+    @discardableResult
+    func fetchNextInboxPage() async -> Bool {
+        guard permitsDelivery, !isReadOnly else { return false }
+        let fetched = await NativeRelayLifecycle.shared.fetchNextInboxPage()
+        if fetched {
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
+        }
+        return fetched
+    }
+
     func uploadNeedsReselection(_ file: ConversationFile, for key: RequestKey, revision: UInt64) -> Bool {
         (conversationThreads[key]?.uploadGroups ?? [:]).values.contains {
             $0.binding.revision == revision && $0.cleanupID != nil && $0.originals.contains(where: { $0.id == file.id })
@@ -1063,20 +1074,37 @@ final class LivePresentationStore {
 
     var inboxRows: [InboxRequestRow] {
         presentation.requests.map {
-            let lifecycle = isRetracted($0.key) ? "Retracted" :
-                String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)
             var statusParts: [String] = []
-            if hasAcceptedUpdate(for: $0.key) { statusParts.append("Updated") }
-            statusParts.append(lifecycle)
-            if let seenStatus = $0.informationalSeenStatus {
-                statusParts.append(informationalSeenRowStatus(seenStatus))
+            if $0.inboxStateIsCurrent {
+                if hasAcceptedUpdate(for: $0.key) { statusParts.append("Updated") }
+                let lifecycle = isRetracted($0.key) ? "Retracted" :
+                    String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)
+                statusParts.append(lifecycle)
+                if let seenStatus = $0.informationalSeenStatus {
+                    statusParts.append(informationalSeenRowStatus(seenStatus))
+                }
+            } else {
+                if let localStatus = cachedOperationStatus($0.intentReceipt?.localState) {
+                    statusParts.append(localStatus)
+                }
+                statusParts.append("Cached history · status not refreshed")
             }
             return InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
                 sender: $0.key.senderID.rawValue,
                 status: statusParts.joined(separator: " · "),
                 bodyText: $0.body?.rawValue ?? "",
                 symbol: $0.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: $0.isResolved)
+                isResolved: !$0.inboxStateIsCurrent || $0.isResolved)
+        }
+    }
+
+    private func cachedOperationStatus(_ state: LocalIntentState?) -> String? {
+        guard let state else { return nil }
+        return switch state {
+        case .durable, .queuedForRelay: "Answer pending on this device"
+        case .accepted: "Answer accepted · terminal status pending"
+        case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .repairRequired: "Answer needs recovery"
         }
     }
 
