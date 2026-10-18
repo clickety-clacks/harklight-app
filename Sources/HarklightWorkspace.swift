@@ -148,6 +148,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var conversationStore: LivePresentationStore? = nil
     var fetchOlderInboxPage: (() async -> Bool)? = nil
     var showsLocalExamples = true
+    var notificationNavigation: NativeInboxNavigation? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: InboxSelection?
     @State private var visibility: NavigationSplitViewVisibility = .all
@@ -334,7 +335,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           restoreLastViewed: restoreLastViewedOnReturn,
                           didRestoreLastViewed: { restoreLastViewedOnReturn = false },
                           showSettings: { settings = true }, markSeen: markSeen,
-                          fetchOlderInboxPage: fetchOlderInboxPage, select: { id in
+                          fetchOlderInboxPage: fetchOlderInboxPage,
+                          notificationNavigation: notificationNavigation, select: { id in
                     UIDiagnostics.shared.record("inbox.rowTap \(UIDiagnostics.describe(id)) selection=\(UIDiagnostics.describe(selection)) landscape=\(landscape)")
                     restoreLastViewedOnReturn = false
                     navigate(to: id)
@@ -403,6 +405,22 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 conversationPresentation
                     .presentationDetents([.medium, .large])
             }
+            .onChange(of: notificationNavigation, initial: true) { _, route in
+                guard let route else { return }
+                settings = false
+                chatOpen = false
+                conversationPresented = false
+                // Notification navigation changes selection only. The ordinary
+                // navigate helper also schedules abandoned-upload cleanup.
+                // A tap must not turn that into a domain mutation.
+                selection = route.request.map(InboxSelection.request)
+                if let key = route.request {
+                    lastViewedSelection = .request(key)
+                    selectRequest(key)
+                }
+                compactColumn = route.request == nil ? .sidebar : .detail
+                visibility = route.request == nil ? .all : .detailOnly
+            }
             .onChange(of: samples.selectedID) { _, id in
                 UIDiagnostics.shared.record("inbox.samplesSelectedChanged \(id ?? "nil") selection=\(UIDiagnostics.describe(selection))")
                 guard showsLocalExamples, case .sample = selection else { return }
@@ -458,6 +476,7 @@ struct InboxList: View {
     let showSettings: () -> Void
     let markSeen: (InboxSelection) -> Void
     let fetchOlderInboxPage: (() async -> Bool)?
+    let notificationNavigation: NativeInboxNavigation?
     let select: (InboxSelection) -> Void
     @State private var search = ""
     @State private var searchPresented = false
@@ -581,6 +600,11 @@ struct InboxList: View {
             .onAppear { restoreLastViewed(using: proxy) }
             .onChange(of: restoreLastViewed) { _, shouldRestore in
                 if shouldRestore { restoreLastViewed(using: proxy) }
+            }
+            .onChange(of: notificationNavigation) { _, route in
+                guard route != nil else { return }
+                search = ""
+                searchFocused = false
             }
             .onChange(of: search) { _, _ in
                 if restoreLastViewed { restoreLastViewed(using: proxy) } else { showFirstRow(using: proxy) }

@@ -1279,13 +1279,27 @@ final class NativeRelayLifecycle {
             if let address = try DevelopmentPushRegistration.addressStore().load(),
                let binding = try enrollment.pendingPushRegistration(address: address,
                                                                      for: context.identity.deviceID.rawValue) {
-                try await transport.registerPush(address: binding.address,
+                guard let expected = try enrollment.load(), expected.matchesNotificationIdentity(context.identity) else {
+                    throw NativeJoinError.superseded
+                }
+                let bindingID = try await transport.registerPush(address: binding.address,
                                                  operationID: binding.operationID,
                                                  revision: binding.revision)
                 guard self.refreshGeneration == generation, self.context == context else {
                     throw NativeRelayCoreError.inactive
                 }
-                try enrollment.markPushAccepted(binding, for: context.identity.deviceID.rawValue)
+                try enrollment.markPushAccepted(binding, bindingID: bindingID, expected: expected)
+                return .confirmed
+            }
+            if let expected = try enrollment.load(), expected.matchesNotificationIdentity(context.identity),
+               let binding = expected.pushBinding, binding.accepted,
+               !(expected.notificationBindings ?? []).contains(where: {
+                   $0.operationID == binding.operationID && $0.revision == binding.revision
+               }), let bindingID = try await transport.currentPushBindingID(revision: binding.revision) {
+                guard self.refreshGeneration == generation, self.context == context else {
+                    throw NativeRelayCoreError.inactive
+                }
+                try enrollment.markPushAccepted(binding, bindingID: bindingID, expected: expected)
                 return .confirmed
             }
             return .notAttempted

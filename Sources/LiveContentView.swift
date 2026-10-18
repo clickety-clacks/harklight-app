@@ -53,14 +53,15 @@ struct LiveContentView: View {
                 settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
                                                       archiveDeparture: archiveDeparture,
                                                       connectionStatus: connectionStatus) },
-                warnings: [store.observationError, store.notificationWarning,
+                warnings: [launch?.notificationNavigationMessage, store.observationError, store.notificationWarning,
                            store.pushRegistrationWarning, launch?.archiveCatalogWarning,
                            launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage,
                            fixtureStore?.persistenceError]
                     .compactMap { $0 },
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
-                showsLocalExamples: !store.isReadOnly)
+                showsLocalExamples: !store.isReadOnly,
+                notificationNavigation: launch?.notificationNavigation)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
                 Button("Copy details") {
