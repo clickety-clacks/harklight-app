@@ -509,7 +509,10 @@ struct InboxList: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 1) {
+                // Eager on purpose: when a search shrinks the list while it is
+                // scrolled down, a lazy stack can keep its old visible range and
+                // draw none of the matching rows.
+                VStack(spacing: 1) {
                     ForEach(filteredRows) { row in
                         Button {
                             searchFocused = false
