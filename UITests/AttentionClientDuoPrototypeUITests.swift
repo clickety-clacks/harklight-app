@@ -1,4 +1,5 @@
 import XCTest
+import AttentionDomain
 
 @MainActor
 final class AttentionClientDuoPrototypeUITests: XCTestCase {
