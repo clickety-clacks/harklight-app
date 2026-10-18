@@ -1242,6 +1242,198 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(rejectedIdentity.progress.message.contains("could not offer its identity to the saved relay host"))
     }
 
+    func testPostAckForegroundSummaryRetainsBoundaryValidationAndUnknownCause() async throws {
+        let transportAttemptID = UUID()
+        let failedDeadline = ForegroundConnectDeadline()
+        failedDeadline.beginSession(transportAttemptID: transportAttemptID)
+        failedDeadline.observe(.nativeSyncAcknowledged, transportAttemptID: transportAttemptID)
+        failedDeadline.observe(.postAckDrainBegan, transportAttemptID: transportAttemptID)
+        failedDeadline.observe(.postAckDrainFinished(.failed), transportAttemptID: transportAttemptID)
+        let failed = await failedDeadline.run(deadline: .seconds(2), operation: {
+            failedDeadline.recordPostAckCompletion(postAckReached: true,
+                relayRefreshConfirmed: false, generationMatches: false,
+                profileMatches: true, relayContextMatches: false)
+            return false
+        }, onTimeout: {}, onProgress: { _ in })
+
+        XCTAssertEqual(failed.outcome, .incomplete)
+        XCTAssertNil(failed.failureClass, "No transport cause was observed in this invalidation case.")
+        XCTAssertEqual(failed.terminalReason, .generationInvalidated)
+        XCTAssertEqual(failed.lastCompletedPostAckBoundary, .relayRefreshReturned)
+        XCTAssertEqual(failed.postAckRelayRefresh, .failed)
+        XCTAssertEqual(failed.postAckDrainTransition, .failed)
+        XCTAssertEqual(failed.generationValidation, .failed)
+        XCTAssertEqual(failed.profileContextValidation, .passed)
+        XCTAssertEqual(failed.relayContextValidation, .failed)
+        XCTAssertTrue(failed.message.contains("Cause was not observed."))
+
+        let failedSummary = NativeForegroundConnectDiagnostic(
+            progress: failed, operationSnapshot: .unavailable,
+            appVersion: "4.8.2", buildNumber: "1087",
+            executableSHA256: String(repeating: "a", count: 64))
+        XCTAssertTrue(failedSummary.shareText.contains("app_version=4.8.2"))
+        XCTAssertTrue(failedSummary.shareText.contains("app_build=1087"))
+        XCTAssertTrue(failedSummary.shareText.contains("last_completed_post_ack_boundary=post_ack_relay_refresh_returned"))
+        XCTAssertTrue(failedSummary.shareText.contains("post_ack_relay_refresh=failed"))
+        XCTAssertTrue(failedSummary.shareText.contains("post_ack_drain=failed"))
+        XCTAssertTrue(failedSummary.shareText.contains("generation_validated=failed"))
+        XCTAssertTrue(failedSummary.shareText.contains("profile_context_validated=passed"))
+        XCTAssertTrue(failedSummary.shareText.contains("relay_context_validated=failed"))
+        XCTAssertTrue(failedSummary.shareText.contains("terminal_reason=generation_invalidated"))
+        XCTAssertTrue(failedSummary.shareText.contains("error_class=unknown_error_class"))
+
+        let successfulDeadline = ForegroundConnectDeadline()
+        let successfulTransportID = UUID()
+        successfulDeadline.beginSession(transportAttemptID: successfulTransportID)
+        successfulDeadline.observe(.nativeSyncAcknowledged, transportAttemptID: successfulTransportID)
+        successfulDeadline.observe(.postAckDrainBegan, transportAttemptID: successfulTransportID)
+        successfulDeadline.observe(.postAckDrainFinished(.completed), transportAttemptID: successfulTransportID)
+        let confirmed = await successfulDeadline.run(deadline: .seconds(2), operation: {
+            successfulDeadline.recordPostAckCompletion(postAckReached: true,
+                relayRefreshConfirmed: true, generationMatches: true,
+                profileMatches: true, relayContextMatches: true)
+            return true
+        }, onTimeout: {}, onProgress: { _ in })
+        XCTAssertEqual(confirmed.outcome, .confirmed)
+        XCTAssertEqual(confirmed.terminalReason, .confirmed)
+        XCTAssertEqual(confirmed.lastCompletedPostAckBoundary, .foregroundConfirmed)
+        XCTAssertEqual(confirmed.postAckDrainTransition, .completed)
+        XCTAssertEqual(confirmed.generationValidation, .passed)
+        XCTAssertEqual(confirmed.profileContextValidation, .passed)
+        XCTAssertEqual(confirmed.relayContextValidation, .passed)
+
+        let timeoutDeadline = ForegroundConnectDeadline()
+        let timeoutTransportID = UUID()
+        timeoutDeadline.beginSession(transportAttemptID: timeoutTransportID)
+        timeoutDeadline.observe(.nativeSyncAcknowledged, transportAttemptID: timeoutTransportID)
+        timeoutDeadline.observe(.postAckDrainBegan, transportAttemptID: timeoutTransportID)
+        let timedOut = await timeoutDeadline.run(deadline: .milliseconds(20), operation: {
+            try? await Task.sleep(for: .seconds(2))
+            return false
+        }, onTimeout: {}, onProgress: { _ in })
+        XCTAssertEqual(timedOut.outcome, .timedOut)
+        timeoutDeadline.recordTimedOutValidation(attemptID: try XCTUnwrap(timedOut.attemptID),
+            generationMatches: false, profileMatches: true, relayContextMatches: false)
+        XCTAssertEqual(timeoutDeadline.progress.terminalReason, .deadlineExceeded)
+        XCTAssertEqual(timeoutDeadline.progress.lastCompletedPostAckBoundary, .nativeCursorAcknowledged)
+        XCTAssertEqual(timeoutDeadline.progress.postAckRelayRefresh, .failed)
+        XCTAssertEqual(timeoutDeadline.progress.postAckDrainTransition, .timedOut)
+        XCTAssertEqual(timeoutDeadline.progress.generationValidation, .failed)
+        XCTAssertEqual(timeoutDeadline.progress.profileContextValidation, .passed)
+        XCTAssertEqual(timeoutDeadline.progress.relayContextValidation, .failed)
+
+        let cancelledDeadline = ForegroundConnectDeadline()
+        let cancelledTransportID = UUID()
+        cancelledDeadline.beginSession(transportAttemptID: cancelledTransportID)
+        cancelledDeadline.observe(.nativeSyncAcknowledged, transportAttemptID: cancelledTransportID)
+        cancelledDeadline.observe(.postAckDrainBegan, transportAttemptID: cancelledTransportID)
+        cancelledDeadline.observe(.postAckDrainFinished(.cancelled), transportAttemptID: cancelledTransportID)
+        let cancelled = await cancelledDeadline.run(deadline: .seconds(2), operation: {
+            cancelledDeadline.recordFailure(CancellationError())
+            cancelledDeadline.recordPostAckCompletion(postAckReached: true,
+                relayRefreshConfirmed: false, generationMatches: true,
+                profileMatches: true, relayContextMatches: false)
+            return false
+        }, onTimeout: {}, onProgress: { _ in })
+        XCTAssertEqual(cancelled.outcome, .incomplete)
+        XCTAssertEqual(cancelled.failureClass, .cancelled)
+        XCTAssertEqual(cancelled.terminalReason, .cancelled)
+
+        let lateProgressDeadline = ForegroundConnectDeadline()
+        let lateProgressTransportID = UUID()
+        lateProgressDeadline.beginSession(transportAttemptID: lateProgressTransportID)
+        let lateProgressStarted = AsyncTestSignal()
+        let lateProgressRun = Task { @MainActor in
+            await lateProgressDeadline.run(deadline: .seconds(2), operation: {
+                await lateProgressStarted.signal()
+                try? await Task.sleep(for: .milliseconds(20))
+                return false
+            }, onTimeout: {}, onProgress: { _ in })
+        }
+        await lateProgressStarted.wait()
+        lateProgressDeadline.recordFailure(URLError(.networkConnectionLost))
+        lateProgressDeadline.recordPostAckCompletion(postAckReached: true,
+            relayRefreshConfirmed: false, generationMatches: true,
+            profileMatches: true, relayContextMatches: false)
+        lateProgressDeadline.observe(.postAckDrainFinished(.failed), transportAttemptID: lateProgressTransportID)
+        let lateProgressFailure = await lateProgressRun.value
+        XCTAssertEqual(lateProgressFailure.failureClass,
+                       .urlSession(code: URLError.networkConnectionLost.rawValue),
+                       "A queued post-ACK progress event must not erase the caught transport cause.")
+        XCTAssertEqual(lateProgressFailure.postAckDrainTransition, .failed)
+
+        let journalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightPostAckDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: journalURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: journalURL)
+        let request = RequestKey(accountScope: ExactText("account"), senderID: ExactText("sender"),
+                                 messageID: ExactText("message"))
+        let operationID = UUID()
+        journal.record([
+            NativeClientDiagnosticEvent(area: .relay, phase: .postAckDrain, transition: .unresolved,
+                causeCode: "unknown_error", attemptID: failed.attemptID,
+                transportAttemptID: transportAttemptID, operationID: operationID,
+                request: request, requestRevision: 7, receiptState: .acceptedAwaitingReplay),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundGenerationValidation,
+                transition: .cancelled, causeCode: "foreground_generation_invalidated",
+                attemptID: failed.attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundProfileValidation,
+                transition: .completed, attemptID: failed.attemptID,
+                transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundContextValidation,
+                transition: .unresolved, causeCode: "foreground_relay_context_unconfirmed",
+                attemptID: failed.attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
+                transition: .cancelled, terminalReason: .generationInvalidated,
+                postAckBoundary: .relayRefreshReturned,
+                postAckDrainTransition: .failed,
+                attemptID: failed.attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .approvedConnection, transition: .failed,
+                terminalReason: .generationInvalidated,
+                attemptID: failed.attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
+                transition: .completed, terminalReason: .confirmed,
+                postAckBoundary: .foregroundConfirmed, postAckDrainTransition: .completed,
+                attemptID: confirmed.attemptID, transportAttemptID: successfulTransportID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
+                transition: .timedOut, terminalReason: .deadlineExceeded,
+                postAckBoundary: .nativeCursorAcknowledged, postAckDrainTransition: .timedOut,
+                attemptID: timedOut.attemptID, transportAttemptID: timeoutTransportID)
+        ])
+        let restored = NativeClientDiagnosticJournal(fileURL: journalURL)
+        XCTAssertEqual(restored.persistenceStatus, .saved)
+        XCTAssertTrue(restored.shareText.contains("phase=postAckDrain transition=unresolved cause=unknown_error"))
+        XCTAssertTrue(restored.shareText.contains("phase=foregroundGenerationValidation transition=cancelled cause=foreground_generation_invalidated"))
+        XCTAssertTrue(restored.shareText.contains("phase=foregroundProfileValidation transition=completed"))
+        XCTAssertTrue(restored.shareText.contains("phase=foregroundContextValidation transition=unresolved cause=foreground_relay_context_unconfirmed"))
+        XCTAssertTrue(restored.shareText.contains("phase=foregroundCompletion transition=cancelled cause=none_observed terminal_reason=generation_invalidated"))
+        XCTAssertTrue(restored.shareText.contains("post_ack_boundary=post_ack_relay_refresh_returned"))
+        XCTAssertTrue(restored.shareText.contains("post_ack_drain=failed"))
+        let completion = try XCTUnwrap(restored.events.first { $0.phase == .foregroundCompletion })
+        XCTAssertEqual(completion.postAckBoundary, .relayRefreshReturned)
+        XCTAssertEqual(completion.postAckDrainTransition, .failed)
+        XCTAssertTrue(restored.shareText.contains("post_ack_boundary=foreground_confirmed"))
+        XCTAssertTrue(restored.shareText.contains("post_ack_drain=timed_out"))
+        let successCompletion = try XCTUnwrap(restored.events.first {
+            $0.phase == .foregroundCompletion && $0.transition == .completed
+        })
+        XCTAssertEqual(successCompletion.postAckBoundary, .foregroundConfirmed)
+        XCTAssertEqual(successCompletion.postAckDrainTransition, .completed)
+        let timeoutCompletion = try XCTUnwrap(restored.events.first {
+            $0.phase == .foregroundCompletion && $0.transition == .timedOut
+        })
+        XCTAssertEqual(timeoutCompletion.postAckBoundary, .nativeCursorAcknowledged)
+        XCTAssertEqual(timeoutCompletion.postAckDrainTransition, .timedOut)
+        XCTAssertTrue(restored.shareText.contains("attempt_id=\(failed.attemptID!.uuidString.lowercased())"))
+        XCTAssertTrue(restored.shareText.contains("transport_attempt_id=\(transportAttemptID.uuidString.lowercased())"))
+        XCTAssertTrue(restored.shareText.contains("operation_id=\(operationID.uuidString.lowercased())"))
+        XCTAssertTrue(restored.shareText.contains("request_tag_sha256="))
+        XCTAssertTrue(restored.shareText.contains("request_revision=7"))
+        XCTAssertTrue(restored.shareText.contains("receipt_state=acceptedAwaitingReplay"))
+        XCTAssertFalse(restored.shareText.contains("answer="))
+        XCTAssertFalse(restored.shareText.contains("token="))
+    }
+
     func testReplacementTransportHasFreshPhasesAndKeepsOnlyPriorTransportSummary() async throws {
         let deadline = ForegroundConnectDeadline()
         let firstTransportID = UUID()
@@ -1263,6 +1455,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         deadline.observe(.nativeSyncReplayRequested, transportAttemptID: firstTransportID)
         deadline.observe(.nativeSyncResynced, transportAttemptID: firstTransportID)
         deadline.observe(.nativeSyncAcknowledged, transportAttemptID: firstTransportID)
+        deadline.observe(.postAckDrainBegan, transportAttemptID: firstTransportID)
+        deadline.observe(.postAckDrainFinished(.completed), transportAttemptID: firstTransportID)
         deadline.recordFailure(URLError(.networkConnectionLost))
 
         let secondTransportID = UUID()
@@ -1273,6 +1467,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(deadline.progress.nativeSyncReplayRequested)
         XCTAssertEqual(deadline.progress.previousTransportAttempt?.id, firstTransportID)
         XCTAssertEqual(deadline.progress.previousTransportAttempt?.lastConfirmedStage, .nativeSyncAcknowledged)
+        XCTAssertEqual(deadline.progress.previousTransportAttempt?.lastCompletedPostAckBoundary, .coreDrainCompleted)
+        XCTAssertEqual(deadline.progress.previousTransportAttempt?.postAckDrainTransition, .completed)
+        XCTAssertEqual(deadline.progress.lastCompletedPostAckBoundary, .none,
+                       "A replacement transport must not inherit a historical cursor checkpoint as its own.")
+        XCTAssertNil(deadline.progress.postAckDrainTransition)
         XCTAssertEqual(deadline.progress.previousTransportAttempt?.failureClass,
                        .urlSession(code: URLError.networkConnectionLost.rawValue))
 
@@ -1295,6 +1494,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(diagnostic.shareText.contains("last_confirmed_phase=server_trust_validated"))
         XCTAssertTrue(diagnostic.shareText.contains("previous_transport_attempt_id=\(firstTransportID.uuidString.lowercased())"))
         XCTAssertTrue(diagnostic.shareText.contains("previous_last_confirmed_phase=native_sync_acknowledged"))
+        XCTAssertTrue(diagnostic.shareText.contains("last_completed_post_ack_boundary=none_observed"))
+        XCTAssertTrue(diagnostic.shareText.contains("previous_last_completed_post_ack_boundary=post_ack_core_drain_completed"))
+        XCTAssertTrue(diagnostic.shareText.contains("previous_post_ack_drain=completed"))
         XCTAssertTrue(diagnostic.shareText.contains("previous_error_class=url_session_error_code_\(URLError.networkConnectionLost.rawValue)"))
 
         finishOperation?.resume(returning: false)

@@ -312,37 +312,47 @@ public actor NativeRelayCore {
         retainReplayDiagnostics(for: acceptedBeforeReplay)
         var high = try await replayAndAcknowledge(since: before,
                                                    trackingAcceptedOperations: acceptedBeforeReplay)
-        inspectedConversationMetadata = true
-        let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
-            .map(\.operationID))
-        let attempted: Int
+        onProgress(.postAckDrainBegan)
         do {
-            attempted = try await drainPending()
-        } catch {
-            // A later operation may fail after an earlier operation was
-            // accepted. Record that the accepted operation's terminal replay
-            // was not reached, without attributing the later operation's
-            // transport error to it.
-            let acceptedAfterInterruptedDrain = (try? store.acceptedOperationsAwaitingTerminalReplay(context: context)) ?? []
-            for submission in acceptedAfterInterruptedDrain where !acceptedBeforeDrain.contains(submission.operationID) {
-                diagnoseOperationReplay(.unresolved,
-                         causeCode: "follow_on_replay_not_reached",
-                         submission: submission, receipt: .acceptedAwaitingReplay)
+            inspectedConversationMetadata = true
+            let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
+                .map(\.operationID))
+            let attempted: Int
+            do {
+                attempted = try await drainPending()
+            } catch {
+                // A later operation may fail after an earlier operation was
+                // accepted. Record that the accepted operation's terminal replay
+                // was not reached, without attributing the later operation's
+                // transport error to it.
+                let acceptedAfterInterruptedDrain = (try? store.acceptedOperationsAwaitingTerminalReplay(context: context)) ?? []
+                for submission in acceptedAfterInterruptedDrain where !acceptedBeforeDrain.contains(submission.operationID) {
+                    diagnoseOperationReplay(.unresolved,
+                             causeCode: "follow_on_replay_not_reached",
+                             submission: submission, receipt: .acceptedAwaitingReplay)
+                }
+                throw error
             }
+            if attempted > 0 {
+                // The answer may have created a terminal event after the first
+                // replay. Commit and ACK it before publishing the refreshed view;
+                // an operation's receipt sequence cannot advance C's cursor.
+                high = try await replayAndAcknowledge(since: high,
+                    trackingAcceptedOperations: try store.acceptedOperationsAwaitingTerminalReplay(context: context))
+            }
+            if try !store.conversationSnapshot(context: context).threads.isEmpty,
+               let conversationSession = session as? any AuthenticatedConversationSession {
+                try await replayConversationAndAcknowledge(using: conversationSession)
+            }
+            try validate()
+            onProgress(.postAckDrainFinished(.completed))
+            return high
+        } catch {
+            let transition = NativeDiagnosticCauseCode.failureTransition(for: error)
+            onProgress(.postAckDrainFinished(transition))
+            diagnose(.relay, .postAckDrain, transition, error: error)
             throw error
         }
-        if attempted > 0 {
-            // The answer may have created a terminal event after the first
-            // replay. Commit and ACK it before publishing the refreshed view;
-            // an operation's receipt sequence cannot advance C's cursor.
-            high = try await replayAndAcknowledge(since: high,
-                trackingAcceptedOperations: try store.acceptedOperationsAwaitingTerminalReplay(context: context))
-        }
-        if try !store.conversationSnapshot(context: context).threads.isEmpty,
-           let conversationSession = session as? any AuthenticatedConversationSession {
-            try await replayConversationAndAcknowledge(using: conversationSession)
-        }
-        return high
     }
 
     private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {

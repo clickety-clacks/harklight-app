@@ -41,14 +41,28 @@ final class NativeClientDiagnosticJournal {
     var hasEvents: Bool { !events.isEmpty || persistenceStatus != .new }
 
     func record(_ event: NativeClientDiagnosticEvent) {
-        guard !isUnchangedOperationReplayState(event) else { return }
+        record([event])
+    }
+
+    /// Persist a group of related facts with one journal rewrite while keeping
+    /// the existing unchanged-operation replay suppression in force.
+    func record(_ newEvents: [NativeClientDiagnosticEvent]) {
+        guard !newEvents.isEmpty else { return }
         // URLSession and actor callbacks may reach the main-actor journal in a
         // different order than they occurred. Keep the exported history in
         // event-time order while preserving arrival order for equal timestamps.
-        let insertionIndex = events.firstIndex {
-            $0.occurredAtMilliseconds > event.occurredAtMilliseconds
-        } ?? events.endIndex
-        events.insert(event, at: insertionIndex)
+        var appended = false
+        for event in newEvents where !isUnchangedOperationReplayState(event) {
+            events.append(event)
+            appended = true
+        }
+        guard appended else { return }
+        events = events.enumerated().sorted { lhs, rhs in
+            if lhs.element.occurredAtMilliseconds == rhs.element.occurredAtMilliseconds {
+                return lhs.offset < rhs.offset
+            }
+            return lhs.element.occurredAtMilliseconds < rhs.element.occurredAtMilliseconds
+        }.map(\.element)
         if events.count > Self.retainedEventLimit {
             events.removeFirst(events.count - Self.retainedEventLimit)
         }
@@ -67,6 +81,9 @@ final class NativeClientDiagnosticJournal {
         // that transport attempt; avoid rewriting this same operation summary.
         return previous.transition == event.transition &&
             previous.causeCode == event.causeCode &&
+            previous.terminalReason == event.terminalReason &&
+            previous.postAckBoundary == event.postAckBoundary &&
+            previous.postAckDrainTransition == event.postAckDrainTransition &&
             previous.requestTag == event.requestTag &&
             previous.requestRevision == event.requestRevision &&
             previous.receiptState == event.receiptState
@@ -77,6 +94,9 @@ final class NativeClientDiagnosticJournal {
                 transition: NativeDiagnosticTransition,
                 error: Error? = nil,
                 causeCode: String? = nil,
+                terminalReason: NativeDiagnosticTerminalReason? = nil,
+                postAckBoundary: NativeDiagnosticPostAckBoundary? = nil,
+                postAckDrainTransition: NativeDiagnosticTransition? = nil,
                 attemptID: UUID? = nil,
                 transportAttemptID: UUID? = nil,
                 operationID: UUID? = nil,
@@ -84,7 +104,9 @@ final class NativeClientDiagnosticJournal {
                 requestRevision: UInt64? = nil,
                 receiptState: NativeDiagnosticReceiptState? = nil) {
         record(NativeClientDiagnosticEvent(area: area, phase: phase, transition: transition,
-            causeCode: causeCode ?? error.map(Self.causeCode(for:)), attemptID: attemptID,
+            causeCode: causeCode ?? error.map(Self.causeCode(for:)), terminalReason: terminalReason,
+            postAckBoundary: postAckBoundary, postAckDrainTransition: postAckDrainTransition,
+            attemptID: attemptID,
             transportAttemptID: transportAttemptID,
             operationID: operationID, request: request, requestRevision: requestRevision,
             receiptState: receiptState))
@@ -112,6 +134,9 @@ final class NativeClientDiagnosticJournal {
                 "transition=\(event.transition.rawValue)",
                 "cause=\(event.causeCode ?? "none_observed")"
             ]
+            if let reason = event.terminalReason { fields.append("terminal_reason=\(reason.rawValue)") }
+            if let boundary = event.postAckBoundary { fields.append("post_ack_boundary=\(boundary.rawValue)") }
+            if let drain = event.postAckDrainTransition { fields.append("post_ack_drain=\(drain.rawValue)") }
             if let id = event.attemptID { fields.append("attempt_id=\(id.uuidString.lowercased())") }
             if let id = event.transportAttemptID { fields.append("transport_attempt_id=\(id.uuidString.lowercased())") }
             if let id = event.operationID { fields.append("operation_id=\(id.uuidString.lowercased())") }

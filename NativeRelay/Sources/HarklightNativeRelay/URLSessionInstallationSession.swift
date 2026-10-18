@@ -28,6 +28,8 @@ public enum NativeRelayProgressEvent: Equatable, Sendable {
     case nativeSyncReplayRequested
     case nativeSyncResynced
     case nativeSyncAcknowledged
+    case postAckDrainBegan
+    case postAckDrainFinished(NativeDiagnosticTransition)
 }
 
 /// Security.framework keychain identities are immutable references usable by

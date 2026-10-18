@@ -122,7 +122,30 @@ final class NativeAppLaunch {
                     presentation.connectionWarning = progress.outcome == .confirmed ? nil : progress.message
                 }
             }
-            guard self.activationGeneration == epoch else { return false }
+            guard self.activationGeneration == epoch else {
+                if let attemptID = connect.attemptID,
+                   self.foregroundConnectProgress?.attemptID == attemptID {
+                    var invalidated = connect
+                    invalidated.markGenerationInvalidated()
+                    let operationSnapshot = self.foregroundConnectDiagnostic?.operationSnapshot ?? .unavailable
+                    self.foregroundConnectProgress = invalidated
+                    self.foregroundConnectDiagnostic = NativeForegroundConnectDiagnostic(
+                        progress: invalidated, operationSnapshot: operationSnapshot)
+                }
+                self.diagnostics.record([
+                    NativeClientDiagnosticEvent(area: .connection, phase: .foregroundGenerationValidation,
+                        transition: .cancelled, causeCode: "foreground_generation_invalidated",
+                        terminalReason: NativeDiagnosticTerminalReason.generationInvalidated,
+                        attemptID: connect.attemptID, transportAttemptID: connect.transportAttemptID),
+                    NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
+                        transition: .cancelled, causeCode: "foreground_generation_invalidated",
+                        terminalReason: NativeDiagnosticTerminalReason.generationInvalidated,
+                        postAckBoundary: connect.lastCompletedPostAckBoundary.journalValue,
+                        postAckDrainTransition: connect.postAckDrainTransition,
+                        attemptID: connect.attemptID, transportAttemptID: connect.transportAttemptID)
+                ])
+                return false
+            }
             let reached = connect.outcome == .confirmed
             if reached { try self.enrollment.markForegroundRelayConfirmed(for: record.deviceID) }
             if case let .live(presentation) = self.state {
