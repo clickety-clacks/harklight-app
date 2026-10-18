@@ -191,15 +191,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func selectionDidChange(from previous: InboxSelection?, to next: InboxSelection?) {
-        print("E2_TRACE selection previous=\(String(describing: previous)) next=\(String(describing: next)) sampleSelected=\(samples.selectedID ?? "nil") sampleLast=\(samples.lastViewedID ?? "nil")")
         let oldRequest: RequestKey? = if case let .request(key) = previous { key } else { nil }
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
 
-        // The sample library retains the selected identity across adaptive
-        // split-view reconstruction, while the view's selection can briefly
-        // lag that identity. Use the retained sample as the cleanup departure.
-        let oldSampleID = samples.selectedID
+        let oldSampleID: String? = if case let .sample(id) = previous { id }
+            else if previous == nil { samples.selectedID }
+            else { nil }
         let newSampleID: String? = if case let .sample(id) = next { id } else { nil }
 
         if let next { lastViewedSelection = next }
@@ -445,9 +443,6 @@ struct InboxList: View {
             $0.preview.title.localizedCaseInsensitiveContains(query) ||
             $0.preview.sender.localizedCaseInsensitiveContains(query) ||
             $0.preview.body.localizedCaseInsensitiveContains(query)
-        }
-        if query == "welcome" {
-            print("E2_TRACE inbox query=welcome tab=\(selectedTab.rawValue) inTab=\(inTab.count) filtered=\(filtered.map(\.accessibilityID))")
         }
         return filtered
     }
