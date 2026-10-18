@@ -175,7 +175,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.buttons["request-row-sample-information-2"].waitForExistence(timeout: 10), app.debugDescription)
         for _ in 0..<30 where !unobscured(opened, in: list, app: app) {
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
-            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -60)),
+            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -150)),
                         withVelocity: .slow, thenHoldForDuration: 0.3)
         }
         XCTAssertTrue(unobscured(opened, in: list, app: app), app.debugDescription)
