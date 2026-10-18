@@ -183,13 +183,20 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
 
-        let oldExample: RequestKey? = if case let .sample(id) = previous { samples.responses[id]?.key } else { nil }
-        let newExample: RequestKey? = if case let .sample(id) = next { samples.responses[id]?.key } else { nil }
+        // SampleLibrary retains the selected example across adaptive view
+        // reconstruction. Use it when selection has no prior value, and clear
+        // it whenever navigation leaves the example domain.
+        let oldSampleID: String? = if case let .sample(id) = previous { id }
+            else if previous == nil { samples.selectedID }
+            else { nil }
+        let newSampleID: String? = if case let .sample(id) = next { id } else { nil }
+        let oldExample = oldSampleID.flatMap { samples.responses[$0]?.key }
+        let newExample = newSampleID.flatMap { samples.responses[$0]?.key }
         samples.fixture?.viewModel.navigateMessage(from: oldExample, to: newExample)
 
         if let next { lastViewedSelection = next }
         if let newRequest { selectRequest(newRequest) }
-        if case let .sample(id) = next { samples.select(id) }
+        samples.select(newSampleID)
     }
 
     private func markSeen(_ id: InboxSelection) {
@@ -374,6 +381,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     navigate(to: nil)
                     chatOpen = false
                 }
+            }
+            .onAppear {
+                guard showsLocalExamples, selection == nil,
+                      let id = samples.selectedID, samples.responses[id] != nil else { return }
+                selection = .sample(id)
+                lastViewedSelection = .sample(id)
             }
             .onChange(of: samples.messages.count) { _, _ in
                 // Populate the existing list; never present a second navigation stack.
