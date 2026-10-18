@@ -161,8 +161,8 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         let secondHigh = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(secondHigh, 4)
-        XCTAssertEqual(session.acknowledgedSequences(), [3, 3, 4],
-                       "The terminal replay is durably applied and ACKed before the refreshed view can confirm Seen.")
+        XCTAssertEqual(session.acknowledgedSequences(), [3, 4],
+                       "The checkpoint at 3 is ACKed separately; only the post-H terminal uses ordinary ACK.")
         let sent = try XCTUnwrap(session.sentOriginalOperation())
         XCTAssertEqual(sent.operationID, receipt.opID)
         let answerFrame = try JSONValue.parse(sent.frame)
@@ -1491,7 +1491,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         _ = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
                                          inputs: [.compatibilityValue(action: ExactText("got-it"))]))
         let originalOperation = try XCTUnwrap(store.snapshot(context: context).outbox.first)
-        let savedBefore = try XCTUnwrap(persistence.load(identity: identity))
         XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
 
         let diagnosticURL = FileManager.default.temporaryDirectory
@@ -1520,8 +1519,15 @@ final class NativeGuidedTLSTests: XCTestCase {
         let connectionClosed = await eventually { server.clientClosed }
         XCTAssertTrue(connectionClosed, "The timed-out matching relay session must close its local TLS connection.")
         XCTAssertFalse(progressUpdates.contains(where: { $0.outcome == .confirmed }))
-        XCTAssertEqual(try persistence.load(identity: identity), savedBefore,
-                       "The stalled connection must preserve the approved profile's local state.")
+        let restoredAfterTimeout = try AttentionDomainStore(context: context, persistence: persistence)
+        let restoredSnapshot = try restoredAfterTimeout.snapshot(context: context)
+        XCTAssertEqual(restoredSnapshot.cursor, 1,
+                       "The stalled connection must preserve the approved profile's replay cursor.")
+        XCTAssertEqual(restoredSnapshot.outbox.first?.operationID, originalOperation.operationID,
+                       "The stalled connection must preserve its exact queued operation.")
+        XCTAssertEqual(try restoredAfterTimeout.conversationSnapshot(context: context)
+            .threads[requestKey]?.drafts[1]?.text, ExactText("Keep this draft"),
+                       "The stalled connection must preserve the saved conversation draft.")
         XCTAssertEqual(try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate().deviceID,
                        installation.deviceID, "The approved device identity remains available after timeout.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
@@ -1600,8 +1606,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         })
         XCTAssertEqual(session.sent.first?.1, receipt.opID,
                        "Replay must keep the accepted operation's original UUID.")
-        XCTAssertEqual(session.acknowledgements.count, 2,
-                       "The terminal replay is durably applied before its cursor ACK.")
+        XCTAssertEqual(session.acknowledgements.count, 1,
+                       "The checkpoint ACK is separate; only terminal sequence 2 uses ordinary ACK.")
+        XCTAssertEqual(try JSONValue.parse(try XCTUnwrap(session.acknowledgements.first))
+            .uniqueValue(named: "seq"), .number(JSONNumber(lexeme: "2")))
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(try store.snapshot(context: context).remoteStates[key]?.state, .answered)
     }
@@ -1645,8 +1653,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(replayFailure?.receiptState, .acceptedAwaitingReplay)
         XCTAssertEqual(session.sent.first?.1, receipt.opID,
                        "A retry must stay bound to the accepted operation, never a replacement answer.")
-        XCTAssertEqual(session.acknowledgements.count, 1,
-                       "The failed follow-on replay must not ACK a missing terminal.")
+        XCTAssertEqual(session.acknowledgements.count, 0,
+                       "The checkpoint ACK is separate, and failed terminal replay must not ordinary-ACK.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
                       "The accepted operation is not silently requeued as a new answer.")

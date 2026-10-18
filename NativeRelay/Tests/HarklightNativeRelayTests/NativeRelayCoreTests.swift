@@ -19,8 +19,9 @@ private final class DiagnosticEventCollector: @unchecked Sendable {
 }
 
 final class NativeRelayCoreTests: XCTestCase {
-    private final class Session: AuthenticatedInboxPagingSession, @unchecked Sendable {
+    private final class Session: AuthenticatedInboxEventStreamSession, @unchecked Sendable {
         var authenticatedIdentity: ProfileIdentity
+        var supportsPostCheckpointInboxEvents = false
         var frames: [Data] = []
         var requests: [Data] = []
         var acknowledgements: [Data] = []
@@ -33,6 +34,8 @@ final class NativeRelayCoreTests: XCTestCase {
         var olderPages: [String: [JSONValue]] = [:]
         var checkpointWasAccepted = false
         var reconciliationOverrides: [UUID: JSONValue] = [:]
+        var postCheckpointEvents: [Data] = []
+        var postCheckpointEventAfterAccept: Data?
         private var activeSnapshotID = "snapshot-test"
         private var activeSnapshotHighWater: UInt64 = 0
         var rejectFirstAcknowledgement = false
@@ -191,8 +194,34 @@ final class NativeRelayCoreTests: XCTestCase {
                 throw InstallationTransportError.acknowledgementBehind
             }
         }
+        func takePostCheckpointInboxEvents(through sequence: UInt64?,
+                                           waitForTarget: Bool) async throws -> [Data] {
+            if waitForTarget, let sequence,
+               !postCheckpointEvents.contains(where: { eventSequence($0).map { $0 >= sequence } ?? false }) {
+                throw InstallationTransportError.unexpectedServerFrame
+            }
+            guard let sequence else {
+                let events = postCheckpointEvents
+                postCheckpointEvents.removeAll()
+                return events
+            }
+            var selected: [Data] = []
+            var remaining: [Data] = []
+            for frame in postCheckpointEvents {
+                if let eventSequence = eventSequence(frame), eventSequence <= sequence {
+                    selected.append(frame)
+                } else {
+                    remaining.append(frame)
+                }
+            }
+            postCheckpointEvents = remaining
+            return selected
+        }
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
             sent.append((frame, operationID))
+            if case .accepted = result, let postCheckpointEventAfterAccept {
+                postCheckpointEvents.append(postCheckpointEventAfterAccept)
+            }
             return result
         }
 
@@ -204,6 +233,11 @@ final class NativeRelayCoreTests: XCTestCase {
         private func uint64(_ value: JSONValue?) -> UInt64? {
             guard let value, case let .number(number) = value else { return nil }
             return UInt64(number.lexeme)
+        }
+
+        private func eventSequence(_ frame: Data) -> UInt64? {
+            guard let value = try? JSONValue.parse(frame) else { return nil }
+            return uint64(value.uniqueValue(named: "seq"))
         }
     }
 
@@ -631,12 +665,11 @@ final class NativeRelayCoreTests: XCTestCase {
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         let submission = try XCTUnwrap(store.snapshot(context: context).outbox.first)
         session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+        session.supportsPostCheckpointInboxEvents = true
+        session.postCheckpointEventAfterAccept = data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"answer-request","origin":"other-installation","state":"answered","at":2}"#)
         session.replayFrames = [
             [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
-             data(#"{"v":1,"type":"resynced","seq":1}"#)],
-            [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
-             data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"answer-request","origin":"other-installation","state":"answered","at":2}"#),
-             data(#"{"v":1,"type":"resynced","seq":2}"#)]
+             data(#"{"v":1,"type":"resynced","seq":1}"#)]
         ]
         let events = DiagnosticEventCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
@@ -655,6 +688,13 @@ final class NativeRelayCoreTests: XCTestCase {
             $0.transition == .completed && $0.receiptState == .terminal &&
                 $0.requestTag != nil && $0.requestRevision == 1
         })
+        XCTAssertEqual(session.replayCallCount, 1,
+                       "The same connection carries post-barrier events; it does not attach a second cached replay.")
+        XCTAssertEqual(session.acknowledgements.count, 1)
+        let terminalAcknowledgement = try JSONValue.parse(try XCTUnwrap(session.acknowledgements.first))
+        XCTAssertEqual(terminalAcknowledgement.uniqueValue(named: "seq"),
+                       .number(JSONNumber(lexeme: "2")),
+                       "The post-H terminal is durably applied at sequence 2 before ordinary ACK.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(try store.snapshot(context: context).remoteStates[key]?.state, .answered)
     }

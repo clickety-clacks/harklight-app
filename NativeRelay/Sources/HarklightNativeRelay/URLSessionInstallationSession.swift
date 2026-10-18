@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import Security
 
-public enum InstallationTransportError: Error {
+public enum InstallationTransportError: Error, Sendable {
     case invalidEndpoint
     case invalidTrustAnchor
     case wrongDeviceIdentity
@@ -42,9 +42,11 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// A keychain-backed installation certificate and an enrollment-approved relay
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
-public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession, AuthenticatedInboxPagingSession {
+public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession,
+    AuthenticatedInboxEventStreamSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
+    public nonisolated let supportsPostCheckpointInboxEvents = true
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
@@ -52,6 +54,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
     private let attemptID: UUID?
+    private var postCheckpointReader: Task<Void, Never>?
+    private var responseFrames: [Data] = []
+    private var responseWaiters: [CheckedContinuation<Data, any Error>] = []
+    private var postCheckpointEventFrames: [Data] = []
+    private var postCheckpointEventWaiters: [CheckedContinuation<Void, any Error>] = []
+    private var postCheckpointReadFailure: (any Error)?
 
     public init(profile: ProfileContext,
                 relayURL: URL,
@@ -188,7 +196,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     throw InstallationTransportError.unexpectedServerFrame
                 }
                 try await consume(frame)
-                if kind == "resynced" { return }
+                if kind == "resynced" {
+                    startPostCheckpointReader()
+                    return
+                }
             }
         } catch {
             diagnose(.relay, .ordinaryReplay,
@@ -442,8 +453,41 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func close() {
+        postCheckpointReader?.cancel()
+        postCheckpointReader = nil
+        failPostCheckpointReader(InstallationTransportError.unexpectedServerFrame)
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
+    }
+
+    public func takePostCheckpointInboxEvents(through sequence: UInt64?,
+                                               waitForTarget: Bool) async throws -> [Data] {
+        if waitForTarget, let sequence {
+            while !postCheckpointEventFrames.contains(where: { Self.eventSequence($0).map { $0 >= sequence } ?? false }) {
+                if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                    postCheckpointEventWaiters.append(continuation)
+                }
+            }
+        }
+
+        guard let sequence else {
+            let frames = postCheckpointEventFrames
+            postCheckpointEventFrames.removeAll(keepingCapacity: true)
+            return frames
+        }
+
+        var selected: [Data] = []
+        var remaining: [Data] = []
+        for frame in postCheckpointEventFrames {
+            if let eventSequence = Self.eventSequence(frame), eventSequence <= sequence {
+                selected.append(frame)
+            } else {
+                remaining.append(frame)
+            }
+        }
+        postCheckpointEventFrames = remaining
+        return selected
     }
 
     public func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
@@ -539,11 +583,72 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func receive() async throws -> Data {
+        if postCheckpointReader != nil {
+            if !responseFrames.isEmpty { return responseFrames.removeFirst() }
+            if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, any Error>) in
+                responseWaiters.append(continuation)
+            }
+        }
+        return try await receiveTaskFrame()
+    }
+
+    private func receiveTaskFrame() async throws -> Data {
         switch try await task.receive() {
         case let .string(text): return Data(text.utf8)
         case .data: throw InstallationTransportError.unexpectedServerFrame
         @unknown default: throw InstallationTransportError.unexpectedServerFrame
         }
+    }
+
+    private func startPostCheckpointReader() {
+        guard postCheckpointReader == nil else { return }
+        postCheckpointReadFailure = nil
+        postCheckpointReader = Task { [weak self] in
+            await self?.readPostCheckpointFrames()
+        }
+    }
+
+    private func readPostCheckpointFrames() async {
+        do {
+            while !Task.isCancelled {
+                let frame = try await receiveTaskFrame()
+                if Self.isPostCheckpointInboxEvent(frame) {
+                    postCheckpointEventFrames.append(frame)
+                    let waiters = postCheckpointEventWaiters
+                    postCheckpointEventWaiters.removeAll(keepingCapacity: true)
+                    waiters.forEach { $0.resume() }
+                } else if !responseWaiters.isEmpty {
+                    responseWaiters.removeFirst().resume(returning: frame)
+                } else {
+                    responseFrames.append(frame)
+                }
+            }
+        } catch {
+            failPostCheckpointReader(error)
+        }
+    }
+
+    private func failPostCheckpointReader(_ error: any Error) {
+        postCheckpointReadFailure = error
+        let responseWaiters = self.responseWaiters
+        self.responseWaiters.removeAll(keepingCapacity: false)
+        responseWaiters.forEach { $0.resume(throwing: error) }
+        let eventWaiters = postCheckpointEventWaiters
+        postCheckpointEventWaiters.removeAll(keepingCapacity: false)
+        eventWaiters.forEach { $0.resume(throwing: error) }
+    }
+
+    private static func isPostCheckpointInboxEvent(_ frame: Data) -> Bool {
+        guard let value = try? JSONValue.parse(frame) else { return false }
+        let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+        return kind == "delivery" || kind == "lifecycle"
+    }
+
+    private static func eventSequence(_ frame: Data) -> UInt64? {
+        guard let value = try? JSONValue.parse(frame),
+              case let .number(number)? = value.uniqueValue(named: "seq") else { return nil }
+        return UInt64(number.lexeme)
     }
 
     private func diagnose(_ area: NativeDiagnosticArea,

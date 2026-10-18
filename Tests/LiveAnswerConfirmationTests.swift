@@ -134,7 +134,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(high, 2)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
-        XCTAssertEqual(session.acknowledgedCursors, [1, 2])
+        XCTAssertEqual(session.acknowledgedCursors, [2],
+                       "The checkpoint ACK is distinct; ordinary ACKs cover only post-H events.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
