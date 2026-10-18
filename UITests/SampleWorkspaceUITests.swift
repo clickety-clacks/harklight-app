@@ -87,7 +87,7 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     func testDesignedControlsAndComponentScreenshots() {
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let kinds = ["textChoice", "pictureChoice", "instructions", "review", "multipleChoice", "value", "point", "colorChoice", "soundChoice", "error", "warning", "information", "completed"]
@@ -112,7 +112,9 @@ final class SampleWorkspaceUITests: XCTestCase {
             }
             enterSearch(query, in: app)
             let row = app.buttons["sample-\(kind)-0"]
-            XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+            let found = row.waitForExistence(timeout: 5)
+            if kind == "review" || !found { recordDiagnostics("search-\(kind)", app) }
+            XCTAssertTrue(found, app.debugDescription)
             reveal(row, in: app.scrollViews.firstMatch, app: app)
             row.tap()
             XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5))
@@ -168,6 +170,21 @@ final class SampleWorkspaceUITests: XCTestCase {
     private func capture(_ name: String, _ app: XCUIApplication) {
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Reads the app's diagnostics probes (enabled by `--harklight-ui-diagnostics`)
+    /// and keeps them with the result, so a failure carries its view and store state.
+    private func recordDiagnostics(_ step: String, _ app: XCUIApplication) {
+        let probes = ["inbox-ui-diagnostics", "inbox-list-diagnostics", "conversation-ui-diagnostics"]
+        let text = probes.compactMap { id -> String? in
+            let probe = app.descendants(matching: .any)[id].firstMatch
+            return probe.exists ? "\(id): \(probe.label)" : nil
+        }.joined(separator: "\n")
+        print("E2_DIAG \(step)\n\(text.isEmpty ? "no probes" : text)")
+        let attachment = XCTAttachment(string: text)
+        attachment.name = "diagnostics-\(step)"
         attachment.lifetime = .keepAlways
         add(attachment)
     }

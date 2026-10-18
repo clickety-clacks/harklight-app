@@ -110,6 +110,7 @@ final class ConversationSampleUITests: XCTestCase {
     func testNavigationKeepsUnsubmittedUploadCleanupTruthfulAcrossAdaptiveRebuild() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
+        app.launchArguments = ["--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("welcome", in: app)
@@ -134,16 +135,20 @@ final class ConversationSampleUITests: XCTestCase {
         // In a regular-width split view the sidebar rows expose these titles too,
         // so only the detail card can show that the selection changed.
         let detail = app.scrollViews["message-card-scroll"]
-        XCTAssertTrue(detail.staticTexts["Review the studio welcome text"].waitForExistence(timeout: 5),
-                      "Selecting another row must change the detail identity before cleanup is assessed")
+        let departed = detail.staticTexts["Review the studio welcome text"].waitForExistence(timeout: 5)
+        recordDiagnostics("after-departure", app)
+        XCTAssertTrue(departed, "Selecting another row must change the detail identity before cleanup is assessed")
         showInbox(app)
         reveal(row, in: app.scrollViews.firstMatch, app: app)
         row.tap()
-        XCTAssertTrue(detail.staticTexts["Review the library welcome text"].waitForExistence(timeout: 5),
-                      "Returning to the original row must restore its exact detail identity")
+        let returned = detail.staticTexts["Review the library welcome text"].waitForExistence(timeout: 5)
+        recordDiagnostics("after-return", app)
+        XCTAssertTrue(returned, "Returning to the original row must restore its exact detail identity")
         app.buttons["Chat"].tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5))
+        let cleanupShown = app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5)
+        recordDiagnostics("after-return-chat", app)
+        XCTAssertTrue(cleanupShown)
         XCTAssertEqual(composer.value as? String, "Keep this file note.")
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
         XCTAssertTrue(app.staticTexts["Not ready · reselect after cleanup"].exists)
@@ -225,6 +230,21 @@ final class ConversationSampleUITests: XCTestCase {
     private func capture(_ name: String, _ app: XCUIApplication) {
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Reads the app's diagnostics probes (enabled by `--harklight-ui-diagnostics`)
+    /// and keeps them with the result, so a failure carries its view and store state.
+    private func recordDiagnostics(_ step: String, _ app: XCUIApplication) {
+        let probes = ["inbox-ui-diagnostics", "inbox-list-diagnostics", "conversation-ui-diagnostics"]
+        let text = probes.compactMap { id -> String? in
+            let probe = app.descendants(matching: .any)[id].firstMatch
+            return probe.exists ? "\(id): \(probe.label)" : nil
+        }.joined(separator: "\n")
+        print("E2_DIAG \(step)\n\(text.isEmpty ? "no probes" : text)")
+        let attachment = XCTAttachment(string: text)
+        attachment.name = "diagnostics-\(step)"
         attachment.lifetime = .keepAlways
         add(attachment)
     }

@@ -897,6 +897,7 @@ final class LivePresentationStore {
             do {
                 let pending = try port.abandonConversationUploads(for: previous, context: port.context)
                 try refreshFromDurableStore()
+                UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) pending=\(pending.count)")
                 if !pending.isEmpty {
                     if permitsDelivery { Task { await retryUploadCleanup(for: previous) } }
                     else {
@@ -906,11 +907,14 @@ final class LivePresentationStore {
                     }
                 }
             } catch {
+                UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) error=\(error)")
                 conversationError = "Upload cleanup could not be saved. Return to this message and retry; deletion is not confirmed."
                 diagnose(.upload, .uploadCleanup,
                          NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
                          request: previous)
             }
+        } else {
+            UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) readOnly=\(self.isReadOnly)")
         }
         selectRequest(next)
     }

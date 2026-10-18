@@ -401,6 +401,7 @@ final class SampleLibrary {
         let previousKey = previousID.flatMap { responses[$0]?.key }
         let nextKey = id.flatMap { responses[$0]?.key }
         fixture?.viewModel.navigateMessage(from: previousKey, to: nextKey)
+        UIDiagnostics.shared.record("samples.select \(previousID ?? "nil")->\(id ?? "nil") selectedID=\(selectedID ?? "nil") requests=\(fixture?.viewModel.presentation.requests.count ?? -1) messages=\(messages.count)")
         selectedID = id
         if let id {
             lastViewedID = id

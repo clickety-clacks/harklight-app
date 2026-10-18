@@ -176,6 +176,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func navigate(from previous: InboxSelection?, to next: InboxSelection?) {
         guard previous != next else { return }
+        UIDiagnostics.shared.record("inbox.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next))")
         if let next {
             if previous == nil {
                 listTabOnMessageEntry = selectedTab
@@ -221,6 +222,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             if let listTabOnMessageEntry { selectedTab = listTabOnMessageEntry }
             listTabOnMessageEntry = nil
             restoreLastViewedOnReturn = false
+            UIDiagnostics.shared.record("inbox.restorePosition entryTab tab=\(selectedTab.rawValue)")
             return
         }
         navigatedBetweenMessages = false
@@ -228,10 +230,27 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         guard let lastViewedSelection,
               let lastViewedItem = rows.first(where: { $0.id == lastViewedSelection }) else {
             restoreLastViewedOnReturn = false
+            UIDiagnostics.shared.record("inbox.restorePosition missing last=\(UIDiagnostics.describe(lastViewedSelection))")
             return
         }
         selectedTab = lastViewedItem.belongsToSeenTab ? .seen : .unseen
         restoreLastViewedOnReturn = true
+        UIDiagnostics.shared.record("inbox.restorePosition lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) tab=\(selectedTab.rawValue)")
+    }
+
+    private func diagnosticSummary(landscape: Bool) -> String {
+        let rowSummary = rows.map { row -> String in
+            let missingRow: Bool = if case let .example(_, response) = row { response.inboxRow == nil } else { false }
+            return row.accessibilityID + ":" + (row.belongsToSeenTab ? "S" : "U") + (missingRow ? ":empty" : "")
+        }
+        return [
+            "selection=\(UIDiagnostics.describe(selection)) tab=\(selectedTab.rawValue) entryTab=\(listTabOnMessageEntry?.rawValue ?? "nil") lastViewed=\(UIDiagnostics.describe(lastViewedSelection))",
+            "betweenMessages=\(navigatedBetweenMessages) restoreOnReturn=\(restoreLastViewedOnReturn) chatOpen=\(chatOpen) sheet=\(conversationPresented)",
+            "compactColumn=\(compactColumn) visibility=\(visibility) sizeClass=\(horizontalSizeClass.map { "\($0)" } ?? "nil") window=\(Int(windowSize.width))x\(Int(windowSize.height)) landscape=\(landscape)",
+            "samples.selected=\(samples.selectedID ?? "nil") samples.lastViewed=\(samples.lastViewedID ?? "nil") loadError=\(samples.loadError ?? "nil")",
+            "rows=\(rowSummary)",
+            UIDiagnostics.shared.eventSummary,
+        ].joined(separator: " | ")
     }
 
     // SwiftUI writes this binding for its native compact Back navigation.
@@ -242,6 +261,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func returnToInbox() {
+        UIDiagnostics.shared.record("inbox.returnToInbox from=\(UIDiagnostics.describe(selection))")
         restoreLastViewedListPosition()
         chatOpen = false
         navigate(to: nil)
@@ -313,6 +333,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           restoreLastViewed: restoreLastViewedOnReturn,
                           didRestoreLastViewed: { restoreLastViewedOnReturn = false },
                           showSettings: { settings = true }, markSeen: markSeen, select: { id in
+                    UIDiagnostics.shared.record("inbox.rowTap \(UIDiagnostics.describe(id)) selection=\(UIDiagnostics.describe(selection)) landscape=\(landscape)")
                     restoreLastViewedOnReturn = false
                     navigate(to: id)
                     compactColumn = .detail
@@ -381,6 +402,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     .presentationDetents([.medium, .large])
             }
             .onChange(of: samples.selectedID) { _, id in
+                UIDiagnostics.shared.record("inbox.samplesSelectedChanged \(id ?? "nil") selection=\(UIDiagnostics.describe(selection))")
                 guard showsLocalExamples, case .sample = selection else { return }
                 navigate(to: id.map { .sample($0) })
             }
@@ -391,6 +413,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .onAppear {
+                UIDiagnostics.shared.record("inbox.appear selection=\(UIDiagnostics.describe(selection)) samples.selected=\(samples.selectedID ?? "nil")")
                 guard showsLocalExamples, selection == nil,
                       let id = samples.selectedID, samples.responses[id] != nil else { return }
                 selection = .sample(id)
@@ -402,6 +425,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 compactColumn = .sidebar
             }
             .onChange(of: landscape) { _, isLandscape in
+                UIDiagnostics.shared.record("inbox.landscape \(isLandscape) selection=\(UIDiagnostics.describe(selection))")
                 visibility = isLandscape || selection == nil ? .all : .detailOnly
             }
             .safeAreaBar(edge: .top) {
@@ -413,6 +437,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     }.padding(8)
                 }
             }
+            .uiDiagnostics("inbox-ui-diagnostics", diagnosticSummary(landscape: landscape))
         }
         .background(WorkspaceWindowReader { windowSize = $0 })
         .sheet(isPresented: $settings, content: settingsContent)
@@ -455,6 +480,7 @@ struct InboxList: View {
             return
         }
         if !filteredRows.contains(where: { $0.id == lastViewedSelection }) {
+            UIDiagnostics.shared.record("list.restoreClearsSearch search=\(search) last=\(UIDiagnostics.describe(lastViewedSelection))")
             search = ""
             return
         }
@@ -465,6 +491,19 @@ struct InboxList: View {
     private func openSettings() {
         searchFocused = false
         showSettings()
+    }
+
+    private var diagnosticSummary: String {
+        let inTab = rows.filter { $0.belongsToSeenTab == (selectedTab == .seen) }
+        let filtered = filteredRows.map { row -> String in
+            let missingRow: Bool = if case let .example(_, response) = row { response.inboxRow == nil } else { false }
+            return row.accessibilityID + (missingRow ? ":empty" : "")
+        }
+        return [
+            "search=\(search) presented=\(searchPresented) focused=\(searchFocused) tab=\(selectedTab.rawValue)",
+            "restoreLastViewed=\(restoreLastViewed) lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) selected=\(UIDiagnostics.describe(selected))",
+            "rows=\(rows.count) inTab=\(inTab.count) filtered=\(filtered)",
+        ].joined(separator: " | ")
     }
 
     var body: some View {
@@ -529,6 +568,7 @@ struct InboxList: View {
             .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
             .navigationTitle("Harklight")
             .navigationBarTitleDisplayMode(.inline)
+            .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
         }
     }
 }
