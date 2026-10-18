@@ -50,7 +50,13 @@ struct AttentionClientDuoPrototypeApp: App {
             // Fill the container; the hosted SwiftUI bars/content still respect
             // their own system safe areas, including the software keyboard.
             .ignoresSafeArea(.container)
-            .task { await launch.restoreInstallation() }
+            .task {
+                await launch.restoreInstallation()
+                await launch.handleNotification()
+            }
+            .onChange(of: launch.notificationRouter.intent?.serial) { _, _ in
+                Task { await launch.handleNotification() }
+            }
             .onOpenURL { url in Task { await launch.receiveInvitation(url) } }
             .task(id: scenePhase) {
                 launch.guidedJoin.invalidateApprovalObservation()

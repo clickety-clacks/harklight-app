@@ -68,6 +68,14 @@ final class NativeAppLaunch {
     private(set) var isEndpointMigrationBusy = false
     let guidedJoin: NativeGuidedJoinCoordinator
     let diagnostics: NativeClientDiagnosticJournal
+    let notificationRouter: NativeNotificationRouter
+    private(set) var notificationNavigation: NativeInboxNavigation?
+    private(set) var notificationNavigationMessage: String?
+    @ObservationIgnored private var notificationSynchronized = false
+    @ObservationIgnored private var notificationRefreshFinished = false
+    @ObservationIgnored private var handledNotificationSerial: UInt64?
+    @ObservationIgnored private var didFinishRestoring = false
+    @ObservationIgnored private let refreshOperation: @MainActor () async -> NativeRelayRefreshResult
 
     private var dismissedForegroundConnectFailure: NativeForegroundConnectFailureKey?
 
@@ -82,10 +90,17 @@ final class NativeAppLaunch {
          joinStore suppliedJoinStore: NativeGuidedJoinStore? = nil,
          initialState: State? = nil,
          initialEnrollmentRecord: NativeEnrollmentRecord? = nil,
-         initialArchivedDepartures: [NativeAccountDeparture] = []) {
+         initialArchivedDepartures: [NativeAccountDeparture] = [],
+         notificationRouter: NativeNotificationRouter = .shared,
+         refreshOperation: @escaping @MainActor () async -> NativeRelayRefreshResult = {
+             await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
+         }) {
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
         let diagnostics = NativeClientDiagnosticJournal()
         self.diagnostics = diagnostics
+        self.notificationRouter = notificationRouter
+        self.refreshOperation = refreshOperation
+        didFinishRestoring = initialState != nil
         enrollment = enrollmentStore ?? NativeEnrollmentStore()
         let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
         guidedJoinStore = joinStore
@@ -176,6 +191,7 @@ final class NativeAppLaunch {
     func restoreInstallation() async {
         guard !didRestore else { return }
         didRestore = true
+        defer { didFinishRestoring = true }
         if case .fixture = state { return }
         refreshArchivedAccounts()
         if let departure = try? guidedJoinStore.departure(),
@@ -616,6 +632,9 @@ final class NativeAppLaunch {
         }
         let generation = UUID()
         activationGeneration = generation
+        notificationNavigation = nil
+        notificationSynchronized = false
+        notificationRefreshFinished = false
         disconnectMessage = nil
         isEnrollmentExpired = false
         if case let .live(previous) = state { previous.stopObserving() }
@@ -642,6 +661,7 @@ final class NativeAppLaunch {
             throw error
         }
         guard activationGeneration == generation else { return }
+        presentation.notificationProjectionDidChange = { [weak self] in self?.resolveNotificationNavigation() }
         presentation.startObserving()
         state = .live(presentation)
         isShowingDisconnectedArchive = false
@@ -734,9 +754,69 @@ final class NativeAppLaunch {
 
     func refreshLive() async {
         guard case let .live(presentation) = state, !presentation.isLocalExample else { return }
-        let result = await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
+        notificationSynchronized = false
+        notificationRefreshFinished = false
+        let result = await refreshOperation()
         guard case let .live(current) = state, current === presentation else { return }
         presentation.applyRefreshResult(result)
+        notificationRefreshFinished = true
+        notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
+        resolveNotificationNavigation()
+    }
+
+    func handleNotification() async {
+        guard didFinishRestoring, let intent = notificationRouter.intent,
+              handledNotificationSerial != intent.serial else { return }
+        handledNotificationSerial = intent.serial
+        notificationSynchronized = false
+        // Leave any archive surface; never activate an archive from a locator.
+        selectedArchivedAccount = nil
+        selectedArchivedPresentation = nil
+        isShowingDisconnectedArchive = false
+        notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: nil)
+        notificationNavigationMessage = intent.locator == nil ? nil : "Opening notification: checking the current message state."
+        if case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample {
+            presentation.selectRequest(nil)
+            if let record = try? enrollment.load(),
+               intent.locator?.profile(in: [record]) != nil {
+                _ = notificationRouter.resolve(records: [record], context: presentation.notificationContext,
+                    requests: [], synchronized: false)
+            }
+            presentation.notificationProjectionDidChange = { [weak self] in self?.resolveNotificationNavigation() }
+            await refreshLive()
+        } else {
+            notificationRouter.fallback()
+            notificationNavigationMessage = nil
+        }
+    }
+
+    func resolveNotificationNavigation() {
+        guard notificationRefreshFinished, let intent = notificationRouter.intent,
+              handledNotificationSerial == intent.serial,
+              case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample else { return }
+        let record: NativeEnrollmentRecord?
+        do { record = try enrollment.load() }
+        catch {
+            notificationNavigationMessage = "The notification's account could not be checked. Showing the current inbox."
+            return
+        }
+        if let key = notificationRouter.resolve(records: record.map { [$0] } ?? [],
+            context: presentation.notificationContext, requests: presentation.presentation.requests,
+            synchronized: notificationSynchronized) {
+            presentation.selectRequest(key)
+            notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key)
+            notificationNavigationMessage = nil
+            notificationRouter.consumed()
+        } else if notificationRouter.intent?.locator != nil {
+            presentation.selectRequest(nil)
+            notificationNavigationMessage = notificationSynchronized
+                ? "The notification's exact message is not loaded. Showing the current inbox; it can open when normally loaded."
+                : "The notification's current state is not confirmed. Showing the inbox while connection recovery is pending."
+        } else {
+            presentation.selectRequest(nil)
+            notificationNavigationMessage = nil
+            notificationRouter.consumed()
+        }
     }
 
     func retryForegroundConnection() async {
@@ -767,6 +847,8 @@ final class LivePresentationStore {
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
+    var notificationContext: ProfileContext { profileContext }
+    @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
     private(set) var isReadOnly: Bool
     @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
@@ -1402,6 +1484,7 @@ final class LivePresentationStore {
         } else if selectedRequestKey == nil {
             self.selectedRequestKey = snapshot.requests.first?.key
         }
+        notificationProjectionDidChange?()
     }
 
     private func discussionOperationID(for request: RequestKey, revision: UInt64) -> UUID? {
