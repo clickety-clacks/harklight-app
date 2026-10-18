@@ -168,31 +168,30 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let list = app.scrollViews.firstMatch
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
-        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
-        let visible = rows.allElementsBoundByIndex.filter { unobscured($0, in: list, app: app) }
-        guard let first = visible.min(by: { $0.frame.minY < $1.frame.minY }) else {
-            XCTFail("No inbox row is visible: \(app.debugDescription)")
-            return
+        // The information, warning, error and note examples are short cards, so a pull past
+        // their end moves between them. Open the first one while the last one is out of view.
+        let opened = app.buttons["request-row-sample-information-1"]
+        let lastViewed = app.buttons["request-row-sample-note-1"]
+        XCTAssertTrue(app.buttons["request-row-sample-information-2"].waitForExistence(timeout: 10), app.debugDescription)
+        for _ in 0..<30 where !unobscured(opened, in: list, app: app) {
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -60)),
+                        withVelocity: .slow, thenHoldForDuration: 0.3)
         }
-        let initiallyVisible = Set(visible.map(\.identifier))
-        first.tap()
+        XCTAssertTrue(unobscured(opened, in: list, app: app), app.debugDescription)
+        XCTAssertFalse(unobscured(lastViewed, in: list, app: app),
+                       "The last-viewed message must start outside the visible list so Back has to bring it into view.")
+        opened.tap()
         let card = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
         let counter = app.staticTexts.matching(NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")).firstMatch
         XCTAssertTrue(counter.waitForExistence(timeout: 5), app.debugDescription)
-        for _ in 0..<10 {
+        for _ in 0..<3 {
             guard showNextMessage(card: card, counter: counter, app: app) else { return }
         }
         recordDiagnostics("after-switching", app)
         let probe = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
-        guard let match = probe.label.firstMatch(of: /lastViewed=request:(\S+)/) else {
-            XCTFail("The last-viewed message is not reported: \(probe.label)")
-            return
-        }
-        let lastViewed = app.buttons["request-row-" + match.1]
-        XCTAssertFalse(initiallyVisible.contains(lastViewed.identifier),
-                       "The last-viewed message must start outside the visible list so Back has to bring it into view.")
+        XCTAssertTrue(probe.label.contains("lastViewed=request:sample-note-1 "), probe.label)
         let back = app.buttons["harklight-detail-back"]
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
@@ -320,11 +319,10 @@ final class ConversationSampleUITests: XCTestCase {
     }
 
     /// Pulls past the end of the open message until the next one opens.
-    /// The pull starts in the card's side margin so a note field or control cannot take the drag.
     private func showNextMessage(card: XCUIElement, counter: XCUIElement, app: XCUIApplication) -> Bool {
         let before = counter.label
-        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.8))
-        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.2))
+        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
         for _ in 0..<8 {
             lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow, thenHoldForDuration: 0.5)
             let moved = NSPredicate { _, _ in counter.exists && counter.label != before }
@@ -338,6 +336,7 @@ final class ConversationSampleUITests: XCTestCase {
 
     /// Whether the whole row is inside the list, above its bottom tab and search controls.
     private func unobscured(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
+        guard element.exists else { return false }
         let controls = [app.textFields["inbox-search-field"], app.otherElements["inbox-message-tabs"],
                         app.buttons["inbox-search-button"]].filter(\.exists).map(\.frame.minY)
         let bottom = controls.min() ?? app.windows.firstMatch.frame.maxY
