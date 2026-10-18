@@ -1204,7 +1204,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard !startupID.isEmpty, since == state.cursor else {
             throw AttentionStoreError.inboxCheckpointIncomplete
         }
-        let inventory = inboxOperationInventory(context: suppliedContext)
+        let inventory = try inboxOperationInventory(context: suppliedContext)
         let expected = inventory.map(\.operationID)
         let submitted = batches.flatMap(\.operationIDs)
         guard Set(submitted).count == submitted.count,
