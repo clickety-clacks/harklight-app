@@ -76,9 +76,9 @@ struct LiveContentView: View {
             } message: { diagnostic in
                 Text(diagnostic.progress.message)
             }
-        }
-        .onChange(of: store.presentation.revision) { _, _ in
-            fixtureStore?.refreshFromDurableStore()
+            .onChange(of: store.presentation.revision) { _, _ in
+                fixtureStore?.refreshFromDurableStore()
+            }
         }
     }
 
