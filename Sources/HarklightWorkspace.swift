@@ -128,8 +128,8 @@ struct InboxRequestRow: Identifiable {
     var belongsToSeenTab: Bool {
         if localSeenSelected { return true }
         switch informationalSeenStatus {
-        case .some(.pending), .some(.confirmed): true
-        case .some(.available), .some(.resolvedWithoutSeen), .none: false
+        case .some(.pending), .some(.confirmed): return true
+        case .some(.available), .some(.resolvedWithoutSeen), .none: return false
         }
     }
 }
