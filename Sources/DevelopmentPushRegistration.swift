@@ -60,7 +60,7 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         }
     }
 
-    func userNotificationCenter(_ center: UNUserNotificationCenter,
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
         // Default opening is navigation only. Dismissal and unsupported actions
         // do not alter navigation, domain state, or notification presentation.
@@ -71,7 +71,8 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         let integerSequence = sequence.map { !["d", "f"].contains(String(cString: $0.objCType)) && CFGetTypeID($0) != CFBooleanGetTypeID() } ?? true
         if integerSequence, let data = try? JSONSerialization.data(withJSONObject: info),
            let decoded = try? JSONValue.parse(data) { payload = decoded }
-        NativeNotificationRouter.shared.receive(payload, opened: true)
+        let navigationPayload = payload
+        await MainActor.run { NativeNotificationRouter.shared.receive(navigationPayload, opened: true) }
     }
 
     private func clearAddressAndSetStatus(_ status: String) {

@@ -808,10 +808,12 @@ final class NativeAppLaunch {
             notificationNavigationMessage = nil
             notificationRouter.consumed()
         } else if notificationRouter.intent?.locator != nil {
+            presentation.selectRequest(nil)
             notificationNavigationMessage = notificationSynchronized
                 ? "The notification's exact message is not loaded. Showing the current inbox; it can open when normally loaded."
                 : "The notification's current state is not confirmed. Showing the inbox while connection recovery is pending."
         } else {
+            presentation.selectRequest(nil)
             notificationNavigationMessage = nil
             notificationRouter.consumed()
         }
@@ -1443,7 +1445,6 @@ final class LivePresentationStore {
             diagnose(.localStore, .projectionRefresh, .failed, error: error)
         }
         presentation = snapshot
-        notificationProjectionDidChange?()
         if let key = actionErrorRequest,
            let current = snapshot.requests.first(where: { $0.key == key }),
            current.intentReceipt != nil || current.lifecycleStatus != .open {
@@ -1455,6 +1456,7 @@ final class LivePresentationStore {
         } else if selectedRequestKey == nil {
             self.selectedRequestKey = snapshot.requests.first?.key
         }
+        notificationProjectionDidChange?()
     }
 
     private func discussionOperationID(for request: RequestKey, revision: UInt64) -> UUID? {
