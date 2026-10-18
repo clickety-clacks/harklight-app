@@ -1664,7 +1664,7 @@ final class NativeGuidedTLSTests: XCTestCase {
 
     private func u2Data(_ text: String) -> Data { Data((text + "\n").utf8) }
 
-    private final class U2ReplaySession: AuthenticatedInstallationSession, @unchecked Sendable {
+    private final class U2ReplaySession: AuthenticatedInboxPagingSession, @unchecked Sendable {
         let authenticatedIdentity: ProfileIdentity
         var acknowledgements: [Data] = []
         var sent: [(Data, UUID)] = []
@@ -1916,7 +1916,7 @@ private final class RelayProgressRecorder: @unchecked Sendable {
     }
 }
 
-private final class ForegroundProgressRelaySession: AuthenticatedInstallationSession, @unchecked Sendable {
+private final class ForegroundProgressRelaySession: AuthenticatedInboxPagingSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     private let store: AttentionDomainStore
     private let context: ProfileContext
@@ -1947,7 +1947,7 @@ private final class ForegroundProgressRelaySession: AuthenticatedInstallationSes
 
 /// Feeds exact ordinary v1 relay frames through NativeRelayCore's real decoder,
 /// replay barrier and ACK path without making a network connection.
-private final class OrdinaryOrderingRelaySession: AuthenticatedInstallationSession, @unchecked Sendable {
+private final class OrdinaryOrderingRelaySession: AuthenticatedInboxPagingSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     private let lock = NSLock()
     private var replayCount = 0

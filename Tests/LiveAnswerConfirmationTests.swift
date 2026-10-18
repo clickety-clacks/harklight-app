@@ -235,7 +235,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 }
 
-private final class AnswerSession: AuthenticatedInstallationSession, @unchecked Sendable {
+private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     var sentOperationIDs: [UUID] = []
     var acknowledgedCursors: [UInt64] = []
