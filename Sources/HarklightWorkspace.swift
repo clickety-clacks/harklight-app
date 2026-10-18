@@ -127,6 +127,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var warnings: [String] = []
     var conversationStore: LivePresentationStore? = nil
     var showsLocalExamples = true
+    var notificationNavigation: NativeInboxNavigation? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: InboxSelection?
     @State private var visibility: NavigationSplitViewVisibility = .all
@@ -245,6 +246,20 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .searchable(text: $search, placement: horizontalSizeClass == .compact ? .automatic : .navigationBarDrawer(displayMode: .always), prompt: "Search")
             .searchFocused($searchFocused)
             .onSubmit(of: .search) { searchFocused = false }
+            .onChange(of: notificationNavigation, initial: true) { _, route in
+                guard let route else { return }
+                settings = false
+                search = ""
+                searchFocused = false
+                chatOpen = false
+                // Notification navigation changes selection only. The ordinary
+                // navigate helper also schedules abandoned-upload cleanup.
+                // A tap must not turn that into a domain mutation.
+                selection = route.request.map(InboxSelection.request)
+                if let key = route.request { selectRequest(key) }
+                compactColumn = route.request == nil ? .sidebar : .detail
+                visibility = route.request == nil ? .all : .detailOnly
+            }
             .onChange(of: samples.selectedID) { _, id in
                 if showsLocalExamples, let id, case .sample = selection { selection = .sample(id) }
             }

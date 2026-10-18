@@ -77,6 +77,8 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     /// Stable local account/storage authority. Nil on records written before
     /// endpoint migration; those records use their enrollment host.
     var localProfileAuthority: String? = nil
+    var notificationProfileGeneration: UUID? = nil
+    var notificationBindings: [NativeNotificationBinding]? = nil
 
     var isApproved: Bool { personID != nil }
     var profileAuthority: String { localProfileAuthority ?? host }
@@ -418,10 +420,20 @@ struct NativeEnrollmentStore {
         return binding
     }
 
-    func markPushAccepted(_ binding: NativePushBinding, for deviceID: String) throws {
-        guard var record = try load(),
-              record.deviceID == deviceID,
-              record.pushBinding == binding else { return }
+    /// Persist routing metadata and acceptance together, guarded by the exact
+    /// preexisting trusted enrollment and durable registration operation.
+    func markPushAccepted(_ binding: NativePushBinding, bindingID: String,
+                          expected: NativeEnrollmentRecord) throws {
+        guard var record = try load(), record.sameNotificationProfile(as: expected),
+              record.pushBinding == binding, UUID(uuidString: bindingID) != nil else {
+            throw NativeJoinError.superseded
+        }
+        record.notificationProfileGeneration = record.notificationProfileGeneration ?? UUID()
+        let association = NativeNotificationBinding(bindingID: ExactText(bindingID),
+            operationID: binding.operationID, revision: binding.revision)
+        var associations = record.notificationBindings ?? []
+        if !associations.contains(association) { associations.append(association) }
+        record.notificationBindings = associations
         record.pushBinding?.accepted = true
         try save(record)
     }

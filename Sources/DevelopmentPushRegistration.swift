@@ -1,10 +1,12 @@
 import Foundation
 import UIKit
+import UserNotifications
+import AttentionDomain
 
 // This receiver is scoped to the signed development build of the existing app.
 // A simulator has no APNs address to hand off.
 @MainActor
-final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate {
+final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private static let expectedBundleID = "co.clicketyclacks.Harklight"
     private static let statusKey = "harklight.apns.registration.status"
 
@@ -12,6 +14,7 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
         return true
     }
 
@@ -55,6 +58,20 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate {
             let refreshed = await NativeRelayLifecycle.shared.refreshFromTrustedRelay()
             completionHandler(refreshed ? .newData : .noData)
         }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse) async {
+        // Default opening is navigation only. Dismissal and unsupported actions
+        // do not alter navigation, domain state, or notification presentation.
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        let info = response.notification.request.content.userInfo
+        var payload: JSONValue = .null
+        let sequence = ((info["attention"] as? [String: Any])?["locator"] as? [String: Any])?["acceptance_seq"] as? NSNumber
+        let integerSequence = sequence.map { !["d", "f"].contains(String(cString: $0.objCType)) && CFGetTypeID($0) != CFBooleanGetTypeID() } ?? true
+        if integerSequence, let data = try? JSONSerialization.data(withJSONObject: info),
+           let decoded = try? JSONValue.parse(data) { payload = decoded }
+        NativeNotificationRouter.shared.receive(payload, opened: true)
     }
 
     private func clearAddressAndSetStatus(_ status: String) {
