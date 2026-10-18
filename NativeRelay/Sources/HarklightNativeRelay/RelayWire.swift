@@ -46,9 +46,7 @@ public struct RelayWire: Sendable {
                 throw RelayWireError.invalidFrame
             }
             return RelayEvent(sequence: seq,
-                              body: .delivery(StoredRequest(key: key, originalPayload: payload,
-                                  senderDisplay: senderDisplay(value, key: key, origin: origin)), classification),
-                              conversation: conversation)
+                              body: .delivery(StoredRequest(key: key, originalPayload: payload), classification), conversation: conversation)
         case "lifecycle":
             guard let state = TerminalState(rawValue: try text(value, "state")),
                   (isOrigin || value.uniqueValue(named: "answer") == nil) else {
@@ -66,17 +64,6 @@ public struct RelayWire: Sendable {
         let value = try parseFrame(bytes)
         guard try text(value, "type") == "resynced" else { throw RelayWireError.invalidFrame }
         return try sequence(value)
-    }
-
-    private func senderDisplay(_ envelope: JSONValue, key: RequestKey, origin: String) -> SenderDisplay? {
-        guard let value = envelope.uniqueValue(named: "sender_display"),
-              value.hasExactlyKeys(["v", "sender_id", "origin", "name"]),
-              value.uniqueValue(named: "v")?.integerValue == 1,
-              value.uniqueValue(named: "sender_id")?.stringValue == key.senderID,
-              value.uniqueValue(named: "origin")?.stringValue?.rawValue == origin,
-              let name = value.uniqueValue(named: "name")?.stringValue,
-              !name.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return SenderDisplay(senderID: key.senderID, origin: ExactText(origin), name: name)
     }
 
     public func isResyncAccepted(_ bytes: Data) throws -> Bool {

@@ -593,13 +593,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
                 try commit(next)
             }
-            if case let .delivery(request, _) = event.body,
-               let existing = state.requests[request.key], existing.senderDisplay == nil,
-               request.senderDisplay != nil {
-                var next = state
-                next.requests[request.key] = existing.retainingSenderDisplay(request.senderDisplay)
-                try commit(next)
-            }
             return state.cursor
         }
 
@@ -622,11 +615,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     try recordRepair(.conflictingEvent(sequence: event.sequence))
                     throw AttentionStoreError.eventConflict(event.sequence)
                 }
-                let enriched = existing.retainingSenderDisplay(request.senderDisplay)
-                next.requests[request.key] = enriched
-                if enriched.acceptanceOrder == nil {
+                if existing.acceptanceOrder == nil {
                     let priorOrder = firstDeliverySequence(for: request.key, in: next.appliedEvents)
-                    next.requests[request.key] = enriched.assigningAcceptanceOrder(priorOrder ?? event.sequence)
+                    next.requests[request.key] = existing.assigningAcceptanceOrder(priorOrder ?? event.sequence)
                 }
             } else {
                 next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
@@ -2065,8 +2056,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private func effectiveRequest(for key: RequestKey) -> StoredRequest? {
         guard let original = state.requests[key] else { return nil }
         guard let thread = state.conversation?.threads[key] else { return original }
-        let current = StoredRequest(key: key, originalPayload: thread.currentQuestionPayload,
-                                    senderDisplay: original.senderDisplay)
+        let current = StoredRequest(key: key, originalPayload: thread.currentQuestionPayload)
         return original.acceptanceOrder.map { current.assigningAcceptanceOrder($0) } ?? current
     }
 
