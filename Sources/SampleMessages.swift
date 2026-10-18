@@ -393,6 +393,10 @@ final class SampleLibrary {
         }
     }
 
+    func select(_ id: String?) {
+        select(id, departingFrom: selectedID)
+    }
+
     func select(_ id: String?, departingFrom previousID: String?) {
         let previousKey = previousID.flatMap { responses[$0]?.key }
         let nextKey = id.flatMap { responses[$0]?.key }
