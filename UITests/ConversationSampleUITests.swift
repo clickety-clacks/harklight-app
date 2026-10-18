@@ -320,10 +320,11 @@ final class ConversationSampleUITests: XCTestCase {
     }
 
     /// Pulls past the end of the open message until the next one opens.
+    /// The pull starts in the card's side margin so a note field or control cannot take the drag.
     private func showNextMessage(card: XCUIElement, counter: XCUIElement, app: XCUIApplication) -> Bool {
         let before = counter.label
-        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
-        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.8))
+        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.2))
         for _ in 0..<8 {
             lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow, thenHoldForDuration: 0.5)
             let moved = NSPredicate { _, _ in counter.exists && counter.label != before }
