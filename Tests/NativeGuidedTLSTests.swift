@@ -1194,7 +1194,13 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(high, 1)
         XCTAssertEqual(session.cursorAtAcknowledgement, 1,
                        "The event cursor must be durable before the ACK exchange begins.")
-        XCTAssertEqual(events.snapshot(), [.nativeSyncReplayRequested, .nativeSyncResynced, .nativeSyncAcknowledged])
+        XCTAssertEqual(events.snapshot(), [
+            .nativeSyncReplayRequested,
+            .nativeSyncResynced,
+            .nativeSyncAcknowledged,
+            .postAckDrainBegan,
+            .postAckDrainFinished(.completed)
+        ])
 
         let progress = ForegroundConnectDeadline()
         let transportAttemptID = UUID()
@@ -1415,7 +1421,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(completion.postAckBoundary, .relayRefreshReturned)
         XCTAssertEqual(completion.postAckDrainTransition, .failed)
         XCTAssertTrue(restored.shareText.contains("post_ack_boundary=foreground_confirmed"))
-        XCTAssertTrue(restored.shareText.contains("post_ack_drain=timed_out"))
+        XCTAssertTrue(restored.shareText.contains("post_ack_drain=timedOut"))
         let successCompletion = try XCTUnwrap(restored.events.first {
             $0.phase == .foregroundCompletion && $0.transition == .completed
         })
