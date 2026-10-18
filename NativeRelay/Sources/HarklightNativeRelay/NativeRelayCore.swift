@@ -29,7 +29,7 @@ public protocol AuthenticatedInboxPagingSession: AuthenticatedInstallationSessio
 /// core durably applies them.
 public protocol AuthenticatedInboxEventStreamSession: AuthenticatedInboxPagingSession {
     var supportsPostCheckpointInboxEvents: Bool { get }
-    func takePostCheckpointInboxEvents(through sequence: UInt64?, waitForTarget: Bool) async throws -> [Data]
+    func nextPostCheckpointInboxEvent() async throws -> Data
 }
 
 public extension AuthenticatedInstallationSession {
@@ -81,6 +81,11 @@ public actor NativeRelayCore {
         let receipt: NativeDiagnosticReceiptState?
     }
 
+    private struct InboxSequenceWaiter {
+        let target: UInt64
+        let continuation: CheckedContinuation<Void, any Error>
+    }
+
     private let store: AttentionDomainStore
     private let context: ProfileContext
     private let session: any AuthenticatedInstallationSession
@@ -94,6 +99,13 @@ public actor NativeRelayCore {
     private var activeInboxReplay: ReplayProgress?
     private var inboxBootstrapped = false
     private var activeInboxStartupID: String?
+    private var postCheckpointInboxConsumerTask: Task<Void, Never>?
+    private var postCheckpointInboxFailure: (any Error)?
+    private var postCheckpointAcknowledgementGateOpen = false
+    private var postCheckpointAcknowledgedCursor: UInt64?
+    private var pendingPostCheckpointAcknowledgement: UInt64?
+    private var postCheckpointAcknowledgementTask: Task<Void, Never>?
+    private var postCheckpointAcknowledgementWaiters: [InboxSequenceWaiter] = []
     private var pendingInboxPageWaiters: [CheckedContinuation<Bool, Error>] = []
     private var conversationReplay: ConversationReplayProgress?
     private var inspectedConversationMetadata = false
@@ -103,6 +115,7 @@ public actor NativeRelayCore {
     // terminal replay. Removing a terminal entry keeps memory bounded by current
     // outstanding work, not the account's retained history.
     private var operationReplayDiagnosticStates: [UUID: OperationReplayDiagnosticState] = [:]
+    private var acceptedReplaySubmissions: [UUID: Submission] = [:]
 
     public func conversationOriginURL() throws -> URL? {
         try validate()
@@ -314,6 +327,11 @@ public actor NativeRelayCore {
 
     public func deactivate() {
         active = false
+        postCheckpointInboxConsumerTask?.cancel()
+        postCheckpointInboxConsumerTask = nil
+        postCheckpointAcknowledgementTask?.cancel()
+        postCheckpointAcknowledgementTask = nil
+        resumePostCheckpointWaiters(throwing: NativeRelayCoreError.inactive)
     }
 
     /// Foreground and push-triggered reconnects both start from C's durable
@@ -324,6 +342,7 @@ public actor NativeRelayCore {
         busy = true
         defer { releaseBusy() }
         try validate()
+        try throwPostCheckpointInboxFailureIfPresent()
         guard let pagingSession = session as? any AuthenticatedInboxPagingSession else {
             throw NativeRelayCoreError.inboxPagingUnavailable
         }
@@ -333,8 +352,9 @@ public actor NativeRelayCore {
         if inboxBootstrapped {
             if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
                eventStream.supportsPostCheckpointInboxEvents {
-                high = try await drainPostCheckpointInboxEvents(from: eventStream,
-                    trackingAcceptedOperations: acceptedBeforeReplay)
+                startPostCheckpointInboxConsumer(from: eventStream,
+                    baseline: try currentInboxCheckpointHighWater())
+                high = try store.snapshot(context: context).cursor
             } else {
                 high = try await replayInboxAndAcknowledge(
                     since: store.snapshot(context: context).cursor,
@@ -349,6 +369,7 @@ public actor NativeRelayCore {
         inspectedConversationMetadata = true
         let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
             .map(\.operationID))
+        let pendingBeforeDrain = try store.snapshot(context: context).outbox
         let attempted: Int
         do {
             attempted = try await drainPending()
@@ -366,33 +387,43 @@ public actor NativeRelayCore {
             throw error
         }
         if attempted > 0 {
+            let afterDrain = try store.snapshot(context: context)
+            let newlyAccepted = pendingBeforeDrain.compactMap { pending -> Submission? in
+                guard let recorded = afterDrain.intents[pending.intentID],
+                      case .accepted = recorded.disposition else { return nil }
+                return recorded
+            }
+            for submission in newlyAccepted {
+                acceptedReplaySubmissions[submission.operationID] = submission
+                if operationReplayDiagnosticStates[submission.operationID] == nil {
+                    diagnoseOperationReplay(.began, submission: submission,
+                                            receipt: .acceptedAwaitingReplay)
+                }
+            }
             let acceptedAfterDrain = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            let trackingSubmissions = Array(acceptedReplaySubmissions.values)
             if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
                eventStream.supportsPostCheckpointInboxEvents {
-                let cursor = try store.snapshot(context: context).cursor
-                let terminalSequence = acceptedAfterDrain.compactMap(Self.acceptedTerminalSequence)
-                    .filter { $0 > cursor }.max()
-                high = try await drainPostCheckpointInboxEvents(from: eventStream,
-                    trackingAcceptedOperations: acceptedAfterDrain,
-                    through: terminalSequence,
-                    waitForTarget: terminalSequence != nil)
+                let terminalSequence = (acceptedAfterDrain + newlyAccepted)
+                    .compactMap(Self.acceptedTerminalSequence).max()
+                if let terminalSequence {
+                    try await waitForPostCheckpointAcknowledgement(through: terminalSequence)
+                }
+                completeAcceptedOperationReplayDiagnostics(trackingSubmissions)
+                high = try store.snapshot(context: context).cursor
             } else {
                 high = try await replayInboxAndAcknowledge(
                     since: high,
-                    trackingAcceptedOperations: acceptedAfterDrain,
+                    trackingAcceptedOperations: acceptedAfterDrain + newlyAccepted,
                     using: pagingSession)
             }
-        }
-        if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
-           eventStream.supportsPostCheckpointInboxEvents {
-            high = try await drainPostCheckpointInboxEvents(from: eventStream,
-                trackingAcceptedOperations: try store.acceptedOperationsAwaitingTerminalReplay(context: context))
         }
         if try !store.conversationSnapshot(context: context).threads.isEmpty,
            let conversationSession = session as? any AuthenticatedConversationSession {
             try await replayConversationAndAcknowledge(using: conversationSession)
         }
-        return high
+        let durableCursor = try store.snapshot(context: context).cursor
+        return max(high, durableCursor)
     }
 
     /// A page request originates only from a deliberate downward-scroll signal.
@@ -412,6 +443,7 @@ public actor NativeRelayCore {
         defer { releaseBusy() }
         do {
             try validate()
+            try throwPostCheckpointInboxFailureIfPresent()
             let checkpoint = try store.snapshot(context: context).inboxCheckpoint
             guard let checkpoint, checkpoint.checkpointAccepted,
                   checkpoint.hasInitialPage,
@@ -428,11 +460,6 @@ public actor NativeRelayCore {
                                                 snapshotID: snapshotID, highWater: highWater)
             try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
                 cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context)
-            if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
-               eventStream.supportsPostCheckpointInboxEvents {
-                _ = try await drainPostCheckpointInboxEvents(from: eventStream,
-                    trackingAcceptedOperations: try store.acceptedOperationsAwaitingTerminalReplay(context: context))
-            }
             return true
         } catch {
             throw error
@@ -643,39 +670,30 @@ public actor NativeRelayCore {
         do {
             let replayStart = try store.snapshot(context: context).cursor
             guard replayStart == cursor else { throw NativeRelayCoreError.invalidReplay }
-            var high = try await replayInbox(since: replayStart, using: transport)
+            let checkpointHighWater = try currentInboxCheckpointHighWater()
+            let high = try await replayInbox(since: replayStart, using: transport)
             onProgress(.nativeSyncResynced)
-            var ordinaryAcknowledgementConfirmed = false
-            if high > replayStart {
-                do {
-                    try await session.acknowledge(wire.acknowledge(high))
-                    ordinaryAcknowledgementConfirmed = true
-                    onProgress(.nativeSyncAcknowledged)
-                } catch InstallationTransportError.acknowledgementBehind {
-                    diagnose(.relay, .acknowledgement, .retrying,
-                             error: InstallationTransportError.acknowledgementBehind)
-                    // A checkpoint is the lower replay boundary. Reattach only
-                    // from C's actual durable cursor; never restart FORMAT17 at 0.
-                    let durableCursor = try store.snapshot(context: context).cursor
-                    high = try await replayInbox(since: durableCursor, using: transport)
-                    onProgress(.nativeSyncResynced)
-                    guard high > durableCursor else {
-                        // The checkpoint ACK already establishes H. A replay
-                        // with no new event has no ordinary ACK to repeat.
-                        throw InstallationTransportError.acknowledgementBehind
-                    }
-                    try await session.acknowledge(wire.acknowledge(high))
-                    ordinaryAcknowledgementConfirmed = true
-                    onProgress(.nativeSyncAcknowledged)
-                }
+            let eventStream = transport as? any AuthenticatedInboxEventStreamSession
+            if let eventStream, eventStream.supportsPostCheckpointInboxEvents {
+                // Start draining after resynced(K), before awaiting ACK(K), so
+                // a bounded transport handoff cannot block that correlated
+                // reply behind a burst of later live events. The consumer may
+                // persist H+1 onward now, but its ACK pump stays gated until K.
+                startPostCheckpointInboxConsumer(from: eventStream, baseline: checkpointHighWater)
             }
-            if ordinaryAcknowledgementConfirmed {
+            if high > checkpointHighWater {
+                try await session.acknowledge(wire.acknowledge(high))
+                onProgress(.nativeSyncAcknowledged)
                 diagnose(.relay, .acknowledgement, .completed)
+            }
+            if let eventStream, eventStream.supportsPostCheckpointInboxEvents {
+                openPostCheckpointAcknowledgementGate(through: high)
             }
             diagnose(.relay, .ordinaryReplay, .completed)
             completeAcceptedOperationReplayDiagnostics(submissions)
             return high
         } catch {
+            failPostCheckpointInbox(error)
             diagnose(.relay, .ordinaryReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
             let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
@@ -689,19 +707,37 @@ public actor NativeRelayCore {
         }
     }
 
-    private func drainPostCheckpointInboxEvents(
+    private func currentInboxCheckpointHighWater() throws -> UInt64 {
+        guard let checkpoint = try store.snapshot(context: context).inboxCheckpoint,
+              checkpoint.checkpointAccepted,
+              let highWater = checkpoint.highWater else {
+            throw NativeRelayCoreError.invalidReplay
+        }
+        return highWater
+    }
+
+    private func startPostCheckpointInboxConsumer(
         from eventStream: any AuthenticatedInboxEventStreamSession,
-        trackingAcceptedOperations submissions: [Submission],
-        through sequence: UInt64? = nil,
-        waitForTarget: Bool = false
-    ) async throws -> UInt64 {
-        let initialCursor = try store.snapshot(context: context).cursor
+        baseline: UInt64
+    ) {
+        guard postCheckpointInboxConsumerTask == nil else { return }
+        postCheckpointInboxFailure = nil
+        postCheckpointAcknowledgementGateOpen = false
+        postCheckpointAcknowledgedCursor = baseline
+        postCheckpointInboxConsumerTask = Task { [weak self] in
+            guard let self else { return }
+            await self.consumePostCheckpointInboxEvents(from: eventStream)
+        }
+    }
+
+    private func consumePostCheckpointInboxEvents(
+        from eventStream: any AuthenticatedInboxEventStreamSession
+    ) async {
         do {
-            let frames = try await eventStream.takePostCheckpointInboxEvents(
-                through: sequence, waitForTarget: waitForTarget)
-            var cursor = initialCursor
-            for frame in frames {
+            while !Task.isCancelled {
+                let frame = try await eventStream.nextPostCheckpointInboxEvent()
                 try validate()
+                let previousCursor = try store.snapshot(context: context).cursor
                 let event = try wire.decodeEvent(frame)
                 let result = store.applyRelayEvent(event, context: context)
                 switch result {
@@ -712,36 +748,111 @@ public actor NativeRelayCore {
                 case .gap, .conflict, .repairRequired, .deferred:
                     throw NativeRelayCoreError.eventRejected
                 }
-                let nextCursor = try store.snapshot(context: context).cursor
-                if event.sequence > cursor {
-                    guard cursor < UInt64.max, event.sequence == cursor + 1,
-                          nextCursor == event.sequence else {
+                let durableCursor = try store.snapshot(context: context).cursor
+                if event.sequence > previousCursor {
+                    guard previousCursor < UInt64.max,
+                          event.sequence == previousCursor + 1,
+                          durableCursor == event.sequence else {
                         throw NativeRelayCoreError.invalidReplay
                     }
-                    cursor = nextCursor
-                } else if nextCursor != cursor {
+                } else if durableCursor != previousCursor {
                     throw NativeRelayCoreError.invalidReplay
                 }
+
+                if let acknowledged = postCheckpointAcknowledgedCursor,
+                   durableCursor > acknowledged {
+                    queuePostCheckpointAcknowledgement(through: durableCursor)
+                }
+                completeAcceptedOperationReplayDiagnostics(
+                    Array(acceptedReplaySubmissions.values))
             }
-            if cursor > initialCursor {
-                try await session.acknowledge(wire.acknowledge(cursor))
-                onProgress(.nativeSyncAcknowledged)
-                diagnose(.relay, .acknowledgement, .completed)
-            }
-            completeAcceptedOperationReplayDiagnostics(submissions)
-            return cursor
         } catch {
+            guard !Task.isCancelled else { return }
+            failPostCheckpointInbox(error)
             diagnose(.relay, .ordinaryReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
-            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
-            let ids = outstanding.map { Set($0.map(\.operationID)) }
-            for submission in submissions {
-                diagnoseOperationReplay(NativeDiagnosticCauseCode.failureTransition(for: error),
-                    causeCode: NativeDiagnosticCauseCode.forError(error), submission: submission,
-                    receipt: ids.map { $0.contains(submission.operationID) ? .acceptedAwaitingReplay : .terminal } ?? .unknown)
-            }
-            throw error
         }
+    }
+
+    private func openPostCheckpointAcknowledgementGate(through sequence: UInt64) {
+        postCheckpointAcknowledgedCursor = max(postCheckpointAcknowledgedCursor ?? 0, sequence)
+        postCheckpointAcknowledgementGateOpen = true
+        resumePostCheckpointAcknowledgementWaiters(through: postCheckpointAcknowledgedCursor ?? sequence)
+        startPostCheckpointAcknowledgementPumpIfNeeded()
+    }
+
+    private func queuePostCheckpointAcknowledgement(through sequence: UInt64) {
+        guard postCheckpointInboxFailure == nil,
+              sequence > (postCheckpointAcknowledgedCursor ?? 0) else { return }
+        pendingPostCheckpointAcknowledgement = max(pendingPostCheckpointAcknowledgement ?? 0, sequence)
+        startPostCheckpointAcknowledgementPumpIfNeeded()
+    }
+
+    private func startPostCheckpointAcknowledgementPumpIfNeeded() {
+        guard postCheckpointAcknowledgementGateOpen,
+              postCheckpointAcknowledgementTask == nil,
+              pendingPostCheckpointAcknowledgement != nil,
+              postCheckpointInboxFailure == nil else { return }
+        postCheckpointAcknowledgementTask = Task { [weak self] in
+            guard let self else { return }
+            await self.drainPostCheckpointAcknowledgements()
+        }
+    }
+
+    private func drainPostCheckpointAcknowledgements() async {
+        do {
+            while postCheckpointAcknowledgementGateOpen,
+                  let sequence = pendingPostCheckpointAcknowledgement {
+                pendingPostCheckpointAcknowledgement = nil
+                guard sequence > (postCheckpointAcknowledgedCursor ?? 0) else { continue }
+                try await session.acknowledge(wire.acknowledge(sequence))
+                postCheckpointAcknowledgedCursor = sequence
+                onProgress(.nativeSyncAcknowledged)
+                diagnose(.relay, .acknowledgement, .completed)
+                resumePostCheckpointAcknowledgementWaiters(through: sequence)
+            }
+            postCheckpointAcknowledgementTask = nil
+            startPostCheckpointAcknowledgementPumpIfNeeded()
+        } catch {
+            postCheckpointAcknowledgementTask = nil
+            failPostCheckpointInbox(error)
+            diagnose(.relay, .acknowledgement,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+        }
+    }
+
+    private func waitForPostCheckpointAcknowledgement(through sequence: UInt64) async throws {
+        try throwPostCheckpointInboxFailureIfPresent()
+        if (postCheckpointAcknowledgedCursor ?? 0) >= sequence { return }
+        try await withCheckedThrowingContinuation { continuation in
+            postCheckpointAcknowledgementWaiters.append(
+                InboxSequenceWaiter(target: sequence, continuation: continuation))
+            startPostCheckpointAcknowledgementPumpIfNeeded()
+        }
+    }
+
+    private func resumePostCheckpointAcknowledgementWaiters(through sequence: UInt64) {
+        let ready = postCheckpointAcknowledgementWaiters.filter { $0.target <= sequence }
+        postCheckpointAcknowledgementWaiters.removeAll { $0.target <= sequence }
+        ready.forEach { $0.continuation.resume() }
+    }
+
+    private func resumePostCheckpointWaiters(throwing error: any Error) {
+        let waiters = postCheckpointAcknowledgementWaiters
+        postCheckpointAcknowledgementWaiters.removeAll()
+        waiters.forEach { $0.continuation.resume(throwing: error) }
+    }
+
+    private func failPostCheckpointInbox(_ error: any Error) {
+        guard postCheckpointInboxFailure == nil else { return }
+        postCheckpointInboxFailure = error
+        postCheckpointInboxConsumerTask?.cancel()
+        postCheckpointInboxConsumerTask = nil
+        resumePostCheckpointWaiters(throwing: error)
+    }
+
+    private func throwPostCheckpointInboxFailureIfPresent() throws {
+        if let postCheckpointInboxFailure { throw postCheckpointInboxFailure }
     }
 
     private static func acceptedTerminalSequence(_ submission: Submission) -> UInt64? {
@@ -760,6 +871,7 @@ public actor NativeRelayCore {
                     "original_operation_terminal_not_observed"),
                 submission: submission,
                 receipt: settled ? .terminal : (outstanding == nil ? .unknown : .acceptedAwaitingReplay))
+            if settled { acceptedReplaySubmissions.removeValue(forKey: submission.operationID) }
         }
     }
 
@@ -911,6 +1023,8 @@ public actor NativeRelayCore {
         operationReplayDiagnosticStates = operationReplayDiagnosticStates.filter {
             outstanding.contains($0.key)
         }
+        acceptedReplaySubmissions = Dictionary(uniqueKeysWithValues:
+            submissions.map { ($0.operationID, $0) })
     }
 
     /// An uncertain result leaves the exact original C operation in the outbox.

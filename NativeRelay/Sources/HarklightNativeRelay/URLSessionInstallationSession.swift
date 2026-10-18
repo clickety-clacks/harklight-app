@@ -57,9 +57,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private var postCheckpointReader: Task<Void, Never>?
     private var responseFrames: [Data] = []
     private var responseWaiters: [CheckedContinuation<Data, any Error>] = []
-    private var postCheckpointEventFrames: [Data] = []
-    private var postCheckpointEventWaiters: [CheckedContinuation<Void, any Error>] = []
+    // One queued event bounds native-side memory while the core catches up.
+    private var postCheckpointEventFrame: Data?
+    private var postCheckpointEventWaiters: [CheckedContinuation<Data, any Error>] = []
+    private var postCheckpointEventSpaceWaiters: [CheckedContinuation<Void, any Error>] = []
     private var postCheckpointReadFailure: (any Error)?
+    private var socketExchangeInProgress = false
+    private var socketExchangeWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(profile: ProfileContext,
                 relayURL: URL,
@@ -122,6 +126,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// Reads one correlated paging or receipt response on the enrolled relay
     /// socket. It never starts replay or sends a mutation.
     public func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        await beginSocketExchange()
+        defer { endSocketExchange() }
         do {
             try await send(request)
             while true {
@@ -151,6 +157,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// through `resynced`; the caller owns contiguous validation and ACK.
     public func attachInboxReplay(_ request: Data, ref: String,
                                   consume: @Sendable (Data) async throws -> Void) async throws {
+        await beginSocketExchange()
+        defer { endSocketExchange() }
         do {
             try await send(request)
             var accepted = false
@@ -226,6 +234,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     private func replay(_ request: Data, ref: String, event: String, end: String,
                         consume: @Sendable (Data) async throws -> Void) async throws {
+        await beginSocketExchange()
+        defer { endSocketExchange() }
         let area: NativeDiagnosticArea = event == "conversation" ? .conversation : .relay
         let phase: NativeDiagnosticPhase = event == "conversation" ? .conversationReplay : .ordinaryReplay
         do {
@@ -275,6 +285,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func acknowledgeProjection(_ request: Data, field: String, ref: String) async throws {
+        await beginSocketExchange()
+        defer { endSocketExchange() }
         let area: NativeDiagnosticArea = field == "conversation_seq" ? .conversation : .relay
         do {
             let requestValue = try JSONValue.parse(request)
@@ -320,6 +332,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        await beginSocketExchange()
+        defer { endSocketExchange() }
         do { try await send(frame) }
         catch {
             diagnose(.answer, .originalOperationDelivery,
@@ -373,6 +387,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     /// A send response is not a replay ACK and cannot advance either cursor.
     public func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
+        await beginSocketExchange()
+        defer { endSocketExchange() }
         do {
             let outgoing = try JSONValue.parse(frame)
             guard outgoing.uniqueValue(named: "type") == .string(ExactText("discussion")),
@@ -460,34 +476,18 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         urlSession.invalidateAndCancel()
     }
 
-    public func takePostCheckpointInboxEvents(through sequence: UInt64?,
-                                               waitForTarget: Bool) async throws -> [Data] {
-        if waitForTarget, let sequence {
-            while !postCheckpointEventFrames.contains(where: { Self.eventSequence($0).map { $0 >= sequence } ?? false }) {
-                if let postCheckpointReadFailure { throw postCheckpointReadFailure }
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                    postCheckpointEventWaiters.append(continuation)
-                }
+    public func nextPostCheckpointInboxEvent() async throws -> Data {
+        if let frame = postCheckpointEventFrame {
+            postCheckpointEventFrame = nil
+            if !postCheckpointEventSpaceWaiters.isEmpty {
+                postCheckpointEventSpaceWaiters.removeFirst().resume()
             }
+            return frame
         }
-
-        guard let sequence else {
-            let frames = postCheckpointEventFrames
-            postCheckpointEventFrames.removeAll(keepingCapacity: true)
-            return frames
+        if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+        return try await withCheckedThrowingContinuation { continuation in
+            postCheckpointEventWaiters.append(continuation)
         }
-
-        var selected: [Data] = []
-        var remaining: [Data] = []
-        for frame in postCheckpointEventFrames {
-            if let eventSequence = Self.eventSequence(frame), eventSequence <= sequence {
-                selected.append(frame)
-            } else {
-                remaining.append(frame)
-            }
-        }
-        postCheckpointEventFrames = remaining
-        return selected
     }
 
     public func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
@@ -614,10 +614,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             while !Task.isCancelled {
                 let frame = try await receiveTaskFrame()
                 if Self.isPostCheckpointInboxEvent(frame) {
-                    postCheckpointEventFrames.append(frame)
-                    let waiters = postCheckpointEventWaiters
-                    postCheckpointEventWaiters.removeAll(keepingCapacity: true)
-                    waiters.forEach { $0.resume() }
+                    try await enqueuePostCheckpointInboxEvent(frame)
                 } else if !responseWaiters.isEmpty {
                     responseWaiters.removeFirst().resume(returning: frame)
                 } else {
@@ -629,6 +626,21 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
+    private func enqueuePostCheckpointInboxEvent(_ frame: Data) async throws {
+        while postCheckpointEventFrame != nil {
+            if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+            try await withCheckedThrowingContinuation { continuation in
+                postCheckpointEventSpaceWaiters.append(continuation)
+            }
+        }
+        if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+        if !postCheckpointEventWaiters.isEmpty {
+            postCheckpointEventWaiters.removeFirst().resume(returning: frame)
+        } else {
+            postCheckpointEventFrame = frame
+        }
+    }
+
     private func failPostCheckpointReader(_ error: any Error) {
         postCheckpointReadFailure = error
         let responseWaiters = self.responseWaiters
@@ -637,6 +649,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         let eventWaiters = postCheckpointEventWaiters
         postCheckpointEventWaiters.removeAll(keepingCapacity: false)
         eventWaiters.forEach { $0.resume(throwing: error) }
+        let spaceWaiters = postCheckpointEventSpaceWaiters
+        postCheckpointEventSpaceWaiters.removeAll(keepingCapacity: false)
+        spaceWaiters.forEach { $0.resume(throwing: error) }
     }
 
     private static func isPostCheckpointInboxEvent(_ frame: Data) -> Bool {
@@ -645,10 +660,22 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         return kind == "delivery" || kind == "lifecycle"
     }
 
-    private static func eventSequence(_ frame: Data) -> UInt64? {
-        guard let value = try? JSONValue.parse(frame),
-              case let .number(number)? = value.uniqueValue(named: "seq") else { return nil }
-        return UInt64(number.lexeme)
+    private func beginSocketExchange() async {
+        if !socketExchangeInProgress {
+            socketExchangeInProgress = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            socketExchangeWaiters.append(continuation)
+        }
+    }
+
+    private func endSocketExchange() {
+        if socketExchangeWaiters.isEmpty {
+            socketExchangeInProgress = false
+        } else {
+            socketExchangeWaiters.removeFirst().resume()
+        }
     }
 
     private func diagnose(_ area: NativeDiagnosticArea,

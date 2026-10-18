@@ -34,7 +34,12 @@ final class NativeRelayCoreTests: XCTestCase {
         var olderPages: [String: [JSONValue]] = [:]
         var checkpointWasAccepted = false
         var reconciliationOverrides: [UUID: JSONValue] = [:]
-        var postCheckpointEvents: [Data] = []
+        private var postCheckpointEvents: [Data] = []
+        private var postCheckpointEventWaiters: [CheckedContinuation<Data, any Error>] = []
+        private var postCheckpointAcknowledgementWaiters: [CheckedContinuation<Data, Never>] = []
+        private var postCheckpointAcknowledgements: [Data] = []
+        private var postCheckpointEventFailure: (any Error)?
+        private let postCheckpointLock = NSLock()
         var postCheckpointEventAfterAccept: Data?
         private var activeSnapshotID = "snapshot-test"
         private var activeSnapshotHighWater: UInt64 = 0
@@ -193,34 +198,80 @@ final class NativeRelayCoreTests: XCTestCase {
                 rejectFirstAcknowledgement = false
                 throw InstallationTransportError.acknowledgementBehind
             }
+            recordPostCheckpointAcknowledgement(request)
         }
-        func takePostCheckpointInboxEvents(through sequence: UInt64?,
-                                           waitForTarget: Bool) async throws -> [Data] {
-            if waitForTarget, let sequence,
-               !postCheckpointEvents.contains(where: { eventSequence($0).map { $0 >= sequence } ?? false }) {
-                throw InstallationTransportError.unexpectedServerFrame
-            }
-            guard let sequence else {
-                let events = postCheckpointEvents
-                postCheckpointEvents.removeAll()
-                return events
-            }
-            var selected: [Data] = []
-            var remaining: [Data] = []
-            for frame in postCheckpointEvents {
-                if let eventSequence = eventSequence(frame), eventSequence <= sequence {
-                    selected.append(frame)
+        func nextPostCheckpointInboxEvent() async throws -> Data {
+            try await withCheckedThrowingContinuation { continuation in
+                var frame: Data?
+                var failure: (any Error)?
+                postCheckpointLock.lock()
+                if !postCheckpointEvents.isEmpty {
+                    frame = postCheckpointEvents.removeFirst()
+                } else if let postCheckpointEventFailure {
+                    failure = postCheckpointEventFailure
                 } else {
-                    remaining.append(frame)
+                    postCheckpointEventWaiters.append(continuation)
+                }
+                postCheckpointLock.unlock()
+                if let frame {
+                    continuation.resume(returning: frame)
+                } else if let failure {
+                    continuation.resume(throwing: failure)
                 }
             }
-            postCheckpointEvents = remaining
-            return selected
+        }
+
+        func publishPostCheckpointInboxEvent(_ frame: Data) {
+            var waiter: CheckedContinuation<Data, any Error>?
+            postCheckpointLock.lock()
+            if !postCheckpointEventWaiters.isEmpty {
+                waiter = postCheckpointEventWaiters.removeFirst()
+            } else {
+                postCheckpointEvents.append(frame)
+            }
+            postCheckpointLock.unlock()
+            waiter?.resume(returning: frame)
+        }
+
+        func stopPostCheckpointInboxEvents() {
+            let waiters: [CheckedContinuation<Data, any Error>]
+            postCheckpointLock.lock()
+            postCheckpointEventFailure = InstallationTransportError.unexpectedServerFrame
+            waiters = postCheckpointEventWaiters
+            postCheckpointEventWaiters.removeAll()
+            postCheckpointLock.unlock()
+            waiters.forEach { $0.resume(throwing: InstallationTransportError.unexpectedServerFrame) }
+        }
+
+        func nextPostCheckpointAcknowledgement() async -> Data {
+            await withCheckedContinuation { continuation in
+                var frame: Data?
+                postCheckpointLock.lock()
+                if !postCheckpointAcknowledgements.isEmpty {
+                    frame = postCheckpointAcknowledgements.removeFirst()
+                } else {
+                    postCheckpointAcknowledgementWaiters.append(continuation)
+                }
+                postCheckpointLock.unlock()
+                if let frame { continuation.resume(returning: frame) }
+            }
+        }
+
+        private func recordPostCheckpointAcknowledgement(_ frame: Data) {
+            var waiter: CheckedContinuation<Data, Never>?
+            postCheckpointLock.lock()
+            if !postCheckpointAcknowledgementWaiters.isEmpty {
+                waiter = postCheckpointAcknowledgementWaiters.removeFirst()
+            } else {
+                postCheckpointAcknowledgements.append(frame)
+            }
+            postCheckpointLock.unlock()
+            waiter?.resume(returning: frame)
         }
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
             sent.append((frame, operationID))
             if case .accepted = result, let postCheckpointEventAfterAccept {
-                postCheckpointEvents.append(postCheckpointEventAfterAccept)
+                publishPostCheckpointInboxEvent(postCheckpointEventAfterAccept)
             }
             return result
         }
@@ -235,10 +286,6 @@ final class NativeRelayCoreTests: XCTestCase {
             return UInt64(number.lexeme)
         }
 
-        private func eventSequence(_ frame: Data) -> UInt64? {
-            guard let value = try? JSONValue.parse(frame) else { return nil }
-            return uint64(value.uniqueValue(named: "seq"))
-        }
     }
 
     private func data(_ text: String) -> Data { Data((text + "\n").utf8) }
@@ -508,7 +555,7 @@ final class NativeRelayCoreTests: XCTestCase {
                       "A gapped stream must not publish a partial inbox.")
     }
 
-    func testRejectedPostCheckpointACKReattachesFromDurableCursorAndOnlyACKsNewEvents() async throws {
+    func testRejectedPostCheckpointACKDoesNotAttachAgainOnSameSession() async throws {
         let (context, store, session) = try setup()
         session.snapshotHighWater = 0
         session.replayFrames = [
@@ -520,21 +567,48 @@ final class NativeRelayCoreTests: XCTestCase {
         session.rejectFirstAcknowledgement = true
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        let high = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(high, 2)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("A rejected ACK must not trigger a second replay attach on the same connection.")
+        } catch InstallationTransportError.acknowledgementBehind {
+            // Recovery must use a new authenticated session and its actual durable cursor.
+        }
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         let requestValues = try session.requests.map(JSONValue.parse)
         XCTAssertEqual(requestValues.compactMap { $0.uniqueValue(named: "type")?.stringValue?.rawValue }, [
-            "inbox_start", "inbox_attach", "inbox_attach"
+            "inbox_start", "inbox_attach"
         ])
         XCTAssertEqual(requestValues.dropFirst().compactMap {
             $0.uniqueValue(named: "since")?.integerValue
-        }, [0, 1], "Recovery reattaches from the actual local cursor after the checkpoint, not zero.")
-        XCTAssertEqual(session.acknowledgements.count, 2)
+        }, [0])
+        XCTAssertEqual(session.acknowledgements.count, 1)
         XCTAssertEqual(String(decoding: session.acknowledgements[0], as: UTF8.self),
                        #"{"v":1,"type":"ack","seq":1,"ref":"native-ack"}"# + "\n")
-        XCTAssertEqual(String(decoding: session.acknowledgements[1], as: UTF8.self),
-                       #"{"v":1,"type":"ack","seq":2,"ref":"native-ack"}"# + "\n")
+    }
+
+    func testLivePostBarrierEventIsAppliedAndAcknowledgedWithoutAnotherRefreshOrPage() async throws {
+        let (context, store, session) = try setup()
+        session.snapshotHighWater = 0
+        session.supportsPostCheckpointInboxEvents = true
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        let cursor = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(cursor, 0)
+        session.publishPostCheckpointInboxEvent(data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"live-after-barrier","origin":"other-installation","as":"message","message":{"answer_ui":null,"title":"Live"}}"#))
+
+        let acknowledgement = try JSONValue.parse(await session.nextPostCheckpointAcknowledgement())
+        XCTAssertEqual(acknowledgement.uniqueValue(named: "seq"),
+                       .number(JSONNumber(lexeme: "1")))
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(session.replayCallCount, 1,
+                       "The live event must use the existing post-barrier stream, without another replay attach.")
+        let requestTypes = try session.requests.map(JSONValue.parse).compactMap {
+            $0.uniqueValue(named: "type")?.stringValue?.rawValue
+        }
+        XCTAssertFalse(requestTypes.contains("inbox_page"),
+                       "Live application and ACK must not depend on a downward-scroll page request.")
+        await core.deactivate()
+        session.stopPostCheckpointInboxEvents()
     }
 
     func testFixtureAndWrongInstallationCannotCreateRelayCore() throws {
@@ -697,6 +771,8 @@ final class NativeRelayCoreTests: XCTestCase {
                        "The post-H terminal is durably applied at sequence 2 before ordinary ACK.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(try store.snapshot(context: context).remoteStates[key]?.state, .answered)
+        await core.deactivate()
+        session.stopPostCheckpointInboxEvents()
     }
 
     func testAcceptedOperationReplayFailureKeepsExactReceiptAndCauseRetrievable() async throws {
