@@ -153,6 +153,335 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertThrowsError(try store.relayCursor(context: context))
     }
 
+    private let notificationBindingID = "c0e2a155-934c-44fb-bb29-50b22fa7b823"
+
+    private func notificationPayload(sequence: String = "1", message: String = "target",
+                                     binding: String? = nil) throws -> JSONValue {
+        try JSONValue.parse(Data("""
+        {"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"\(binding ?? notificationBindingID)","person_id":"saved-person","device_id":"saved-device-id","sender_id":"sender","message_id":"\(message)","acceptance_seq":\(sequence)}}}
+        """.utf8))
+    }
+
+    private func notificationRecord() -> NativeEnrollmentRecord {
+        var record = approvedRecord(foregroundRelayConfirmed: true, notificationExplanationSeen: true)
+        record.notificationProfileGeneration = UUID()
+        record.pushBinding = NativePushBinding(address: String(repeating: "a", count: 64),
+            operationID: UUID(), revision: 7, accepted: true)
+        record.notificationBindings = [NativeNotificationBinding(bindingID: ExactText(notificationBindingID),
+            operationID: record.pushBinding!.operationID, revision: 7)]
+        return record
+    }
+
+    func testPushBindingReplyCorrelationAndDurableSameOperationRecovery() throws {
+        let service = "Harklight.push-binding-test." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        var record = approvedRecord(foregroundRelayConfirmed: true, notificationExplanationSeen: true)
+        record.pushBinding = NativePushBinding(address: String(repeating: "a", count: 64),
+            operationID: UUID(), revision: 7, accepted: false)
+        try saveEnrollmentRecord(record, service: service)
+        let store = NativeEnrollmentStore(service: service)
+        let original = try XCTUnwrap(record.pushBinding)
+        XCTAssertEqual(try store.pendingPushRegistration(address: original.address, for: record.deviceID), original)
+        XCTAssertEqual(try store.pendingPushRegistration(address: original.address, for: record.deviceID), original,
+                       "A lost reply keeps the original registration operation and revision")
+        let good = try JSONValue.parse(Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":7,\"binding_id\":\"\(notificationBindingID)\"}".utf8))
+        XCTAssertThrowsError(try PushBindingReply.registration(good, revision: 8))
+        XCTAssertNil(try store.load()?.notificationBindings)
+        let id = try PushBindingReply.registration(good, revision: 7)
+        try store.markPushAccepted(original, bindingID: id, expected: record)
+        let saved = try XCTUnwrap(store.load())
+        XCTAssertTrue(saved.pushBinding?.accepted == true)
+        XCTAssertEqual(saved.pushBinding?.operationID, original.operationID)
+        XCTAssertEqual(saved.notificationBindings?.first?.bindingID, ExactText(id))
+        XCTAssertEqual(saved.notificationBindings?.first?.revision, original.revision)
+        XCTAssertNotNil(saved.notificationProfileGeneration)
+        XCTAssertEqual(saved.trustedRootDER, record.trustedRootDER)
+        XCTAssertEqual(saved.personID, record.personID)
+        XCTAssertThrowsError(try store.markPushAccepted(original, bindingID: id, expected: record),
+                             "A stale profile/operation snapshot cannot commit a later reply")
+        let rotated = try XCTUnwrap(store.pendingPushRegistration(address: String(repeating: "b", count: 64), for: record.deviceID))
+        XCTAssertEqual(rotated.revision, 8)
+        XCTAssertEqual(try store.load()?.notificationBindings, saved.notificationBindings,
+                       "Delayed notifications can retain the old authenticated association")
+
+        let status = try JSONValue.parse(Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push-status\",\"push\":{\"revision\":7,\"binding_id\":\"\(id)\",\"profile_id\":\"harklight-sandbox\"}}".utf8))
+        XCTAssertEqual(try PushBindingReply.status(status, revision: 7), id)
+        XCTAssertThrowsError(try PushBindingReply.status(status, revision: 8))
+        XCTAssertThrowsError(try PushBindingReply.registration(status, revision: 7))
+    }
+
+    func testLegacyAcceptedPushBindingStatusRecoveryAddsOnlyAuthenticatedAssociation() throws {
+        let service = "Harklight.push-legacy-test." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        var record = approvedRecord(foregroundRelayConfirmed: true, notificationExplanationSeen: true)
+        record.pushBinding = NativePushBinding(address: String(repeating: "a", count: 64),
+            operationID: UUID(), revision: 4, accepted: true)
+        try saveEnrollmentRecord(record, service: service)
+        let store = NativeEnrollmentStore(service: service)
+        XCTAssertNil(try store.pendingPushRegistration(address: record.pushBinding!.address, for: record.deviceID))
+        let reply = try JSONValue.parse(Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push-status\",\"push\":{\"revision\":4,\"binding_id\":\"\(notificationBindingID)\",\"profile_id\":\"harklight-sandbox\"}}".utf8))
+        let id = try XCTUnwrap(PushBindingReply.status(reply, revision: 4))
+        try store.markPushAccepted(record.pushBinding!, bindingID: id, expected: record)
+        let recovered = try XCTUnwrap(store.load())
+        XCTAssertEqual(recovered.pushBinding, record.pushBinding)
+        XCTAssertEqual(recovered.identityLabel, record.identityLabel)
+        XCTAssertEqual(recovered.trustedRootDER, record.trustedRootDER)
+        XCTAssertEqual(recovered.notificationBindings?.first?.bindingID, ExactText(id))
+    }
+
+    func testNotificationBindingSelectionIsExactAndNeverChoosesByMessageText() throws {
+        let record = notificationRecord()
+        let locator = try XCTUnwrap(NativeNotificationLocator(notificationPayload()))
+        var other = record
+        other.host = "another.example"
+        other.notificationProfileGeneration = UUID()
+        other.notificationBindings = [NativeNotificationBinding(bindingID: ExactText(UUID().uuidString), operationID: UUID(), revision: 1)]
+        XCTAssertEqual(locator.profile(in: [other, record]), NativeNotificationProfile(record))
+        XCTAssertNil(locator.profile(in: [other]))
+        other.notificationBindings = record.notificationBindings
+        XCTAssertNil(locator.profile(in: [other, record]), "An ambiguous binding cannot choose an account")
+        other = record
+        other.personID = "another-person"
+        XCTAssertNil(locator.profile(in: [other]))
+        let wrongDevice = try JSONValue.parse(Data(notificationPayload().canonicalJSON
+            .replacingOccurrences(of: "saved-device-id", with: "replacement-device").utf8))
+        XCTAssertNil(NativeNotificationLocator(wrongDevice)?.profile(in: [record]))
+        XCTAssertNil(locator.profile(in: []), "Removed profiles and archives are not candidates")
+        XCTAssertNil(NativeNotificationLocator(try notificationPayload(sequence: "1.5")))
+        XCTAssertNil(NativeNotificationLocator(try notificationPayload(sequence: "true")))
+        XCTAssertNil(NativeNotificationLocator(try notificationPayload(sequence: "0")))
+        let unsupported = try JSONValue.parse(Data(notificationPayload().canonicalJSON
+            .replacingOccurrences(of: "\"v\":1", with: "\"v\":2").utf8))
+        XCTAssertNil(NativeNotificationLocator(unsupported))
+        XCTAssertEqual(NativeNotificationLocator(try notificationPayload(sequence: "9007199254740993"))?.acceptanceSequence,
+                       9_007_199_254_740_993)
+    }
+
+    func testNotificationOpenUsesCurrentTerminalStateAndNeverChangesPendingOperations() async throws {
+        let namespace = "Harklight.notification-open." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
+        defer { defaults.removePersistentDomain(forName: namespace); deleteEnrollmentRecord(service: namespace) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: namespace)
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("target"))
+        let pendingKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("pending"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Same title"}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        try domain.apply(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: pendingKey, originalPayload: payload), .message)), context: context)
+        let live = try LivePresentationStore(store: domain, context: context)
+        live.selectAction(ExactText("reply"), input: nil, for: pendingKey)
+        live.updateCompatibilityText("An existing deliberate answer", action: ExactText("reply"), for: pendingKey)
+        let receipt = try live.submit(pendingKey)
+        let before = try domain.snapshot(context: context)
+        let router = NativeNotificationRouter(defaults: defaults)
+        router.receive(try notificationPayload(), opened: true)
+        var refreshes = 0
+        let app = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: namespace),
+            joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
+            initialState: .live(live), initialEnrollmentRecord: record, notificationRouter: router,
+            refreshOperation: {
+                refreshes += 1
+                try! domain.apply(RelayEvent(sequence: 3, body: .terminal(key, .answered, nil)), context: context)
+                try! live.refreshFromDurableStore()
+                return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
+                    confirmedContext: context, confirmedTransportAttemptID: UUID())
+            })
+        await app.handleNotification()
+        XCTAssertEqual(refreshes, 1)
+        XCTAssertEqual(app.notificationNavigation?.request, key)
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
+        XCTAssertNil(router.intent)
+        let after = try domain.snapshot(context: context)
+        XCTAssertEqual(after.outbox, before.outbox)
+        XCTAssertEqual(after.intents, before.intents)
+        XCTAssertEqual(after.drafts, before.drafts)
+        XCTAssertEqual(after.intents[receipt.intentID], before.intents[receipt.intentID])
+        let persisted = try XCTUnwrap(persistence.load(identity: context.identity))
+        router.receive(try notificationPayload(), opened: false)
+        XCTAssertNil(router.intent)
+        XCTAssertEqual(try persistence.load(identity: context.identity), persisted)
+    }
+
+    func testColdPendingNotificationWaitsForOrdinaryLoadingAndRejectsSequenceOrGenerationChange() throws {
+        let namespace = "Harklight.notification-cold." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
+        defer { defaults.removePersistentDomain(forName: namespace) }
+        let record = notificationRecord()
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity, transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let payload = try JSONValue.parse(Data(#"{"title":"Same title"}"#.utf8))
+        let key = try XCTUnwrap(NativeNotificationLocator(notificationPayload())).request
+        let first = NativeNotificationRouter(defaults: defaults)
+        first.receive(try notificationPayload(), opened: true)
+        let cold = NativeNotificationRouter(defaults: defaults)
+        XCTAssertNotNil(cold.intent)
+        XCTAssertNil(cold.resolve(records: [record], context: context, requests: [], synchronized: true))
+        XCTAssertNotNil(cold.intent?.locator, "An unloaded target remains pending without a page request")
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: domain)
+        let requests = try port.observe(context: port.context).requests
+        XCTAssertNil(cold.resolve(records: [record], context: context, requests: requests, synchronized: false))
+        XCTAssertEqual(cold.resolve(records: [record], context: context, requests: requests, synchronized: true), key)
+        cold.receive(try notificationPayload(sequence: "2"), opened: true)
+        XCTAssertNil(cold.resolve(records: [record], context: context, requests: requests, synchronized: true))
+        let replaced = ProfileContext(identity: context.identity, transportMode: .relay)
+        XCTAssertNil(cold.resolve(records: [record], context: replaced, requests: requests, synchronized: true))
+        XCTAssertNil(cold.intent?.locator, "A changed live generation invalidates in-flight navigation")
+        first.receive(try notificationPayload(), opened: true)
+        _ = first.resolve(records: [record], context: context, requests: [], synchronized: false)
+        let afterRestart = NativeNotificationRouter(defaults: defaults)
+        var replacedRecord = record
+        replacedRecord.notificationProfileGeneration = UUID()
+        XCTAssertNil(afterRestart.resolve(records: [replacedRecord], context: context, requests: requests, synchronized: true))
+        XCTAssertNil(afterRestart.intent?.locator, "A replacement saved generation cannot inherit cold intent")
+        XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
+        XCTAssertTrue(try domain.snapshot(context: context).intents.isEmpty)
+    }
+
+    func testLegacyAndUnknownNotificationOpenInboxWithoutSelectingSimilarRows() async throws {
+        let namespace = "Harklight.notification-fallback." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
+        defer { defaults.removePersistentDomain(forName: namespace); deleteEnrollmentRecord(service: namespace) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: namespace)
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = try XCTUnwrap(NativeNotificationLocator(notificationPayload())).request
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key,
+            originalPayload: try JSONValue.parse(Data(#"{"title":"Duplicated title"}"#.utf8))), .message)), context: context)
+        let live = try LivePresentationStore(store: domain, context: context)
+        let router = NativeNotificationRouter(defaults: defaults)
+        let app = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: namespace),
+            joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
+            initialState: .live(live), initialEnrollmentRecord: record, notificationRouter: router,
+            refreshOperation: { .unavailable })
+        let before = try persistence.load(identity: context.identity)
+        router.receive(try notificationPayload(), opened: true)
+        await app.handleNotification()
+        XCTAssertNil(app.notificationNavigation?.request)
+        XCTAssertNotNil(router.intent?.locator)
+        XCTAssertNotNil(app.notificationNavigationMessage)
+        XCTAssertEqual(try persistence.load(identity: context.identity), before)
+        for payload in [try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync"}}"#.utf8)),
+                        try notificationPayload(binding: UUID().uuidString), .null] {
+            router.receive(payload, opened: true)
+            await app.handleNotification()
+            XCTAssertNil(app.notificationNavigation?.request)
+            XCTAssertNil(live.selectedRequestKey)
+            XCTAssertNil(router.intent)
+            XCTAssertEqual(try persistence.load(identity: context.identity), before)
+        }
+    }
+
+    func testAuthorizedSenderDisplaySurvivesPersistenceRevisionAndTerminalProjection() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("display-person"), deviceID: ExactText("display-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let frame = Data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"build-agent","message_id":"notice","origin":"agent-origin","as":"message","sender_display":{"v":1,"sender_id":"build-agent","origin":"agent-origin","name":"Build assistant"},"message":{"title":"Build finished","body":"The actual message body.","sender_display":{"name":"Message content is not attribution"}}}"#.utf8)
+        let event = try RelayWire(profile: context).decodeEvent(frame)
+        guard case let .delivery(delivery, _) = event.body else { return XCTFail("Expected an ordinary delivery") }
+        let key = delivery.key
+        XCTAssertEqual(key.accountScope, identity.personID)
+        XCTAssertEqual(delivery.senderDisplay, SenderDisplay(senderID: key.senderID,
+            origin: ExactText("agent-origin"), name: ExactText("Build assistant")))
+        try store.apply(event, context: context)
+
+        let reopened = try AttentionDomainStore(context: context, persistence: persistence)
+        let live = try LivePresentationStore(store: reopened, context: context)
+        XCTAssertEqual(live.inboxRows.first?.sender, "Build assistant")
+        XCTAssertEqual(live.request(for: key)?.body, ExactText("The actual message body."))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try reopened.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("agent-session"), payload: delivery.originalPayload)), context: context)
+        let revision = ConversationBinding(request: key, revision: 2)
+        let updatedPayload = try JSONValue.parse(Data(#"{"title":"Updated question","body":"Current body."}"#.utf8))
+        let turn = ConversationTurn(id: ExactText("revision-2"), binding: revision, author: .agent,
+            sessionHandle: ExactText("agent-session"), text: ExactText("Updated question"), kind: .revision)
+        try reopened.applyConversation(ConversationEvent(sequence: 2, binding: revision,
+            fact: .revision(turn, payload: updatedPayload)), context: context)
+        let port = AttentionDomainPort(store: reopened)
+        let current = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        XCTAssertEqual(current.body, ExactText("Current body."))
+        XCTAssertEqual(current.senderAttribution, "Build assistant")
+        XCTAssertEqual(try port.inspectAnswerDraft(context: port.context, request: key, revision: 1)?.senderDisplay,
+                       delivery.senderDisplay)
+        try reopened.apply(RelayEvent(sequence: 2, body: .terminal(key, .cleared, nil)), context: context)
+        let terminal = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        XCTAssertEqual(terminal.lifecycleStatus, .cleared)
+        XCTAssertEqual(terminal.senderDisplay, delivery.senderDisplay)
+        XCTAssertTrue(try reopened.snapshot(context: context).outbox.isEmpty)
+        XCTAssertTrue(try reopened.snapshot(context: context).intents.isEmpty)
+    }
+
+    func testSenderAttributionUsesOnlyMatchingEnvelopeAndRetainsLegacyFallback() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("display-person"), deviceID: ExactText("display-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let wire = try RelayWire(profile: context)
+        let optionalFields = [
+            "",
+            #", "sender_display":{"v":1,"sender_id":"another-sender","origin":"agent-origin","name":"Other sender"}"#,
+            #", "sender_display":{"v":1,"sender_id":"build-agent","origin":"another-origin","name":"Other origin"}"#,
+            #", "sender_display":{"v":1,"sender_id":"build-agent","origin":"agent-origin","name":"   "}"#
+        ]
+        for field in optionalFields {
+            let frame = Data((#"{"v":1,"type":"delivery","seq":1,"sender_id":"build-agent","message_id":"legacy","origin":"agent-origin","as":"message","message":{"title":"Historical title","sender_display":{"v":1,"sender_id":"build-agent","origin":"agent-origin","name":"Content-only name"}}"# + field + "}").utf8)
+            let event = try wire.decodeEvent(frame)
+            guard case let .delivery(delivery, _) = event.body else { return XCTFail("Expected delivery") }
+            XCTAssertNil(delivery.senderDisplay)
+            let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+            try store.apply(event, context: context)
+            let live = try LivePresentationStore(store: store, context: context)
+            XCTAssertEqual(live.inboxRows.first?.sender, "Sender name unavailable · build-agent")
+        }
+        let originFrame = Data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"build-agent","message_id":"origin","origin":"display-device"}"#.utf8)
+        guard case .originReference = try wire.decodeEvent(originFrame).body else {
+            return XCTFail("Origin-device projection remains a content-free reference")
+        }
+    }
+
+    func testSenderDisplayEnrichesLegacyReplayWithoutChangingPendingAnswer() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("display-person"), deviceID: ExactText("display-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("build-agent"), messageID: ExactText("pending"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Reply needed"}"#.utf8))
+        // An older installation persisted no senderDisplay key at all.
+        let encoded = try JSONEncoder().encode(StoredRequest(key: key, originalPayload: payload))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "senderDisplay")
+        let legacy = try JSONDecoder().decode(StoredRequest.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.senderDisplay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        try store.apply(RelayEvent(sequence: 1, body: .delivery(legacy, .message)), context: context)
+        let live = try LivePresentationStore(store: store, context: context)
+        live.selectAction(ExactText("reply"), input: nil, for: key)
+        live.updateCompatibilityText("Keep this pending answer", action: ExactText("reply"), for: key)
+        _ = try live.submit(key)
+        let before = try store.snapshot(context: context)
+        let display = SenderDisplay(senderID: key.senderID, origin: ExactText("agent-origin"), name: ExactText("Build assistant"))
+        let replay = RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key,
+            originalPayload: payload, senderDisplay: display), .message))
+        try store.apply(replay, context: context)
+        let reopened = try AttentionDomainStore(context: context, persistence: persistence)
+        let after = try reopened.snapshot(context: context)
+        XCTAssertEqual(after.requests[key]?.senderDisplay, display)
+        XCTAssertEqual(after.requests[key]?.acceptanceOrder, before.requests[key]?.acceptanceOrder)
+        XCTAssertEqual(after.cursor, before.cursor)
+        XCTAssertEqual(after.outbox, before.outbox)
+        XCTAssertEqual(after.intents, before.intents)
+        XCTAssertEqual(after.drafts, before.drafts)
+        let restoredLive = try LivePresentationStore(store: reopened, context: context)
+        XCTAssertEqual(restoredLive.inboxRows.first?.sender, "Build assistant")
+    }
+
     func testOrdinaryInboxGroupsUnresolvedThenResolvedAndUsesDescendingAcceptanceOrder() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-order"), deviceID: ExactText("device-order"))

@@ -213,26 +213,50 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
     public var isTerminal: Bool { state != nil }
 }
 
+/// Presentation metadata from the authorized relay envelope, never message content
+/// or an authority for sending, answering, or selecting an account.
+public struct SenderDisplay: Equatable, Codable, Sendable {
+    public let senderID: ExactText
+    public let origin: ExactText
+    public let name: ExactText
+
+    public init(senderID: ExactText, origin: ExactText, name: ExactText) {
+        self.senderID = senderID
+        self.origin = origin
+        self.name = name
+    }
+}
+
 public struct StoredRequest: Equatable, Codable, Sendable {
     public let key: RequestKey
     public let originalPayload: JSONValue
+    public let senderDisplay: SenderDisplay?
     /// Native durable order assigned when C first accepts this item.
     public let acceptanceOrder: UInt64?
 
-    public init(key: RequestKey, originalPayload: JSONValue) {
+    public init(key: RequestKey, originalPayload: JSONValue, senderDisplay: SenderDisplay? = nil) {
         self.key = key
         self.originalPayload = originalPayload
+        self.senderDisplay = senderDisplay
         self.acceptanceOrder = nil
     }
 
-    init(key: RequestKey, originalPayload: JSONValue, acceptanceOrder: UInt64) {
+    init(key: RequestKey, originalPayload: JSONValue, senderDisplay: SenderDisplay?, acceptanceOrder: UInt64) {
         self.key = key
         self.originalPayload = originalPayload
+        self.senderDisplay = senderDisplay
         self.acceptanceOrder = acceptanceOrder
     }
 
     func assigningAcceptanceOrder(_ acceptanceOrder: UInt64) -> StoredRequest {
-        StoredRequest(key: key, originalPayload: originalPayload, acceptanceOrder: acceptanceOrder)
+        StoredRequest(key: key, originalPayload: originalPayload, senderDisplay: senderDisplay,
+                      acceptanceOrder: acceptanceOrder)
+    }
+
+    func retainingSenderDisplay(_ display: SenderDisplay?) -> StoredRequest {
+        guard senderDisplay == nil, let display else { return self }
+        let enriched = StoredRequest(key: key, originalPayload: originalPayload, senderDisplay: display)
+        return acceptanceOrder.map { enriched.assigningAcceptanceOrder($0) } ?? enriched
     }
 
     public var answerDescription: JSONValue? {

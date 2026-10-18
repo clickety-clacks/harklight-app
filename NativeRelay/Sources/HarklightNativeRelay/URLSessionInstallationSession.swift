@@ -431,7 +431,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     /// The APNs address is a separate device binding, never answer content.
     /// The caller durably owns the operation ID and revision across retries.
-    public func registerPush(address: String, operationID: UUID, revision: UInt64) async throws {
+    public func registerPush(address: String, operationID: UUID, revision: UInt64) async throws -> String {
         guard address.count == 64,
               address.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
               revision > 0, revision < UInt64(Int64.max) else {
@@ -446,13 +446,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 let value = try JSONValue.parse(try await receive())
                 switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
                 case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-push":
-                    guard case let .number(number)? = value.uniqueValue(named: "revision"),
-                          UInt64(number.lexeme) == revision,
-                          let binding = value.uniqueValue(named: "binding_id")?.stringValue?.rawValue,
-                          UUID(uuidString: binding) != nil else {
-                        throw InstallationTransportError.unexpectedServerFrame
-                    }
-                    return
+                    return try PushBindingReply.registration(value, revision: revision)
                 case "delivery", "lifecycle", "conversation":
                     continue
                 case "error":
@@ -466,6 +460,26 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             diagnose(.notifications, .pushRegistration,
                      NativeDiagnosticCauseCode.failureTransition(for: error),
                      error: error, operationID: operationID)
+            close()
+            throw error
+        }
+    }
+
+    /// Recover legacy accepted registrations only on this authenticated session.
+    public func currentPushBindingID(revision: UInt64) async throws -> String? {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
+        do {
+            try await send(Data("{\"v\":1,\"type\":\"push_status\",\"ref\":\"native-push-status\"}\n".utf8))
+            while true {
+                let value = try JSONValue.parse(try await receive())
+                switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+                case "delivery", "lifecycle", "conversation": continue
+                case "error": throw InstallationTransportError.serverRejected
+                default: return try PushBindingReply.status(value, revision: revision)
+                }
+            }
+        } catch {
             close()
             throw error
         }

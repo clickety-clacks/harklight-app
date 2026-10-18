@@ -45,13 +45,14 @@ struct LiveContentView: View {
             settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
                                                   archiveDeparture: archiveDeparture,
                                                   connectionStatus: connectionStatus) },
-            warnings: [store.observationError, store.notificationWarning,
+            warnings: [launch?.notificationNavigationMessage, store.observationError, store.notificationWarning,
                        store.pushRegistrationWarning, launch?.archiveCatalogWarning,
                        launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
                 .compactMap { $0 },
             conversationStore: store,
             fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
-            showsLocalExamples: !store.isReadOnly)
+            showsLocalExamples: !store.isReadOnly,
+            notificationNavigation: launch?.notificationNavigation)
         .alert("Connection needs attention", isPresented: failureAlertPresented,
                presenting: diagnostic) { diagnostic in
             Button("Copy details") {
@@ -278,8 +279,8 @@ struct LiveRequestDetail: View {
     var body: some View {
         MessageCardSurface(context: context) {
             VStack(alignment: .leading, spacing: 22) {
-                MessageHeading(sender: request.key.senderID.rawValue,
-                               initials: String(request.key.senderID.rawValue.prefix(2)).uppercased(),
+                MessageHeading(sender: request.senderAttribution,
+                               initials: String((request.senderDisplay?.name.rawValue ?? request.key.senderID.rawValue).prefix(2)).uppercased(),
                                title: request.title?.rawValue ?? request.key.senderID.rawValue)
                 if let thread = store.conversation(for: request.key), thread.currentRevision > 1 {
                     Text(store.hasAcceptedUpdate(for: request.key) ? "Updated · version \(thread.currentRevision)" : "Question version \(thread.currentRevision)")
@@ -385,7 +386,7 @@ struct LiveRequestDetail: View {
                     .popover(isPresented: $chatPresented, arrowEdge: .bottom) {
                         NavigationStack {
                             ConversationPanel(store: store, key: request.key,
-                                sender: request.key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                                sender: request.senderAttribution, title: request.title?.rawValue ?? "")
                                 .toolbar {
                                     ToolbarItem(placement: .cancellationAction) {
                                         Button("Close", systemImage: "xmark") { chatPresented = false }.labelStyle(.iconOnly)
