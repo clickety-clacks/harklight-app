@@ -262,13 +262,6 @@ final class PrototypeStore {
         persistDraft(session.draft, for: key)
     }
 
-    func stepPoint(horizontal: Bool, by amount: Int, for key: RequestKey, inputID: ExactText) {
-        guard let point = sessions[key]?.draft.inputs[inputID]?.effectivePoint else { return }
-        let changed = horizontal ? PointValue(x: min(1000, max(0, point.x + amount)), y: point.y)
-                                 : PointValue(x: point.x, y: min(1000, max(0, point.y + amount)))
-        setPoint(changed, for: key, inputID: inputID)
-    }
-
     func cancelDraft(for key: RequestKey) {
         guard let session = sessions[key], case .open = session.lifecycle,
               let port, let selector = try? boundSelector(for: key) else { return }

@@ -34,10 +34,14 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         selectFacilitiesRequest(in: app)
         XCTAssertTrue(app.staticTexts["Select the location on the floor plan and add a note."]
             .waitForExistence(timeout: 5))
+        let lifecycle = app.staticTexts["request-lifecycle-status"]
+        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5))
+        XCTAssertEqual(lifecycle.label, "Open",
+                       "A fresh fixture request starts open, before a local answer is submitted.")
         XCTAssertFalse(app.staticTexts["fixture:Facilities"].exists,
                        "Raw fixture identity stays in request details, not the task framing.")
-        XCTAssertTrue(app.buttons["fixture-outcome-menu"].waitForExistence(timeout: 5),
-                      "The local outcome simulation remains available on the ordinary pending fixture card.")
+        XCTAssertFalse(app.buttons["fixture-outcome-menu"].exists,
+                        "Fixture outcomes are available only after an answer enters Pending.")
 
         setFacilitiesPoint(in: app, x: 500, y: 500)
         let details = app.descendants(matching: .any)["request-details-disclosure"]
@@ -63,6 +67,11 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
         XCTAssertTrue(finish.isEnabled, "A valid point and note should enable the shared answer action.")
         finish.tap()
+        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5))
+        XCTAssertEqual(lifecycle.label, "Pending",
+                       "A local submission remains pending until its fixture outcome is explicitly simulated.")
+        XCTAssertTrue(app.buttons["fixture-outcome-menu"].waitForExistence(timeout: 5),
+                      "The local outcome simulation appears on the ordinary pending fixture card.")
         assertExactFacilitiesReceipt(in: app, y: 500)
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
