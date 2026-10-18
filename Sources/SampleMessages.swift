@@ -52,8 +52,6 @@ struct SampleMessage: Identifiable, Equatable {
     let revised: Bool
     let chatUnread: Bool
     let hasChat: Bool
-    // Prescribed fixture emphasis, never computed from deadlines or live requests.
-    let emphasis: Int
     // Stable per fixture identity so repeated registration keeps the original
     // payload instead of looking like an update to an existing request.
     let fixtureCreatedAtMilliseconds: Int
@@ -359,7 +357,6 @@ final class SampleLibrary {
                 title: request.title?.rawValue ?? "", body: request.body?.rawValue ?? "",
                 options: metadata.options, deadline: metadata.deadline, missed: metadata.missed,
                 revised: metadata.revised, chatUnread: metadata.chatUnread, hasChat: metadata.hasChat,
-                emphasis: metadata.emphasis,
                 fixtureCreatedAtMilliseconds: metadata.fixtureCreatedAtMilliseconds)
         }
         guard !reorderedIDs.isEmpty else { return projected }
@@ -426,7 +423,6 @@ enum SampleCatalog {
                                  deadline: index.isMultiple(of: 3) ? (variation == 1 ? "Due yesterday" : "By 5 PM") : nil,
                                  missed: variation == 1 && index.isMultiple(of: 3), revised: variation == 2,
                                  chatUnread: variation == 0 && index.isMultiple(of: 2), hasChat: variation != 1,
-                                 emphasis: variation == 0 ? max(0, 3 - index / 3) : (variation == 1 ? 1 : 0),
                                  fixtureCreatedAtMilliseconds: 1_790_000_000_000
                                     + (variation * SampleKind.allCases.count + index) * 60_000)
         }

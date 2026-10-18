@@ -8,15 +8,18 @@ struct LiveContentView: View {
     let samples: SampleLibrary
     let launch: NativeAppLaunch?
     let archiveDeparture: NativeAccountDeparture?
+    let fixtureStore: PrototypeStore?
 
     init(store: LivePresentationStore,
          samples: SampleLibrary,
          launch: NativeAppLaunch? = nil,
-         archiveDeparture: NativeAccountDeparture? = nil) {
+         archiveDeparture: NativeAccountDeparture? = nil,
+         fixtureStore: PrototypeStore? = nil) {
         self.store = store
         self.samples = samples
         self.launch = launch
         self.archiveDeparture = archiveDeparture
+        self.fixtureStore = fixtureStore
     }
 
     var body: some View {
@@ -33,40 +36,59 @@ struct LiveContentView: View {
                 guard !isPresented, let launch, let failureKey else { return }
                 launch.dismissForegroundConnectFailure(failureKey)
             })
-        HarklightInbox(
-            requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
-            markSeenRequest: { store.submitFromUser($0, explicitCompatibilityAction: ExactText("seen")) },
-            requestDetail: { key, context in
-                if let request = store.request(for: key) {
-                    LiveRequestDetail(request: request, store: store, context: context)
-                } else {
-                    ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
+        if let loadError = fixtureStore?.loadError {
+            ContentUnavailableView(loadError, systemImage: "exclamationmark.triangle")
+        } else {
+            HarklightInbox(
+                requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
+                markSeenRequest: { markSeen($0) },
+                requestDetail: { key, context in
+                    if let request = store.request(for: key) {
+                        LiveRequestDetail(request: request, store: store, context: context,
+                                          fixtureStore: fixtureStore)
+                    } else {
+                        ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
+                    }
+                },
+                settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
+                                                      archiveDeparture: archiveDeparture,
+                                                      connectionStatus: connectionStatus) },
+                warnings: [store.observationError, store.notificationWarning,
+                           store.pushRegistrationWarning, launch?.archiveCatalogWarning,
+                           launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage,
+                           fixtureStore?.persistenceError]
+                    .compactMap { $0 },
+                conversationStore: store,
+                showsLocalExamples: !store.isReadOnly)
+            .alert("Connection needs attention", isPresented: failureAlertPresented,
+                   presenting: diagnostic) { diagnostic in
+                Button("Copy details") {
+                    UIPasteboard.general.string = diagnostic.shareText
+                    if let launch, let failureKey {
+                        launch.dismissForegroundConnectFailure(failureKey)
+                    }
                 }
-            },
-            settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
-                                                  archiveDeparture: archiveDeparture,
-                                                  connectionStatus: connectionStatus) },
-            warnings: [store.observationError, store.notificationWarning,
-                       store.pushRegistrationWarning, launch?.archiveCatalogWarning,
-                       launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage]
-                .compactMap { $0 },
-            conversationStore: store,
-            showsLocalExamples: !store.isReadOnly)
-        .alert("Connection needs attention", isPresented: failureAlertPresented,
-               presenting: diagnostic) { diagnostic in
-            Button("Copy details") {
-                UIPasteboard.general.string = diagnostic.shareText
-                if let launch, let failureKey {
-                    launch.dismissForegroundConnectFailure(failureKey)
+                Button("Dismiss", role: .cancel) {
+                    if let launch, let failureKey {
+                        launch.dismissForegroundConnectFailure(failureKey)
+                    }
                 }
+            } message: { diagnostic in
+                Text(diagnostic.progress.message)
             }
-            Button("Dismiss", role: .cancel) {
-                if let launch, let failureKey {
-                    launch.dismissForegroundConnectFailure(failureKey)
-                }
-            }
-        } message: { diagnostic in
-            Text(diagnostic.progress.message)
+        }
+        .onChange(of: store.presentation.revision) { _, _ in
+            fixtureStore?.refreshFromDurableStore()
+        }
+    }
+
+    private func markSeen(_ key: RequestKey) {
+        if let fixtureStore {
+            guard fixtureStore.sendSelectedAnswer(for: key,
+                                                   explicitCompatibilityAction: ExactText("seen")) else { return }
+            try? store.refreshFromDurableStore()
+        } else {
+            store.submitFromUser(key, explicitCompatibilityAction: ExactText("seen"))
         }
     }
 }
@@ -304,6 +326,7 @@ struct LiveRequestDetail: View {
     let store: LivePresentationStore
     var context: InboxCardContext = .standalone
     var localExample: SampleResponse? = nil
+    var fixtureStore: PrototypeStore? = nil
     @State private var deferred = false
     @State private var chatPresented = false
     @State private var enlargedPicture: SampleOption?
@@ -316,9 +339,16 @@ struct LiveRequestDetail: View {
         return !canAnswer
     }
 
-    private var localSeenAction: (() -> Void)? {
-        guard let localExample else { return nil }
-        return { localExample.finishLocally() }
+    private var localSeenAction: ((ExactText) -> Void)? {
+        if let localExample {
+            return { _ in localExample.finishLocally() }
+        }
+        guard let fixtureStore else { return nil }
+        return { action in
+            guard fixtureStore.sendSelectedAnswer(for: request.key,
+                                                   explicitCompatibilityAction: action) else { return }
+            try? store.refreshFromDurableStore()
+        }
     }
 
     var canAnswer: Bool {
@@ -424,10 +454,23 @@ struct LiveRequestDetail: View {
                     Text("This request uses an unsupported answer format.")
                         .foregroundStyle(.secondary)
                 }
-                if localExample == nil && request.lifecycleStatus == .pending {
+                if localExample == nil && fixtureStore == nil && request.lifecycleStatus == .pending {
                     Button("Retry delivery") { store.retryPendingDelivery() }
                         .buttonStyle(.bordered)
                         .disabled(store.isReadOnly)
+                }
+                if let fixtureStore, request.lifecycleStatus == .pending {
+                    Menu("Simulate fixture outcome", systemImage: "testtube.2") {
+                        ForEach([DemoTerminalScenario.ownOperationAccepted,
+                                 .answerOutcomeUnconfirmed]) { scenario in
+                            Button(scenario.simulationTitle) {
+                                guard fixtureStore.simulateTerminal(for: request.key,
+                                                                    scenario: scenario) else { return }
+                                try? store.refreshFromDurableStore()
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("fixture-outcome-menu")
                 }
                 if let actionError = store.actionError {
                     Label(actionError, systemImage: "exclamationmark.triangle")
@@ -466,8 +509,16 @@ struct LiveRequestDetail: View {
                     .disabled(!localExample.canFinishLocally || localExample.finished)
                     .accessibilityIdentifier("sample-finish")
                 } else if request.informationalSeenStatus == nil {
-                    Button(submitLabel, systemImage: "checkmark") { store.submitFromUser(request.key) }
-                        .labelStyle(.iconOnly).disabled(!canAnswer)
+                    Button(submitLabel, systemImage: "checkmark") {
+                        if let fixtureStore {
+                            guard fixtureStore.sendSelectedAnswer(for: request.key) else { return }
+                            try? store.refreshFromDurableStore()
+                        } else {
+                            store.submitFromUser(request.key)
+                        }
+                    }
+                        .labelStyle(.iconOnly)
+                        .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
             }
@@ -627,6 +678,8 @@ private struct LiveProjectedInputView: View {
     let readOnly: Bool
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
+    @State private var pointGestureCapture = PointGestureCapture()
+    @GestureState private var pointGestureActive = false
 
     private var draft: InputDraft? {
         readOnly ? request.draft.inputs[input.id] : store.request(for: request.key)?.draft.inputs[input.id]
@@ -707,16 +760,52 @@ private struct LiveProjectedInputView: View {
                         Text(input.label.rawValue).font(.headline)
                         SenderIllustrationCanvas(illustration: illustration,
                                                  point: draft?.effectivePoint)
-                        if let point = draft?.effectivePoint {
-                            Text("Horizontal \(point.x), vertical \(point.y)")
-                            Stepper("Horizontal position", value: pointBinding(horizontal: true), in: 0...1000)
-                                .disabled(readOnly)
-                            Stepper("Vertical position", value: pointBinding(horizontal: false), in: 0...1000)
-                                .disabled(readOnly)
-                        } else if !readOnly {
-                            Button("Set point") {
+                            .overlay {
+                                GeometryReader { geometry in
+                                    let bounds = CGRect(origin: .zero, size: geometry.size)
+                                    Color.clear
+                                        .contentShape(Rectangle())
+                                        .gesture(DragGesture(minimumDistance: 0)
+                                            .updating($pointGestureActive) { _, active, _ in
+                                                active = true
+                                            }
+                                            .onChanged { value in
+                                                guard !readOnly else { return }
+                                                var capture = pointGestureCapture
+                                                _ = capture.update(at: value.location, in: bounds)
+                                                pointGestureCapture = capture
+                                            }
+                                            .onEnded { value in
+                                                defer { pointGestureCapture.gestureDidEnd() }
+                                                guard !readOnly else { return }
+                                                var capture = pointGestureCapture
+                                                if let point = capture.finish(at: value.location, in: bounds) {
+                                                    store.setPoint(point, input: input.id, for: request.key)
+                                                }
+                                                pointGestureCapture = capture
+                                            }, isEnabled: !readOnly)
+                                        .onChange(of: geometry.size) { _, size in
+                                            var capture = pointGestureCapture
+                                            capture.cancelIfBoundsChanged(to: CGRect(origin: .zero, size: size))
+                                            pointGestureCapture = capture
+                                        }
+                                        .onChange(of: pointGestureActive) { wasActive, isActive in
+                                            guard wasActive && !isActive else { return }
+                                            var capture = pointGestureCapture
+                                            capture.gestureDidEnd()
+                                            pointGestureCapture = capture
+                                        }
+                                }
+                            }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(illustration.label.rawValue)
+                            .accessibilityHint(readOnly ? "Read-only illustration." : "Tap or drag to select a point.")
+                            .accessibilityAction(named: "Set point at center") {
+                                guard !readOnly else { return }
                                 store.setPoint(PointValue(x: 500, y: 500), input: input.id, for: request.key)
                             }
+                        if let point = draft?.effectivePoint {
+                            Text("Horizontal \(point.x), vertical \(point.y)")
                         }
                     }
                 }
@@ -761,21 +850,6 @@ private struct LiveProjectedInputView: View {
         }
     }
 
-    private func pointBinding(horizontal: Bool) -> Binding<Int> {
-        Binding(
-            get: {
-                let point = draft?.effectivePoint
-                return horizontal ? (point?.x ?? 500) : (point?.y ?? 500)
-            },
-            set: { value in
-                let current = store.request(for: request.key)?.draft.inputs[input.id]?.effectivePoint
-                    ?? PointValue(x: 500, y: 500)
-                store.setPoint(PointValue(x: horizontal ? value : current.x,
-                                          y: horizontal ? current.y : value),
-                               input: input.id, for: request.key)
-            }
-        )
-    }
 }
 
 @MainActor
@@ -785,7 +859,7 @@ private struct LiveCompatibilityActions: View {
     let store: LivePresentationStore
     let readOnly: Bool
     var localExample: SampleResponse? = nil
-    var onSeen: (() -> Void)? = nil
+    var onSeen: ((ExactText) -> Void)? = nil
 
     private var selected: ExactText? {
         readOnly ? request.draft.compatibility.selectedActionID : store.request(for: request.key)?.draft.compatibility.selectedActionID
@@ -799,7 +873,7 @@ private struct LiveCompatibilityActions: View {
                 if let action = actions.first {
                     Button {
                         if let onSeen {
-                            onSeen()
+                            onSeen(action.id)
                         } else {
                             store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
                         }

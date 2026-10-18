@@ -179,11 +179,34 @@ struct SampleAnnotationEditor: View {
                 }
             }
         }
-        .sheet(isPresented: $enlarged) { SamplePictureViewer(initialPicture: SampleCatalog.pictures[1]) }
+        .sheet(isPresented: $enlarged) {
+            SampleIllustrationViewer(illustration: illustration, point: point)
+        }
     }
 
     private func normalized(_ point: CGPoint, in size: CGSize) -> SampleMark {
         SampleMark(x: min(1, max(0, point.x / max(1, size.width))), y: min(1, max(0, point.y / max(1, size.height))))
+    }
+}
+
+private struct SampleIllustrationViewer: View {
+    let illustration: SenderIllustration
+    let point: PointValue?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            SenderIllustrationCanvas(illustration: illustration, point: point)
+                .padding()
+                .navigationTitle(illustration.label.rawValue)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done", systemImage: "checkmark") { dismiss() }
+                            .labelStyle(.iconOnly)
+                    }
+                }
+        }
     }
 }
 
