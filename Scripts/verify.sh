@@ -68,6 +68,10 @@ case "$ACTION" in
         set --
         if [ "$ACTION" = test-guided-tls ]; then
             set -- -only-testing:AttentionClientDuoPrototypeTests/NativeGuidedTLSTests
+        elif [ -n "${HARKLIGHT_ONLY_TESTING:-}" ]; then
+            for test_id in $HARKLIGHT_ONLY_TESTING; do
+                set -- "$@" "-only-testing:$test_id"
+            done
         fi
         exec xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" \
             -derivedDataPath "$DERIVED_DATA" -collect-test-diagnostics never CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- "$@" test
