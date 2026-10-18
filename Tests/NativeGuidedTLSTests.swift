@@ -119,13 +119,16 @@ final class NativeGuidedTLSTests: XCTestCase {
         other = record
         other.personID = "another-person"
         XCTAssertNil(locator.profile(in: [other]))
-        other = record
-        other.deviceID = "replacement-device"
-        XCTAssertNil(locator.profile(in: [other]))
+        let wrongDevice = try JSONValue.parse(Data(notificationPayload().canonicalJSON
+            .replacingOccurrences(of: "saved-device-id", with: "replacement-device").utf8))
+        XCTAssertNil(NativeNotificationLocator(wrongDevice)?.profile(in: [record]))
         XCTAssertNil(locator.profile(in: []), "Removed profiles and archives are not candidates")
         XCTAssertNil(NativeNotificationLocator(try notificationPayload(sequence: "1.5")))
         XCTAssertNil(NativeNotificationLocator(try notificationPayload(sequence: "true")))
         XCTAssertNil(NativeNotificationLocator(try notificationPayload(sequence: "0")))
+        let unsupported = try JSONValue.parse(Data(notificationPayload().canonicalJSON
+            .replacingOccurrences(of: "\"v\":1", with: "\"v\":2").utf8))
+        XCTAssertNil(NativeNotificationLocator(unsupported))
         XCTAssertEqual(NativeNotificationLocator(try notificationPayload(sequence: "9007199254740993"))?.acceptanceSequence,
                        9_007_199_254_740_993)
     }
@@ -203,6 +206,13 @@ final class NativeGuidedTLSTests: XCTestCase {
         let replaced = ProfileContext(identity: context.identity, transportMode: .relay)
         XCTAssertNil(cold.resolve(records: [record], context: replaced, requests: requests, synchronized: true))
         XCTAssertNil(cold.intent?.locator, "A changed live generation invalidates in-flight navigation")
+        first.receive(try notificationPayload(), opened: true)
+        _ = first.resolve(records: [record], context: context, requests: [], synchronized: false)
+        let afterRestart = NativeNotificationRouter(defaults: defaults)
+        var replacedRecord = record
+        replacedRecord.notificationProfileGeneration = UUID()
+        XCTAssertNil(afterRestart.resolve(records: [replacedRecord], context: context, requests: requests, synchronized: true))
+        XCTAssertNil(afterRestart.intent?.locator, "A replacement saved generation cannot inherit cold intent")
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         XCTAssertTrue(try domain.snapshot(context: context).intents.isEmpty)
     }
@@ -226,6 +236,12 @@ final class NativeGuidedTLSTests: XCTestCase {
             initialState: .live(live), initialEnrollmentRecord: record, notificationRouter: router,
             refreshOperation: { .unavailable })
         let before = try persistence.load(identity: context.identity)
+        router.receive(try notificationPayload(), opened: true)
+        await app.handleNotification()
+        XCTAssertNil(app.notificationNavigation?.request)
+        XCTAssertNotNil(router.intent?.locator)
+        XCTAssertNotNil(app.notificationNavigationMessage)
+        XCTAssertEqual(try persistence.load(identity: context.identity), before)
         for payload in [try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync"}}"#.utf8)),
                         try notificationPayload(binding: UUID().uuidString), .null] {
             router.receive(payload, opened: true)
