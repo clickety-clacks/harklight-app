@@ -331,6 +331,7 @@ struct LiveRequestDetail: View {
     var context: InboxCardContext = .standalone
     var localExample: SampleResponse? = nil
     var fixtureStore: PrototypeStore? = nil
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var deferred = false
     @State private var chatPresented = false
     @State private var enlargedPicture: SampleOption?
@@ -546,25 +547,18 @@ struct LiveRequestDetail: View {
                 .labelStyle(.iconOnly)
                 .disabled(store.isReadOnly || store.isRetracted(request.key) || localExample?.finished == true)
                 Spacer()
-                Button("Chat", systemImage: "bubble.left.and.bubble.right") {
-                    localExample?.chatRead = true
-                    if context.canInlineChat { context.openChat?() } else { chatPresented = true }
-                }
-                    .labelStyle(.iconOnly)
-                    .popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                        NavigationStack {
-                            ConversationPanel(store: store, key: request.key,
-                                sender: request.key.senderID.rawValue, title: request.title?.rawValue ?? "")
-                                .toolbar {
-                                    ToolbarItem(placement: .cancellationAction) {
-                                        Button("Close", systemImage: "xmark") { chatPresented = false }.labelStyle(.iconOnly)
-                                    }
-                                }
-                        }
-                        .frame(idealWidth: 380, idealHeight: 560)
-                        .presentationCompactAdaptation(.sheet)
-                        .presentationDetents([.medium, .large])
+                if context.canInlineChat {
+                    chatButton
+                } else if horizontalSizeClass == .compact {
+                    chatButton.sheet(isPresented: $chatPresented) {
+                        conversationPanel
+                            .presentationDetents([.medium, .large])
                     }
+                } else {
+                    chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
+                        conversationPanel.frame(idealWidth: 380, idealHeight: 560)
+                    }
+                }
             }
         }
         .sheet(item: $enlargedPicture) { picture in
@@ -572,6 +566,26 @@ struct LiveRequestDetail: View {
         }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
+        }
+    }
+
+    private var chatButton: some View {
+        Button("Chat", systemImage: "bubble.left.and.bubble.right") {
+            localExample?.chatRead = true
+            if context.canInlineChat { context.openChat?() } else { chatPresented = true }
+        }
+        .labelStyle(.iconOnly)
+    }
+
+    private var conversationPanel: some View {
+        NavigationStack {
+            ConversationPanel(store: store, key: request.key,
+                sender: request.key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close", systemImage: "xmark") { chatPresented = false }.labelStyle(.iconOnly)
+                    }
+                }
         }
     }
 
