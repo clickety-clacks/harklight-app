@@ -169,15 +169,19 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func navigate(to next: InboxSelection?) {
-        let previous = selection
-        guard previous != next else { return }
+        guard selection != next else { return }
+        selection = next
+    }
+
+    private func selectionDidChange(from previous: InboxSelection?, to next: InboxSelection?) {
         let oldRequest: RequestKey? = if case let .request(key) = previous { key } else { nil }
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
+
         let oldExample: RequestKey? = if case let .sample(id) = previous { samples.responses[id]?.key } else { nil }
         let newExample: RequestKey? = if case let .sample(id) = next { samples.responses[id]?.key } else { nil }
         samples.fixture?.viewModel.navigateMessage(from: oldExample, to: newExample)
-        selection = next
+
         if let next { lastViewedSelection = next }
         if let newRequest { selectRequest(newRequest) }
         if case let .sample(id) = next { samples.select(id) }
@@ -297,8 +301,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .navigationSplitViewStyle(.balanced)
+            .onChange(of: selection) { previous, next in
+                // All detail departures flow through the selected identity, even when
+                // SwiftUI restores sample selection while the layout adapts.
+                selectionDidChange(from: previous, to: next)
+            }
             .onChange(of: samples.selectedID) { _, id in
-                if showsLocalExamples, let id, case .sample = selection { selection = .sample(id) }
+                guard showsLocalExamples, case .sample = selection else { return }
+                navigate(to: id.map { .sample($0) })
             }
             .onChange(of: showsLocalExamples) { _, visible in
                 if !visible, case .sample = selection {

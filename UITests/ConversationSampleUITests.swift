@@ -131,9 +131,13 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(other.waitForExistence(timeout: 5))
         reveal(other, in: app.scrollViews.firstMatch, app: app)
         other.tap()
+        XCTAssertTrue(app.staticTexts["Review the studio welcome text"].waitForExistence(timeout: 5),
+                      "Selecting another row must change the detail identity before cleanup is assessed")
         showInbox(app)
         reveal(row, in: app.scrollViews.firstMatch, app: app)
         row.tap()
+        XCTAssertTrue(app.staticTexts["Review the library welcome text"].waitForExistence(timeout: 5),
+                      "Returning to the original row must restore its exact detail identity")
         app.buttons["Chat"].tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5))
