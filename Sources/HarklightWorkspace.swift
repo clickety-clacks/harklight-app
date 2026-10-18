@@ -195,9 +195,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
 
-        let oldSampleID: String? = if case let .sample(id) = previous { id }
-            else if previous == nil { samples.selectedID }
-            else { nil }
+        // The sample library retains the selected identity across adaptive
+        // split-view reconstruction, while the view's selection can briefly
+        // lag that identity. Use the retained sample as the cleanup departure.
+        let oldSampleID = samples.selectedID
         let newSampleID: String? = if case let .sample(id) = next { id } else { nil }
 
         if let next { lastViewedSelection = next }
