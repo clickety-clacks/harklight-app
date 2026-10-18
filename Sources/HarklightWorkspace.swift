@@ -186,11 +186,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
 
+        let oldSampleID: String? = if case let .sample(id) = previous { id }
+            else if previous == nil { samples.selectedID }
+            else { nil }
         let newSampleID: String? = if case let .sample(id) = next { id } else { nil }
 
         if let next { lastViewedSelection = next }
         if let newRequest { selectRequest(newRequest) }
-        samples.select(newSampleID)
+        samples.select(newSampleID, departingFrom: oldSampleID)
     }
 
     private func markSeen(_ id: InboxSelection) {
