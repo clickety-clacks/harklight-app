@@ -10,7 +10,7 @@ public enum RelayWireError: Error, Equatable {
 
 /// Decode the server's authenticated projection without re-encoding sender JSON.
 /// The trusted profile, never a wire field, supplies the person/account scope.
-public struct RelayWire {
+public struct RelayWire: Sendable {
     public let profile: ProfileContext
 
     public init(profile: ProfileContext) throws {
