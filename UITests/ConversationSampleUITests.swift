@@ -130,7 +130,7 @@ final class ConversationSampleUITests: XCTestCase {
         showInbox(app)
         let other = app.buttons["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
-        reveal(other, in: app.scrollViews.firstMatch, app: app)
+        guard reveal(other, in: app.scrollViews.firstMatch, app: app) else { return }
         other.tap()
         // In a regular-width split view the sidebar rows expose these titles too,
         // so only the detail card can show that the selection changed.
@@ -139,7 +139,7 @@ final class ConversationSampleUITests: XCTestCase {
         recordDiagnostics("after-departure", app)
         XCTAssertTrue(departed, "Selecting another row must change the detail identity before cleanup is assessed")
         showInbox(app)
-        reveal(row, in: app.scrollViews.firstMatch, app: app)
+        guard reveal(row, in: app.scrollViews.firstMatch, app: app) else { return }
         row.tap()
         let returned = detail.staticTexts["Review the library welcome text"].waitForExistence(timeout: 5)
         recordDiagnostics("after-return", app)
@@ -278,17 +278,27 @@ final class ConversationSampleUITests: XCTestCase {
                       app.debugDescription)
     }
 
-    private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) {
-        XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
-        for _ in 0..<8 {
-            // A row partly under the bottom search controls can be hittable while its
-            // tap point lands on them, so require the whole row inside the visible list.
+    /// Scrolls until the whole row is inside the visible list. Returns false after
+    /// a recorded failure so the caller does not tap a row the controls cover.
+    private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
+        guard element.waitForExistence(timeout: 5) else {
+            XCTFail("Row does not exist: \(app.debugDescription)")
+            return false
+        }
+        // A row partly under the bottom search controls can be hittable while its
+        // tap point lands on them, so require the whole row inside the visible list.
+        func unobscured() -> Bool {
             let search = app.textFields["inbox-search-field"]
             let bottom = search.exists ? search.frame.minY : app.windows.firstMatch.frame.maxY
             let frame = element.frame
-            if element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom { return }
-            if frame.midY < scrollView.frame.midY { scrollView.swipeDown() } else { scrollView.swipeUp() }
+            return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
         }
-        XCTAssertTrue(element.isHittable, app.debugDescription)
+        for _ in 0..<8 {
+            if unobscured() { return true }
+            if element.frame.midY < scrollView.frame.midY { scrollView.swipeDown() } else { scrollView.swipeUp() }
+        }
+        if unobscured() { return true }
+        XCTFail("Row stayed outside the unobscured list after scrolling: \(app.debugDescription)")
+        return false
     }
 }

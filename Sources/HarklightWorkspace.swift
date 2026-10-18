@@ -488,6 +488,14 @@ struct InboxList: View {
         didRestoreLastViewed()
     }
 
+    /// When a filter shrinks the list while it is scrolled down, the lazy stack
+    /// can keep its old visible range and draw none of the matching rows, so a
+    /// filter change starts the list again at its first row.
+    private func showFirstRow(using proxy: ScrollViewProxy) {
+        guard let first = filteredRows.first else { return }
+        proxy.scrollTo(first.id, anchor: .top)
+    }
+
     private func openSettings() {
         searchFocused = false
         showSettings()
@@ -509,10 +517,7 @@ struct InboxList: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // Eager on purpose: when a search shrinks the list while it is
-                // scrolled down, a lazy stack can keep its old visible range and
-                // draw none of the matching rows.
-                VStack(spacing: 1) {
+                LazyVStack(spacing: 1) {
                     ForEach(filteredRows) { row in
                         Button {
                             searchFocused = false
@@ -557,7 +562,10 @@ struct InboxList: View {
                 if shouldRestore { restoreLastViewed(using: proxy) }
             }
             .onChange(of: search) { _, _ in
-                if restoreLastViewed { restoreLastViewed(using: proxy) }
+                if restoreLastViewed { restoreLastViewed(using: proxy) } else { showFirstRow(using: proxy) }
+            }
+            .onChange(of: selectedTab) { _, _ in
+                if !restoreLastViewed { showFirstRow(using: proxy) }
             }
             .toolbar {
                 ToolbarItem(placement: .principal) { HarklightBrand() }
