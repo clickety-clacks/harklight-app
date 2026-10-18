@@ -666,6 +666,6 @@ public actor NativeRelayCore {
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
         }
-        _ = try store.snapshot(context: context)
+        try store.validateContext(context: context)
     }
 }

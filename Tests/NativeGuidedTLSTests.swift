@@ -1343,10 +1343,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let lateProgressTransportID = UUID()
         lateProgressDeadline.beginSession(transportAttemptID: lateProgressTransportID)
         let lateProgressStarted = AsyncTestSignal()
+        let releaseLateProgressOperation = AsyncTestSignal()
         let lateProgressRun = Task { @MainActor in
             await lateProgressDeadline.run(deadline: .seconds(2), operation: {
                 await lateProgressStarted.signal()
-                try? await Task.sleep(for: .milliseconds(20))
+                await releaseLateProgressOperation.wait()
                 return false
             }, onTimeout: {}, onProgress: { _ in })
         }
@@ -1356,6 +1357,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             relayRefreshConfirmed: false, generationMatches: true,
             profileMatches: true, relayContextMatches: false)
         lateProgressDeadline.observe(.postAckDrainFinished(.failed), transportAttemptID: lateProgressTransportID)
+        await releaseLateProgressOperation.signal()
         let lateProgressFailure = await lateProgressRun.value
         XCTAssertEqual(lateProgressFailure.failureClass,
                        .urlSession(code: URLError.networkConnectionLost.rawValue),

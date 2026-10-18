@@ -877,6 +877,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       conversationThreads: state.conversation?.threads ?? [:])
     }
 
+    /// Checks that a caller still owns the active profile without materializing
+    /// the retained request, draft, fixture, conversation, or outbox projections.
+    public func validateContext(context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+    }
+
     /// Returns only accepted original operations whose exact terminal sequence
     /// has not yet been observed. The store builds this small index at load and
     /// updates it with the same durable mutations that accept or replay events.
