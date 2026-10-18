@@ -916,6 +916,52 @@ final class NativeRelayLifecycle {
         return await refreshFlights.coalesced()
     }
 
+    /// The terminal event batch used by the foreground lifecycle and its
+    /// focused behavior test. Keeping the mapping here makes the emitted
+    /// boundary and validation facts testable without constructing journal
+    /// events by hand.
+    static func foregroundTerminalDiagnosticEvents(
+        progress: NativeForegroundConnectProgress,
+        confirmed: Bool,
+        timedOut: Bool = false,
+        fallbackTransportAttemptID: UUID? = nil,
+        generationMatches: Bool,
+        profileMatches: Bool,
+        relayContextMatches: Bool
+    ) -> [NativeClientDiagnosticEvent] {
+        let attemptID = progress.attemptID
+        let transportAttemptID = progress.transportAttemptID ?? fallbackTransportAttemptID
+        let cancelled = progress.failureClass == .cancelled || !generationMatches || !profileMatches
+        let transition: NativeDiagnosticTransition = timedOut ? .timedOut :
+            (confirmed ? .completed : (cancelled ? .cancelled : .failed))
+        let terminalReason = confirmed ? NativeDiagnosticTerminalReason.confirmed :
+            progress.terminalReason?.journalValue
+        let postAckBoundary = confirmed ? NativeDiagnosticPostAckBoundary.foregroundConfirmed :
+            progress.lastCompletedPostAckBoundary.journalValue
+
+        return [
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundGenerationValidation,
+                transition: generationMatches ? .completed : .cancelled,
+                causeCode: generationMatches ? nil : "foreground_generation_invalidated",
+                attemptID: attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundProfileValidation,
+                transition: profileMatches ? .completed : .cancelled,
+                causeCode: profileMatches ? nil : "foreground_profile_context_changed",
+                attemptID: attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundContextValidation,
+                transition: relayContextMatches ? .completed : .unresolved,
+                causeCode: relayContextMatches ? nil : "foreground_relay_context_unconfirmed",
+                attemptID: attemptID, transportAttemptID: transportAttemptID),
+            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
+                transition: transition,
+                causeCode: progress.failureClass?.diagnosticValue,
+                terminalReason: terminalReason,
+                postAckBoundary: postAckBoundary,
+                postAckDrainTransition: progress.postAckDrainTransition,
+                attemptID: attemptID, transportAttemptID: transportAttemptID)
+        ]
+    }
+
     /// Enrollment readiness is actual authenticated replay progress. A later
     /// push-register failure must not hide a working foreground connection.
     func confirmForegroundProgress(for expected: ProfileContext,
@@ -982,37 +1028,13 @@ final class NativeRelayLifecycle {
                 generationMatches: generationMatches,
                 profileMatches: profileMatches,
                 relayContextMatches: relayContextMatches)
-            let attemptID = self.foregroundDeadline.progress.attemptID
-            let transportAttemptID = self.foregroundDeadline.progress.transportAttemptID ?? self.activeTransportAttemptID
-            var terminalEvents: [NativeClientDiagnosticEvent] = []
-            terminalEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .foregroundGenerationValidation,
-                transition: generationMatches ? .completed : .cancelled,
-                causeCode: generationMatches ? nil : "foreground_generation_invalidated",
-                attemptID: attemptID, transportAttemptID: transportAttemptID))
-            terminalEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .foregroundProfileValidation,
-                transition: profileMatches ? .completed : .cancelled,
-                causeCode: profileMatches ? nil : "foreground_profile_context_changed",
-                attemptID: attemptID, transportAttemptID: transportAttemptID))
-            terminalEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .foregroundContextValidation,
-                transition: relayContextMatches ? .completed : .unresolved,
-                causeCode: relayContextMatches ? nil : "foreground_relay_context_unconfirmed",
-                attemptID: attemptID, transportAttemptID: transportAttemptID))
             let reached = relayConfirmed && generationMatches && profileMatches && relayContextMatches
-            let cancelled = self.foregroundDeadline.progress.failureClass == .cancelled ||
-                !generationMatches || !profileMatches
-            let transition: NativeDiagnosticTransition = reached ? .completed :
-                (cancelled ? .cancelled : .failed)
             let terminalProgress = self.foregroundDeadline.progress
-            let terminal = terminalProgress.terminalReason
-            terminalEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
-                transition: transition,
-                causeCode: terminalProgress.failureClass?.diagnosticValue,
-                terminalReason: reached ? NativeDiagnosticTerminalReason.confirmed : terminal?.journalValue,
-                postAckBoundary: reached ? .foregroundConfirmed :
-                    terminalProgress.lastCompletedPostAckBoundary.journalValue,
-                postAckDrainTransition: terminalProgress.postAckDrainTransition,
-                attemptID: attemptID, transportAttemptID: transportAttemptID))
-            self.recordDiagnosticEvents(terminalEvents)
+            self.recordDiagnosticEvents(Self.foregroundTerminalDiagnosticEvents(
+                progress: terminalProgress, confirmed: reached,
+                fallbackTransportAttemptID: self.activeTransportAttemptID,
+                generationMatches: generationMatches, profileMatches: profileMatches,
+                relayContextMatches: relayContextMatches))
             return reached
         }, onTimeout: { [weak self] in
             await self?.cancelTimedOutSession(generation: epoch, expected: expected)
@@ -1031,27 +1053,10 @@ final class NativeRelayLifecycle {
             result = foregroundDeadline.progress
             onProgress(result)
 
-            let transportAttemptID = result.transportAttemptID
-            var terminalEvents: [NativeClientDiagnosticEvent] = []
-            terminalEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .foregroundGenerationValidation,
-                transition: generationMatches ? .completed : .cancelled,
-                causeCode: generationMatches ? nil : "foreground_generation_invalidated",
-                attemptID: attemptID, transportAttemptID: transportAttemptID))
-            terminalEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .foregroundProfileValidation,
-                transition: profileMatches ? .completed : .cancelled,
-                causeCode: profileMatches ? nil : "foreground_profile_context_changed",
-                attemptID: attemptID, transportAttemptID: transportAttemptID))
-            terminalEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .foregroundContextValidation,
-                transition: relayContextMatches ? .completed : .unresolved,
-                causeCode: relayContextMatches ? nil : "foreground_relay_context_unconfirmed",
-                attemptID: attemptID, transportAttemptID: transportAttemptID))
-            terminalEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
-                transition: .timedOut, causeCode: nil,
-                terminalReason: NativeDiagnosticTerminalReason.deadlineExceeded,
-                postAckBoundary: result.lastCompletedPostAckBoundary.journalValue,
-                postAckDrainTransition: result.postAckDrainTransition,
-                attemptID: attemptID, transportAttemptID: transportAttemptID))
-            recordDiagnosticEvents(terminalEvents)
+            recordDiagnosticEvents(Self.foregroundTerminalDiagnosticEvents(
+                progress: result, confirmed: false, timedOut: true,
+                generationMatches: generationMatches, profileMatches: profileMatches,
+                relayContextMatches: relayContextMatches))
         }
         let transition: NativeDiagnosticTransition
         switch result.outcome {

@@ -1374,54 +1374,41 @@ final class NativeGuidedTLSTests: XCTestCase {
             .appendingPathComponent("HarklightPostAckDiagnostics-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: journalURL) }
         let journal = NativeClientDiagnosticJournal(fileURL: journalURL)
-        let request = RequestKey(accountScope: ExactText("account"), senderID: ExactText("sender"),
-                                 messageID: ExactText("message"))
-        let operationID = UUID()
-        journal.record([
-            NativeClientDiagnosticEvent(area: .relay, phase: .postAckDrain, transition: .unresolved,
-                causeCode: "unknown_error", attemptID: failed.attemptID,
-                transportAttemptID: transportAttemptID, operationID: operationID,
-                request: request, requestRevision: 7, receiptState: .acceptedAwaitingReplay),
-            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundGenerationValidation,
-                transition: .cancelled, causeCode: "foreground_generation_invalidated",
-                attemptID: failed.attemptID, transportAttemptID: transportAttemptID),
-            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundProfileValidation,
-                transition: .completed, attemptID: failed.attemptID,
-                transportAttemptID: transportAttemptID),
-            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundContextValidation,
-                transition: .unresolved, causeCode: "foreground_relay_context_unconfirmed",
-                attemptID: failed.attemptID, transportAttemptID: transportAttemptID),
-            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
-                transition: .cancelled, terminalReason: .generationInvalidated,
-                postAckBoundary: .relayRefreshReturned,
-                postAckDrainTransition: .failed,
-                attemptID: failed.attemptID, transportAttemptID: transportAttemptID),
-            NativeClientDiagnosticEvent(area: .connection, phase: .approvedConnection, transition: .failed,
-                terminalReason: .generationInvalidated,
-                attemptID: failed.attemptID, transportAttemptID: transportAttemptID),
-            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
-                transition: .completed, terminalReason: .confirmed,
-                postAckBoundary: .foregroundConfirmed, postAckDrainTransition: .completed,
-                attemptID: confirmed.attemptID, transportAttemptID: successfulTransportID),
-            NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
-                transition: .timedOut, terminalReason: .deadlineExceeded,
-                postAckBoundary: .nativeCursorAcknowledged, postAckDrainTransition: .timedOut,
-                attemptID: timedOut.attemptID, transportAttemptID: timeoutTransportID)
-        ])
+        let terminalEvents = [
+            NativeRelayLifecycle.foregroundTerminalDiagnosticEvents(progress: failed,
+                confirmed: false, generationMatches: false, profileMatches: true,
+                relayContextMatches: false),
+            NativeRelayLifecycle.foregroundTerminalDiagnosticEvents(progress: confirmed,
+                confirmed: true, generationMatches: true, profileMatches: true,
+                relayContextMatches: true),
+            NativeRelayLifecycle.foregroundTerminalDiagnosticEvents(progress: timeoutDeadline.progress,
+                confirmed: false, timedOut: true, generationMatches: false, profileMatches: true,
+                relayContextMatches: false),
+            NativeRelayLifecycle.foregroundTerminalDiagnosticEvents(progress: cancelled,
+                confirmed: false, generationMatches: true, profileMatches: true,
+                relayContextMatches: false),
+            NativeRelayLifecycle.foregroundTerminalDiagnosticEvents(progress: lateProgressFailure,
+                confirmed: false, generationMatches: true, profileMatches: true,
+                relayContextMatches: false)
+        ].flatMap { $0 }
+        journal.record(terminalEvents)
         let restored = NativeClientDiagnosticJournal(fileURL: journalURL)
         XCTAssertEqual(restored.persistenceStatus, .saved)
-        XCTAssertTrue(restored.shareText.contains("phase=postAckDrain transition=unresolved cause=unknown_error"))
         XCTAssertTrue(restored.shareText.contains("phase=foregroundGenerationValidation transition=cancelled cause=foreground_generation_invalidated"))
         XCTAssertTrue(restored.shareText.contains("phase=foregroundProfileValidation transition=completed"))
         XCTAssertTrue(restored.shareText.contains("phase=foregroundContextValidation transition=unresolved cause=foreground_relay_context_unconfirmed"))
         XCTAssertTrue(restored.shareText.contains("phase=foregroundCompletion transition=cancelled cause=none_observed terminal_reason=generation_invalidated"))
         XCTAssertTrue(restored.shareText.contains("post_ack_boundary=post_ack_relay_refresh_returned"))
         XCTAssertTrue(restored.shareText.contains("post_ack_drain=failed"))
+        XCTAssertTrue(restored.shareText.contains("phase=foregroundCompletion transition=completed cause=none_observed terminal_reason=foreground_confirmed"))
         let completion = try XCTUnwrap(restored.events.first { $0.phase == .foregroundCompletion })
         XCTAssertEqual(completion.postAckBoundary, .relayRefreshReturned)
         XCTAssertEqual(completion.postAckDrainTransition, .failed)
         XCTAssertTrue(restored.shareText.contains("post_ack_boundary=foreground_confirmed"))
         XCTAssertTrue(restored.shareText.contains("post_ack_drain=timedOut"))
+        XCTAssertTrue(restored.shareText.contains("terminal_reason=foreground_deadline"))
+        XCTAssertTrue(restored.shareText.contains("phase=foregroundCompletion transition=cancelled cause=cancelled terminal_reason=cancelled"))
+        XCTAssertTrue(restored.shareText.contains("cause=url_session_error_code_\(URLError.networkConnectionLost.rawValue)"))
         let successCompletion = try XCTUnwrap(restored.events.first {
             $0.phase == .foregroundCompletion && $0.transition == .completed
         })
@@ -1434,10 +1421,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(timeoutCompletion.postAckDrainTransition, .timedOut)
         XCTAssertTrue(restored.shareText.contains("attempt_id=\(failed.attemptID!.uuidString.lowercased())"))
         XCTAssertTrue(restored.shareText.contains("transport_attempt_id=\(transportAttemptID.uuidString.lowercased())"))
-        XCTAssertTrue(restored.shareText.contains("operation_id=\(operationID.uuidString.lowercased())"))
-        XCTAssertTrue(restored.shareText.contains("request_tag_sha256="))
-        XCTAssertTrue(restored.shareText.contains("request_revision=7"))
-        XCTAssertTrue(restored.shareText.contains("receipt_state=acceptedAwaitingReplay"))
         XCTAssertFalse(restored.shareText.contains("answer="))
         XCTAssertFalse(restored.shareText.contains("token="))
     }
@@ -1814,6 +1797,18 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "The terminal replay is durably applied before its cursor ACK.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(try store.snapshot(context: context).remoteStates[key]?.state, .answered)
+
+        let diagnosticURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightAcceptedReplayDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: diagnosticURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
+        journal.record(events.events)
+        let restored = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
+        XCTAssertTrue(restored.shareText.contains("operation_id=\(submission.operationID.uuidString.lowercased())"))
+        XCTAssertTrue(restored.shareText.contains("request_revision=1"))
+        XCTAssertTrue(restored.shareText.contains("receipt_state=acceptedAwaitingReplay"))
+        XCTAssertTrue(restored.shareText.contains("receipt_state=terminal"))
+        XCTAssertFalse(restored.shareText.contains("answer="))
     }
 
     func testAcceptedOperationReplayFailureKeepsExactReceiptAndCauseRetrievable() async throws {
@@ -1860,6 +1855,18 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
                       "The accepted operation is not silently requeued as a new answer.")
+
+        let diagnosticURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightReplayFailureDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: diagnosticURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
+        journal.record(events.events)
+        let restored = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
+        XCTAssertTrue(restored.shareText.contains("cause=unexpected_relay_frame"))
+        XCTAssertTrue(restored.shareText.contains("operation_id=\(submission.operationID.uuidString.lowercased())"))
+        XCTAssertTrue(restored.shareText.contains("request_revision=1"))
+        XCTAssertTrue(restored.shareText.contains("receipt_state=acceptedAwaitingReplay"))
+        XCTAssertFalse(restored.shareText.contains("answer="))
     }
 
     private func makeU2ReplayFixture() throws -> (ProfileContext, AttentionDomainStore, U2ReplaySession) {
