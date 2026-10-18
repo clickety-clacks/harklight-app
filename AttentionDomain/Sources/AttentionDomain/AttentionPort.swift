@@ -111,6 +111,7 @@ public struct IntentReceipt: Equatable, Sendable {
 public enum ApplyEventResult: Equatable, Sendable {
     case committed(contiguousCursor: UInt64, publishable: PresentationSnapshot?)
     case compatibleRepeat(contiguousCursor: UInt64, classificationChanged: Bool)
+    case deferred(contiguousCursor: UInt64)
     case gap(expected: UInt64)
     case conflict
     case repairRequired
@@ -242,6 +243,9 @@ public struct PresentedRequest: Equatable, Sendable {
     public let intentReceipt: IntentReceipt?
     public let projection: AdmittedRequestProjection
     public let informationalSeenStatus: InformationalSeenStatus?
+    /// Whether lifecycle and Seen state were established by the accepted
+    /// bounded snapshot, a receipt, or later contiguous relay activity.
+    public let inboxStateIsCurrent: Bool
 
     public var isResolved: Bool {
         lifecycleStatus != .open && lifecycleStatus != .pending
@@ -258,7 +262,8 @@ public struct PresentedRequest: Equatable, Sendable {
                 receiptFacts: ReceiptPresentationFacts?,
                 intentReceipt: IntentReceipt?,
                 projection: AdmittedRequestProjection,
-                informationalSeenStatus: InformationalSeenStatus? = nil) {
+                informationalSeenStatus: InformationalSeenStatus? = nil,
+                inboxStateIsCurrent: Bool = true) {
         self.key = key
         self.acceptanceOrder = acceptanceOrder
         self.title = title
@@ -271,6 +276,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.intentReceipt = intentReceipt
         self.projection = projection
         self.informationalSeenStatus = informationalSeenStatus
+        self.inboxStateIsCurrent = inboxStateIsCurrent
     }
 }
 
@@ -586,9 +592,15 @@ public final class AttentionDomainPort: @unchecked Sendable {
                             $0.requestKey == item.request.key &&
                             $0.requestRevision == snapshot.conversationThreads[item.request.key]?.currentRevision
                         }),
-                        selector: selectors?[item.request.key])
+                        selector: selectors?[item.request.key],
+                        inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
+                            $0.contains(item.request.key)
+                        } ?? true)
         }
         let displayRequests = requests.sorted { left, right in
+            if left.inboxStateIsCurrent != right.inboxStateIsCurrent {
+                return left.inboxStateIsCurrent
+            }
             if left.isResolved != right.isResolved { return !left.isResolved }
             if left.acceptanceOrder != right.acceptanceOrder {
                 return left.acceptanceOrder > right.acceptanceOrder
@@ -611,7 +623,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          session: RequestSession?,
                          remote: RemoteRequestState?,
                          submission: Submission?,
-                         selector: BoundDocumentSelector?) throws -> PresentedRequest {
+                         selector: BoundDocumentSelector?,
+                         inboxStateIsCurrent: Bool = true) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
@@ -735,7 +748,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 intentReceipt: submission.map { receipt($0, context: context) },
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
-                                    status: status, remote: remote, submission: submission))
+                                    status: status, remote: remote, submission: submission),
+                                inboxStateIsCurrent: inboxStateIsCurrent)
     }
 
     private func informationalSeenStatus(for request: StoredRequest,

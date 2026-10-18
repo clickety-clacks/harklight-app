@@ -293,6 +293,8 @@ final class NativeClientDiagnosticJournal {
             case .missingOriginContent: return "relay_origin_content_missing"
             case .eventRejected: return "relay_event_rejected"
             case .mismatchedOperationResult: return "relay_operation_result_mismatch"
+            case .inboxPagingUnavailable: return "relay_inbox_paging_unavailable"
+            case .inboxPagingBusy: return "relay_inbox_paging_busy"
             }
         }
         if let value = error as? ConversationError {
@@ -335,6 +337,10 @@ final class NativeClientDiagnosticJournal {
             case .missingAcceptanceOrder: return "store_acceptance_order_missing"
             case .duplicateAcceptanceOrder: return "store_acceptance_order_duplicate"
             case .invalidProjection: return "store_invalid_projection"
+            case .inboxCheckpointPending: return "store_inbox_checkpoint_pending"
+            case .inboxCheckpointIncomplete: return "store_inbox_checkpoint_incomplete"
+            case .inboxPageConflict: return "store_inbox_page_conflict"
+            case .inboxStateUnrefreshed: return "store_inbox_state_unrefreshed"
             case .persistence: return "store_persistence_failure"
             }
         }

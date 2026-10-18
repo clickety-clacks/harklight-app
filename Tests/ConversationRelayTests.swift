@@ -4,7 +4,7 @@ import HarklightNativeRelay
 import XCTest
 
 final class ConversationRelayTests: XCTestCase {
-    private final class Session: AuthenticatedConversationSession, @unchecked Sendable {
+    private final class Session: AuthenticatedInboxPagingSession, AuthenticatedConversationSession, @unchecked Sendable {
         let authenticatedIdentity: ProfileIdentity
         var ordinary: [Data] = []
         var conversation: [Data] = []

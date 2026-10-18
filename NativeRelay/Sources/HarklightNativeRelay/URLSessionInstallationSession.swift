@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import Security
 
-public enum InstallationTransportError: Error {
+public enum InstallationTransportError: Error, Sendable {
     case invalidEndpoint
     case invalidTrustAnchor
     case wrongDeviceIdentity
@@ -44,9 +44,11 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// A keychain-backed installation certificate and an enrollment-approved relay
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
-public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession {
+public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession,
+    AuthenticatedInboxEventStreamSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
+    public nonisolated let supportsPostCheckpointInboxEvents = true
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
@@ -54,6 +56,15 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
     private let attemptID: UUID?
+    private var postCheckpointReader: Task<Void, Never>?
+    private var responseFrames: [Data] = []
+    private var responseWaiters: [CheckedContinuation<Data, any Error>] = []
+    // One queued event bounds native-side memory while the core catches up.
+    private var postCheckpointEventFrame: Data?
+    private var postCheckpointEventWaiters: [CheckedContinuation<Data, any Error>] = []
+    private var postCheckpointEventSpaceWaiters: [CheckedContinuation<Void, any Error>] = []
+    private var postCheckpointReadFailure: (any Error)?
+    private let socketExchangeGate = RelaySocketExchangeGate()
 
     public init(profile: ProfileContext,
                 relayURL: URL,
@@ -113,6 +124,100 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         try await replay(request, ref: "native-sync", event: "delivery", end: "resynced", consume: consume)
     }
 
+    /// Reads one correlated paging or receipt response on the enrolled relay
+    /// socket. It never starts replay or sends a mutation.
+    public func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
+        do {
+            try await send(request)
+            while true {
+                let frame = try await receive()
+                guard let value = try? JSONValue.parse(frame),
+                      case .object = value,
+                      value.hasUniqueObjectKeys else {
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+                let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+                if kind == "ok" || kind == "error" {
+                    guard value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref else {
+                        throw InstallationTransportError.unexpectedServerFrame
+                    }
+                    return frame
+                }
+                throw InstallationTransportError.unexpectedServerFrame
+            }
+        } catch {
+            close()
+            throw error
+        }
+    }
+
+    /// Opens only the explicit replay half of a confirmed paging checkpoint.
+    /// The accepted reply is delivered first, followed by ordinary projections
+    /// through `resynced`; the caller owns contiguous validation and ACK.
+    public func attachInboxReplay(_ request: Data, ref: String,
+                                  consume: @Sendable (Data) async throws -> Void) async throws {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
+        do {
+            try await send(request)
+            var accepted = false
+            while true {
+                let frame = try await receive()
+                guard let value = try? JSONValue.parse(frame),
+                      case .object = value,
+                      value.hasUniqueObjectKeys,
+                      value.uniqueValue(named: "v")?.integerValue == 1 else {
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+                let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+                if !accepted {
+                    if kind == "error" {
+                        guard value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref else {
+                            throw InstallationTransportError.unexpectedServerFrame
+                        }
+                        diagnose(.relay, .ordinaryReplay, .rejected,
+                                 causeCode: NativeDiagnosticCauseCode.serverReason(
+                                    value.uniqueValue(named: "reason")?.stringValue?.rawValue))
+                        throw InstallationTransportError.serverRejected
+                    }
+                    guard kind == "ok",
+                          value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref,
+                          value.uniqueValue(named: "paging_version")?.integerValue == 1,
+                          value.uniqueValue(named: "checkpoint_accepted") == .bool(true),
+                          value.uniqueValue(named: "replay_started") == .bool(true) else {
+                        throw InstallationTransportError.unexpectedServerFrame
+                    }
+                    accepted = true
+                    onProgress(.relayAdmitted)
+                    diagnose(.connection, .relayAdmission, .completed)
+                    try await consume(frame)
+                    continue
+                }
+                if kind == "error" {
+                    diagnose(.relay, .ordinaryReplay, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(
+                                value.uniqueValue(named: "reason")?.stringValue?.rawValue))
+                    throw InstallationTransportError.serverRejected
+                }
+                guard kind == "delivery" || kind == "lifecycle" || kind == "resynced" else {
+                    throw InstallationTransportError.unexpectedServerFrame
+                }
+                try await consume(frame)
+                if kind == "resynced" {
+                    startPostCheckpointReader()
+                    return
+                }
+            }
+        } catch {
+            diagnose(.relay, .ordinaryReplay,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            close()
+            throw error
+        }
+    }
+
     public func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await replay(request, ref: "native-conversation-sync", event: "conversation", end: "conversation_resynced", consume: consume)
     }
@@ -130,6 +235,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     private func replay(_ request: Data, ref: String, event: String, end: String,
                         consume: @Sendable (Data) async throws -> Void) async throws {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         let area: NativeDiagnosticArea = event == "conversation" ? .conversation : .relay
         let phase: NativeDiagnosticPhase = event == "conversation" ? .conversationReplay : .ordinaryReplay
         do {
@@ -179,6 +286,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func acknowledgeProjection(_ request: Data, field: String, ref: String) async throws {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         let area: NativeDiagnosticArea = field == "conversation_seq" ? .conversation : .relay
         do {
             let requestValue = try JSONValue.parse(request)
@@ -224,6 +333,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         do { try await send(frame) }
         catch {
             diagnose(.answer, .originalOperationDelivery,
@@ -277,6 +388,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     /// A send response is not a replay ACK and cannot advance either cursor.
     public func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         do {
             let outgoing = try JSONValue.parse(frame)
             guard outgoing.uniqueValue(named: "type") == .string(ExactText("discussion")),
@@ -324,6 +437,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
               revision > 0, revision < UInt64(Int64.max) else {
             throw InstallationTransportError.unexpectedServerFrame
         }
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         let frame = Data(("{\"v\":1,\"type\":\"push_register\",\"ref\":\"native-push\",\"op_id\":\"\(operationID.uuidString.lowercased())\",\"revision\":\(revision),\"profile_id\":\"harklight-sandbox\",\"address_kind\":\"apns_token\",\"address\":\"\(address)\"}\n").utf8)
         do {
             try await send(frame)
@@ -357,8 +472,25 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func close() {
+        postCheckpointReader?.cancel()
+        postCheckpointReader = nil
+        failPostCheckpointReader(InstallationTransportError.unexpectedServerFrame)
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
+    }
+
+    public func nextPostCheckpointInboxEvent() async throws -> Data {
+        if let frame = postCheckpointEventFrame {
+            postCheckpointEventFrame = nil
+            if !postCheckpointEventSpaceWaiters.isEmpty {
+                postCheckpointEventSpaceWaiters.removeFirst().resume()
+            }
+            return frame
+        }
+        if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+        return try await withCheckedThrowingContinuation { continuation in
+            postCheckpointEventWaiters.append(continuation)
+        }
     }
 
     public func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
@@ -454,11 +586,81 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func receive() async throws -> Data {
+        if postCheckpointReader != nil {
+            if !responseFrames.isEmpty { return responseFrames.removeFirst() }
+            if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, any Error>) in
+                responseWaiters.append(continuation)
+            }
+        }
+        return try await receiveTaskFrame()
+    }
+
+    private func receiveTaskFrame() async throws -> Data {
         switch try await task.receive() {
         case let .string(text): return Data(text.utf8)
         case .data: throw InstallationTransportError.unexpectedServerFrame
         @unknown default: throw InstallationTransportError.unexpectedServerFrame
         }
+    }
+
+    private func startPostCheckpointReader() {
+        guard postCheckpointReader == nil else { return }
+        postCheckpointReadFailure = nil
+        postCheckpointReader = Task { [weak self] in
+            await self?.readPostCheckpointFrames()
+        }
+    }
+
+    private func readPostCheckpointFrames() async {
+        do {
+            while !Task.isCancelled {
+                let frame = try await receiveTaskFrame()
+                if Self.isPostCheckpointInboxEvent(frame) {
+                    try await enqueuePostCheckpointInboxEvent(frame)
+                } else if !responseWaiters.isEmpty {
+                    responseWaiters.removeFirst().resume(returning: frame)
+                } else {
+                    responseFrames.append(frame)
+                }
+            }
+        } catch {
+            failPostCheckpointReader(error)
+        }
+    }
+
+    private func enqueuePostCheckpointInboxEvent(_ frame: Data) async throws {
+        while postCheckpointEventFrame != nil {
+            if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+            try await withCheckedThrowingContinuation { continuation in
+                postCheckpointEventSpaceWaiters.append(continuation)
+            }
+        }
+        if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+        if !postCheckpointEventWaiters.isEmpty {
+            postCheckpointEventWaiters.removeFirst().resume(returning: frame)
+        } else {
+            postCheckpointEventFrame = frame
+        }
+    }
+
+    private func failPostCheckpointReader(_ error: any Error) {
+        postCheckpointReadFailure = error
+        let responseWaiters = self.responseWaiters
+        self.responseWaiters.removeAll(keepingCapacity: false)
+        responseWaiters.forEach { $0.resume(throwing: error) }
+        let eventWaiters = postCheckpointEventWaiters
+        postCheckpointEventWaiters.removeAll(keepingCapacity: false)
+        eventWaiters.forEach { $0.resume(throwing: error) }
+        let spaceWaiters = postCheckpointEventSpaceWaiters
+        postCheckpointEventSpaceWaiters.removeAll(keepingCapacity: false)
+        spaceWaiters.forEach { $0.resume(throwing: error) }
+    }
+
+    private static func isPostCheckpointInboxEvent(_ frame: Data) -> Bool {
+        guard let value = try? JSONValue.parse(frame) else { return false }
+        let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+        return kind == "delivery" || kind == "lifecycle"
     }
 
     private func diagnose(_ area: NativeDiagnosticArea,
