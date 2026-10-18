@@ -153,6 +153,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .unseen
+    @State private var listTabOnMessageEntry: InboxMessageTab?
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
     @State private var restoreLastViewedOnReturn = false
@@ -175,6 +176,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func navigate(from previous: InboxSelection?, to next: InboxSelection?) {
         guard previous != next else { return }
+        if let next {
+            if previous == nil {
+                listTabOnMessageEntry = selectedTab
+                navigatedBetweenMessages = false
+            } else {
+                navigatedBetweenMessages = true
+            }
+        }
         selection = next
         // Keep departure cleanup bound to the explicit identity transition;
         // split-view adaptation changes columns without leaving this message.
@@ -186,9 +195,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
 
-        let oldSampleID: String? = if case let .sample(id) = previous { id }
-            else if previous == nil { samples.selectedID }
-            else { nil }
+        // The sample library owns the active local example identity. Keep its
+        // departure bound to that identity across NavigationSplitView rebuilds.
+        let oldSampleID = samples.selectedID
         let newSampleID: String? = if case let .sample(id) = next { id } else { nil }
 
         if let next { lastViewedSelection = next }
@@ -209,10 +218,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func restoreLastViewedListPosition() {
         guard navigatedBetweenMessages else {
+            if let listTabOnMessageEntry { selectedTab = listTabOnMessageEntry }
+            listTabOnMessageEntry = nil
             restoreLastViewedOnReturn = false
             return
         }
         navigatedBetweenMessages = false
+        listTabOnMessageEntry = nil
         guard let lastViewedSelection,
               let lastViewedItem = rows.first(where: { $0.id == lastViewedSelection }) else {
             restoreLastViewedOnReturn = false
@@ -301,7 +313,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           restoreLastViewed: restoreLastViewedOnReturn,
                           didRestoreLastViewed: { restoreLastViewedOnReturn = false },
                           showSettings: { settings = true }, markSeen: markSeen, select: { previous, id in
-                    navigatedBetweenMessages = previous != nil && previous != id
                     restoreLastViewedOnReturn = false
                     navigate(from: previous, to: id)
                     compactColumn = .detail
