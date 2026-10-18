@@ -592,7 +592,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
                             $0.requestKey == item.request.key &&
                             $0.requestRevision == snapshot.conversationThreads[item.request.key]?.currentRevision
                         }),
-                        selector: selectors?[item.request.key])
+                        selector: selectors?[item.request.key],
+                        inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
+                            $0.contains(item.request.key)
+                        } ?? true)
         }
         let displayRequests = requests.sorted { left, right in
             if left.inboxStateIsCurrent != right.inboxStateIsCurrent {
@@ -620,7 +623,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          session: RequestSession?,
                          remote: RemoteRequestState?,
                          submission: Submission?,
-                         selector: BoundDocumentSelector?) throws -> PresentedRequest {
+                         selector: BoundDocumentSelector?,
+                         inboxStateIsCurrent: Bool = true) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
@@ -745,7 +749,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
                                     status: status, remote: remote, submission: submission),
-                                inboxStateIsCurrent: snapshot.inboxCurrentKeys.map { $0.contains(request.key) } ?? true)
+                                inboxStateIsCurrent: inboxStateIsCurrent)
     }
 
     private func informationalSeenStatus(for request: StoredRequest,
