@@ -1,11 +1,83 @@
 import Foundation
 import AttentionDomain
 import CryptoKit
-import HarklightNativeRelay
+@testable import HarklightNativeRelay
 import Network
 import Security
 import XCTest
 @testable import AttentionClientDuoPrototype
+
+private final class PagingExchangeSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var signaled = false
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            let resumeImmediately = signaled
+            if !resumeImmediately { self.continuation = continuation }
+            lock.unlock()
+            if resumeImmediately { continuation.resume() }
+        }
+    }
+
+    func signal() {
+        lock.lock()
+        signaled = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
+
+private actor PagingControlledReplyChannel {
+    private var sentRequests: [String] = []
+    private var pendingRequests: [String] = []
+    private var requestWaiters: [CheckedContinuation<String, Never>] = []
+    private var pendingReplies: [String] = []
+    private var replyWaiters: [CheckedContinuation<String, Never>] = []
+
+    func send(_ request: String) {
+        sentRequests.append(request)
+        if !requestWaiters.isEmpty {
+            requestWaiters.removeFirst().resume(returning: request)
+        } else {
+            pendingRequests.append(request)
+        }
+    }
+
+    func nextRequest() async -> String {
+        await withCheckedContinuation { continuation in
+            if !pendingRequests.isEmpty {
+                continuation.resume(returning: pendingRequests.removeFirst())
+            } else {
+                requestWaiters.append(continuation)
+            }
+        }
+    }
+
+    func receive() async -> String {
+        await withCheckedContinuation { continuation in
+            if !pendingReplies.isEmpty {
+                continuation.resume(returning: pendingReplies.removeFirst())
+            } else {
+                replyWaiters.append(continuation)
+            }
+        }
+    }
+
+    func respond(_ reply: String) {
+        if !replyWaiters.isEmpty {
+            replyWaiters.removeFirst().resume(returning: reply)
+        } else {
+            pendingReplies.append(reply)
+        }
+    }
+
+    func requestsSent() -> [String] { sentRequests }
+}
 
 private final class NativeDiagnosticEventCollector: @unchecked Sendable {
     private let lock = NSLock()
@@ -29,6 +101,58 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
 /// request an optional certificate; that server seam needs server integration.
 @MainActor
 final class NativeGuidedTLSTests: XCTestCase {
+    func testNativeRelayACKAndPushExchangesKeepFIFORepliesWithTheirRequests() async {
+        let pushWaiting = PagingExchangeSignal()
+        let gate = RelaySocketExchangeGate(onWaiterQueued: { pushWaiting.signal() })
+        let channel = PagingControlledReplyChannel()
+
+        func exchange(_ request: String) async -> String {
+            await gate.enter()
+            defer { gate.leave() }
+            await channel.send(request)
+            return await channel.receive()
+        }
+
+        let acknowledgement = Task { await exchange("ack:seq:7") }
+        let firstRequest = await channel.nextRequest()
+        XCTAssertEqual(firstRequest, "ack:seq:7")
+        let pushRegistration = Task { await exchange("push_register:revision:3") }
+        await pushWaiting.wait()
+
+        let requestsWhileACKOwnsReply = await channel.requestsSent()
+        XCTAssertEqual(requestsWhileACKOwnsReply, ["ack:seq:7"],
+                       "Push registration must wait while the ACK owns the FIFO reply waiter.")
+        await channel.respond("ok:ref:native-ack:seq:7")
+        let acknowledgementReply = await acknowledgement.value
+        XCTAssertEqual(acknowledgementReply, "ok:ref:native-ack:seq:7")
+
+        let secondRequest = await channel.nextRequest()
+        XCTAssertEqual(secondRequest, "push_register:revision:3")
+        await channel.respond("ok:ref:native-push:revision:3")
+        let pushReply = await pushRegistration.value
+        XCTAssertEqual(pushReply, "ok:ref:native-push:revision:3")
+        let allRequests = await channel.requestsSent()
+        XCTAssertEqual(allRequests, ["ack:seq:7", "push_register:revision:3"])
+    }
+
+    func testNativeRelayCursorAccessValidatesItsProfileContext() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-A"),
+                                       deviceID: ExactText("installation-A"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        XCTAssertEqual(try store.relayCursor(context: context), 0)
+
+        let otherIdentity = ProfileIdentity(trustedRelayAuthority: context.identity.trustedRelayAuthority,
+                                            personID: ExactText("person-B"),
+                                            deviceID: ExactText("installation-B"))
+        let otherContext = ProfileContext(identity: otherIdentity, transportMode: .relay)
+        XCTAssertThrowsError(try store.relayCursor(context: otherContext))
+
+        store.invalidate()
+        XCTAssertThrowsError(try store.relayCursor(context: context))
+    }
+
     func testOrdinaryInboxGroupsUnresolvedThenResolvedAndUsesDescendingAcceptanceOrder() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-order"), deviceID: ExactText("device-order"))

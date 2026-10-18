@@ -12,14 +12,10 @@ DEVICE_ID=${HARKLIGHT_SIMULATOR_ID:-}
 BUNDLE_ID=com.example.attentionclient.duo-prototype
 
 case "$ACTION" in
-    build|test|test-guided-tls|run|host-test|host-run|native-host-test|native-relay-paging-test) ;;
-    *) fail "Usage: Scripts/verify.sh [build|test|test-guided-tls|run|host-test|host-run|native-host-test|native-relay-paging-test]" ;;
+    build|test|test-guided-tls|run|host-test|host-run|native-host-test) ;;
+    *) fail "Usage: Scripts/verify.sh [build|test|test-guided-tls|run|host-test|host-run|native-host-test]" ;;
 esac
 
-if [ "$ACTION" = native-relay-paging-test ]; then
-    cd "$ROOT/NativeRelay"
-    exec xcrun swift test --filter 'testACKAndPushExchangesKeepFIFORepliesWithTheirRequests|testRelayCursorAccessValidatesItsProfileContext'
-fi
 if [ "$ACTION" = native-host-test ]; then
     cd "$ROOT/NativeHost"
     xcrun swift test
