@@ -281,8 +281,13 @@ final class ConversationSampleUITests: XCTestCase {
     private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) {
         XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
         for _ in 0..<8 {
-            if element.isHittable { return }
-            scrollView.swipeUp()
+            // A row partly under the bottom search controls can be hittable while its
+            // tap point lands on them, so require the whole row inside the visible list.
+            let search = app.textFields["inbox-search-field"]
+            let bottom = search.exists ? search.frame.minY : app.windows.firstMatch.frame.maxY
+            let frame = element.frame
+            if element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom { return }
+            if frame.midY < scrollView.frame.midY { scrollView.swipeDown() } else { scrollView.swipeUp() }
         }
         XCTAssertTrue(element.isHittable, app.debugDescription)
     }
