@@ -46,7 +46,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                         "Fixture outcomes are available only after an answer enters Pending.")
 
         let centerPoint = setFacilitiesPoint(in: app, x: 500, y: 500)
-        let details = app.descendants(matching: .any)["request-details-disclosure"]
+        let details = app.buttons["request-details-disclosure"]
         revealInCard(details, in: app)
         details.tap()
         XCTAssertTrue(app.staticTexts["Sender: fixture:Facilities"].waitForExistence(timeout: 5))
@@ -135,7 +135,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
     }
 
     private func assertExactFacilitiesReceipt(in app: XCUIApplication, point: PointValue) {
-        let details = app.descendants(matching: .any)["request-details-disclosure"]
+        let details = app.buttons["request-details-disclosure"]
         revealInCard(details, in: app)
         details.tap()
         let receipt = app.staticTexts["request-details-original-answer-json"]
@@ -175,9 +175,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let scroll = app.scrollViews["message-card-scroll"]
         for _ in 0..<8 {
             if element.isHittable { return }
-            // Keep the gesture outside the system scroll indicator and point canvas.
-            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.82))
-            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.28))
+            // A central pan scrolls the card without hitting either system edge or indicator.
+            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast,
                         thenHoldForDuration: 0)
         }

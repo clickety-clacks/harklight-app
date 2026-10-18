@@ -541,6 +541,13 @@ struct LiveRequestDetail: View {
                         .accessibilityIdentifier("request-finish")
                 }
             }
+            ToolbarItem(placement: .primaryAction) {
+                if horizontalSizeClass == .regular && UIDevice.current.userInterfaceIdiom == .phone {
+                    chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
+                        conversationPanel.frame(idealWidth: 380, idealHeight: 560)
+                    }
+                }
+            }
             ToolbarItemGroup(placement: .bottomBar) {
                 Button("Later", systemImage: "clock") {
                     if let localExample { localExample.deferred.toggle() }
@@ -556,7 +563,7 @@ struct LiveRequestDetail: View {
                         conversationPanel
                             .presentationDetents([.medium, .large])
                     }
-                } else {
+                } else if UIDevice.current.userInterfaceIdiom != .phone {
                     chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
                         conversationPanel.frame(idealWidth: 380, idealHeight: 560)
                     }
