@@ -736,19 +736,19 @@ public actor NativeRelayCore {
         do {
             while !Task.isCancelled {
                 let frame = try await eventStream.nextPostCheckpointInboxEvent()
-                try validate()
-                let previousCursor = try store.snapshot(context: context).cursor
+                let previousCursor = try validatedRelayCursor()
                 let event = try wire.decodeEvent(frame)
                 let result = store.applyRelayEvent(event, context: context)
+                let durableCursor: UInt64
                 switch result {
-                case .committed, .compatibleRepeat:
-                    break
+                case let .committed(contiguousCursor, _),
+                     let .compatibleRepeat(contiguousCursor, _):
+                    durableCursor = contiguousCursor
                 case let .deferred(contiguousCursor) where contiguousCursor == event.sequence:
-                    break
+                    durableCursor = contiguousCursor
                 case .gap, .conflict, .repairRequired, .deferred:
                     throw NativeRelayCoreError.eventRejected
                 }
-                let durableCursor = try store.snapshot(context: context).cursor
                 if event.sequence > previousCursor {
                     guard previousCursor < UInt64.max,
                           event.sequence == previousCursor + 1,
@@ -1120,11 +1120,15 @@ public actor NativeRelayCore {
             requestRevision: revision, receiptState: receipt))
     }
 
-    private func validate() throws {
+    private func validatedRelayCursor() throws -> UInt64 {
         guard active else { throw NativeRelayCoreError.inactive }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
         }
-        _ = try store.snapshot(context: context)
+        return try store.relayCursor(context: context)
+    }
+
+    private func validate() throws {
+        _ = try validatedRelayCursor()
     }
 }

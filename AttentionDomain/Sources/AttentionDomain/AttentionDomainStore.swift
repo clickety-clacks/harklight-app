@@ -1572,6 +1572,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       inboxReferences: state.inboxReferences ?? [:])
     }
 
+    /// Returns only the contiguous relay cursor after validating the profile.
+    /// Unlike `snapshot(context:)`, this does not project retained presentation history.
+    public func relayCursor(context suppliedContext: ProfileContext) throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        return state.cursor
+    }
+
     /// Returns only accepted original operations whose exact terminal sequence
     /// has not yet been observed. The store builds this small index at load and
     /// updates it with the same durable mutations that accept or replay events.

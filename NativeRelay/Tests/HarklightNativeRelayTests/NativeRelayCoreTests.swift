@@ -1,7 +1,83 @@
 import AttentionDomain
 import Foundation
-import HarklightNativeRelay
+@testable import HarklightNativeRelay
 import XCTest
+
+private final class AsyncSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var signaled = false
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            var resumeImmediately = false
+            lock.lock()
+            if signaled {
+                resumeImmediately = true
+            } else {
+                self.continuation = continuation
+            }
+            lock.unlock()
+            if resumeImmediately { continuation.resume() }
+        }
+    }
+
+    func signal() {
+        lock.lock()
+        signaled = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
+
+private actor ControlledReplyChannel {
+    private var sentRequests: [String] = []
+    private var pendingRequests: [String] = []
+    private var requestWaiters: [CheckedContinuation<String, Never>] = []
+    private var pendingReplies: [String] = []
+    private var replyWaiters: [CheckedContinuation<String, Never>] = []
+
+    func send(_ request: String) {
+        sentRequests.append(request)
+        if !requestWaiters.isEmpty {
+            requestWaiters.removeFirst().resume(returning: request)
+        } else {
+            pendingRequests.append(request)
+        }
+    }
+
+    func nextRequest() async -> String {
+        await withCheckedContinuation { continuation in
+            if !pendingRequests.isEmpty {
+                continuation.resume(returning: pendingRequests.removeFirst())
+            } else {
+                requestWaiters.append(continuation)
+            }
+        }
+    }
+
+    func receive() async -> String {
+        await withCheckedContinuation { continuation in
+            if !pendingReplies.isEmpty {
+                continuation.resume(returning: pendingReplies.removeFirst())
+            } else {
+                replyWaiters.append(continuation)
+            }
+        }
+    }
+
+    func respond(_ reply: String) {
+        if !replyWaiters.isEmpty {
+            replyWaiters.removeFirst().resume(returning: reply)
+        } else {
+            pendingReplies.append(reply)
+        }
+    }
+
+    func requestsSent() -> [String] { sentRequests }
+}
 
 private final class DiagnosticEventCollector: @unchecked Sendable {
     private let lock = NSLock()
@@ -298,6 +374,54 @@ final class NativeRelayCoreTests: XCTestCase {
         return (context,
                 try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence()),
                 Session(identity))
+    }
+
+    func testACKAndPushExchangesKeepFIFORepliesWithTheirRequests() async {
+        let pushWaiting = AsyncSignal()
+        let gate = RelaySocketExchangeGate(onWaiterQueued: { pushWaiting.signal() })
+        let channel = ControlledReplyChannel()
+
+        func exchange(_ request: String) async -> String {
+            await gate.enter()
+            defer { gate.leave() }
+            await channel.send(request)
+            return await channel.receive()
+        }
+
+        let acknowledgement = Task { await exchange("ack:seq:7") }
+        let firstRequest = await channel.nextRequest()
+        XCTAssertEqual(firstRequest, "ack:seq:7")
+        let pushRegistration = Task { await exchange("push_register:revision:3") }
+        await pushWaiting.wait()
+
+        let requestsWhileACKOwnsReply = await channel.requestsSent()
+        XCTAssertEqual(requestsWhileACKOwnsReply, ["ack:seq:7"],
+                       "Push registration must wait while the ACK owns the FIFO reply waiter.")
+        await channel.respond("ok:ref:native-ack:seq:7")
+        let acknowledgementReply = await acknowledgement.value
+        XCTAssertEqual(acknowledgementReply, "ok:ref:native-ack:seq:7")
+
+        let secondRequest = await channel.nextRequest()
+        XCTAssertEqual(secondRequest, "push_register:revision:3")
+        await channel.respond("ok:ref:native-push:revision:3")
+        let pushReply = await pushRegistration.value
+        XCTAssertEqual(pushReply, "ok:ref:native-push:revision:3")
+        let allRequests = await channel.requestsSent()
+        XCTAssertEqual(allRequests, ["ack:seq:7", "push_register:revision:3"])
+    }
+
+    func testRelayCursorAccessValidatesItsProfileContext() throws {
+        let (context, store, _) = try setup()
+        XCTAssertEqual(try store.relayCursor(context: context), 0)
+
+        let otherIdentity = ProfileIdentity(trustedRelayAuthority: context.identity.trustedRelayAuthority,
+                                            personID: ExactText("person-B"),
+                                            deviceID: ExactText("installation-B"))
+        let otherContext = ProfileContext(identity: otherIdentity, transportMode: .relay)
+        XCTAssertThrowsError(try store.relayCursor(context: otherContext))
+
+        store.invalidate()
+        XCTAssertThrowsError(try store.relayCursor(context: context))
     }
 
     func testForeignDeliveryAndTerminalCommitBeforeOneContiguousACK() async throws {
@@ -599,7 +723,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let acknowledgement = try JSONValue.parse(await session.nextPostCheckpointAcknowledgement())
         XCTAssertEqual(acknowledgement.uniqueValue(named: "seq"),
                        .number(JSONNumber(lexeme: "1")))
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(try store.relayCursor(context: context), 1)
         XCTAssertEqual(session.replayCallCount, 1,
                        "The live event must use the existing post-barrier stream, without another replay attach.")
         let requestTypes = try session.requests.map(JSONValue.parse).compactMap {

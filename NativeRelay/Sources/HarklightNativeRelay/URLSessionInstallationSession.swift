@@ -62,8 +62,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private var postCheckpointEventWaiters: [CheckedContinuation<Data, any Error>] = []
     private var postCheckpointEventSpaceWaiters: [CheckedContinuation<Void, any Error>] = []
     private var postCheckpointReadFailure: (any Error)?
-    private var socketExchangeInProgress = false
-    private var socketExchangeWaiters: [CheckedContinuation<Void, Never>] = []
+    private let socketExchangeGate = RelaySocketExchangeGate()
 
     public init(profile: ProfileContext,
                 relayURL: URL,
@@ -126,8 +125,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// Reads one correlated paging or receipt response on the enrolled relay
     /// socket. It never starts replay or sends a mutation.
     public func inboxRequest(_ request: Data, ref: String) async throws -> Data {
-        await beginSocketExchange()
-        defer { endSocketExchange() }
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         do {
             try await send(request)
             while true {
@@ -157,8 +156,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// through `resynced`; the caller owns contiguous validation and ACK.
     public func attachInboxReplay(_ request: Data, ref: String,
                                   consume: @Sendable (Data) async throws -> Void) async throws {
-        await beginSocketExchange()
-        defer { endSocketExchange() }
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         do {
             try await send(request)
             var accepted = false
@@ -234,8 +233,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     private func replay(_ request: Data, ref: String, event: String, end: String,
                         consume: @Sendable (Data) async throws -> Void) async throws {
-        await beginSocketExchange()
-        defer { endSocketExchange() }
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         let area: NativeDiagnosticArea = event == "conversation" ? .conversation : .relay
         let phase: NativeDiagnosticPhase = event == "conversation" ? .conversationReplay : .ordinaryReplay
         do {
@@ -285,8 +284,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func acknowledgeProjection(_ request: Data, field: String, ref: String) async throws {
-        await beginSocketExchange()
-        defer { endSocketExchange() }
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         let area: NativeDiagnosticArea = field == "conversation_seq" ? .conversation : .relay
         do {
             let requestValue = try JSONValue.parse(request)
@@ -332,8 +331,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
-        await beginSocketExchange()
-        defer { endSocketExchange() }
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         do { try await send(frame) }
         catch {
             diagnose(.answer, .originalOperationDelivery,
@@ -387,8 +386,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     /// A send response is not a replay ACK and cannot advance either cursor.
     public func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
-        await beginSocketExchange()
-        defer { endSocketExchange() }
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         do {
             let outgoing = try JSONValue.parse(frame)
             guard outgoing.uniqueValue(named: "type") == .string(ExactText("discussion")),
@@ -436,6 +435,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
               revision > 0, revision < UInt64(Int64.max) else {
             throw InstallationTransportError.unexpectedServerFrame
         }
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
         let frame = Data(("{\"v\":1,\"type\":\"push_register\",\"ref\":\"native-push\",\"op_id\":\"\(operationID.uuidString.lowercased())\",\"revision\":\(revision),\"profile_id\":\"harklight-sandbox\",\"address_kind\":\"apns_token\",\"address\":\"\(address)\"}\n").utf8)
         do {
             try await send(frame)
@@ -658,24 +659,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         guard let value = try? JSONValue.parse(frame) else { return false }
         let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
         return kind == "delivery" || kind == "lifecycle"
-    }
-
-    private func beginSocketExchange() async {
-        if !socketExchangeInProgress {
-            socketExchangeInProgress = true
-            return
-        }
-        await withCheckedContinuation { continuation in
-            socketExchangeWaiters.append(continuation)
-        }
-    }
-
-    private func endSocketExchange() {
-        if socketExchangeWaiters.isEmpty {
-            socketExchangeInProgress = false
-        } else {
-            socketExchangeWaiters.removeFirst().resume()
-        }
     }
 
     private func diagnose(_ area: NativeDiagnosticArea,
