@@ -37,7 +37,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Archive", in: app)
-        let row = app.buttons["sample-approval-2"]
+        let row = app.buttons["request-row-sample-approval-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         XCTAssertTrue(row.label.contains("Updated"))
         row.tap()
@@ -60,7 +60,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("welcome", in: app)
-        let row = app.buttons["sample-review-0"]
+        let row = app.buttons["request-row-sample-review-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -82,7 +82,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("welcome", in: app)
-        let row = app.buttons["sample-review-2"]
+        let row = app.buttons["request-row-sample-review-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -113,7 +113,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("welcome", in: app)
-        let row = app.buttons["sample-review-2"]
+        let row = app.buttons["request-row-sample-review-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -125,7 +125,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
         capture("upload-before-message-departure", app)
-        let other = app.buttons["sample-review-0"]
+        let other = app.buttons["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
         other.tap()
         row.tap()
@@ -148,7 +148,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Archive", in: app)
-        let row = app.buttons["sample-approval-1"]
+        let row = app.buttons["request-row-sample-approval-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         XCTAssertTrue(row.label.contains("Retracted"))
         row.tap()
@@ -177,7 +177,7 @@ final class ConversationSampleUITests: XCTestCase {
             app.launch()
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
             enterSearch(search, in: app)
-            let row = app.buttons[id]
+            let row = app.buttons["request-row-" + id]
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             row.tap()
             app.buttons["Chat"].tap()

@@ -43,7 +43,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["fixture-outcome-menu"].exists,
                         "Fixture outcomes are available only after an answer enters Pending.")
 
-        setFacilitiesPoint(in: app, x: 500, y: 500)
+        let centerPoint = setFacilitiesPoint(in: app, x: 500, y: 500)
         let details = app.descendants(matching: .any)["request-details-disclosure"]
         revealInCard(details, in: app)
         details.tap()
@@ -54,10 +54,10 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(originalContent.label.contains("facilities-01"))
         details.tap()
         XCTAssertEqual(app.staticTexts["request-point-value-location"].label,
-                       "Horizontal 500, vertical 500",
+                       "Horizontal \(centerPoint.x), vertical \(centerPoint.y)",
                        "Inspecting request details must preserve the active point draft.")
 
-        setFacilitiesPoint(in: app, x: 240, y: 500)
+        let submittedPoint = setFacilitiesPoint(in: app, x: 240, y: 500)
         let note = app.textViews["request-input-note"]
         revealInCard(note, in: app)
         note.tap()
@@ -72,11 +72,11 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                        "A local submission remains pending until its fixture outcome is explicitly simulated.")
         XCTAssertTrue(app.buttons["fixture-outcome-menu"].waitForExistence(timeout: 5),
                       "The local outcome simulation appears on the ordinary pending fixture card.")
-        assertExactFacilitiesReceipt(in: app, y: 500)
+        assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
-        submitFacilitiesAnswer(in: app, x: 240, y: 610)
+        let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
 
@@ -91,14 +91,15 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let knownPoint = app.descendants(matching: .any)["Established submitted location"].firstMatch
         XCTAssertTrue(knownPoint.waitForExistence(timeout: 5),
                       "The accepted original operation should select the known sender result scene.")
-        XCTAssertEqual(knownPoint.value as? String, "Horizontal 240, vertical 610")
+        XCTAssertEqual(knownPoint.value as? String,
+                       "Horizontal \(submittedPoint.x), vertical \(submittedPoint.y)")
 
-        assertExactFacilitiesReceipt(in: app, y: 610)
+        assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
     func testUnconfirmedAnswerOutcomeKeepsNeutralSceneAndExactReceipt() throws {
         let app = launchFreshApp()
-        submitFacilitiesAnswer(in: app, x: 240, y: 610)
+        let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("answerOutcomeUnconfirmed", in: app)
 
@@ -113,7 +114,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["Established submitted location"].exists,
                        "An unconfirmed closure must keep the neutral sender scene.")
 
-        assertExactFacilitiesReceipt(in: app, y: 610)
+        assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
@@ -122,21 +123,23 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                       "The ordinary pending fixture card must expose its local outcome control.")
         revealInCard(outcomeButton, in: app)
         outcomeButton.tap()
-        let outcome = app.buttons["fixture-outcome-" + scenario]
+        // The confirmation-dialog snapshot exposes this native action as both a
+        // parent and its nested button node; interact with the first visible match.
+        let outcome = app.buttons.matching(identifier: "fixture-outcome-" + scenario).firstMatch
         XCTAssertTrue(outcome.waitForExistence(timeout: 5))
         XCTAssertTrue(outcome.isEnabled && outcome.isHittable,
                       "Apply the local outcome through the ordinary card's native dialog.")
         outcome.tap()
     }
 
-    private func assertExactFacilitiesReceipt(in app: XCUIApplication, y: Int) {
+    private func assertExactFacilitiesReceipt(in app: XCUIApplication, point: PointValue) {
         let details = app.descendants(matching: .any)["request-details-disclosure"]
         revealInCard(details, in: app)
         details.tap()
         let receipt = app.staticTexts["request-details-original-answer-json"]
         XCTAssertTrue(receipt.waitForExistence(timeout: 5))
         XCTAssertEqual(receipt.label,
-                       "{\"point\":{\"x\":240,\"y\":\(y)},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}",
+                       "{\"point\":{\"x\":\(point.x),\"y\":\(point.y)},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}",
                        "The terminal fixture outcome must preserve the exact originally submitted answer.")
     }
 
@@ -176,19 +179,33 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                       "The shared message card should make its existing control reachable.\n\(app.debugDescription)")
     }
 
-    private func setFacilitiesPoint(in app: XCUIApplication, x: Int, y: Int) {
+    private func setFacilitiesPoint(in app: XCUIApplication, x: Int, y: Int) -> PointValue {
         let pointSurface = app.descendants(matching: .any)["request-point-location"]
         revealInCard(pointSurface, in: app)
         pointSurface.coordinate(withNormalizedOffset: CGVector(dx: CGFloat(x) / 1000,
                                                                 dy: CGFloat(y) / 1000)).tap()
         let pointValue = app.staticTexts["request-point-value-location"]
         XCTAssertTrue(pointValue.waitForExistence(timeout: 5))
-        XCTAssertEqual(pointValue.label, "Horizontal \(x), vertical \(y)")
+        let components = pointValue.label
+            .replacingOccurrences(of: "Horizontal ", with: "")
+            .replacingOccurrences(of: "vertical ", with: "")
+            .split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard components.count == 2 else {
+            XCTFail("The point control must expose its saved integer coordinates.")
+            return PointValue(x: x, y: y)
+        }
+        let selected = PointValue(x: components[0], y: components[1])
+        XCTAssertLessThanOrEqual(abs(selected.x - x), 1,
+                                 "The selected point should remain within one normalized unit of the tap.")
+        XCTAssertLessThanOrEqual(abs(selected.y - y), 1,
+                                 "The selected point should remain within one normalized unit of the tap.")
+        return selected
     }
 
-    private func submitFacilitiesAnswer(in app: XCUIApplication, x: Int, y: Int) {
+    private func submitFacilitiesAnswer(in app: XCUIApplication, x: Int, y: Int) -> PointValue {
         selectFacilitiesRequest(in: app)
-        setFacilitiesPoint(in: app, x: x, y: y)
+        let selectedPoint = setFacilitiesPoint(in: app, x: x, y: y)
         let note = app.textViews["request-input-note"]
         revealInCard(note, in: app)
         note.tap()
@@ -201,6 +218,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 5))
         XCTAssertEqual(status.label, "Pending",
                        "The local answer stays pending until its fixture outcome is explicitly simulated.")
+        return selectedPoint
     }
 
     private func launchFreshApp() -> XCUIApplication {

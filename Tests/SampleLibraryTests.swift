@@ -134,7 +134,9 @@ final class SampleLibraryTests: XCTestCase {
         for message in library.messages {
             let request = try XCTUnwrap(restored.request(for: fixture.key(for: message)))
             XCTAssertNil(request.intentReceipt)
-            let expectedLifecycle: AppLifecycleStatus = message.id == "sample-completed-2" ? .cleared : .open
+            let retracted = restored.isRetracted(request.key)
+            let expectedLifecycle: AppLifecycleStatus =
+                message.id == "sample-completed-2" || retracted ? .cleared : .open
             XCTAssertEqual(request.lifecycleStatus, expectedLifecycle)
             let hasNoteInput: Bool
             if case let .sender(sender) = request.projection {
@@ -143,8 +145,7 @@ final class SampleLibraryTests: XCTestCase {
                 hasNoteInput = false
             }
             if hasNoteInput {
-                let expectedDraft: ExactText? = fixture.viewModel.isRetracted(request.key)
-                    ? nil : ExactText("A domain draft")
+                let expectedDraft: ExactText? = retracted ? ExactText("") : ExactText("A domain draft")
                 XCTAssertEqual(request.draft.inputs[ExactText("note")]?.text, expectedDraft)
             } else {
                 XCTAssertNil(request.draft.inputs[ExactText("note")]?.text,

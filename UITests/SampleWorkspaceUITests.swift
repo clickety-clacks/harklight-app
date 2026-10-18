@@ -110,7 +110,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             capture("component-\(kind)", app)
             if ["textChoice", "review", "multipleChoice", "colorChoice", "soundChoice"].contains(kind) {
                 app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch.tap()
-                let answer = app.textFields["Your answer"]
+                let answer = app.textViews["request-input-answer-response"]
                 XCTAssertTrue(answer.waitForExistence(timeout: 5))
                 answer.tap(); answer.typeText("Leave room for a quiet corner.")
                 capture("component-own-answer", app)

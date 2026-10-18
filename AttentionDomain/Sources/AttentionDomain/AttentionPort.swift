@@ -583,15 +583,21 @@ public final class AttentionDomainPort: @unchecked Sendable {
         }
         let requests = try orderedRequests.map { item in
             let session = snapshot.fixtureSessions[item.request.key]
-            // Requests without a conversation thread are still revision one.
-            let currentRevision = snapshot.conversationThreads[item.request.key]?.currentRevision ?? 1
-            let submission = snapshot.intents.values.first(where: {
-                $0.requestKey == item.request.key && $0.requestRevision == currentRevision
-            }) ?? session?.lifecycle.submissionValue.flatMap { value in
-                guard value.requestKey == item.request.key,
-                      value.requestRevision == currentRevision else { return nil }
-                return value
+            // Requests without a conversation thread are revision one on the
+            // wire, where requestRevision remains absent for legacy bindings.
+            // Treat that absent value as revision one only when no conversation
+            // revision history exists; versioned requests still require an exact
+            // revision match.
+            let conversationRevision = snapshot.conversationThreads[item.request.key]?.currentRevision
+            let matchesCurrentRevision: (Submission) -> Bool = { candidate in
+                guard candidate.requestKey == item.request.key else { return false }
+                guard let conversationRevision else { return candidate.requestRevision == nil }
+                return candidate.requestRevision == conversationRevision
             }
+            let submission = snapshot.intents.values.first(where: matchesCurrentRevision)
+                ?? session?.lifecycle.submissionValue.flatMap { value in
+                    matchesCurrentRevision(value) ? value : nil
+                }
             return try present(item.request,
                         acceptanceOrder: item.order,
                         draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),
