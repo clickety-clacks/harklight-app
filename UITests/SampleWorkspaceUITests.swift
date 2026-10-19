@@ -132,21 +132,26 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     func testNoCommentIsAvailableForReplyOnlyRequests() {
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
 
-        enterSearch("Archive", in: app)
-        let row = app.descendants(matching: .any)["sample-approval-0"]
+        enterSearch("A note for", in: app)
+        let row = app.descendants(matching: .any)["sample-note-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         let noComment = app.buttons["request-no-comment"]
         XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(noComment.isEnabled, app.debugDescription)
-        let reply = app.textViews["request-input-answer-response"]
-        XCTAssertTrue(reply.exists, "A text-only request keeps its reply editor.")
-        XCTAssertGreaterThan(noComment.frame.minY, reply.frame.maxY,
-                             "No comment is listed after the typed-reply choice.")
+        let replyChoice = app.buttons["Reply"]
+        XCTAssertTrue(replyChoice.exists, "A text-only request offers its Reply choice.")
+        XCTAssertGreaterThan(noComment.frame.minY, replyChoice.frame.maxY,
+                             "No comment is listed after the Reply choice.")
+        replyChoice.tap()
+        let replyEditor = app.textViews.firstMatch
+        XCTAssertTrue(replyEditor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertGreaterThan(noComment.frame.minY, replyEditor.frame.maxY,
+                             "No comment stays after the expanded Reply editor.")
         capture("reply-only-no-comment-available", app)
 
         noComment.tap()
@@ -155,10 +160,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         showList(app)
         clearSearch(in: app)
         app.buttons["inbox-tab-replied"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["sample-approval-0"]
+        XCTAssertTrue(app.descendants(matching: .any)["sample-note-0"]
             .waitForExistence(timeout: 5), "No comment moves the request to Replied.")
         capture("reply-only-no-comment-selected", app)
-        app.descendants(matching: .any)["sample-approval-0"].swipeLeft()
+        app.descendants(matching: .any)["sample-note-0"].swipeLeft()
         XCTAssertFalse(app.buttons["inbox-no-comment"].exists,
                        "Replied rows have no swipe action.")
     }
