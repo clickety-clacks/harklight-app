@@ -100,20 +100,26 @@ final class SampleWorkspaceUITests: XCTestCase {
             .first { $0.label == "Seen, Seen" }
     }
 
-    func testSeenActionFromEitherSwipeEdgeMovesTheMessageToReplied() {
+    func testAnswerRequestSwipeOffersNoComment() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
 
-        // An answer request uses No comment rather than the Seen action.
         enterSearch("Archive", in: app)
         let ordinary = app.buttons["sample-approval-0"]
         XCTAssertTrue(ordinary.waitForExistence(timeout: 5), app.debugDescription)
         ordinary.swipeLeft()
-        XCTAssertNotNil(app.buttons.allElementsBoundByIndex.first { $0.label.contains("No comment") },
-                        app.debugDescription)
-        clearSearch(in: app)
+        let noComment = app.buttons.allElementsBoundByIndex.first { $0.label.contains("No comment") }
+        XCTAssertNotNil(noComment, app.debugDescription)
+        capture("inbox-swipe-no-comment-revealed", app)
+    }
+
+    func testSeenActionFromEitherSwipeEdgeMovesTheMessageToReplied() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
 
         enterSearch("Thursday", in: app)
         let informational = app.buttons["sample-information-0"]
