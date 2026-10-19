@@ -240,14 +240,15 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             } else {
                 navigatedBetweenMessages = true
             }
-        } else if previous != nil {
-            restoreLastViewedListPosition()
-            chatOpen = false
         }
         selection = next
         // Keep departure cleanup bound to the explicit identity transition;
         // split-view adaptation changes columns without leaving this message.
         selectionDidChange(from: previous, to: next)
+        if previous != nil, next == nil {
+            restoreLastViewedListPosition()
+            chatOpen = false
+        }
     }
 
     private func selectionDidChange(from previous: InboxSelection?, to next: InboxSelection?) {
