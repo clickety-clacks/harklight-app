@@ -243,7 +243,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         guard previous != next else { return }
         UIDiagnostics.shared.record("inbox.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next))")
         if case let .request(key) = previous { conversationStore?.flushPendingDraft(for: key) }
-        if let next {
+        if next != nil {
             restoreLastViewedOnReturn = false
             if previous == nil {
                 listTabOnMessageEntry = selectedTab
