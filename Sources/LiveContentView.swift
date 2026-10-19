@@ -1218,6 +1218,7 @@ private struct LiveCompatibilityActions: View {
         }
     }
 
+    @ViewBuilder
     private func compatibilityChoice(_ action: ProjectedAction,
                                      selected: Bool,
                                      detail: String,
