@@ -236,8 +236,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: end)
-        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
-                      "An edge swipe from detail must return to the inbox list.")
+        let returnedToInbox = facilities.waitForExistence(timeout: 5)
+        if !returnedToInbox { attachScreenshot("Detail after native edge swipe", from: app) }
+        XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
 
         let search = app.buttons["inbox-search-button"]
