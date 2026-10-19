@@ -138,7 +138,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
-    func testBackWithoutSwitchingKeepsListPositionWhenAnsweredRequestMovesDown() throws {
+    func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -151,7 +151,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(examples.firstMatch.waitForExistence(timeout: 10),
                       "Local examples make the list long enough to scroll.")
         XCTAssertTrue(others.contains { $0.frame.minY > facilities.frame.minY },
-                      "The open request starts above another open request, so finishing it moves it down.")
+                      "The request starts above other open requests in the Inbox.")
 
         // Scroll part of a row so the position Back must keep is not the list's top.
         let top = ([facilities] + others).min { $0.frame.minY < $1.frame.minY }!
@@ -165,11 +165,6 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
         facilities.tap()
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
-        _ = answerSelectedFacilitiesRequest(in: app, x: 240, y: 610)
-        applyFixtureOutcome("ownOperationAccepted", in: app)
-        let status = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
-        XCTAssertEqual(status.label, "Answered")
 
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
@@ -177,8 +172,8 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                        "Detail uses the native navigation back control.")
         back.tap()
         XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
-        let movedDown = NSPredicate { _, _ in others.allSatisfy { $0.frame.minY < facilities.frame.minY } }
-        wait(for: [XCTNSPredicateExpectation(predicate: movedDown, object: nil)], timeout: 5)
+        XCTAssertTrue(app.buttons["inbox-tab-inbox"].isSelected)
+        XCTAssertTrue(facilities.exists, "An untouched request stays in Inbox after native Back.")
         let kept = NSPredicate { _, _ in abs(top.frame.minY - scrolledTop) <= 1 }
         let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
         XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
@@ -308,13 +303,16 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let status = app.staticTexts["request-lifecycle-status"]
         XCTAssertTrue(status.waitForExistence(timeout: 5))
         XCTAssertEqual(status.label, "Answered")
-        showRequestsListIfNeeded(in: app)
+
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
 
         let replied = app.buttons["inbox-tab-replied"]
         XCTAssertTrue(replied.waitForExistence(timeout: 5), app.debugDescription)
-        replied.tap()
+        XCTAssertTrue(replied.isSelected, "Back returns to the tab that owns the acted-on message.")
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
-                      "An answered request moves to Replied.\n\(app.debugDescription)")
+                      "An answered request returns in Replied.\n\(app.debugDescription)")
         attachScreenshot("Answered request in Replied", from: app)
 
         app.buttons["inbox-tab-inbox"].tap()
