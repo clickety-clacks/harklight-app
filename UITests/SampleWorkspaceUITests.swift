@@ -171,7 +171,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let replyChoice = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
         XCTAssertTrue(replyChoice.waitForExistence(timeout: 5), app.debugDescription)
         replyChoice.tap()
-        let editor = app.textViews["request-input-answer-response"]
+        let editor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         editor.tap()
         editor.typeText("Keep the smaller first step.")
