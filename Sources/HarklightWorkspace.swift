@@ -773,7 +773,6 @@ struct InboxBottomControls: View {
                     }
                     .frame(height: controlHeight)
                     .glassEffect(.regular, in: Capsule())
-                    .accessibilityIdentifier("inbox-message-tabs")
                     Spacer(minLength: 8)
                     Button("Search", systemImage: "magnifyingglass") {
                         withAnimation(.smooth(duration: 0.35)) { isSearchPresented = true }

@@ -338,8 +338,9 @@ final class ConversationSampleUITests: XCTestCase {
     /// Whether the whole row is inside the list, above its bottom tab and search controls.
     private func unobscured(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.exists else { return false }
-        let controls = [app.textFields["inbox-search-field"], app.otherElements["inbox-message-tabs"],
-                        app.buttons["inbox-search-button"]].filter(\.exists).map(\.frame.minY)
+        let controls = [app.textFields["inbox-search-field"], app.buttons["inbox-tab-inbox"],
+                        app.buttons["inbox-tab-replied"], app.buttons["inbox-search-button"]]
+            .filter(\.exists).map(\.frame.minY)
         let bottom = controls.min() ?? app.windows.firstMatch.frame.maxY
         let frame = element.frame
         return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
