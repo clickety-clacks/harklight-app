@@ -3,8 +3,8 @@ import UIKit
 import UserNotifications
 import AttentionDomain
 
-// This receiver is scoped to the signed development build of the existing app.
-// A simulator has no APNs address to hand off.
+// The same receiver handles development and distribution builds; the signed app
+// target selects the APNs environment. A simulator has no APNs address to hand off.
 @MainActor
 final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private static let expectedBundleID = "co.clicketyclacks.Harklight"
