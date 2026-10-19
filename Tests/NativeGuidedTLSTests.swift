@@ -1718,6 +1718,15 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(bundleDiagnostic.executableSHA256.count, 64)
         XCTAssertTrue(bundleDiagnostic.executableSHA256.allSatisfy(\.isHexDigit))
         XCTAssertTrue(bundleDiagnostic.shareText.contains("app_executable_sha256=\(bundleDiagnostic.executableSHA256)"))
+        XCTAssertNotEqual(bundleDiagnostic.appVersion, "unavailable")
+        XCTAssertNotEqual(bundleDiagnostic.buildNumber, "unavailable")
+        let bundleMetadata = [
+            "app_version=\(bundleDiagnostic.appVersion)",
+            "app_build=\(bundleDiagnostic.buildNumber)",
+            "app_executable_sha256=\(bundleDiagnostic.executableSHA256)"
+        ]
+        bundleMetadata.forEach { XCTAssertTrue(bundleDiagnostic.shareText.contains($0), $0) }
+        print("Connection diagnostics from the installed app bundle:\n\(bundleMetadata.joined(separator: "\n"))")
     }
 
     func testClientDiagnosticJournalPersistsRetrievableOperationAndSafeCauseOnly() throws {
