@@ -55,6 +55,7 @@ public protocol AuthenticatedConversationCleanupSession: AuthenticatedConversati
 
 public enum OriginalOperationResult: Equatable, Sendable {
     case accepted(operationID: UUID, terminalSequence: UInt64)
+    case refusedByRetraction(operationID: UUID, retractedAtMilliseconds: UInt64)
     case unresolved
 }
 
@@ -1086,7 +1087,8 @@ public actor NativeRelayCore {
             }
             try validate()
             attempted += 1
-            if case let .accepted(operationID, terminalSequence) = result {
+            switch result {
+            case let .accepted(operationID, terminalSequence):
                 guard operationID == submission.operationID, terminalSequence > 0 else {
                     diagnose(.answer, .originalOperationDelivery, .unresolved,
                              error: NativeRelayCoreError.mismatchedOperationResult,
@@ -1108,7 +1110,30 @@ public actor NativeRelayCore {
                 diagnose(.answer, .originalOperationDelivery, .accepted,
                          operationID: operationID, request: submission.requestKey,
                          revision: submission.requestRevision, receipt: .acceptedAwaitingReplay)
-            } else {
+            case let .refusedByRetraction(operationID, retractedAtMilliseconds):
+                guard operationID == submission.operationID else {
+                    diagnose(.answer, .originalOperationDelivery, .unresolved,
+                             error: NativeRelayCoreError.mismatchedOperationResult,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                do {
+                    try store.recordAnswerRefusedByRetraction(submission.intentID,
+                        operationID: operationID,
+                        retractedAtMilliseconds: retractedAtMilliseconds,
+                        context: context)
+                } catch {
+                    diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
+                             operationID: operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                    throw error
+                }
+                diagnose(.answer, .originalOperationDelivery, .rejected,
+                         causeCode: NativeDiagnosticCauseCode.serverReason("retracted"),
+                         operationID: operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .terminal)
+            case .unresolved:
                 diagnose(.answer, .originalOperationDelivery, .unresolved,
                          operationID: submission.operationID, request: submission.requestKey,
                          revision: submission.requestRevision, receipt: .unknown)

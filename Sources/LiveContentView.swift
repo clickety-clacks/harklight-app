@@ -410,7 +410,7 @@ struct LiveRequestDetail: View {
                         .accessibilityIdentifier("request-update-fact")
                 }
                 if request.inboxStateIsCurrent {
-                    Text(store.isRetracted(request.key) ? "Retracted" : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
+                    Text(store.isRetracted(request.key) ? store.retractionLabel(request.key) : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-lifecycle-status")
                     if let seenStatus = request.informationalSeenStatus {
@@ -639,6 +639,7 @@ struct LiveRequestDetail: View {
         return switch state {
         case .durable, .queuedForRelay: "Answer pending on this device"
         case .accepted: "Answer accepted · terminal status pending"
+        case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
         case .repairRequired: "Answer needs recovery"
         }

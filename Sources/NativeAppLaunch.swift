@@ -894,7 +894,28 @@ final class LivePresentationStore {
     func hasAcceptedUpdate(for key: RequestKey) -> Bool {
         conversationThreads[key]?.acceptedUpdates.isEmpty == false
     }
-    func isRetracted(_ key: RequestKey) -> Bool { conversationThreads[key]?.isRetracted == true }
+    func isRetracted(_ key: RequestKey) -> Bool {
+        if conversationThreads[key]?.isRetracted == true { return true }
+        if let outcome = request(for: key)?.intentReceipt?.relayOutcome,
+           case .refusedByRetraction = outcome { return true }
+        return false
+    }
+
+    func retractionDate(_ key: RequestKey) -> Date? {
+        let thread = conversationThreads[key]
+        let timestamp = thread?.retraction?.retractedAtMilliseconds ?? thread?.reportedRetractedAtMilliseconds ?? {
+            guard let outcome = request(for: key)?.intentReceipt?.relayOutcome,
+                  case let .refusedByRetraction(retractedAtMilliseconds) = outcome else { return nil }
+            return retractedAtMilliseconds
+        }()
+        guard let timestamp else { return nil }
+        return Date(timeIntervalSince1970: Double(timestamp) / 1_000)
+    }
+
+    func retractionLabel(_ key: RequestKey) -> String {
+        guard let date = retractionDate(key) else { return "Retracted" }
+        return "Retracted · " + date.formatted(date: .abbreviated, time: .shortened)
+    }
 
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
 
@@ -1163,7 +1184,7 @@ final class LivePresentationStore {
             var statusParts: [String] = []
             if $0.inboxStateIsCurrent {
                 if hasAcceptedUpdate(for: $0.key) { statusParts.append("Updated") }
-                let lifecycle = isRetracted($0.key) ? "Retracted" :
+                let lifecycle = isRetracted($0.key) ? retractionLabel($0.key) :
                     String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)
                 statusParts.append(lifecycle)
                 if let seenStatus = $0.informationalSeenStatus {
@@ -1191,6 +1212,7 @@ final class LivePresentationStore {
         return switch state {
         case .durable, .queuedForRelay: "Answer pending on this device"
         case .accepted: "Answer accepted · terminal status pending"
+        case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
         case .repairRequired: "Answer needs recovery"
         }
