@@ -847,6 +847,7 @@ final class LivePresentationStore {
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
+    @ObservationIgnored private let inboxSeenBaseline: InboxSeenBaseline?
     var notificationContext: ProfileContext { profileContext }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
     private(set) var isReadOnly: Bool
@@ -860,9 +861,11 @@ final class LivePresentationStore {
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
-    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext) throws {
+    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext,
+                     captureFixtureRequestsAsSeen: Bool = false) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
-        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false, diagnostics: nil)
+        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false,
+                      diagnostics: nil, captureFixtureRequestsAsSeen: captureFixtureRequestsAsSeen)
     }
 
     convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext) throws {
@@ -872,7 +875,8 @@ final class LivePresentationStore {
 
     private init(store: AttentionDomainStore, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
-                 diagnostics: NativeClientDiagnosticJournal? = nil) throws {
+                 diagnostics: NativeClientDiagnosticJournal? = nil,
+                 captureFixtureRequestsAsSeen: Bool = false) throws {
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
         self.isReadOnly = isReadOnly
@@ -882,6 +886,16 @@ final class LivePresentationStore {
         let snapshot = try port.observe(context: port.context)
         self.port = port
         self.presentation = snapshot
+        if permitsDelivery && context.transportMode == .relay {
+            self.inboxSeenBaseline = InboxSeenBaseline.capture(
+                identity: context.identity,
+                acceptanceOrders: snapshot.requests.map(\.acceptanceOrder))
+        } else if captureFixtureRequestsAsSeen && context.transportMode == .fixture {
+            self.inboxSeenBaseline = InboxSeenBaseline.fixture(
+                existingAcceptanceOrders: snapshot.requests.map(\.acceptanceOrder))
+        } else {
+            self.inboxSeenBaseline = nil
+        }
         self.conversationThreads = try port.conversations(context: port.context).threads
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
@@ -1180,30 +1194,33 @@ final class LivePresentationStore {
     }
 
     var inboxRows: [InboxRequestRow] {
-        presentation.requests.map {
+        presentation.requests.map { request in
             var statusParts: [String] = []
-            if $0.inboxStateIsCurrent {
-                if hasAcceptedUpdate(for: $0.key) { statusParts.append("Updated") }
-                let lifecycle = isRetracted($0.key) ? retractionLabel($0.key) :
-                    String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)
+            if request.inboxStateIsCurrent {
+                if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
+                let lifecycle = isRetracted(request.key) ? retractionLabel(request.key) :
+                    String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
                 statusParts.append(lifecycle)
-                if let seenStatus = $0.informationalSeenStatus {
+                if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
                     statusParts.append(informationalSeenRowStatus(seenStatus))
                 }
             } else {
-                if let localStatus = cachedOperationStatus($0.intentReceipt?.localState) {
+                if let localStatus = cachedOperationStatus(request.intentReceipt?.localState) {
                     statusParts.append(localStatus)
                 }
                 statusParts.append("Cached history · status not refreshed")
             }
-            return InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? "Message",
-                sender: $0.key.senderID.rawValue,
+            return InboxRequestRow(key: request.key, title: request.title?.rawValue ?? "Message",
+                sender: request.key.senderID.rawValue,
                 status: statusParts.joined(separator: " · "),
-                bodyText: $0.body?.rawValue,
-                symbol: $0.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: !$0.inboxStateIsCurrent || $0.isResolved, createdAt: $0.createdAt,
-                informationalSeenStatus: $0.informationalSeenStatus,
-                canMarkSeen: !isReadOnly && $0.informationalSeenStatus == .available)
+                bodyText: request.body?.rawValue,
+                symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
+                isResolved: !request.inboxStateIsCurrent || request.isResolved, createdAt: request.createdAt,
+                informationalSeenStatus: request.informationalSeenStatus,
+                canMarkSeen: !isReadOnly && request.informationalSeenStatus == .available,
+                localSeenSelected: inboxSeenBaseline?.selects(
+                    acceptanceOrder: request.acceptanceOrder) ?? false,
+                tier: request.attentionTier.inboxRowStyleTier)
         }
     }
 
@@ -1544,4 +1561,14 @@ enum LiveReplyError: Error {
     case notOpen
     case incomplete
     case unsupported
+}
+
+extension AttentionTier {
+    var inboxRowStyleTier: InboxAttentionTier {
+        switch self {
+        case .top: .top
+        case .middle: .middle
+        case .low: .low
+        }
+    }
 }

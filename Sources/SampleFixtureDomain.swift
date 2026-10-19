@@ -211,9 +211,11 @@ final class SampleFixtureDomain {
         case .note, .error, .warning, .information, .completed:
             break
         }
-        // Notes are actual domain text drafts. Conversation closure examples are
-        // applied separately as typed local facts, never accepted answer receipts.
-        text("note", "Note")
+        // Text choices already offer "Your own answer" for free-form input.
+        // Other examples retain their actual domain note drafts.
+        if message.kind != .textChoice {
+            text("note", "Note")
+        }
         let nodes: [[String: Any]] = inputs.map { input in
             let kind = input["kind"] as? String
             return ["kind": "input", "id": input["id"]!,

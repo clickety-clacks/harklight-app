@@ -71,6 +71,42 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
         XCTAssertNil(thread.facts[ExactText("2")]?.actedBy)
     }
+    func testUnboundTierFactIsDurableBeforeACKAndAppliesWhenDeliveryArrives() async throws {
+        let (context, persistence, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("future"))
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"future","origin":"future-origin","request_revision":1,"kind":"attention_tier","event_id":"tier-change","attention_tier":"low"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        session.onConversationACK = {
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+            XCTAssertEqual(try store.snapshot(context: context).cursor, 1,
+                           "Conversation replay must not advance the ordinary cursor.")
+            let snapshot = try store.snapshot(context: context)
+            XCTAssertNil(snapshot.requests[key], "A tier fact must not create a duplicate message row.")
+            XCTAssertNil(snapshot.remoteStates[key])
+            XCTAssertEqual(snapshot.inboxReferences[key]?.attentionTier, .low,
+                           "The tier fact must be durable before the conversation cursor is acknowledged.")
+            XCTAssertEqual(snapshot.inboxReferences[key]?.attentionTierFeed, .conversation)
+            let restored = try AttentionDomainStore(context: context, persistence: persistence)
+            XCTAssertEqual(try restored.snapshot(context: context).inboxReferences[key]?.attentionTier, .low)
+        }
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.conversationACKs.count, 1)
+
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let payload = try JSONValue.parse(data(#"{"title":"Arrived later"}"#))
+        try restored.apply(RelayEvent(sequence: 2,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            origin: ExactText("future-origin"), attentionTier: .top), context: context)
+        let port = AttentionDomainPort(store: restored)
+        let rows = try port.observe(context: port.context).requests.filter { $0.key == key }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.attentionTier, .low,
+                       "The later ordinary delivery must retain the conversation-feed tier.")
+    }
     func testOriginSourceResultCommitsBeforeItsACKAndKeepsAgentTerminalAsTheOnlyClosure() async throws {
         let (context, _, store, session) = try setup()
         let operationID = UUID(uuidString: "83b3fc92-6f10-4d94-9fd5-62f9572e4f1a")!

@@ -56,6 +56,62 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
     }
 
     @MainActor
+    func testPreexistingOpenRequestAppearsInSeenAndRemainsAnswerable() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("seen-baseline-\(UUID().uuidString)"),
+                                       deviceID: ExactText("device-A"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        let existingKey = RequestKey(accountScope: identity.personID,
+                                     senderID: ExactText("app:test"),
+                                     messageID: ExactText("preexisting"))
+        let existingPayload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"preexisting","title":"Older request","body":"Please reply"}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1,
+                                       body: .delivery(StoredRequest(key: existingKey,
+                                                                     originalPayload: existingPayload), .message)),
+                            context: context)
+        let resolvedKey = RequestKey(accountScope: identity.personID,
+                                     senderID: ExactText("app:test"),
+                                     messageID: ExactText("preexisting-answered"))
+        let resolvedPayload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"preexisting-answered","title":"Older answered request","body":"Already answered"}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 2,
+                                       body: .delivery(StoredRequest(key: resolvedKey,
+                                                                     originalPayload: resolvedPayload), .message)),
+                            context: context)
+        _ = try store.apply(RelayEvent(sequence: 3,
+                                       body: .terminal(resolvedKey, .answered, nil)),
+                            context: context)
+
+        let visible = try LivePresentationStore(store: store, context: context)
+        let existingRow = try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey })
+        XCTAssertTrue(existingRow.belongsToSeenTab)
+        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == resolvedKey }).belongsToSeenTab)
+        let existingRequest = try XCTUnwrap(visible.presentation.requests.first { $0.key == existingKey })
+        XCTAssertTrue(LiveRequestDetail(request: existingRequest, store: visible).canAnswer)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "Local Seen placement must not create a relay operation.")
+
+        let newKey = RequestKey(accountScope: identity.personID,
+                                senderID: ExactText("app:test"),
+                                messageID: ExactText("arrived-after-start"))
+        let newPayload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"arrived-after-start","title":"New request","body":"Please reply"}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 4,
+                                       body: .delivery(StoredRequest(key: newKey,
+                                                                     originalPayload: newPayload), .message)),
+                            context: context)
+        try visible.refreshFromDurableStore()
+
+        let newRow = try XCTUnwrap(visible.inboxRows.first { $0.key == newKey })
+        XCTAssertFalse(newRow.belongsToSeenTab)
+        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToSeenTab)
+        XCTAssertTrue(LiveRequestDetail(request: try XCTUnwrap(visible.presentation.requests.first { $0.key == existingKey }),
+                                        store: visible).canAnswer)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "Capturing Seen placement must not answer the request.")
+    }
+
+    @MainActor
     func testSuppliedUnsupportedAnswerFormatOffersNoSend() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"),

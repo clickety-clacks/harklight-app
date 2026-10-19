@@ -40,7 +40,11 @@ struct LiveContentView: View {
             ContentUnavailableView(loadError, systemImage: "exclamationmark.triangle")
         } else {
             HarklightInbox(
-                requests: store.inboxRows, samples: samples, selectRequest: { store.selectRequest($0) },
+                requests: store.inboxRows.map { row in
+                    var row = row
+                    if store.conversation(for: row.key) != nil { row.chatUnread = false }
+                    return row
+                }, samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { markSeen($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
@@ -103,49 +107,48 @@ struct MessageHeading: View {
     let title: String
     var createdAt: Date? = nil
     var symbol: String? = nil
+    var titleColor: Color = .primary
+    var chatUnread: Bool? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 9) {
                 if !initials.isEmpty {
                     Text(initials)
                         .font(.caption.bold())
-                        .padding(9)
+                        .frame(width: 28, height: 28)
                         .background(.quaternary, in: Circle())
                 }
-                if let symbol {
-                    Image(systemName: symbol)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                }
                 if let sender {
-                    Text(sender).font(.subheadline.weight(.semibold))
+                    Text(sender).font(.subheadline)
                 }
                 Spacer(minLength: 0)
                 if let createdAt {
-                    Text(createdAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(InboxFriendlyDate.label(for: createdAt))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if let chatUnread {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.caption)
+                        .foregroundStyle(chatUnread ? .blue : .secondary)
+                        .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
+                }
             }
-            Text(title)
-                .font(.largeTitle.bold())
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 21, weight: .semibold))
+                        .foregroundStyle(titleColor)
+                        .accessibilityHidden(true)
+                }
+                Text(title)
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundStyle(titleColor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .accessibilityElement(children: .combine)
-    }
-}
-
-private extension SampleKind {
-    var noticeTint: Color? {
-        switch self {
-        case .error: .red
-        case .warning: .orange
-        case .information: .blue
-        case .completed: .green
-        default: nil
-        }
     }
 }
 
@@ -338,6 +341,7 @@ struct LiveRequestDetail: View {
     @State private var chatPresented = false
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
+    @State private var requestDetailsPresented = false
 
     private var controlsReadOnly: Bool {
         if let localExample {
@@ -356,6 +360,20 @@ struct LiveRequestDetail: View {
             guard fixtureStore.sendSelectedAnswer(for: request.key,
                                                    explicitCompatibilityAction: action) else { return }
             try? store.refreshFromDurableStore()
+        }
+    }
+
+    private var availableSeenAction: ExactText? {
+        guard request.informationalSeenStatus == .available,
+              case let .compatibility(actions) = request.projection else { return nil }
+        return actions.first?.id
+    }
+
+    private func submitSeenAction(_ action: ExactText) {
+        if let localSeenAction {
+            localSeenAction(action)
+        } else {
+            store.submitFromUser(request.key, explicitCompatibilityAction: action)
         }
     }
 
@@ -379,17 +397,35 @@ struct LiveRequestDetail: View {
     }
 
     var body: some View {
-        MessageCardSurface(context: context) {
-            VStack(alignment: .leading, spacing: 22) {
-                MessageHeading(sender: localExample?.message.sender,
-                               initials: localExample?.message.initials ?? "",
+        MessageCardSurface(context: context,
+            backgroundColor: Color(red: 0.89, green: 0.94, blue: 1)) {
+            VStack(alignment: .leading, spacing: 12) {
+                MessageHeading(sender: localExample?.message.sender
+                                   ?? InboxSenderDisplay.name(for: request.key.senderID.rawValue),
+                               initials: localExample?.message.initials
+                                   ?? String(InboxSenderDisplay.name(for: request.key.senderID.rawValue)
+                                       .split(whereSeparator: { !$0.isLetter }).prefix(2).compactMap(\.first)).uppercased(),
                                title: request.title?.rawValue ?? "Message",
                                createdAt: request.createdAt,
-                               symbol: localExample?.message.kind.symbol ?? (request.informationalSeenStatus == nil ? "text.bubble" : "info.circle"))
+                               symbol: localExample?.message.kind.symbol ?? (request.informationalSeenStatus == nil ? "text.bubble" : "info.circle"),
+                               titleColor: localExample?.message.kind == .error
+                                   ? Color(red: 0.70, green: 0, blue: 0.06)
+                                   : localExample?.message.kind == .warning
+                                       ? Color(red: 0.48, green: 0.30, blue: 0)
+                                       : .primary,
+                               chatUnread: conversationIndicator)
+                    .accessibilityIdentifier("request-heading")
+                    .accessibilityHint("Touch and hold for request details")
+                    .contextMenu {
+                        Button("Request details", systemImage: "info.circle") {
+                            requestDetailsPresented = true
+                        }
+                        .accessibilityIdentifier("request-details-menu-action")
+                    }
                 if let localExample {
-                    Label("Local example · answers stay on this device", systemImage: "iphone")
-                        .font(.caption).foregroundStyle(.secondary)
-                    LocalSampleContext(response: localExample)
+                    if localExample.message.revised || localExample.message.deadline != nil {
+                        LocalSampleContext(response: localExample)
+                    }
                     if localExample.finished {
                         Label(request.informationalSeenStatus == nil
                               ? "Answered locally · nothing sent"
@@ -409,24 +445,6 @@ struct LiveRequestDetail: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-update-fact")
                 }
-                if request.inboxStateIsCurrent {
-                    Text(store.isRetracted(request.key) ? store.retractionLabel(request.key) : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("request-lifecycle-status")
-                    if let seenStatus = request.informationalSeenStatus {
-                        Label(Self.informationalSeenText(seenStatus),
-                              systemImage: Self.informationalSeenSymbol(seenStatus))
-                            .font(.caption).foregroundStyle(.secondary)
-                            .accessibilityIdentifier("informational-seen-status")
-                    }
-                } else {
-                    Label("Cached history · status not refreshed", systemImage: "clock.arrow.circlepath")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("inbox-status-unrefreshed")
-                    if let localStatus = Self.cachedOperationStatus(request.intentReceipt?.localState) {
-                        Text(localStatus).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
                 if store.isRetracted(request.key) {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -439,14 +457,17 @@ struct LiveRequestDetail: View {
                     }.font(.subheadline)
                 }
                 if let body = request.body {
-                    if let tint = localExample?.message.kind.noticeTint {
+                    if let noticeBodyColor {
                         Text(body.rawValue)
                             .textSelection(.enabled)
-                            .padding(16)
+                            .foregroundStyle(noticeTextColor)
+                            .padding(.horizontal, 14).padding(.vertical, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                            .background(noticeBodyColor, in: RoundedRectangle(cornerRadius: 14))
                     } else {
-                        Text(body.rawValue).textSelection(.enabled)
+                        Text(body.rawValue)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 if localExample?.message.kind == .review {
@@ -467,10 +488,31 @@ struct LiveRequestDetail: View {
                                              store: store,
                                              readOnly: controlsReadOnly,
                                              localExample: localExample,
-                                             onSeen: localSeenAction)
+                                             onSeen: submitSeenAction)
                 case .unsupported:
                     Text("This request uses an unsupported answer format.")
                         .foregroundStyle(.secondary)
+                }
+                if request.inboxStateIsCurrent {
+                    if request.lifecycleStatus != .open || store.isRetracted(request.key) {
+                        Text(store.isRetracted(request.key) ? store.retractionLabel(request.key) : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("request-lifecycle-status")
+                    }
+                    if let seenStatus = request.informationalSeenStatus,
+                       seenStatus != .available {
+                        Label(Self.informationalSeenText(seenStatus),
+                              systemImage: Self.informationalSeenSymbol(seenStatus))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("informational-seen-status")
+                    }
+                } else {
+                    Label("Cached history · status not refreshed", systemImage: "clock.arrow.circlepath")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("inbox-status-unrefreshed")
+                    if let localStatus = Self.cachedOperationStatus(request.intentReceipt?.localState) {
+                        Text(localStatus).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 if localExample == nil && fixtureStore == nil && request.lifecycleStatus == .pending {
                     Button("Retry delivery") { store.retryPendingDelivery() }
@@ -506,36 +548,32 @@ struct LiveRequestDetail: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-receipt-evidence")
                 }
-                DisclosureGroup {
-                    Text("Sender: \(request.key.senderID.rawValue)")
-                    Text("Message: \(request.key.messageID.rawValue)")
-                    Text(request.originalContentJSON)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("request-original-content-json")
-                    if let receipt = request.intentReceipt {
-                        Text("Original answer")
-                            .font(.headline)
-                        Text(receipt.exactAnswerJSON)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("request-details-original-answer-json")
-                    }
-                } label: {
-                    Text("Request details")
-                        .accessibilityIdentifier("request-details-disclosure")
-                }
             }
-            .padding(.horizontal, 22).padding(.vertical, 24)
+            .padding(.horizontal, 16).padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                if let localExample {
+                if let availableSeenAction {
+                    Button("Seen", systemImage: "checkmark") {
+                        submitSeenAction(availableSeenAction)
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.glassProminent)
+                    .disabled(controlsReadOnly)
+                    .accessibilityIdentifier("request-finish-seen")
+                } else if request.informationalSeenStatus != nil {
+                    Button("No answer to submit", systemImage: "checkmark") {}
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.glass)
+                        .disabled(true)
+                        .accessibilityIdentifier("request-finish-unavailable")
+                } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         localExample.finishLocally()
                     }
                     .labelStyle(.iconOnly)
+                    .buttonStyle(.glassProminent)
                     .disabled(!localExample.canFinishLocally || localExample.finished)
                     .accessibilityIdentifier("sample-finish")
                 } else if request.informationalSeenStatus == nil {
@@ -548,6 +586,7 @@ struct LiveRequestDetail: View {
                         }
                     }
                         .labelStyle(.iconOnly)
+                        .buttonStyle(.glassProminent)
                         .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
@@ -564,6 +603,11 @@ struct LiveRequestDetail: View {
                 }
             }
             ToolbarItemGroup(placement: .bottomBar) {
+                if horizontalSizeClass == .compact {
+                    Spacer()
+                    compactBottomControls
+                    Spacer()
+                } else {
                 Button("Later", systemImage: "clock") {
                     if let localExample { localExample.deferred.toggle() }
                     else { deferred.toggle() }
@@ -585,10 +629,14 @@ struct LiveRequestDetail: View {
                         }
                     }
                 }
+                }
             }
         }
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)
+        }
+        .sheet(isPresented: $requestDetailsPresented) {
+            requestDetailsSheet
         }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
@@ -602,6 +650,88 @@ struct LiveRequestDetail: View {
             else { chatPresented = true }
         }
         .labelStyle(.iconOnly)
+    }
+
+    private var requestDetailsSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Sender: \(request.key.senderID.rawValue)")
+                    Text("Message: \(request.key.messageID.rawValue)")
+                    Text(request.originalContentJSON)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("request-original-content-json")
+                    if let receipt = request.intentReceipt {
+                        Text("Original answer")
+                            .font(.headline)
+                        Text(receipt.exactAnswerJSON)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("request-details-original-answer-json")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+            }
+            .navigationTitle("Request details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { requestDetailsPresented = false }
+                        .accessibilityIdentifier("request-details-done")
+                }
+            }
+        }
+    }
+
+    private var compactBottomControls: some View {
+        HStack(spacing: 0) {
+            Button("Later", systemImage: "clock") {
+                if let localExample { localExample.deferred.toggle() }
+                else { deferred.toggle() }
+            }
+            .labelStyle(.iconOnly)
+            .frame(width: 58, height: 52)
+            .disabled(store.isReadOnly || store.isRetracted(request.key) || localExample?.finished == true)
+
+            if context.openChat != nil || context.canInlineChat {
+                chatButton.frame(width: 58, height: 52)
+            } else {
+                chatButton
+                    .frame(width: 58, height: 52)
+                    .sheet(isPresented: $chatPresented) {
+                        conversationPanel.presentationDetents([.medium, .large])
+                    }
+            }
+        }
+    }
+
+    private var noticeBodyColor: Color? {
+        switch localExample?.message.kind {
+        case .some(.error): Color(red: 1, green: 0.89, blue: 0.88)
+        case .some(.warning): Color(red: 1, green: 0.95, blue: 0.80)
+        case .some(.information): Color(red: 0.89, green: 0.94, blue: 1)
+        case .some(.completed): Color(red: 0.89, green: 0.96, blue: 0.90)
+        default: request.informationalSeenStatus == nil ? nil : Color(red: 0.89, green: 0.94, blue: 1)
+        }
+    }
+
+    private var conversationIndicator: Bool? {
+        if let localExample {
+            return localExample.message.hasChat
+                ? localExample.message.chatUnread && !localExample.chatRead : nil
+        }
+        return store.conversation(for: request.key) == nil ? nil : false
+    }
+
+    private var noticeTextColor: Color {
+        switch localExample?.message.kind {
+        case .some(.error): Color(red: 0.48, green: 0, blue: 0.04)
+        case .some(.warning): Color(red: 0.36, green: 0.24, blue: 0)
+        case .some(.completed): Color(red: 0.10, green: 0.37, blue: 0.16)
+        default: Color(red: 0.04, green: 0.23, blue: 0.43)
+        }
     }
 
     private var conversationPanel: some View {
@@ -753,6 +883,17 @@ private struct LiveProjectedInputView: View {
         readOnly ? request.draft.inputs[input.id] : store.request(for: request.key)?.draft.inputs[input.id]
     }
 
+    private var textEditor: some View {
+        TextEditor(text: Binding(
+            get: { draft?.text?.rawValue ?? "" },
+            set: { store.updateText($0, input: input.id, action: nil, for: request.key) }
+        ))
+        .frame(minHeight: 120)
+        .accessibilityLabel(input.label.rawValue)
+        .accessibilityIdentifier("request-input-" + input.id.rawValue)
+        .disabled(readOnly)
+    }
+
     var body: some View {
         switch input.kind {
         case let .response(actions):
@@ -776,7 +917,9 @@ private struct LiveProjectedInputView: View {
                 .disabled(readOnly)
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(input.label.rawValue).font(.headline)
+                    if input.label.rawValue != "Response" {
+                        Text(input.label.rawValue).font(.headline)
+                    }
                     VStack(spacing: 10) {
                         ForEach(actions.filter { action in
                             !(localExample?.message.kind == .multipleChoice &&
@@ -805,14 +948,7 @@ private struct LiveProjectedInputView: View {
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(input.label.rawValue).font(.headline)
-                    TextEditor(text: Binding(
-                        get: { draft?.text?.rawValue ?? "" },
-                        set: { store.updateText($0, input: input.id, action: nil, for: request.key) }
-                    ))
-                    .frame(minHeight: 120)
-                    .accessibilityLabel(input.label.rawValue)
-                    .accessibilityIdentifier("request-input-" + input.id.rawValue)
-                    .disabled(readOnly)
+                    textEditor
                 }
             }
         case let .point(illustrationID):
@@ -917,7 +1053,8 @@ private struct LiveProjectedInputView: View {
                         ? "Write it here, or say why none of these fit."
                         : ""
                     MessageChoiceLabel(title: action.label.rawValue, detail: detail,
-                                       selected: selected, multiple: false, suggested: false)
+                                       selected: selected, multiple: false, suggested: false,
+                                       ownAnswer: action.id.rawValue == "own")
                 }
             }
             .buttonStyle(.plain)
@@ -954,10 +1091,17 @@ private struct LiveCompatibilityActions: View {
                             store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
                         }
                     } label: {
-                        Label(action.label.rawValue, systemImage: "checkmark.circle")
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(spacing: 10) {
+                            Image(systemName: "eye")
+                                .foregroundStyle(Color.blue)
+                            Text(action.label.rawValue)
+                                .foregroundStyle(.primary)
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 50)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.plain)
+                    .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
                     .disabled(readOnly)
                     .accessibilityIdentifier("request-seen-action")
                 }
