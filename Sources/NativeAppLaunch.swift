@@ -1219,11 +1219,24 @@ final class LivePresentationStore {
                 isResolved: !request.inboxStateIsCurrent || request.isResolved, createdAt: request.createdAt,
                 informationalSeenStatus: request.informationalSeenStatus,
                 canMarkSeen: !isReadOnly && request.informationalSeenStatus == .available,
+                canNoComment: canNoComment(request),
+                noCommentUnavailable: request.noCommentUnavailable,
                 hasUserAction: request.intentReceipt != nil || request.draft.hasEdits ||
                     request.lifecycleStatus == .answered ||
+                    request.lifecycleStatus == .noComment ||
                     request.informationalSeenStatus == .pending ||
                     request.informationalSeenStatus == .confirmed,
                 tier: request.attentionTier.inboxRowStyleTier)
+        }
+    }
+
+    private func canNoComment(_ request: PresentedRequest) -> Bool {
+        guard !isReadOnly, request.inboxStateIsCurrent, !isRetracted(request.key),
+              request.lifecycleStatus == .open, request.intentReceipt == nil,
+              request.informationalSeenStatus == nil else { return false }
+        switch request.projection {
+        case .sender, .compatibility: true
+        case .unsupported: false
         }
     }
 
@@ -1234,6 +1247,7 @@ final class LivePresentationStore {
         case .accepted: "Answer accepted · terminal status pending"
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .unsupported: "No comment is unsupported by this server"
         case .repairRequired: "Answer needs recovery"
         }
     }
@@ -1374,6 +1388,56 @@ final class LivePresentationStore {
                     actionError = "Your answer could not be confirmed. Check its saved status before trying again."
                 }
             }
+        }
+    }
+
+    func submitNoCommentFromUser(_ key: RequestKey) {
+        guard permitsDelivery, !isReadOnly else { return }
+        flushPendingDraft(for: key)
+        do {
+            _ = try submitNoComment(key)
+            retryPendingDelivery()
+        } catch {
+            diagnose(.localStore, .draftSave, .failed, error: error, request: key,
+                     receiptState: .unknown)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+            let current: PresentedRequest?
+            do { current = try inspectedRequest(key) }
+            catch {
+                diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key)
+                current = nil
+            }
+            if current?.intentReceipt != nil {
+                clearActionError()
+            } else {
+                actionErrorRequest = key
+                actionError = "No comment could not be confirmed. Check its saved status before trying again."
+            }
+        }
+    }
+
+    @discardableResult
+    private func submitNoComment(_ key: RequestKey) throws -> IntentReceipt {
+        let request = try inspectedRequest(key)
+        guard !isRetracted(key), request.inboxStateIsCurrent,
+              request.lifecycleStatus == .open, request.intentReceipt == nil,
+              !request.noCommentUnavailable,
+              let selector = request.selector,
+              canSubmitNoComment(request) else { throw LiveReplyError.notOpen }
+        let receipt = try port.submitNoComment(context: port.context,
+                                               selector: selector,
+                                               intentID: UUID())
+        do { try refreshFromDurableStore() }
+        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+        clearActionError()
+        return receipt
+    }
+
+    private func canSubmitNoComment(_ request: PresentedRequest) -> Bool {
+        switch request.projection {
+        case .sender, .compatibility: true
+        case .unsupported: false
         }
     }
 

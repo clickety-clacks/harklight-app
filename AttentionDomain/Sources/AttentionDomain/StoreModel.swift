@@ -97,12 +97,20 @@ public enum TypedSubmission: Equatable, Codable, Sendable {
     case compatibility(actionID: ExactText, text: ExactText?)
 }
 
+/// Distinguishes a deliberate No comment answer from an ordinary answer whose
+/// exact JSON value happens to be null or empty.
+public enum SubmissionAnswerKind: String, Equatable, Codable, Sendable {
+    case answer
+    case noComment
+}
+
 public enum IntentDisposition: Equatable, Codable, Sendable {
     case pending
     case accepted(sequence: UInt64?)
     case lost
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
+    case unsupported
     case repairRequired
 }
 
@@ -110,6 +118,8 @@ public struct Submission: Equatable, Codable, Sendable {
     public let requestRevision: UInt64?
     public let requestKey: RequestKey
     public let answer: JSONValue
+    /// Missing values decode existing schema-2 answer receipts unchanged.
+    public let answerKind: SubmissionAnswerKind?
     public let intentID: UUID
     public let operationID: UUID
     public let operation: JSONValue
@@ -120,12 +130,15 @@ public struct Submission: Equatable, Codable, Sendable {
     public let contentFingerprint: String
     public var disposition: IntentDisposition
 
+    public var isNoComment: Bool { answerKind == .noComment }
+
     public var wireFrame: Data {
         Data((operation.jsonString + "\n").utf8)
     }
 
     public init(requestKey: RequestKey,
                 answer: JSONValue,
+                answerKind: SubmissionAnswerKind? = nil,
                 intentID: UUID,
                 operationID: UUID,
                 operation: JSONValue,
@@ -139,6 +152,7 @@ public struct Submission: Equatable, Codable, Sendable {
         self.requestRevision = requestRevision
         self.requestKey = requestKey
         self.answer = answer
+        self.answerKind = answerKind
         self.intentID = intentID
         self.operationID = operationID
         self.operation = operation

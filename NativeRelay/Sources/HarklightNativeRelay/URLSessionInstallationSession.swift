@@ -360,6 +360,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        let isNoCommentOperation: Bool
+        if let outgoing = try? JSONValue.parse(frame) {
+            isNoCommentOperation = outgoing.uniqueValue(named: "type")?.stringValue?.rawValue == "answer_no_comment"
+        } else {
+            isNoCommentOperation = false
+        }
         await socketExchangeGate.enter()
         defer { socketExchangeGate.leave() }
         do { try await send(frame) }
@@ -401,6 +407,15 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 return .accepted(operationID: operationID, terminalSequence: sequence)
             case "error":
                 let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
+                if isNoCommentOperation, let reason {
+                    let normalizedReason = reason.lowercased()
+                    if normalizedReason.contains("unsupported") || normalizedReason.contains("unknown") {
+                        diagnose(.answer, .originalOperationDelivery, .rejected,
+                                 causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                                 operationID: operationID, receipt: .pendingUnconfirmed)
+                        return .unsupported(operationID: operationID)
+                    }
+                }
                 do {
                     if let result = try RelayWire(profile: profileContext)
                         .decodeAnswerRefusal(frame, operationID: operationID) {
@@ -423,6 +438,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             case "delivery", "lifecycle", "conversation":
                 continue
             default:
+                if isNoCommentOperation {
+                    diagnose(.answer, .originalOperationDelivery, .rejected,
+                             causeCode: "unknown_no_comment_response_frame",
+                             operationID: operationID, receipt: .pendingUnconfirmed)
+                    return .unsupported(operationID: operationID)
+                }
                 diagnose(.answer, .originalOperationDelivery, .unresolved,
                          causeCode: "unexpected_relay_frame", operationID: operationID,
                          receipt: .unknown)

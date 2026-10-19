@@ -60,6 +60,48 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
     }
 
+    func testNoCommentUsesItsOwnPayloadFreeFrameAndUnsupportedLeavesTheRequestOpen() throws {
+        let (context, store, live, key) = try setup()
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key)
+            .requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+
+        XCTAssertEqual(receipt.answerKind, .noComment)
+        XCTAssertEqual(receipt.inputs, [])
+        XCTAssertEqual(receipt.exactAnswer, .null,
+                       "The local null placeholder is distinguished by answerKind and is never the wire frame.")
+        let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
+                       #"{"type":"answer_no_comment","request_id":"sample"}"# + "\n")
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
+
+        try store.recordNoCommentUnsupported(receipt.intentID, operationID: receipt.opID, context: context)
+        try live.refreshFromDurableStore()
+        let reopened = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(reopened.lifecycleStatus, .open)
+        XCTAssertTrue(reopened.noCommentUnavailable)
+        XCTAssertNil(reopened.intentReceipt)
+        XCTAssertTrue(LiveRequestDetail(request: reopened, store: live).canAnswer,
+                      "The app leaves ordinary answer choices to an explicit user action.")
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+    }
+
+    func testServerNoCommentTerminalStaysDistinctAndAppearsInReplied() throws {
+        let (context, store, live, key) = try setup()
+        let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"other-installation","state":"no_comment","at":2}"#.utf8)
+        let event = try RelayWire(profile: context).decodeEvent(terminal)
+        _ = try store.apply(event, context: context)
+        try live.refreshFromDurableStore()
+
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(request.lifecycleStatus, .noComment)
+        XCTAssertEqual(request.receiptFacts?.evidenceLabel, "The sender recorded your No comment answer.")
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
+    }
+
     func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {
         let (context, store, live, key) = try setup()
         live.selectAction(ExactText("got-it"), input: nil, for: key)

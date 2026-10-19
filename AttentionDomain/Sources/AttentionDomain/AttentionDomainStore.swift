@@ -429,6 +429,83 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return submission
     }
 
+    /// Persists the agreed payload-free answer frame. The local placeholder
+    /// answer is never serialized onto the wire; `answerKind` is authoritative.
+    @discardableResult
+    public func submitNoComment(intentID: UUID,
+                                selector: BoundDocumentSelector,
+                                context suppliedContext: ProfileContext) throws -> Submission {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        let request = try boundRequest(selector, context: suppliedContext)
+        guard suppliedContext.transportMode == .relay || suppliedContext.transportMode == .fixture,
+              state.replayBarrier == nil,
+              isUUIDv4(intentID) else { throw AttentionStoreError.invalidSubmission }
+        if case .unsupported = request.interface { throw AttentionStoreError.unsupportedInterface }
+        let descriptorFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
+        var fingerprintParts = [
+            request.key.accountScope.rawValue,
+            request.key.senderID.rawValue,
+            request.key.messageID.rawValue,
+            descriptorFingerprint,
+            "no_comment"
+        ]
+        let requestRevision = state.conversation?.threads[request.key]?.currentRevision
+        if let requestRevision { fingerprintParts += ["request_revision", String(requestRevision)] }
+        let contentFingerprint = fingerprint(fingerprintParts.joined(separator: "\u{0}"))
+
+        if let existing = state.intents[intentID] {
+            guard existing.requestKey == request.key,
+                  existing.isNoComment,
+                  existing.descriptorFingerprint == descriptorFingerprint,
+                  existing.contentFingerprint == contentFingerprint else {
+                throw AttentionStoreError.intentConflict
+            }
+            return existing
+        }
+        if state.fencedIntents?[intentID] != nil { throw AttentionStoreError.intentConflict }
+        if let activeID = state.intentByRequest[request.key] {
+            throw AttentionStoreError.competingIntent(activeID)
+        }
+        guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
+        if state.inboxCandidate != nil { throw AttentionStoreError.inboxCheckpointPending }
+        if let checkpoint = state.inboxCheckpoint,
+           checkpoint.checkpointAccepted,
+           !checkpoint.currentKeys.contains(request.key) {
+            throw AttentionStoreError.inboxStateUnrefreshed
+        }
+
+        let operationID = UUID()
+        let operation = JSONValue.object([
+            JSONMember("type", .string(ExactText("answer_no_comment"))),
+            JSONMember("request_id", .string(request.key.messageID))
+        ])
+        let frame = Data((operation.jsonString + "\n").utf8)
+        guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
+        let draft = state.drafts[request.key] ?? RequestDraft(interface: request.interface)
+        let submission = Submission(requestKey: request.key,
+                                    answer: .null,
+                                    answerKind: .noComment,
+                                    intentID: intentID,
+                                    operationID: operationID,
+                                    operation: operation,
+                                    opaqueDocumentID: selector.opaqueDocumentID,
+                                    opaqueSubmissionID: selector.opaqueSubmissionID,
+                                    descriptorFingerprint: descriptorFingerprint,
+                                    contentFingerprint: contentFingerprint,
+                                    requestRevision: requestRevision)
+        var next = state
+        next.intents[intentID] = submission
+        next.intentByRequest[request.key] = intentID
+        next.outboxOrder.append(intentID)
+        if suppliedContext.transportMode == .fixture {
+            next.fixtureSessions[request.key] = RequestSession(draft: draft, lifecycle: .pending(submission))
+        }
+        try commit(next)
+        return submission
+    }
+
     public func lookupIntent(_ intentID: UUID, context suppliedContext: ProfileContext) throws -> Submission? {
         lock.lock()
         defer { lock.unlock() }
@@ -494,6 +571,39 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         try commit(next)
         refreshAcceptedReplayIndex(for: intent.requestKey)
+    }
+
+    /// A server that cannot parse the agreed No comment frame leaves the
+    /// request unanswered and releases it for ordinary answer methods.
+    public func recordNoCommentUnsupported(_ intentID: UUID,
+                                           operationID: UUID,
+                                           context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var intent = state.intents[intentID], intent.operationID == operationID,
+              intent.isNoComment,
+              state.intentByRequest[intent.requestKey] == intentID else {
+            throw AttentionStoreError.intentConflict
+        }
+        switch intent.disposition {
+        case .pending:
+            intent.disposition = .unsupported
+        case .unsupported:
+            return
+        default:
+            throw AttentionStoreError.intentConflict
+        }
+        var next = state
+        next.intents[intentID] = intent
+        next.outboxOrder.removeAll(where: { $0 == intentID })
+        next.intentByRequest.removeValue(forKey: intent.requestKey)
+        if var published = next.replayPublishedIntents {
+            published[intentID] = intent
+            next.replayPublishedIntents = published
+        }
+        try commit(next)
     }
 
     /// Persists the server's definite answer refusal without advancing either replay cursor.

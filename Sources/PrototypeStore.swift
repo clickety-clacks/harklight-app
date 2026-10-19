@@ -286,6 +286,31 @@ final class PrototypeStore {
         return answer.jsonString.utf8.count <= captureLimitBytes
     }
 
+    func canSendNoCommentLocally(for key: RequestKey) -> Bool {
+        guard let request = presentationStore?.request(for: key),
+              request.lifecycleStatus == .open, request.intentReceipt == nil,
+              !request.noCommentUnavailable else { return false }
+        switch request.projection {
+        case .sender, .compatibility: return true
+        case .unsupported: return false
+        }
+    }
+
+    @discardableResult
+    func sendNoCommentLocally(for key: RequestKey) -> Bool {
+        guard canSendNoCommentLocally(for: key), let port,
+              let selector = try? boundSelector(for: key) else { return false }
+        do {
+            _ = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+            refreshSnapshot()
+            persistenceError = nil
+            return true
+        } catch {
+            persistenceError = error.localizedDescription
+            return false
+        }
+    }
+
     @discardableResult
     func sendSelectedAnswer(for key: RequestKey,
                             explicitCompatibilityAction: ExactText? = nil) -> Bool {

@@ -34,6 +34,20 @@ enum InboxItem: Identifiable {
         }
     }
 
+    @MainActor var canNoComment: Bool {
+        switch self {
+        case let .request(row): row.canNoComment
+        case let .example(_, response): response.inboxRow?.canNoComment == true
+        }
+    }
+
+    @MainActor var noCommentUnavailable: Bool {
+        switch self {
+        case let .request(row): row.noCommentUnavailable
+        case .example: false
+        }
+    }
+
     var accessibilityID: String {
         switch self {
         case let .request(row): "request-row-" + row.key.messageID.rawValue

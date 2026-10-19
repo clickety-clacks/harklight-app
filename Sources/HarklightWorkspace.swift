@@ -123,6 +123,8 @@ struct InboxRequestRow: Identifiable {
     var localStatus: String? = nil
     var informationalSeenStatus: InformationalSeenStatus? = nil
     var canMarkSeen = false
+    var canNoComment = false
+    var noCommentUnavailable = false
     var localSeenSelected = false
     var hasUserAction = false
     var chatUnread: Bool? = nil
@@ -195,6 +197,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let samples: SampleLibrary
     let selectRequest: (RequestKey) -> Void
     var markSeenRequest: (RequestKey) -> Void = { _ in }
+    var markNoCommentRequest: (RequestKey) -> Void = { _ in }
     @ViewBuilder let requestDetail: (RequestKey, InboxCardContext) -> RequestDetail
     @ViewBuilder let settingsContent: () -> SettingsContent
     var warnings: [String] = []
@@ -282,6 +285,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canMarkSeenLocally else { return }
             response.finishLocally()
+        }
+    }
+
+    private func markNoComment(_ id: InboxSelection) {
+        switch id {
+        case let .request(key):
+            guard rows.first(where: { $0.id == id })?.canNoComment == true else { return }
+            markNoCommentRequest(key)
+        case let .sample(sampleID):
+            guard let response = samples.responses[sampleID], response.canDeclineLocally else { return }
+            response.declineLocally()
         }
     }
 
@@ -393,6 +407,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           restoreLastViewed: restoreLastViewedOnReturn,
                           didRestoreLastViewed: { restoreLastViewedOnReturn = false },
                           showSettings: { settings = true }, markSeen: markSeen,
+                          markNoComment: markNoComment,
                           fetchOlderInboxPage: fetchOlderInboxPage,
                           notificationNavigation: notificationNavigation)
                 .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
@@ -514,6 +529,7 @@ struct InboxList: View {
     let didRestoreLastViewed: () -> Void
     let showSettings: () -> Void
     let markSeen: (InboxSelection) -> Void
+    let markNoComment: (InboxSelection) -> Void
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
     @State private var search = ""
@@ -615,6 +631,13 @@ struct InboxList: View {
                             }
                             .tint(.blue)
                             .accessibilityIdentifier("inbox-mark-seen")
+                        } else if row.canNoComment {
+                            Button { markNoComment(row.id) } label: {
+                                Label("No comment", systemImage: "bubble.left")
+                            }
+                            .tint(.gray)
+                            .disabled(row.noCommentUnavailable)
+                            .accessibilityIdentifier("inbox-no-comment")
                         }
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
@@ -624,6 +647,13 @@ struct InboxList: View {
                             }
                             .tint(.blue)
                             .accessibilityIdentifier("inbox-mark-seen")
+                        } else if row.canNoComment {
+                            Button { markNoComment(row.id) } label: {
+                                Label("No comment", systemImage: "bubble.left")
+                            }
+                            .tint(.gray)
+                            .disabled(row.noCommentUnavailable)
+                            .accessibilityIdentifier("inbox-no-comment")
                         }
                     }
                     .id(row.id)

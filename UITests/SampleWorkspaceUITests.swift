@@ -110,9 +110,36 @@ final class SampleWorkspaceUITests: XCTestCase {
         let ordinary = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(ordinary.waitForExistence(timeout: 5), app.debugDescription)
         ordinary.swipeLeft()
-        let noComment = app.buttons.allElementsBoundByIndex.first { $0.label.contains("No comment") }
-        XCTAssertNotNil(noComment, app.debugDescription)
+        let noComment = app.buttons["inbox-no-comment"]
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(noComment.label, "No comment")
         capture("inbox-swipe-no-comment-revealed", app)
+    }
+
+    func testNoCommentIsAvailableForReplyOnlyRequests() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+
+        enterSearch("Archive", in: app)
+        let row = app.descendants(matching: .any)["sample-approval-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        let noComment = app.buttons["request-no-comment"]
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(noComment.isEnabled, app.debugDescription)
+        capture("reply-only-no-comment-available", app)
+
+        noComment.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["request-local-no-comment-status"]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        showList(app)
+        clearSearch(in: app)
+        app.buttons["inbox-tab-replied"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["sample-approval-0"]
+            .waitForExistence(timeout: 5), "No comment moves the request to Replied.")
+        capture("reply-only-no-comment-selected", app)
     }
 
     func testSeenActionFromEitherSwipeEdgeMovesTheMessageToReplied() {

@@ -425,6 +425,35 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertThrowsError(try store.relayCursor(context: context))
     }
 
+    func testUnsupportedNoCommentFrameLeavesTheRequestOpenAndReleasesItsOutbox() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("no-comment"))
+        let payload = try JSONValue.parse(data(#"{"title":"No comment request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key)
+            .requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        session.result = .unsupported(operationID: receipt.opID)
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let attempted = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(attempted, 1)
+        XCTAssertEqual(String(decoding: try XCTUnwrap(session.sent.first?.0), as: UTF8.self),
+                       #"{"type":"answer_no_comment","request_id":"no-comment"}"# + "\n")
+
+        let request = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        XCTAssertEqual(request.lifecycleStatus, .open)
+        XCTAssertTrue(request.noCommentUnavailable)
+        XCTAssertNil(request.intentReceipt)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        XCTAssertEqual(try port.lookupIntent(context: port.context, intentID: receipt.intentID)?.localState,
+                       .unsupported)
+    }
+
     func testForeignDeliveryAndTerminalCommitBeforeOneContiguousACK() async throws {
         let (context, store, session) = try setup()
         let message = "{\"answer_ui\":null,\"title\":\"Hello\"}"

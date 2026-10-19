@@ -47,6 +47,7 @@ struct LiveContentView: View {
                     return row
                 }, samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { markSeen($0) },
+                markNoCommentRequest: { store.submitNoCommentFromUser($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
                         LiveRequestDetail(request: request, store: store, context: context,
@@ -379,6 +380,29 @@ struct LiveRequestDetail: View {
             request.informationalSeenStatus == .confirmed
     }
 
+    private var canOfferNoComment: Bool {
+        if let localExample { return localExample.canDeclineLocally }
+        if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
+        guard request.inboxStateIsCurrent, !store.isReadOnly,
+              !store.isRetracted(request.key), request.lifecycleStatus == .open,
+              request.intentReceipt == nil else { return false }
+        switch request.projection {
+        case .sender, .compatibility: return true
+        case .unsupported: return false
+        }
+    }
+
+    private func submitNoCommentAction() {
+        if let localExample {
+            localExample.declineLocally()
+        } else if let fixtureStore {
+            guard fixtureStore.sendNoCommentLocally(for: request.key) else { return }
+            try? store.refreshFromDurableStore()
+        } else {
+            store.submitNoCommentFromUser(request.key)
+        }
+    }
+
     private func submitSeenAction(_ action: ExactText) {
         if let localSeenAction {
             localSeenAction(action)
@@ -436,11 +460,16 @@ struct LiveRequestDetail: View {
                         LocalSampleContext(response: localExample)
                     }
                     if localExample.finished {
-                        Label(request.informationalSeenStatus == nil
-                              ? "Answered locally · nothing sent"
-                              : "Seen selected locally · nothing sent",
+                        Label(localExample.noCommentSelected
+                              ? "No comment selected locally · nothing sent"
+                              : request.informationalSeenStatus == nil
+                                  ? "Answered locally · nothing sent"
+                                  : "Seen selected locally · nothing sent",
                               systemImage: "checkmark.circle")
                             .font(.subheadline).foregroundStyle(.secondary)
+                            .accessibilityIdentifier(localExample.noCommentSelected
+                                ? "request-local-no-comment-status"
+                                : "request-local-answer-status")
                     } else if localExample.deferred {
                         HStack {
                             Label("Deferred locally", systemImage: "clock")
@@ -501,6 +530,22 @@ struct LiveRequestDetail: View {
                 case .unsupported:
                     Text("This request uses an unsupported answer format.")
                         .foregroundStyle(.secondary)
+                }
+                if canOfferNoComment {
+                    Button(action: submitNoCommentAction) {
+                        Label("No comment", systemImage: "bubble.left")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(request.noCommentUnavailable)
+                    .accessibilityHint(request.noCommentUnavailable
+                        ? "This server does not support No comment for this request."
+                        : "Send a final No comment answer to the sender.")
+                    .accessibilityIdentifier("request-no-comment")
+                }
+                if request.noCommentUnavailable {
+                    Text("This server does not support No comment for this request. You can still answer it.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("request-no-comment-unavailable")
                 }
                 if request.inboxStateIsCurrent {
                     if request.lifecycleStatus != .open || store.isRetracted(request.key) {
@@ -782,6 +827,7 @@ struct LiveRequestDetail: View {
         case .accepted: "Answer accepted · terminal status pending"
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .unsupported: "No comment is unsupported by this server"
         case .repairRequired: "Answer needs recovery"
         }
     }
@@ -1231,6 +1277,7 @@ struct LiveLifecycleTitle {
         case .open: label = "Open"
         case .pending: label = "Pending"
         case .answered: label = "Answered"
+        case .noComment: label = "No comment"
         case .cleared: label = "Cleared"
         case .expired: label = "Expired"
         case .superseded: label = "Superseded"
