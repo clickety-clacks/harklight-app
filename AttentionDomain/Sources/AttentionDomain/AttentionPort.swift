@@ -66,6 +66,7 @@ public enum LocalIntentState: Equatable, Sendable {
     case durable
     case queuedForRelay
     case accepted(sequence: UInt64?)
+    case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case terminalUnconfirmed
     case repairRequired
 }
@@ -74,6 +75,7 @@ public enum RelayOutcome: Equatable, Sendable {
     case unknown
     case accepted(sequence: UInt64?)
     case terminal(state: TerminalState, authorizedAnswer: JSONValue?, sequence: UInt64?)
+    case refusedByRetraction(retractedAtMilliseconds: UInt64)
 }
 
 public struct IntentReceipt: Equatable, Sendable {
@@ -506,6 +508,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
         case let .terminal(state, sequence, authorizedAnswer):
             localState = .terminalUnconfirmed
             relayOutcome = .terminal(state: state, authorizedAnswer: authorizedAnswer, sequence: sequence)
+        case let .refusedByRetraction(retractedAtMilliseconds):
+            localState = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
+            relayOutcome = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
         case .repairRequired:
             localState = .repairRequired
             relayOutcome = .unknown
@@ -660,7 +665,13 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                     ownOutcome: terminal.ownOutcome,
                                                     originalOperationUncertainty: terminal.ownOutcome == .unconfirmed)
         case .some(.open), .none:
-            if let terminal = remote?.state {
+            if let submission, case .refusedByRetraction = submission.disposition {
+                status = .cleared
+                receiptFacts = ReceiptPresentationFacts(
+                    evidenceLabel: "The relay refused this answer after the sender retracted the request. The answer was not accepted.",
+                    ownOutcome: .refused,
+                    originalOperationUncertainty: false)
+            } else if let terminal = remote?.state {
                 status = AppLifecycleStatus(rawValue: terminal.rawValue) ?? .open
                 let hasAcceptedIntent = submission.map { value in
                     if case .accepted = value.disposition { return true }
@@ -692,7 +703,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
             let scene: SceneNode
             let terminalState: TerminalState?
             let authorizedAnswer: JSONValue?
-            if let terminal = session?.lifecycle.terminalValue {
+            if let submission, case .refusedByRetraction = submission.disposition {
+                terminalState = .cleared
+                authorizedAnswer = nil
+                scene = document.terminalScene(state: .cleared, authorizedAnswer: nil)
+            } else if let terminal = session?.lifecycle.terminalValue {
                 terminalState = terminal.state
                 authorizedAnswer = terminal.authorizedAnswer
                 scene = document.terminalScene(state: terminal.state, authorizedAnswer: terminal.authorizedAnswer)

@@ -491,6 +491,47 @@ public final class AttentionDomainStore: @unchecked Sendable {
         refreshAcceptedReplayIndex(for: intent.requestKey)
     }
 
+    /// Persists the server's definite answer refusal without advancing either replay cursor.
+    public func recordAnswerRefusedByRetraction(_ intentID: UUID,
+                                                operationID: UUID,
+                                                retractedAtMilliseconds: UInt64,
+                                                context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard var intent = state.intents[intentID], intent.operationID == operationID,
+              state.intentByRequest[intent.requestKey] == intentID else {
+            throw AttentionStoreError.intentConflict
+        }
+        if let remote = state.remoteStates[intent.requestKey]?.state, remote != .cleared {
+            throw AttentionStoreError.intentConflict
+        }
+        if let prior = state.conversation?.threads[intent.requestKey]?.retraction?.retractedAtMilliseconds,
+           prior != retractedAtMilliseconds {
+            throw AttentionStoreError.intentConflict
+        }
+        switch intent.disposition {
+        case .accepted:
+            throw AttentionStoreError.intentConflict
+        case let .refusedByRetraction(prior) where prior != retractedAtMilliseconds:
+            throw AttentionStoreError.intentConflict
+        case .refusedByRetraction:
+            break
+        default:
+            intent.disposition = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
+        }
+        var next = state
+        next.intents[intentID] = intent
+        next.outboxOrder.removeAll(where: { $0 == intentID })
+        if var published = next.replayPublishedIntents {
+            published[intentID] = intent
+            next.replayPublishedIntents = published
+        }
+        try commit(next)
+        refreshAcceptedReplayIndex(for: intent.requestKey)
+    }
+
     public func recordClosedOperation(_ intentID: UUID,
                                       operationID: UUID,
                                       sequence: UInt64,
@@ -506,9 +547,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
         if let old = state.remoteStates[intent.requestKey]?.state, old != terminalState {
             throw AttentionStoreError.eventConflict(sequence)
         }
+        if case .refusedByRetraction = intent.disposition, terminalState != .cleared {
+            throw AttentionStoreError.eventConflict(sequence)
+        }
         let effectiveAuthorizedAnswer = authorizedOriginAnswer ?? state.remoteStates[intent.requestKey]?.authorizedOriginAnswer
         if case .accepted = intent.disposition {
             // A later closed response cannot erase confirmed success for this exact operation.
+        } else if case .refusedByRetraction = intent.disposition {
+            // Keep the exact server refusal when the matching terminal arrives later.
         } else {
             intent.disposition = .terminal(state: terminalState,
                                            sequence: sequence,
@@ -659,7 +705,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                                                classification: previous.classification,
                                                                eventSequence: event.sequence)
             if let intentID = next.intentByRequest[requestKey], var intent = next.intents[intentID] {
-                if case .accepted = intent.disposition {
+                if case let .refusedByRetraction(retractedAt) = intent.disposition {
+                    guard terminalState == .cleared,
+                          event.conversation?.terminalReason == ExactText("retracted"),
+                          event.conversation?.retractedAtMilliseconds == retractedAt else {
+                        throw ConversationError.conflict
+                    }
+                }
+                if preservesOperationResult(intent.disposition) {
                     // A later lifecycle event does not erase evidence that this exact operation won.
                 } else {
                     intent.disposition = .terminal(state: terminalState,
@@ -748,10 +801,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
             if event.conversation?.terminalReason == ExactText("retracted") {
                 guard terminal == .cleared, event.conversation?.author == .origin,
-                      let id = event.conversation?.eventID, let revision = event.conversation?.revision else {
+                      let id = event.conversation?.eventID, let revision = event.conversation?.revision,
+                      let retractedAtMilliseconds = event.conversation?.retractedAtMilliseconds else {
                     throw ConversationError.invalidBinding
                 }
-                try thread.recordRetraction(turn: id, sequence: event.sequence, revision: revision)
+                if let intentID = next.intentByRequest[key],
+                   case let .refusedByRetraction(refusedAt)? = next.intents[intentID]?.disposition,
+                   refusedAt != retractedAtMilliseconds {
+                    throw ConversationError.conflict
+                }
+                try thread.recordRetraction(turn: id, sequence: event.sequence, revision: revision,
+                    retractedAtMilliseconds: retractedAtMilliseconds)
                 if let saved = next.drafts[key] {
                     var archived = thread.answerDrafts ?? [:]
                     archived[thread.currentRevision] = saved
@@ -829,6 +889,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     eventSequence: terminal.sequence)
                 if hasContent {
                     next.remoteStates[key] = current
+                    // The acceptance opens the thread that the terminal's retraction is recorded on.
+                    try applyOrdinaryConversationMetadata(acceptance, to: &next)
                     try applyOrdinaryConversationMetadata(terminal, to: &next)
                 } else {
                     var references = next.inboxReferences ?? [:]
@@ -1646,7 +1708,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
             }
             if current.terminal == nil, let id = next.intentByRequest[key], var intent = next.intents[id] {
-                if case .accepted = intent.disposition { throw ConversationError.conflict }
+                if preservesOperationResult(intent.disposition) {
+                    throw ConversationError.conflict
+                }
                 // An authoritative newer open question proves an earlier final answer did not close it.
                 intent.disposition = .lost
                 next.intents[id] = intent
@@ -1676,7 +1740,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 conversation.threads[key]?.answerDrafts = archived
             }
             if let id = next.intentByRequest[key], var intent = next.intents[id] {
-                if case .accepted = intent.disposition {} else {
+                if preservesOperationResult(intent.disposition) {
+                    // Keep the exact answer receipt that predates this conversation fact.
+                } else {
                     intent.disposition = .terminal(state: .cleared, sequence: sequence,
                         authorizedAnswer: previous.authorizedOriginAnswer)
                     next.intents[id] = intent
@@ -1696,6 +1762,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let actual = state.conversation?.cursor ?? 0
         guard highWater == actual else {
             throw AttentionStoreError.replayIncomplete(expected: highWater, actual: actual)
+        }
+    }
+
+    private func preservesOperationResult(_ disposition: IntentDisposition) -> Bool {
+        switch disposition {
+        case .accepted, .refusedByRetraction: true
+        default: false
         }
     }
 

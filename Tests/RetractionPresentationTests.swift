@@ -5,8 +5,11 @@ import XCTest
 
 @MainActor
 final class RetractionPresentationTests: XCTestCase {
-    private let ordinary = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","terminal_reason":"retracted","by":"origin_withdrawal","author":"origin","event_id":"3","request_revision":1}"#.utf8)
-    private let projected = Data(#"{"v":1,"type":"conversation","conversation_seq":1,"kind":"retraction","sender_id":"sender","message_id":"request","origin":"origin","author":"origin","session_handle":"handle","event_id":"3","request_revision":1,"terminal_seq":2,"terminal_state":"retracted"}"#.utf8)
+    private static let retractedAt: UInt64 = 1_760_000_000_123
+    private static let retractedAtSeconds: TimeInterval = 1_760_000_000.123
+    private let ordinary = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","terminal_reason":"retracted","by":"origin_withdrawal","author":"origin","event_id":"3","request_revision":1,"at":1760000000123,"retracted_at":1760000000123}"#.utf8)
+    private let projected = Data(#"{"v":1,"type":"conversation","conversation_seq":1,"kind":"retraction","sender_id":"sender","message_id":"request","origin":"origin","author":"origin","session_handle":"handle","event_id":"3","request_revision":1,"terminal_seq":2,"terminal_state":"retracted","retracted_at":1760000000123}"#.utf8)
+    private let refusal = Data(#"{"v":1,"type":"error","reason":"retracted","terminal":{"state":"retracted","retracted_at":1760000000123}}"#.utf8)
 
     func testInstalledDecoderAcceptsTheSameAdditiveLifecycleWithoutChangingItsLegacyMeaning() throws {
         let context = profile()
@@ -49,6 +52,8 @@ final class RetractionPresentationTests: XCTestCase {
             }
             let midway = try AttentionDomainStore(context: context, persistence: persistence)
             XCTAssertTrue(try midway.conversationSnapshot(context: context).threads[key]?.isRetracted == true)
+            XCTAssertEqual(try midway.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
+                           Self.retractedAt, "Either durable copy alone carries the retraction time")
             XCTAssertTrue(try midway.snapshot(context: context).outbox.isEmpty)
             let closedSelector = try midway.selector(for: key, context: context)
             XCTAssertThrowsError(try port.submit(SubmitIntent(context: port.context, selector: closedSelector,
@@ -65,6 +70,7 @@ final class RetractionPresentationTests: XCTestCase {
             XCTAssertEqual(thread.turns.filter { $0.kind == .terminal }.count, 1)
             XCTAssertEqual(thread.terminalTurn, ExactText("3"))
             XCTAssertEqual(thread.retraction?.terminalSequence, 2)
+            XCTAssertEqual(thread.retraction?.retractedAtMilliseconds, Self.retractedAt)
             XCTAssertEqual(thread.drafts[1]?.text, ExactText("Unsent original note"))
             XCTAssertEqual(thread.drafts[1]?.disposition, .rejected(ExactText("Not delivered: request retracted")))
             let retained = try XCTUnwrap(domain.lookupIntent(receipt.intentID, context: context))
@@ -81,10 +87,109 @@ final class RetractionPresentationTests: XCTestCase {
             XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context), retained)
             let model = try LivePresentationStore(store: domain, context: context)
             XCTAssertTrue(model.isRetracted(key))
-            XCTAssertTrue(model.inboxRows.first?.status.contains("Retracted") == true)
+            XCTAssertEqual(model.retractionDate(key)?.timeIntervalSince1970 ?? 0, Self.retractedAtSeconds, accuracy: 0.000_5)
+            XCTAssertTrue(model.inboxRows.first?.status.contains(model.retractionLabel(key)) == true)
+            XCTAssertNotEqual(model.retractionLabel(key), "Retracted", "The shown retraction carries its time")
             XCTAssertEqual(model.request(for: key)?.lifecycleStatus, .cleared)
             XCTAssertEqual(try domain.snapshot(context: context).requests.count, 1)
         }
+    }
+
+    func testEveryRetractionWireShapeRequiresItsRetractionTime() throws {
+        let context = profile()
+        let relay = try RelayWire(profile: context)
+        let conversation = try ConversationWire(profile: context)
+        XCTAssertEqual(try relay.decodeEvent(ordinary).conversation?.retractedAtMilliseconds, Self.retractedAt)
+        XCTAssertEqual(try conversation.decodeEvent(projected).retractedAtMilliseconds, Self.retractedAt)
+        XCTAssertThrowsError(try relay.decodeEvent(edited(ordinary, #","retracted_at":1760000000123"#, "")))
+        XCTAssertThrowsError(try relay.decodeEvent(edited(ordinary, #""at":1760000000123"#, #""at":1760000000124"#)),
+                             "The lifecycle time and the retraction time are one fact")
+        XCTAssertThrowsError(try conversation.decodeEvent(edited(projected, #","retracted_at":1760000000123"#, "")))
+    }
+
+    func testFreshInboxPageKeepsTheRetractionTimeOfItsTerminal() throws {
+        let context = profile()
+        let persistence = MemoryAttentionStatePersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+        let delivery = #"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"origin","as":"message","message":{"title":"Retained question"},"request_revision":1,"session_handle":"handle","event_id":"1"}"#
+        let frame = Data((#"{"v":1,"type":"ok","ref":"native-inbox","paging_version":1,"snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":"#
+            + delivery + #","terminal":"# + String(decoding: ordinary, as: UTF8.self)
+            + #"}],"next_cursor":null,"receipt_cursor":null}"#).utf8)
+        let page = try InboxPagingWire(profile: context).decodeStart(frame, ref: "native-inbox")
+        XCTAssertEqual(page.items.first?.terminal?.conversation?.retractedAtMilliseconds, Self.retractedAt)
+        _ = try domain.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
+        try domain.saveInboxInitialPage(snapshotID: page.snapshotID, highWater: page.highWater, items: page.items,
+                                        nextCursor: page.nextCursor, receiptCursor: page.receiptCursor, context: context)
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
+        XCTAssertTrue(thread.isRetracted)
+        XCTAssertEqual(thread.retraction?.retractedAtMilliseconds, Self.retractedAt)
+    }
+
+    func testDefinitiveAnswerRefusalRequiresTheRetractedTerminalSnapshot() throws {
+        let wire = try RelayWire(profile: profile())
+        let operationID = UUID()
+        XCTAssertEqual(try wire.decodeAnswerRefusal(refusal, operationID: operationID),
+                       .refusedByRetraction(operationID: operationID, retractedAtMilliseconds: Self.retractedAt))
+        XCTAssertNil(try wire.decodeAnswerRefusal(Data(#"{"v":1,"type":"error","reason":"closed"}"#.utf8), operationID: operationID),
+                     "Other refusals keep their existing unresolved meaning")
+        XCTAssertThrowsError(try wire.decodeAnswerRefusal(Data(#"{"v":1,"type":"error","reason":"retracted"}"#.utf8),
+                                                          operationID: operationID))
+        XCTAssertThrowsError(try wire.decodeAnswerRefusal(edited(refusal, #""state":"retracted""#, #""state":"cleared""#),
+                                                          operationID: operationID))
+        XCTAssertThrowsError(try wire.decodeAnswerRefusal(edited(refusal, #","retracted_at":1760000000123"#, ""),
+                                                          operationID: operationID))
+    }
+
+    func testRefusedQueuedAnswerIsKeptAsRefusedAndShownRetracted() async throws {
+        let context = profile()
+        let persistence = MemoryAttentionStatePersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Original wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
+        let port = AttentionDomainPort(store: domain)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+            inputs: [.compatibilityValue(action: ExactText("keep"))]))
+        let refused = IntentDisposition.refusedByRetraction(retractedAtMilliseconds: Self.retractedAt)
+        let session = RefusalSession(context.identity, refusal: refusal, profile: context)
+        let core = try NativeRelayCore(store: domain, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
+
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
+        XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
+        let live = try LivePresentationStore(store: restored, context: context)
+        let shown = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(shown.lifecycleStatus, .cleared)
+        XCTAssertEqual(shown.receiptFacts?.ownOutcome, .refused)
+        XCTAssertTrue(live.isRetracted(key))
+        XCTAssertEqual(live.retractionDate(key)?.timeIntervalSince1970 ?? 0, Self.retractedAtSeconds, accuracy: 0.000_5)
+        XCTAssertFalse(live.openRequests.contains { $0.key == key }, "A refused answer no longer needs attention")
+        XCTAssertThrowsError(try port.submit(SubmitIntent(context: port.context, selector: try domain.selector(for: key, context: context),
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("keep"))])))
+
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.sentOperationIDs, [receipt.opID], "A definite refusal is never resent")
+
+        let otherTime = try RelayWire(profile: context).decodeEvent(edited(ordinary, "1760000000123", "1760000000999"))
+        XCTAssertThrowsError(try domain.apply(otherTime, context: context))
+        XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
+
+        try domain.apply(RelayWire(profile: context).decodeEvent(ordinary), context: context)
+        try domain.applyConversation(ConversationWire(profile: context).decodeEvent(projected), context: context)
+        XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.disposition, refused,
+                       "The later retraction copies keep the exact refusal")
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
+                       Self.retractedAt)
+        let settled = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(settled.request(for: key)?.lifecycleStatus, .cleared)
+        XCTAssertEqual(settled.request(for: key)?.receiptFacts?.ownOutcome, .refused)
+        XCTAssertTrue(settled.isRetracted(key))
     }
 
     func testPlainOriginClearHasNoRetractionMeaning() throws {
@@ -117,6 +222,12 @@ final class RetractionPresentationTests: XCTestCase {
             XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, failConversationCommit ? 0 : 1)
             XCTAssertTrue(try restored.conversationSnapshot(context: context).threads[key]?.isRetracted == true)
         }
+    }
+
+    private func edited(_ frame: Data, _ target: String, _ replacement: String) -> Data {
+        let text = String(decoding: frame, as: UTF8.self)
+        precondition(text.contains(target))
+        return Data(text.replacingOccurrences(of: target, with: replacement).utf8)
     }
 
     private func profile() -> ProfileContext {
@@ -166,4 +277,23 @@ private final class RetractionSession: AuthenticatedInboxPagingSession, Authenti
         conversationAcknowledged = true
     }
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult { .unresolved }
+}
+
+private final class RefusalSession: AuthenticatedInboxPagingSession, @unchecked Sendable {
+    let authenticatedIdentity: ProfileIdentity
+    let refusal: Data
+    let profile: ProfileContext
+    private(set) var sentOperationIDs: [UUID] = []
+    init(_ identity: ProfileIdentity, refusal: Data, profile: ProfileContext) {
+        authenticatedIdentity = identity; self.refusal = refusal; self.profile = profile
+    }
+    func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        try await consume(Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#.utf8))
+        try await consume(Data(#"{"v":1,"type":"resynced","seq":1}"#.utf8))
+    }
+    func acknowledge(_ request: Data) async throws {}
+    func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        sentOperationIDs.append(operationID)
+        return try RelayWire(profile: profile).decodeAnswerRefusal(refusal, operationID: operationID) ?? .unresolved
+    }
 }

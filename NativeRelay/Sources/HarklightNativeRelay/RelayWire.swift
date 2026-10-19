@@ -66,6 +66,26 @@ public struct RelayWire: Sendable {
         return try sequence(value)
     }
 
+    /// Returns a definite answer refusal only when the v1 error includes the
+    /// server's matching retracted terminal snapshot.
+    public func decodeAnswerRefusal(_ bytes: Data, operationID: UUID) throws -> OriginalOperationResult? {
+        let value = try parseFrame(bytes)
+        guard try text(value, "type") == "error",
+              value.uniqueValue(named: "reason")?.stringValue?.rawValue == "retracted" else {
+            return nil
+        }
+        guard let terminal = value.uniqueValue(named: "terminal"),
+              case .object = terminal,
+              terminal.hasUniqueObjectKeys,
+              terminal.uniqueValue(named: "state")?.stringValue?.rawValue == "retracted",
+              case let .number(timestamp)? = terminal.uniqueValue(named: "retracted_at"),
+              let retractedAtMilliseconds = UInt64(timestamp.lexeme) else {
+            throw RelayWireError.invalidFrame
+        }
+        return .refusedByRetraction(operationID: operationID,
+                                    retractedAtMilliseconds: retractedAtMilliseconds)
+    }
+
     public func isResyncAccepted(_ bytes: Data) throws -> Bool {
         let value = try parseFrame(bytes)
         return try text(value, "type") == "ok" &&

@@ -65,7 +65,7 @@ struct ConversationPanel: View {
                     }
                 }
                 if let terminal = thread.terminal {
-                    Label(thread.isRetracted ? "Retracted" : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
+                    Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
                 }
                 HStack {

@@ -126,6 +126,7 @@ public struct ConversationWire: Sendable {
         let origin = try text(value, "origin"), handle = ExactText(try text(value, "session_handle"))
         let kind = try text(value, "kind")
         let fact: ConversationEvent.Fact
+        var retractedAtMilliseconds: UInt64? = nil
         switch kind {
         case "discussion", "reply", "revision", "result":
             guard let author = ConversationAuthor(rawValue: try text(value, "author")),
@@ -204,10 +205,12 @@ public struct ConversationWire: Sendable {
         case "retraction":
             guard try text(value, "author") == "origin", try text(value, "terminal_state") == "retracted",
                   try integer(value, "terminal_seq") > 0 else { throw RelayWireError.invalidFrame }
+            retractedAtMilliseconds = try integer(value, "retracted_at")
             fact = .retraction(turn: ExactText(try text(value, "event_id")), terminalSequence: try integer(value, "terminal_seq"))
         default: throw RelayWireError.unsupportedEvent
         }
-        return ConversationEvent(sequence: sequence, binding: binding, fact: fact)
+        return ConversationEvent(sequence: sequence, binding: binding, fact: fact,
+                                 retractedAtMilliseconds: retractedAtMilliseconds)
     }
     func ordinaryMetadata(_ value: JSONValue) throws -> RelayConversationMetadata? {
         guard value.uniqueValue(named: "request_revision") != nil else { return nil }
@@ -219,16 +222,23 @@ public struct ConversationWire: Sendable {
             author = parsed
         } else { author = nil }
         let reason = try optionalText(value, "terminal_reason")
+        let retractedAtMilliseconds: UInt64?
         if let reason {
             guard reason == ExactText("retracted"), author == .origin,
                   try text(value, "type") == "lifecycle", try text(value, "state") == "cleared",
                   try optionalText(value, "event_id") != nil else { throw RelayWireError.invalidFrame }
+            let timestamp = try integer(value, "retracted_at")
+            guard try integer(value, "at") == timestamp else { throw RelayWireError.invalidFrame }
+            retractedAtMilliseconds = timestamp
+        } else {
+            retractedAtMilliseconds = nil
         }
         return RelayConversationMetadata(revision: revision, sessionHandle: try optionalText(value, "session_handle"),
             eventID: try optionalText(value, "event_id"),
             availability: value.uniqueValue(named: "availability") == nil ? nil : try availability(value),
             listeningSupport: value.uniqueValue(named: "listening_support"), author: author,
-            files: value.uniqueValue(named: "files") == nil ? nil : try files(value), terminalReason: reason)
+            files: value.uniqueValue(named: "files") == nil ? nil : try files(value), terminalReason: reason,
+            retractedAtMilliseconds: retractedAtMilliseconds)
     }
     private func availability(_ value: JSONValue) throws -> ConversationAvailability {
         switch try text(value, "availability") {
