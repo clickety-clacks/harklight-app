@@ -87,11 +87,13 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected)
+        attachScreenshot("Inbox list", from: app)
 
         let facilities = app.buttons["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
                       "An untouched request belongs in Inbox.\n\(app.debugDescription)")
         repliedTab.tap()
+        attachScreenshot("Empty Replied list", from: app)
         XCTAssertFalse(facilities.waitForExistence(timeout: 2),
                        "An untouched request does not appear in Replied.")
     }
@@ -165,6 +167,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
         facilities.tap()
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        attachScreenshot("Native detail back control", from: app)
 
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
@@ -250,6 +253,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(finishSeen.label.contains("Seen"), finishSeen.label)
         XCTAssertFalse(finishSeen.isEnabled,
                        "The completed Seen button is ghosted and cannot be tapped again.")
+        attachScreenshot("Seen button remains after action", from: app)
     }
 
     func testTextChoiceCardMatchesReferenceCapture() throws {
