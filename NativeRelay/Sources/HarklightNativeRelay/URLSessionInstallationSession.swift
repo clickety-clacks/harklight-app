@@ -69,8 +69,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// True only while a conversation replay holds the socket exchange gate.
     /// Live conversation frames are routed to readers only then.
     private var conversationReplayReading = false
+    // A replay frame waits for the queue to empty, so catch-up holds one frame here.
+    private var conversationReplaySpaceWaiters: [CheckedContinuation<Void, any Error>] = []
     private var liveConversationWaiters: [CheckedContinuation<Void, any Error>] = []
     private let socketExchangeGate = RelaySocketExchangeGate()
+    /// Tests read this to check that a replay's catch-up stays bounded.
+    var queuedResponseFrameCount: Int { responseFrames.count }
 
     public init(profile: ProfileContext,
                 relayURL: URL,
@@ -644,7 +648,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     private func receive() async throws -> Data {
         if postCheckpointReader != nil {
-            if !responseFrames.isEmpty { return responseFrames.removeFirst() }
+            if !responseFrames.isEmpty {
+                let frame = responseFrames.removeFirst()
+                resumeConversationReplaySpaceWaiters()
+                return frame
+            }
             if let postCheckpointReadFailure { throw postCheckpointReadFailure }
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, any Error>) in
                 responseWaiters.append(continuation)
@@ -680,6 +688,14 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     // and another exchange would treat it as fatal. The server
                     // keeps it in the conversation journal, so the replay the
                     // signal starts reads it again from the durable cursor.
+                    guard conversationReplayReading else { continue }
+                    // Not reading the socket while the replay commits each entry
+                    // keeps a long catch-up from piling up here.
+                    while conversationReplayReading && !responseFrames.isEmpty {
+                        try await withCheckedThrowingContinuation { continuation in
+                            conversationReplaySpaceWaiters.append(continuation)
+                        }
+                    }
                     guard conversationReplayReading else { continue }
                 }
                 if kind == "delivery" || kind == "lifecycle" {
@@ -724,6 +740,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         let conversationWaiters = liveConversationWaiters
         liveConversationWaiters.removeAll(keepingCapacity: false)
         conversationWaiters.forEach { $0.resume(throwing: error) }
+        let replaySpaceWaiters = conversationReplaySpaceWaiters
+        conversationReplaySpaceWaiters.removeAll(keepingCapacity: false)
+        replaySpaceWaiters.forEach { $0.resume(throwing: error) }
     }
 
     /// Frames buffered after the replay read its end are already signalled
@@ -731,6 +750,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private func endConversationReplayReading() {
         conversationReplayReading = false
         responseFrames.removeAll { Self.frameType($0) == "conversation" }
+        resumeConversationReplaySpaceWaiters()
+    }
+
+    private func resumeConversationReplaySpaceWaiters() {
+        let waiters = conversationReplaySpaceWaiters
+        conversationReplaySpaceWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
     }
 
     private func signalLiveConversation() {

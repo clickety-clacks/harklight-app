@@ -742,6 +742,58 @@ final class NativeGuidedTLSTests: XCTestCase {
         await session.close()
     }
 
+    func testLongConversationCatchUpWithASlowConsumerDeliversEveryEntryInOrder() async throws {
+        let namespace = "Harklight.relay-conversation-catch-up-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let backlog = 200
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            if text.contains("\"inbox_attach\"") {
+                return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"attach\",\"paging_version\":1,"
+                            + "\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        "{\"v\":1,\"type\":\"resynced\"}\n"]
+            }
+            if text.contains("\"conversation_sync\"") {
+                return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-conversation-sync\"}\n"]
+                    + (1...backlog).map { "{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\($0)}\n" }
+                    + ["{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":\(backlog)}\n"]
+            }
+            return []
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(
+            profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+
+        try await session.attachInboxReplay(Data("{\"v\":1,\"type\":\"inbox_attach\",\"ref\":\"attach\"}\n".utf8),
+                                            ref: "attach") { _ in }
+        // The relay sends the whole backlog at once while each entry takes a
+        // while to commit, so the reader runs ahead of the replay.
+        let frames = ConversationFrameCollector()
+        try await session.openConversation(
+            Data("{\"v\":1,\"type\":\"conversation_sync\",\"ref\":\"native-conversation-sync\"}\n".utf8)
+        ) { frame in
+            frames.append(frame)
+            frames.noteQueued(await session.queuedResponseFrameCount)
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(frames.types.first, "ok")
+        XCTAssertEqual(frames.types.last, "conversation_resynced")
+        XCTAssertEqual(frames.conversationSeqs, Array(1...backlog))
+        // At most the next entry and the end frame wait behind the consumer.
+        XCTAssertLessThanOrEqual(frames.maxQueued, 2)
+        await session.close()
+    }
+
     func testAuthenticatedRelayRefusesToFollowAnotherEndpoint() async throws {
         let namespace = "Harklight.relay-redirect-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -2856,13 +2908,30 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
 private final class ConversationFrameCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var frames: [Data] = []
+    private var queuedHighWater = 0
+    var maxQueued: Int {
+        lock.lock(); defer { lock.unlock() }
+        return queuedHighWater
+    }
     var types: [String?] {
         lock.lock(); defer { lock.unlock() }
         return frames.map { try? JSONValue.parse($0).uniqueValue(named: "type")?.stringValue?.rawValue }
     }
+    var conversationSeqs: [Int] {
+        lock.lock(); defer { lock.unlock() }
+        return frames.compactMap { frame in
+            guard let value = try? JSONValue.parse(frame),
+                  value.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation" else { return nil }
+            return value.uniqueValue(named: "conversation_seq")?.integerValue
+        }
+    }
 
     func append(_ frame: Data) {
         lock.lock(); frames.append(frame); lock.unlock()
+    }
+
+    func noteQueued(_ count: Int) {
+        lock.lock(); queuedHighWater = max(queuedHighWater, count); lock.unlock()
     }
 }
 
