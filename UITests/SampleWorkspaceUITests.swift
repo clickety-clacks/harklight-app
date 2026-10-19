@@ -173,7 +173,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         replyChoice.tap()
         let editor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
-        editor.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Selecting Reply focuses its editor.")
         editor.typeText("Keep the smaller first step.")
 
         let otherChoice = app.buttons.containing(.staticText, identifier: "Start small").firstMatch
