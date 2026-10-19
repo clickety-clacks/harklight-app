@@ -224,6 +224,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         rows.first { $0.id == id }?.preview
     }
 
+    private func currentItem(for selection: InboxSelection) -> InboxItem? {
+        if case let .request(key) = selection,
+           let request = conversationStore?.inboxRows.first(where: { $0.key == key }) {
+            return .request(request)
+        }
+        return rows.first { $0.id == selection }
+    }
+
     private func navigate(to next: InboxSelection?) {
         navigate(from: selection, to: next)
     }
@@ -278,11 +286,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func restoreLastViewedListPosition() {
-        let lastViewedRow = lastViewedSelection.flatMap { id in rows.first { $0.id == id } }
-        UIDiagnostics.shared.record("inbox.restorePosition last=\(lastViewedSelection.map(diagnosticKey) ?? "nil") replied=\(lastViewedRow?.belongsToReplied.description ?? "missing") rows=\(rows.map { diagnosticKey($0.id) + ":" + ($0.belongsToReplied ? "R" : "I") })")
+        let lastViewedItem = lastViewedSelection.flatMap(currentItem(for:))
+        UIDiagnostics.shared.record("inbox.restorePosition last=\(lastViewedSelection.map(diagnosticKey) ?? "nil") replied=\(lastViewedItem?.belongsToReplied.description ?? "missing") rows=\(rows.map { diagnosticKey($0.id) + ":" + ($0.belongsToReplied ? "R" : "I") })")
         guard navigatedBetweenMessages else {
-            if let lastViewedRow {
-                selectedTab = lastViewedRow.belongsToReplied ? .replied : .inbox
+            if let lastViewedItem {
+                selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
             } else if let listTabOnMessageEntry {
                 selectedTab = listTabOnMessageEntry
             }
@@ -293,12 +301,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         navigatedBetweenMessages = false
         listTabOnMessageEntry = nil
-        guard let lastViewedSelection, let lastViewedRow else {
+        guard let lastViewedSelection, let lastViewedItem else {
             restoreLastViewedOnReturn = false
             UIDiagnostics.shared.record("inbox.restorePosition missing last=\(UIDiagnostics.describe(lastViewedSelection))")
             return
         }
-        selectedTab = lastViewedRow.belongsToReplied ? .replied : .inbox
+        selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
         restoreLastViewedOnReturn = true
         UIDiagnostics.shared.record("inbox.restorePosition lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) tab=\(selectedTab.rawValue)")
     }
