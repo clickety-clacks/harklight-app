@@ -132,7 +132,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"reply-only"}"# + "\n")
-        XCTAssertEqual(store.snapshot(context: context).drafts[key]?.compatibility
+        let savedDraft = try store.snapshot(context: context).drafts[key]
+        XCTAssertEqual(savedDraft?.compatibility
             .textByActionID[ExactText("reply")], ExactText("Keep this as an unsent draft."))
         XCTAssertEqual(receipt.answerKind, .noComment)
         XCTAssertEqual(receipt.inputs, [])
