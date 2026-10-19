@@ -538,7 +538,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             SecItemDelete([kSecClass as String: kSecClassKey,
                            kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
         }
-        let live = { (seq: Int) in
+        let live: @Sendable (Int) -> String = { seq in
             "{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(seq)}\n"
         }
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
