@@ -235,6 +235,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let kinds = ["textChoice", "pictureChoice", "instructions", "review", "multipleChoice", "value", "point", "colorChoice", "soundChoice", "error", "warning", "information", "completed"]
         for kind in kinds {
             showList(app)
+            clearSearch(in: app)
             let inboxTab = app.buttons["inbox-tab-inbox"]
             XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
             if !inboxTab.isSelected { inboxTab.tap() }
