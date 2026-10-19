@@ -208,6 +208,7 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        app.buttons["inbox-tab-replied"].tap()
         enterSearch("Archive", in: app)
         let row = app.descendants(matching: .any)["request-row-sample-approval-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
