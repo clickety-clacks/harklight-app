@@ -2272,7 +2272,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
             fact = .redactedRevision(try externalizingConversationFiles(in: turn, using: references, allowInlinePersistence: allowInlinePersistence))
         default: fact = event.fact
         }
-        return ConversationEvent(sequence: event.sequence, binding: event.binding, fact: fact)
+        return ConversationEvent(sequence: event.sequence, binding: event.binding, fact: fact,
+                                 retractedAtMilliseconds: event.retractedAtMilliseconds)
     }
 
     private static func externalizingConversationFiles(in event: RelayEvent,
@@ -2284,7 +2285,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 files: try old.files.map { files in
                     try files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) }
                 },
-                terminalReason: old.terminalReason)
+                terminalReason: old.terminalReason, retractedAtMilliseconds: old.retractedAtMilliseconds)
         }
         return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata)
     }
