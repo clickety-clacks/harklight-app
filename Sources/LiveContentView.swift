@@ -621,8 +621,9 @@ struct LiveRequestDetail: View {
                     }
                     .buttonStyle(.glassProminent)
                     .tint(seenActionIsComplete ? .green : .blue)
-                    .opacity(controlsReadOnly ? 0.48 : 1)
+                    .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
                     .disabled(controlsReadOnly || availableSeenAction == nil)
+                    .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
                     .accessibilityIdentifier("request-finish-seen")
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
@@ -1195,37 +1196,40 @@ private struct LiveCompatibilityActions: View {
         readOnly ? request.draft.compatibility.selectedActionID : store.draft(for: request.key)?.compatibility.selectedActionID
     }
 
+    private var seenActionIsComplete: Bool {
+        localExample?.localSeenSelected == true ||
+            request.informationalSeenStatus == .pending ||
+            request.informationalSeenStatus == .confirmed
+    }
+
     @ViewBuilder
     var body: some View {
         if let seenStatus = request.informationalSeenStatus {
             switch seenStatus {
-            case .available:
-                if let action = actions.first {
-                    Button {
-                        if let onSeen {
-                            onSeen(action.id)
-                        } else {
-                            store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
-                        }
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "eye")
-                                .foregroundStyle(Color.blue)
-                            Text(action.label.rawValue)
-                                .foregroundStyle(.primary)
-                        }
-                        .font(.headline)
-                        .frame(maxWidth: .infinity, minHeight: 50)
+            case .available, .pending, .confirmed:
+                Button {
+                    guard seenStatus == .available, let action = actions.first else { return }
+                    if let onSeen {
+                        onSeen(action.id)
+                    } else {
+                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
                     }
-                    .buttonStyle(.plain)
-                    .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
-                    .disabled(readOnly)
-                    .accessibilityIdentifier("request-seen-action")
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: seenActionIsComplete ? "checkmark" : "eye")
+                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.blue)
+                        Text(seenActionIsComplete ? "Seen" : (actions.first?.label.rawValue ?? "Seen"))
+                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.primary)
+                    }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 50)
                 }
-            case .pending:
-                Label("Seen pending confirmation", systemImage: "clock")
-            case .confirmed:
-                Label("Seen confirmed", systemImage: "checkmark.circle.fill")
+                .buttonStyle(.plain)
+                .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
+                .disabled(readOnly || seenStatus != .available)
+                .opacity(seenActionIsComplete ? 0.76 : (readOnly ? 0.48 : 1))
+                .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
+                .accessibilityIdentifier("request-seen-action")
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
             }
