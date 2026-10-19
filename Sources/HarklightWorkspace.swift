@@ -106,8 +106,8 @@ enum InboxSelection: Hashable {
 }
 
 enum InboxMessageTab: String, Hashable {
-    case unseen
-    case seen
+    case inbox
+    case replied
 }
 
 struct InboxRequestRow: Identifiable {
@@ -124,18 +124,16 @@ struct InboxRequestRow: Identifiable {
     var informationalSeenStatus: InformationalSeenStatus? = nil
     var canMarkSeen = false
     var localSeenSelected = false
+    var hasUserAction = false
     var chatUnread: Bool? = nil
     var initials: String = ""
     var emphasis: InboxRowEmphasis = .standard
     var tier: InboxAttentionTier = .middle
     var id: RequestKey { key }
 
-    var belongsToSeenTab: Bool {
-        if localSeenSelected { return true }
-        switch informationalSeenStatus {
-        case .some(.pending), .some(.confirmed): return true
-        case .some(.available), .some(.resolvedWithoutSeen), .none: return false
-        }
+    var belongsToReplied: Bool {
+        hasUserAction || localSeenSelected || informationalSeenStatus == .pending ||
+            informationalSeenStatus == .confirmed
     }
 }
 
@@ -209,7 +207,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var visibility: NavigationSplitViewVisibility = .all
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     @State private var settings = false
-    @State private var selectedTab: InboxMessageTab = .unseen
+    @State private var selectedTab: InboxMessageTab = .inbox
     @State private var listTabOnMessageEntry: InboxMessageTab?
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
@@ -276,7 +274,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func restoreLastViewedListPosition() {
         guard navigatedBetweenMessages else {
-            if let listTabOnMessageEntry { selectedTab = listTabOnMessageEntry }
+            if let lastViewedSelection,
+               let lastViewedItem = rows.first(where: { $0.id == lastViewedSelection }) {
+                selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
+            } else if let listTabOnMessageEntry {
+                selectedTab = listTabOnMessageEntry
+            }
             listTabOnMessageEntry = nil
             restoreLastViewedOnReturn = false
             UIDiagnostics.shared.record("inbox.restorePosition entryTab tab=\(selectedTab.rawValue)")
@@ -290,7 +293,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             UIDiagnostics.shared.record("inbox.restorePosition missing last=\(UIDiagnostics.describe(lastViewedSelection))")
             return
         }
-        selectedTab = lastViewedItem.belongsToSeenTab ? .seen : .unseen
+        selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
         restoreLastViewedOnReturn = true
         UIDiagnostics.shared.record("inbox.restorePosition lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) tab=\(selectedTab.rawValue)")
     }
@@ -298,7 +301,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func diagnosticSummary(landscape: Bool) -> String {
         let rowSummary = rows.map { row -> String in
             let missingRow: Bool = if case let .example(_, response) = row { response.inboxRow == nil } else { false }
-            return row.accessibilityID + ":" + (row.belongsToSeenTab ? "S" : "U") + (missingRow ? ":empty" : "")
+            return row.accessibilityID + ":" + (row.belongsToReplied ? "R" : "I") + (missingRow ? ":empty" : "")
         }
         return [
             "selection=\(UIDiagnostics.describe(selection)) tab=\(selectedTab.rawValue) entryTab=\(listTabOnMessageEntry?.rawValue ?? "nil") lastViewed=\(UIDiagnostics.describe(lastViewedSelection))",
@@ -400,8 +403,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 })
                 .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
             } detail: {
-                HStack(spacing: 0) {
-                    NavigationStack {
+                    HStack(spacing: 0) {
                         Group {
                             switch selection {
                             case let .request(key):
@@ -428,27 +430,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                     .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
                             }
                         }
-                        .toolbar {
-                            if selection != nil && horizontalSizeClass == .compact {
-                                ToolbarItem(placement: .topBarLeading) {
-                                    Button("Harklight", systemImage: "chevron.left", action: returnToInbox)
-                                        .buttonStyle(.glass)
-                                        .accessibilityIdentifier("harklight-detail-back")
-                                }
-                            }
-                        }
-                        .navigationBarBackButtonHidden(selection != nil && horizontalSizeClass == .compact)
-                    }
-                    .background {
-                        if selection != nil && horizontalSizeClass == .compact {
-                            DetailEdgeSwipeInstaller {
-                                withAnimation(.easeOut(duration: 0.25)) { returnToInbox() }
-                            }
-                            .frame(width: 0, height: 0)
-                            .accessibilityHidden(true)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
+                        .frame(maxWidth: .infinity)
                     if inlineChat, case let .request(key) = selection, let conversationStore,
                        let request = conversationStore.request(for: key) {
                         Divider()
@@ -485,6 +467,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
                 compactColumn = route.request == nil ? .sidebar : .detail
                 visibility = route.request == nil ? .all : .detailOnly
+            }
+            .onChange(of: compactColumn) { oldColumn, newColumn in
+                guard horizontalSizeClass == .compact,
+                      oldColumn == .detail, newColumn == .sidebar,
+                      selection != nil else { return }
+                returnToInbox()
             }
             .onChange(of: samples.selectedID) { _, id in
                 UIDiagnostics.shared.record("inbox.samplesSelectedChanged \(id ?? "nil") selection=\(UIDiagnostics.describe(selection))")
@@ -530,66 +518,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 }
 
-/// Installs a left-edge recognizer on the detail controller. The installer has
-/// no hit-test surface of its own, so text editors keep their touches.
-private struct DetailEdgeSwipeInstaller: UIViewControllerRepresentable {
-    let onSwipe: () -> Void
-
-    func makeUIViewController(context: Context) -> Controller { Controller(onSwipe: onSwipe) }
-
-    func updateUIViewController(_ controller: Controller, context: Context) {
-        controller.onSwipe = onSwipe
-        controller.installIfNeeded()
-    }
-
-    final class Controller: UIViewController, UIGestureRecognizerDelegate {
-        var onSwipe: () -> Void
-        private var edgeGesture: UIPanGestureRecognizer?
-        init(onSwipe: @escaping () -> Void) {
-            self.onSwipe = onSwipe
-            super.init(nibName: nil, bundle: nil)
-        }
-        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-        override func viewDidAppear(_ animated: Bool) {
-            super.viewDidAppear(animated)
-            installIfNeeded()
-        }
-
-        override func viewWillDisappear(_ animated: Bool) {
-            super.viewWillDisappear(animated)
-            if let edgeGesture { edgeGesture.view?.removeGestureRecognizer(edgeGesture) }
-            edgeGesture = nil
-        }
-
-        func installIfNeeded() {
-            guard let hostView = view.window, edgeGesture?.view !== hostView else { return }
-            if let edgeGesture { edgeGesture.view?.removeGestureRecognizer(edgeGesture) }
-            let gesture = UIPanGestureRecognizer(target: self, action: #selector(handle(_:)))
-            gesture.cancelsTouchesInView = false
-            gesture.delegate = self
-            hostView.addGestureRecognizer(gesture)
-            edgeGesture = gesture
-        }
-
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            touch.location(in: gestureRecognizer.view).x <= 24
-        }
-
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            true
-        }
-
-        @objc func handle(_ gesture: UIPanGestureRecognizer) {
-            guard gesture.state == .ended,
-                  gesture.translation(in: gesture.view).x > 90,
-                  abs(gesture.translation(in: gesture.view).y) < gesture.translation(in: gesture.view).x * 0.6 else { return }
-            onSwipe()
-        }
-    }
-}
-
 @MainActor
 struct InboxList: View {
     let rows: [InboxItem]
@@ -612,7 +540,7 @@ struct InboxList: View {
     @State private var isFetchingOlderPage = false
 
     private var filteredRows: [InboxItem] {
-        let inTab = rows.filter { $0.belongsToSeenTab == (selectedTab == .seen) }
+        let inTab = rows.filter { $0.belongsToReplied == (selectedTab == .replied) }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return inTab }
         let filtered = inTab.filter {
@@ -653,7 +581,7 @@ struct InboxList: View {
     }
 
     private var diagnosticSummary: String {
-        let inTab = rows.filter { $0.belongsToSeenTab == (selectedTab == .seen) }
+        let inTab = rows.filter { $0.belongsToReplied == (selectedTab == .replied) }
         let filtered = filteredRows.map { row -> String in
             let missingRow: Bool = if case let .example(_, response) = row { response.inboxRow == nil } else { false }
             return row.accessibilityID + (missingRow ? ":empty" : "")
@@ -687,17 +615,28 @@ struct InboxList: View {
                         } label: {
                             switch row {
                             case let .request(request):
-                                InboxRowContent(row: request, selected: selected == row.id)
+                                InboxRowContent(row: request,
+                                                selected: selected == row.id || lastViewedSelection == row.id)
                             case let .example(_, response):
                                 if let request = response.inboxRow {
-                                    InboxRowContent(row: request, selected: selected == row.id)
+                                    InboxRowContent(row: request,
+                                                    selected: selected == row.id || lastViewedSelection == row.id)
                                 } else {
                                     EmptyView()
                                 }
                             }
                         }
                         .buttonStyle(.plain)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            if row.canMarkSeen {
+                                Button { markSeen(row.id) } label: {
+                                    Label("Seen", systemImage: "checkmark")
+                                }
+                                .tint(.blue)
+                                .accessibilityIdentifier("inbox-mark-seen")
+                            }
+                        }
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
                             if row.canMarkSeen {
                                 Button { markSeen(row.id) } label: {
                                     Label("Seen", systemImage: "checkmark")
@@ -829,8 +768,8 @@ struct InboxBottomControls: View {
                     .accessibilityIdentifier("inbox-search-dismiss")
                 } else {
                     HStack(spacing: 0) {
-                        tab(.unseen, symbol: "envelope.badge", label: "Unseen")
-                        tab(.seen, symbol: "envelope.open", label: "Seen")
+                        tab(.inbox, symbol: "envelope.badge", label: "Inbox")
+                        tab(.replied, symbol: "envelope.open", label: "Replied")
                     }
                     .frame(height: controlHeight)
                     .glassEffect(.regular, in: Capsule())
@@ -893,6 +832,7 @@ private struct InboxScrollMetrics: Equatable {
 struct InboxRowContent: View {
     let row: InboxRequestRow
     var selected = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -955,10 +895,17 @@ struct InboxRowContent: View {
     }
 
     private var backgroundColor: Color {
-        if selected { return Color(red: 0.894, green: 0.933, blue: 0.988) }
-        return row.tier == .top
-            ? Color(red: 0.933, green: 0.941, blue: 0.957)
-            : Color(uiColor: .systemBackground)
+        if selected {
+            return colorScheme == .dark
+                ? Color(red: 0.12, green: 0.22, blue: 0.34)
+                : Color(red: 0.894, green: 0.933, blue: 0.988)
+        }
+        if row.tier == .top {
+            return colorScheme == .dark
+                ? Color(uiColor: .secondarySystemBackground)
+                : Color(red: 0.933, green: 0.941, blue: 0.957)
+        }
+        return Color(uiColor: .systemBackground)
     }
 
     private var titleFont: Font {

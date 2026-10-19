@@ -369,6 +369,12 @@ struct LiveRequestDetail: View {
         return actions.first?.id
     }
 
+    private var seenActionIsComplete: Bool {
+        localExample?.localSeenSelected == true ||
+            request.informationalSeenStatus == .pending ||
+            request.informationalSeenStatus == .confirmed
+    }
+
     private func submitSeenAction(_ action: ExactText) {
         if let localSeenAction {
             localSeenAction(action)
@@ -553,20 +559,22 @@ struct LiveRequestDetail: View {
         }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                if let availableSeenAction {
-                    Button("Seen", systemImage: "checkmark") {
-                        submitSeenAction(availableSeenAction)
+                if request.informationalSeenStatus != nil {
+                    Button {
+                        if let availableSeenAction { submitSeenAction(availableSeenAction) }
+                    } label: {
+                        Label {
+                            Text("Seen")
+                        } icon: {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(seenActionIsComplete ? Color.green : Color.white)
+                        }
                     }
-                    .labelStyle(.iconOnly)
                     .buttonStyle(.glassProminent)
-                    .disabled(controlsReadOnly)
+                    .tint(seenActionIsComplete ? .green : .blue)
+                    .opacity(controlsReadOnly ? 0.48 : 1)
+                    .disabled(controlsReadOnly || availableSeenAction == nil)
                     .accessibilityIdentifier("request-finish-seen")
-                } else if request.informationalSeenStatus != nil {
-                    Button("No answer to submit", systemImage: "checkmark") {}
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.glass)
-                        .disabled(true)
-                        .accessibilityIdentifier("request-finish-unavailable")
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         localExample.finishLocally()
@@ -877,6 +885,8 @@ private struct LiveProjectedInputView: View {
     var enlargePicture: (SampleOption) -> Void = { _ in }
     @State private var pointGestureCapture = PointGestureCapture()
     @GestureState private var pointGestureActive = false
+    @FocusState private var focusedReplyActionID: String?
+    @Environment(\.colorScheme) private var colorScheme
 
     private var draft: InputDraft? {
         readOnly ? request.draft.inputs[input.id] : store.request(for: request.key)?.draft.inputs[input.id]
@@ -891,6 +901,69 @@ private struct LiveProjectedInputView: View {
         .accessibilityLabel(input.label.rawValue)
         .accessibilityIdentifier("request-input-" + input.id.rawValue)
         .disabled(readOnly)
+    }
+
+    private var replyEditorSurface: Color {
+        colorScheme == .dark
+            ? Color(uiColor: .secondarySystemBackground)
+            : Color(red: 0.96, green: 0.975, blue: 1)
+    }
+
+    private func activate(_ action: ProjectedAction) {
+        withAnimation(.smooth(duration: 0.25)) {
+            if let localExample, action.id.rawValue == "own" {
+                if localExample.message.kind == .multipleChoice {
+                    localExample.choices = []
+                }
+                localExample.ownAnswer = true
+            } else {
+                store.selectAction(action.id, input: input.id, for: request.key)
+            }
+        }
+        focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
+    }
+
+    @ViewBuilder
+    private func inlineReplyAction(_ action: ProjectedAction,
+                                   selected: Bool,
+                                   text: String) -> some View {
+        let detail = localExample != nil && action.id.rawValue == "own"
+            ? "Write it here, or say why none of these fit."
+            : ""
+        let cardShape = RoundedRectangle(cornerRadius: 16)
+        let card = VStack(spacing: 0) {
+            MessageChoiceLabel(title: action.label.rawValue, detail: detail,
+                               selected: selected, multiple: false, suggested: false,
+                               ownAnswer: action.id.rawValue == "own", drawsSurface: false)
+            TextEditor(text: Binding(
+                get: { draft?.textByActionID[action.id]?.rawValue ?? text },
+                set: { store.updateText($0, input: input.id, action: action.id, for: request.key) }
+            ))
+            .font(.body)
+            .foregroundStyle(.primary)
+            .scrollContentBackground(.hidden)
+            .frame(minHeight: 120)
+            .padding(8)
+            .background(replyEditorSurface)
+            .focused($focusedReplyActionID, equals: action.id.rawValue)
+            .accessibilityLabel(action.label.rawValue)
+            .accessibilityIdentifier("request-input-" + input.id.rawValue + "-response")
+            .disabled(readOnly || !selected)
+        }
+        .background(selected ? Color.blue : Color(uiColor: .systemBackground), in: cardShape)
+        .overlay(cardShape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
+        .clipShape(cardShape)
+        .opacity(selected ? 1 : 0.55)
+        .animation(.smooth(duration: 0.25), value: selected)
+
+        if selected {
+            card
+        } else {
+            Button { activate(action) } label: { card }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(.isButton)
+                .disabled(readOnly)
+        }
     }
 
     var body: some View {
@@ -1023,7 +1096,10 @@ private struct LiveProjectedInputView: View {
     @ViewBuilder
     private func actionButton(_ action: ProjectedAction) -> some View {
         let selected = draft?.selectedActionID == action.id
-        if let localExample,
+        let replyText = draft?.textByActionID[action.id]?.rawValue ?? ""
+        if action.kind == .text && (selected || !replyText.isEmpty) {
+            inlineReplyAction(action, selected: selected, text: replyText)
+        } else if let localExample,
            let option = localExample.message.options.first(where: { $0.id == action.id.rawValue }) {
             SampleChoiceRow(option: option, selected: selected,
                             multiple: false,
@@ -1034,14 +1110,7 @@ private struct LiveProjectedInputView: View {
             .disabled(readOnly)
         } else {
             Button {
-                if let localExample, action.id.rawValue == "own" {
-                    if localExample.message.kind == .multipleChoice {
-                        localExample.choices = []
-                    }
-                    localExample.ownAnswer = true
-                } else {
-                    store.selectAction(action.id, input: input.id, for: request.key)
-                }
+                activate(action)
             } label: {
                 VStack(alignment: .leading, spacing: 8) {
                     if let artID = action.illustrationID,

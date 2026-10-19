@@ -123,6 +123,10 @@ final class SampleResponse {
             isLocalExample: true, localStatus: localStatus,
             informationalSeenStatus: request.informationalSeenStatus,
             localSeenSelected: localSeenSelected,
+            hasUserAction: finished || request.intentReceipt != nil || request.draft.hasEdits ||
+                request.lifecycleStatus == .answered ||
+                request.informationalSeenStatus == .pending ||
+                request.informationalSeenStatus == .confirmed,
             chatUnread: message.hasChat ? message.chatUnread && !chatRead : nil,
             initials: message.initials,
             emphasis: emphasis,

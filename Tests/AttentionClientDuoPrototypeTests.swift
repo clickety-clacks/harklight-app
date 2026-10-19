@@ -56,9 +56,9 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
     }
 
     @MainActor
-    func testPreexistingOpenRequestAppearsInSeenAndRemainsAnswerable() throws {
+    func testOnlyRequestsWithAUserActionAppearInReplied() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-                                       personID: ExactText("seen-baseline-\(UUID().uuidString)"),
+                                       personID: ExactText("inbox-replied-\(UUID().uuidString)"),
                                        deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let store = try AttentionDomainStore(context: context,
@@ -85,12 +85,14 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
 
         let visible = try LivePresentationStore(store: store, context: context)
         let existingRow = try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey })
-        XCTAssertTrue(existingRow.belongsToSeenTab)
-        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == resolvedKey }).belongsToSeenTab)
+        XCTAssertFalse(existingRow.belongsToReplied,
+                       "An untouched open request remains in Inbox even if it was present at launch.")
+        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == resolvedKey }).belongsToReplied,
+                      "An answered request belongs to Replied.")
         let existingRequest = try XCTUnwrap(visible.presentation.requests.first { $0.key == existingKey })
         XCTAssertTrue(LiveRequestDetail(request: existingRequest, store: visible).canAnswer)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "Local Seen placement must not create a relay operation.")
+                      "Classifying Inbox and Replied must not create a relay operation.")
 
         let newKey = RequestKey(accountScope: identity.personID,
                                 senderID: ExactText("app:test"),
@@ -103,12 +105,19 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
         try visible.refreshFromDurableStore()
 
         let newRow = try XCTUnwrap(visible.inboxRows.first { $0.key == newKey })
-        XCTAssertFalse(newRow.belongsToSeenTab)
-        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToSeenTab)
-        XCTAssertTrue(LiveRequestDetail(request: try XCTUnwrap(visible.presentation.requests.first { $0.key == existingKey }),
-                                        store: visible).canAnswer)
+        XCTAssertFalse(newRow.belongsToReplied,
+                       "A message received after launch remains in Inbox until an action is taken.")
+        XCTAssertFalse(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToReplied)
+        let existingProjection = try XCTUnwrap(visible.presentation.requests.first { $0.key == existingKey })
+        guard case let .compatibility(actions) = existingProjection.projection,
+              let reply = actions.first else {
+            return XCTFail("The open request should expose its reply action.")
+        }
+        visible.selectAction(reply.id, input: nil, for: existingKey)
+        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToReplied,
+                      "Selecting Reply moves the request to Replied before submission.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "Capturing Seen placement must not answer the request.")
+                      "Choosing Reply must remain a draft until the user submits it.")
     }
 
     @MainActor

@@ -85,9 +85,7 @@ final class PrototypeStore {
             createdPort = AttentionDomainPort(store: store)
             createdPresentation = try LivePresentationStore(
                 localFixtureStore: store,
-                context: profile,
-                captureFixtureRequestsAsSeen: ProcessInfo.processInfo.arguments.contains(
-                    "--harklight-preexisting-seen-fixture"))
+                context: profile)
             initialSnapshot = try store.snapshot(context: profile)
         } catch {
             initializationError = error.localizedDescription

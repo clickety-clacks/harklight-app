@@ -852,7 +852,6 @@ final class LivePresentationStore {
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
-    @ObservationIgnored private let inboxSeenBaseline: InboxSeenBaseline?
     var notificationContext: ProfileContext { profileContext }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
     private(set) var isReadOnly: Bool
@@ -868,11 +867,10 @@ final class LivePresentationStore {
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
-    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext,
-                     captureFixtureRequestsAsSeen: Bool = false) throws {
+    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false,
-                      diagnostics: nil, captureFixtureRequestsAsSeen: captureFixtureRequestsAsSeen)
+                      diagnostics: nil)
     }
 
     convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext) throws {
@@ -883,7 +881,6 @@ final class LivePresentationStore {
     private init(store: AttentionDomainStore, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
-                 captureFixtureRequestsAsSeen: Bool = false,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability) throws {
         self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
@@ -895,16 +892,6 @@ final class LivePresentationStore {
         let snapshot = try port.observe(context: port.context)
         self.port = port
         self.presentation = snapshot
-        if permitsDelivery && context.transportMode == .relay {
-            self.inboxSeenBaseline = InboxSeenBaseline.capture(
-                identity: context.identity,
-                acceptanceOrders: snapshot.requests.map(\.acceptanceOrder))
-        } else if captureFixtureRequestsAsSeen && context.transportMode == .fixture {
-            self.inboxSeenBaseline = InboxSeenBaseline.fixture(
-                existingAcceptanceOrders: snapshot.requests.map(\.acceptanceOrder))
-        } else {
-            self.inboxSeenBaseline = nil
-        }
         self.conversationThreads = try port.conversations(context: port.context).threads
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
@@ -1229,8 +1216,10 @@ final class LivePresentationStore {
                 isResolved: !request.inboxStateIsCurrent || request.isResolved, createdAt: request.createdAt,
                 informationalSeenStatus: request.informationalSeenStatus,
                 canMarkSeen: !isReadOnly && request.informationalSeenStatus == .available,
-                localSeenSelected: inboxSeenBaseline?.selects(
-                    acceptanceOrder: request.acceptanceOrder) ?? false,
+                hasUserAction: request.intentReceipt != nil || request.draft.hasEdits ||
+                    request.lifecycleStatus == .answered ||
+                    request.informationalSeenStatus == .pending ||
+                    request.informationalSeenStatus == .confirmed,
                 tier: request.attentionTier.inboxRowStyleTier)
         }
     }

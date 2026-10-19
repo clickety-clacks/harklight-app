@@ -77,33 +77,23 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
-    func testPreexistingOpenRequestAppearsInSeenAndRemainsAnswerableFixture() throws {
+    func testUntouchedRequestStartsInInbox() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-preexisting-seen-fixture"]
+        app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
 
-        let seenTab = app.buttons.matching(NSPredicate(
-            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Seen")).firstMatch
-        XCTAssertTrue(seenTab.waitForExistence(timeout: 10), app.debugDescription)
-        seenTab.tap()
+        let inboxTab = app.buttons["inbox-tab-inbox"]
+        let repliedTab = app.buttons["inbox-tab-replied"]
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(repliedTab.exists, app.debugDescription)
+        XCTAssertTrue(inboxTab.isSelected)
 
         let facilities = app.buttons["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
-                      "The initial saved fixture request should be visible in Seen.\n\(app.debugDescription)")
-        XCTAssertTrue(facilities.label.contains("Seen"), facilities.label)
-        attachScreenshot("Open preexisting request in Seen (fixture)", from: app)
-        facilities.tap()
-
-        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists)
-        _ = setFacilitiesPoint(in: app, x: 240, y: 500)
-        let note = app.textViews["request-input-note"]
-        revealInCard(note, in: app)
-        note.tap()
-        note.typeText("Still answerable")
-        let finish = app.buttons["request-finish"]
-        XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(finish.isEnabled, "A preexisting open request remains answerable from Seen.")
-        attachScreenshot("Preexisting open request remains answerable in Seen (fixture)", from: app)
+                      "An untouched request belongs in Inbox.\n\(app.debugDescription)")
+        repliedTab.tap()
+        XCTAssertFalse(facilities.waitForExistence(timeout: 2),
+                       "An untouched request does not appear in Replied.")
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
@@ -181,8 +171,10 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 5))
         XCTAssertEqual(status.label, "Answered")
 
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["harklight-detail-back"].exists,
+                       "Detail uses the native navigation back control.")
         back.tap()
         XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
         let movedDown = NSPredicate { _, _ in others.allSatisfy { $0.frame.minY < facilities.frame.minY } }
@@ -208,8 +200,10 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
         attachScreenshot("Request detail", from: app)
 
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["harklight-detail-back"].exists,
+                       "Detail uses the native navigation back control.")
         back.tap()
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
                       "Back must return to the same inbox list.")
@@ -256,6 +250,11 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         attachScreenshot("Notice card with Seen action", from: app)
         finishSeen.tap()
         XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"].waitForExistence(timeout: 5))
+        XCTAssertTrue(finishSeen.exists,
+                      "The Seen button stays in place after the action.")
+        XCTAssertTrue(finishSeen.label.contains("Seen"), finishSeen.label)
+        XCTAssertFalse(finishSeen.isEnabled,
+                       "The completed Seen button is ghosted and cannot be tapped again.")
     }
 
     func testTextChoiceCardMatchesReferenceCapture() throws {
@@ -300,7 +299,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         add(attachment)
     }
 
-    func testAnsweredRequestStaysAtTheBottomOfUnseenAndNeverMovesToSeen() throws {
+    func testAnsweredRequestMovesFromInboxToReplied() throws {
         let app = launchFreshApp()
         let facilities = app.buttons["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
@@ -311,34 +310,16 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertEqual(status.label, "Answered")
         showRequestsListIfNeeded(in: app)
 
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
-        let atBottom = NSPredicate { _, _ in
-            let others = rows.allElementsBoundByIndex.filter { $0.identifier != facilities.identifier }
-            return !others.isEmpty && others.allSatisfy { $0.frame.minY < facilities.frame.minY }
-        }
-        XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: atBottom, object: nil)],
-                                        timeout: 5), .completed,
-                       "An answered request sits below every other request in Unseen.\n\(app.debugDescription)")
-        XCTAssertFalse(facilities.label.contains("Answered"),
-                       "The resolved row should recede without an extra status caption.")
-        attachScreenshot("Post-install answered request at bottom of Unseen", from: app)
+        let replied = app.buttons["inbox-tab-replied"]
+        XCTAssertTrue(replied.waitForExistence(timeout: 5), app.debugDescription)
+        replied.tap()
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
+                      "An answered request moves to Replied.\n\(app.debugDescription)")
+        attachScreenshot("Answered request in Replied", from: app)
 
-        // An answered request is not offered the Seen swipe.
-        facilities.swipeLeft()
-        let seenSwipeAction = app.buttons.allElementsBoundByIndex
-            .first { $0.label == "Seen, Seen" }
-        XCTAssertNil(seenSwipeAction, app.debugDescription)
-
-        let seenTab = app.buttons.matching(NSPredicate(
-            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Seen")).firstMatch
-        let unseenTab = app.buttons.matching(NSPredicate(
-            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Unseen")).firstMatch
-        XCTAssertTrue(seenTab.waitForExistence(timeout: 5), app.debugDescription)
-        seenTab.tap()
-        XCTAssertTrue(seenTab.isSelected, app.debugDescription)
-        XCTAssertFalse(facilities.waitForExistence(timeout: 2), "An answered request does not move to Seen")
-        unseenTab.tap()
-        XCTAssertTrue(facilities.waitForExistence(timeout: 5), "The answered request stays in Unseen")
+        app.buttons["inbox-tab-inbox"].tap()
+        XCTAssertFalse(facilities.waitForExistence(timeout: 2),
+                       "The answered request no longer appears in Inbox.")
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
@@ -397,7 +378,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let requestRow = app.descendants(matching: .any)["request-row-facilities-01"]
         guard !requestRow.isHittable else { return }
 
-        let backButton = app.buttons["harklight-detail-back"]
+        let backButton = app.navigationBars.buttons.firstMatch
         if backButton.exists && backButton.isHittable {
             backButton.tap()
         } else {

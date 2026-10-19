@@ -96,7 +96,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Closing chat alone does not leave its message")
         app.buttons["Close"].tap()
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5))
@@ -194,7 +194,7 @@ final class ConversationSampleUITests: XCTestCase {
         recordDiagnostics("after-switching", app)
         let probe = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
         XCTAssertTrue(probe.label.contains("lastViewed=request:sample-note-1 "), probe.label)
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         let shown = NSPredicate { _, _ in lastViewed.exists && self.unobscured(lastViewed, in: list, app: app) }
@@ -308,7 +308,7 @@ final class ConversationSampleUITests: XCTestCase {
         let searchButton = app.buttons["inbox-search-button"]
         let searchField = app.textFields["inbox-search-field"]
         guard !searchButton.exists && !searchField.exists else { return }
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
             back.tap()
         } else {

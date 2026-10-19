@@ -20,10 +20,10 @@ enum InboxItem: Identifiable {
         }
     }
 
-    @MainActor var belongsToSeenTab: Bool {
+    @MainActor var belongsToReplied: Bool {
         switch self {
-        case let .request(row): row.belongsToSeenTab
-        case let .example(_, response): response.localSeenSelected
+        case let .request(row): row.belongsToReplied
+        case let .example(_, response): response.inboxRow?.belongsToReplied ?? response.finished
         }
     }
 
