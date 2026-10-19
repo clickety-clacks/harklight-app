@@ -605,66 +605,71 @@ struct InboxList: View {
         }
     }
 
-    @ViewBuilder
-    private func rowContent(_ row: InboxItem) -> some View {
-        Button {
-            searchFocused = false
-            selected = row.id
-        } label: {
-            switch row {
-            case let .request(request):
-                InboxRowContent(row: request,
-                                selected: selected == row.id || lastViewedSelection == row.id)
-            case let .example(_, response):
-                if let request = response.inboxRow {
-                    InboxRowContent(row: request,
-                                    selected: selected == row.id || lastViewedSelection == row.id)
-                } else {
-                    EmptyView()
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            swipeAction(for: row)
-        }
-        .swipeActions(edge: .leading, allowsFullSwipe: true) {
-            swipeAction(for: row)
-        }
-        .id(row.id)
-        .accessibilityIdentifier(row.accessibilityID)
-    }
-
-    @ViewBuilder
-    private func swipeAction(for row: InboxItem) -> some View {
-        if row.canMarkSeen {
-            Button { markSeen(row.id) } label: {
-                Label("Seen", systemImage: "checkmark")
-            }
-            .tint(.blue)
-            .accessibilityIdentifier("inbox-mark-seen")
-        } else if row.canNoComment {
-            Button { markNoComment(row.id) } label: {
-                Label("No comment", systemImage: "bubble.left")
-            }
-            .tint(.gray)
-            .disabled(row.noCommentUnavailable)
-            .accessibilityIdentifier("inbox-no-comment")
-        }
-    }
-
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    ForEach(filteredRows) { row in rowContent(row) }
-                    if isFetchingOlderPage {
-                        ProgressView().frame(maxWidth: .infinity).padding()
+            List(selection: $selected) {
+                ForEach(filteredRows) { row in
+                    Group {
+                        switch row {
+                        case let .request(request):
+                            InboxRowContent(row: request,
+                                            selected: selected == row.id || lastViewedSelection == row.id)
+                        case let .example(_, response):
+                            if let request = response.inboxRow {
+                                InboxRowContent(row: request,
+                                                selected: selected == row.id || lastViewedSelection == row.id)
+                            } else {
+                                EmptyView()
+                            }
+                        }
                     }
+                    .tag(row.id)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        if row.canMarkSeen {
+                            Button { markSeen(row.id) } label: {
+                                Label("Seen", systemImage: "checkmark")
+                            }
+                            .tint(.blue)
+                            .accessibilityIdentifier("inbox-mark-seen")
+                        } else if row.canNoComment {
+                            Button { markNoComment(row.id) } label: {
+                                Label("No comment", systemImage: "bubble.left")
+                            }
+                            .tint(.gray)
+                            .disabled(row.noCommentUnavailable)
+                            .accessibilityIdentifier("inbox-no-comment")
+                        }
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        if row.canMarkSeen {
+                            Button { markSeen(row.id) } label: {
+                                Label("Seen", systemImage: "checkmark")
+                            }
+                            .tint(.blue)
+                            .accessibilityIdentifier("inbox-mark-seen")
+                        } else if row.canNoComment {
+                            Button { markNoComment(row.id) } label: {
+                                Label("No comment", systemImage: "bubble.left")
+                            }
+                            .tint(.gray)
+                            .disabled(row.noCommentUnavailable)
+                            .accessibilityIdentifier("inbox-no-comment")
+                        }
+                    }
+                    .id(row.id)
+                    .accessibilityIdentifier(row.accessibilityID)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+                if isFetchingOlderPage {
+                    ProgressView().frame(maxWidth: .infinity).padding()
+                        .listRowSeparator(.hidden)
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
-            .swipeActionsContainer()
             .scrollDismissesKeyboard(.interactively)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 InboxBottomControls(selectedTab: $selectedTab, search: $search,
