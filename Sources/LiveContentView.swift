@@ -347,6 +347,7 @@ struct LiveRequestDetail: View {
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
+    @FocusState private var focusedReplyActionID: String?
 
     private var controlsReadOnly: Bool {
         if let localExample {
@@ -391,6 +392,7 @@ struct LiveRequestDetail: View {
     }
 
     private func submitNoCommentAction() {
+        focusedReplyActionID = nil
         if let localExample {
             localExample.declineLocally()
         } else if let fixtureStore {
@@ -517,14 +519,16 @@ struct LiveRequestDetail: View {
                                            store: store,
                                            readOnly: controlsReadOnly,
                                            localExample: localExample,
-                                           enlargePicture: { enlargedPicture = $0 })
+                                           enlargePicture: { enlargedPicture = $0 },
+                                           focusedReplyActionID: $focusedReplyActionID)
                 case let .compatibility(actions):
                     LiveCompatibilityActions(request: request,
                                              actions: actions,
                                              store: store,
                                              readOnly: controlsReadOnly,
                                              localExample: localExample,
-                                             onSeen: submitSeenAction)
+                                             onSeen: submitSeenAction,
+                                             focusedReplyActionID: $focusedReplyActionID)
                 case .unsupported:
                     Text("This request uses an unsupported answer format.")
                         .foregroundStyle(.secondary)
@@ -689,6 +693,7 @@ struct LiveRequestDetail: View {
                 }
             }
         }
+        .toolbar(focusedReplyActionID == nil ? .visible : .hidden, for: .bottomBar)
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)
         }
@@ -839,6 +844,7 @@ struct HistoricalAnswerDraftView: View {
     let request: PresentedRequest
     let store: LivePresentationStore
     var retracted = false
+    @FocusState private var focusedReplyActionID: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(request.title?.rawValue ?? "Earlier question").font(.headline)
@@ -847,9 +853,13 @@ struct HistoricalAnswerDraftView: View {
                 .font(.caption).foregroundStyle(.secondary)
             switch request.projection {
             case let .sender(sender):
-                LiveProjectedSceneView(request: request, sender: sender, node: sender.scene, store: store, readOnly: true)
+                LiveProjectedSceneView(request: request, sender: sender, node: sender.scene,
+                                       store: store, readOnly: true,
+                                       focusedReplyActionID: $focusedReplyActionID)
             case let .compatibility(actions):
-                LiveCompatibilityActions(request: request, actions: actions, store: store, readOnly: true)
+                LiveCompatibilityActions(request: request, actions: actions, store: store,
+                                         readOnly: true,
+                                         focusedReplyActionID: $focusedReplyActionID)
             case .unsupported:
                 Text("This saved answer format cannot be displayed.").font(.caption)
             }
@@ -864,6 +874,7 @@ private struct LiveProjectedSceneView: View {
     let node: ProjectedSceneNode
     let store: LivePresentationStore
     let readOnly: Bool
+    @FocusState.Binding var focusedReplyActionID: String?
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
 
@@ -900,7 +911,8 @@ private struct LiveProjectedSceneView: View {
                                        store: store,
                                        readOnly: readOnly,
                                        localExample: localExample,
-                                       enlargePicture: enlargePicture)
+                                       enlargePicture: enlargePicture,
+                                       focusedReplyActionID: $focusedReplyActionID)
             }
         case let .resultPoint(illustrationID, label, point):
             if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
@@ -920,7 +932,8 @@ private struct LiveProjectedSceneView: View {
     private func childView(_ child: ProjectedSceneNode) -> some View {
         LiveProjectedSceneView(request: request, sender: sender,
                                node: child, store: store, readOnly: readOnly,
-                               localExample: localExample, enlargePicture: enlargePicture)
+                               localExample: localExample, enlargePicture: enlargePicture,
+                               focusedReplyActionID: $focusedReplyActionID)
     }
 }
 
@@ -938,7 +951,7 @@ private struct LiveProjectedInputView: View {
     @State private var typedInputText: String?
     @State private var replyEditorTexts: [ExactText: String] = [:]
     @GestureState private var pointGestureActive = false
-    @FocusState private var focusedReplyActionID: String?
+    @FocusState.Binding var focusedReplyActionID: String?
     @Environment(\.colorScheme) private var colorScheme
 
     private var draft: InputDraft? {
@@ -1191,7 +1204,7 @@ private struct LiveCompatibilityActions: View {
     var localExample: SampleResponse? = nil
     var onSeen: ((ExactText) -> Void)? = nil
     @State private var replyTextByActionID: [ExactText: String] = [:]
-    @FocusState private var focusedReplyActionID: String?
+    @FocusState.Binding var focusedReplyActionID: String?
     @Environment(\.colorScheme) private var colorScheme
 
     private var selected: ExactText? {

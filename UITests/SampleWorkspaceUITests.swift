@@ -154,6 +154,8 @@ final class SampleWorkspaceUITests: XCTestCase {
                       "Selecting a text-only Reply focuses its embedded editor.")
         XCTAssertGreaterThan(noComment.frame.minY, replyEditor.frame.maxY,
                              "No comment stays after the expanded Reply editor.")
+        XCTAssertTrue(noComment.isHittable,
+                      "The keyboard does not obscure the No comment action.")
         capture("reply-only-no-comment-available", app)
 
         noComment.tap()
