@@ -17,9 +17,11 @@ final class ReplyTypingPerformanceUITests: XCTestCase {
         editor.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
 
-        let longReply = String(repeating: "Please keep the east entrance clear while the repair team moves equipment through the hall. ", count: 8)
+        let longReply = String(repeating: "a", count: 256)
         let started = ProcessInfo.processInfo.systemUptime
-        editor.typeText(longReply)
+        for character in longReply {
+            editor.typeText(String(character))
+        }
         let elapsedMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1_000
         XCTAssertEqual(editor.value as? String, longReply)
 
