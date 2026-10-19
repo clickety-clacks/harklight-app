@@ -300,6 +300,8 @@ final class PrototypeStore {
     func sendNoCommentLocally(for key: RequestKey) -> Bool {
         guard canSendNoCommentLocally(for: key), let port,
               let selector = try? boundSelector(for: key) else { return false }
+        guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
+        refreshSnapshot()
         do {
             _ = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
             refreshSnapshot()
@@ -314,6 +316,7 @@ final class PrototypeStore {
     @discardableResult
     func sendSelectedAnswer(for key: RequestKey,
                             explicitCompatibilityAction: ExactText? = nil) -> Bool {
+        guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
         refreshSnapshot()
         guard let session = sessions[key], case .open = session.lifecycle,
               let port, let records = typedRecords(for: key, draft: session.draft,

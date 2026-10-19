@@ -1311,22 +1311,14 @@ final class LivePresentationStore {
                 draft.inputs[input]?.text = ExactText(text)
             }
         }
-        if permitsDelivery {
-            stageDraftText(for: key, update)
-        } else {
-            editDraft(for: key, update)
-        }
+        stageDraftText(for: key, update)
     }
 
     func updateCompatibilityText(_ text: String, action: ExactText, for key: RequestKey) {
         let update: (inout RequestDraft) -> Void = { draft in
             draft.compatibility.textByActionID[action] = ExactText(text)
         }
-        if permitsDelivery {
-            stageDraftText(for: key, update)
-        } else {
-            editDraft(for: key, update)
-        }
+        stageDraftText(for: key, update)
     }
 
     func setPoint(_ point: PointValue, input: ExactText, for key: RequestKey) {
@@ -1408,7 +1400,7 @@ final class LivePresentationStore {
 
     func submitNoCommentFromUser(_ key: RequestKey) {
         guard permitsDelivery, !isReadOnly else { return }
-        flushPendingDraft(for: key)
+        guard flushPendingDraft(for: key) else { return }
         do {
             _ = try submitNoComment(key)
             retryPendingDelivery()
@@ -1542,11 +1534,17 @@ final class LivePresentationStore {
         clearActionError()
     }
 
-    func flushPendingDraft(for key: RequestKey) {
+    @discardableResult
+    func flushPendingDraft(for key: RequestKey) -> Bool {
         pendingDraftSaveTasks[key]?.cancel()
         pendingDraftSaveTasks[key] = nil
-        do { try persistPendingDraft(for: key) }
-        catch { recordDraftSaveFailure(error, for: key) }
+        do {
+            try persistPendingDraft(for: key)
+            return true
+        } catch {
+            recordDraftSaveFailure(error, for: key)
+            return false
+        }
     }
 
     func flushPendingDrafts() {
