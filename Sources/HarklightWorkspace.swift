@@ -208,7 +208,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: InboxSelection?
     @State private var visibility: NavigationSplitViewVisibility = .all
-    @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var listTabOnMessageEntry: InboxMessageTab?
@@ -223,10 +222,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
     }
     private var orderedIDs: [InboxSelection] { rows.map(\.id) }
-
-    private var compactNavigation: Binding<NavigationSplitViewColumn> {
-        Binding(get: { compactColumn }, set: { compactColumn = $0 })
-    }
 
     private func preview(for id: InboxSelection) -> InboxCardPreview? {
         rows.first { $0.id == id }?.preview
@@ -406,8 +401,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let landscape = windowSize.width > windowSize.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
-            NavigationSplitView(columnVisibility: $visibility,
-                                preferredCompactColumn: compactNavigation) {
+            NavigationSplitView(columnVisibility: $visibility) {
                 InboxList(rows: rows, selected: navigationSelection, selectedTab: $selectedTab,
                           lastViewedSelection: lastViewedSelection,
                           restoreLastViewed: restoreLastViewedOnReturn,
