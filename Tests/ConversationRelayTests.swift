@@ -4,7 +4,7 @@ import HarklightNativeRelay
 import XCTest
 
 final class ConversationRelayTests: XCTestCase {
-    private final class Session: AuthenticatedInboxPagingSession, AuthenticatedConversationSession, @unchecked Sendable {
+    private final class Session: AuthenticatedInboxPagingSession, AuthenticatedConversationEventSession, @unchecked Sendable {
         let authenticatedIdentity: ProfileIdentity
         var ordinary: [Data] = []
         var conversation: [Data] = []
@@ -14,7 +14,19 @@ final class ConversationRelayTests: XCTestCase {
         var onConversationACK: (() throws -> Void)?
         var onConversationOpen: (() -> Void)?
         var rejectFirstConversationACK = false
+        var onLiveConversationWait: (() -> Void)?
+        private var liveConversation: CheckedContinuation<Void, any Error>?
         init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
+        func nextLiveConversationSignal() async throws {
+            try await withCheckedThrowingContinuation { continuation in
+                liveConversation = continuation
+                onLiveConversationWait?()
+            }
+        }
+        func pushLiveConversation() {
+            liveConversation?.resume()
+            liveConversation = nil
+        }
         func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             for frame in ordinary { try await consume(frame) }
         }
@@ -70,6 +82,43 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(thread.turns.first?.id, ExactText("2"))
         XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
         XCTAssertNil(thread.facts[ExactText("2")]?.actedBy)
+    }
+    func testLiveAgentReplyAfterOpenIsCommittedThenACKedWithoutReconnect() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("discussion", sequence: 1, fields: #""author":"person","event_id":"2","text":"Explain""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        let listening = expectation(description: "listening for live conversation entries")
+        listening.assertForOverFulfill = false
+        session.onLiveConversationWait = { listening.fulfill() }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        await fulfillment(of: [listening], timeout: 5)
+        XCTAssertEqual(session.conversationACKs.count, 1)
+
+        // The relay pushed the agent's receipt and reply on the open connection.
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("receipt", sequence: 2, fields: #""author":"origin","event_id":"2","delivered":true"#),
+            event("reply", sequence: 3, fields: #""author":"origin","event_id":"4","in_reply_to":"2","text":"Here is why""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)]
+        let acknowledged = expectation(description: "live entries acknowledged")
+        session.onConversationACK = {
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+            acknowledged.fulfill()
+        }
+        session.pushLiveConversation()
+        await fulfillment(of: [acknowledged], timeout: 5)
+
+        XCTAssertEqual(session.conversationACKs.count, 2)
+        let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+        let reply = try XCTUnwrap(thread.turns.first { $0.id == ExactText("4") })
+        XCTAssertEqual(reply.author, .origin)
+        XCTAssertEqual(reply.text, ExactText("Here is why"))
+        XCTAssertEqual(reply.inReplyTo, ExactText("2"))
+        XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(session.ordinaryACKs.count, 1)
+        await core.deactivate()
     }
     func testOriginSourceResultCommitsBeforeItsACKAndKeepsAgentTerminalAsTheOnlyClosure() async throws {
         let (context, _, store, session) = try setup()

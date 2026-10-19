@@ -45,7 +45,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
 public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession,
-    AuthenticatedInboxEventStreamSession {
+    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
     public nonisolated let supportsPostCheckpointInboxEvents = true
@@ -64,6 +64,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private var postCheckpointEventWaiters: [CheckedContinuation<Data, any Error>] = []
     private var postCheckpointEventSpaceWaiters: [CheckedContinuation<Void, any Error>] = []
     private var postCheckpointReadFailure: (any Error)?
+    // Coalesced: one pending signal covers every entry after the core's cursor.
+    private var liveConversationSignalled = false
+    private var liveConversationWaiters: [CheckedContinuation<Void, any Error>] = []
     private let socketExchangeGate = RelaySocketExchangeGate()
 
     public init(profile: ProfileContext,
@@ -219,6 +222,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        // This replay starts at the core's durable cursor, so it already covers
+        // every live entry signalled before it.
+        liveConversationSignalled = false
         try await replay(request, ref: "native-conversation-sync", event: "conversation", end: "conversation_resynced", consume: consume)
     }
 
@@ -493,6 +499,17 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         urlSession.invalidateAndCancel()
     }
 
+    public func nextLiveConversationSignal() async throws {
+        if liveConversationSignalled {
+            liveConversationSignalled = false
+            return
+        }
+        if let postCheckpointReadFailure { throw postCheckpointReadFailure }
+        try await withCheckedThrowingContinuation { continuation in
+            liveConversationWaiters.append(continuation)
+        }
+    }
+
     public func nextPostCheckpointInboxEvent() async throws -> Data {
         if let frame = postCheckpointEventFrame {
             postCheckpointEventFrame = nil
@@ -630,7 +647,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         do {
             while !Task.isCancelled {
                 let frame = try await receiveTaskFrame()
-                if Self.isPostCheckpointInboxEvent(frame) {
+                let kind = Self.frameType(frame)
+                if kind == "conversation" { signalLiveConversation() }
+                if kind == "delivery" || kind == "lifecycle" {
                     try await enqueuePostCheckpointInboxEvent(frame)
                 } else if !responseWaiters.isEmpty {
                     responseWaiters.removeFirst().resume(returning: frame)
@@ -669,12 +688,24 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         let spaceWaiters = postCheckpointEventSpaceWaiters
         postCheckpointEventSpaceWaiters.removeAll(keepingCapacity: false)
         spaceWaiters.forEach { $0.resume(throwing: error) }
+        let conversationWaiters = liveConversationWaiters
+        liveConversationWaiters.removeAll(keepingCapacity: false)
+        conversationWaiters.forEach { $0.resume(throwing: error) }
     }
 
-    private static func isPostCheckpointInboxEvent(_ frame: Data) -> Bool {
-        guard let value = try? JSONValue.parse(frame) else { return false }
-        let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
-        return kind == "delivery" || kind == "lifecycle"
+    /// The frame still goes to any exchange reading the socket; an open
+    /// conversation replay consumes it there.
+    private func signalLiveConversation() {
+        if liveConversationWaiters.isEmpty {
+            liveConversationSignalled = true
+        } else {
+            liveConversationWaiters.removeFirst().resume()
+        }
+    }
+
+    private static func frameType(_ frame: Data) -> String? {
+        guard let value = try? JSONValue.parse(frame) else { return nil }
+        return value.uniqueValue(named: "type")?.stringValue?.rawValue
     }
 
     private func diagnose(_ area: NativeDiagnosticArea,
