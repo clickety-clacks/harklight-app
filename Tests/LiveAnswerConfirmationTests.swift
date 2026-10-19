@@ -242,6 +242,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     var sentOperationIDs: [UUID] = []
+    var acceptedOperationIDs: Set<UUID> = []
     var acknowledgedCursors: [UInt64] = []
     var loseOperationReply = false
     var failReplayAfterSend = false
@@ -271,6 +272,36 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
 
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
         sentOperationIDs.append(operationID)
-        return loseOperationReply ? .unresolved : .accepted(operationID: operationID, terminalSequence: 2)
+        if loseOperationReply { return .unresolved }
+        acceptedOperationIDs.insert(operationID)
+        return .accepted(operationID: operationID, terminalSequence: 2)
+    }
+
+    /// Once the relay has accepted an answer, a new connection's inbox
+    /// snapshot includes its terminal at sequence 2 and reconciles the
+    /// operation as committed, as the relay reports an accepted original.
+    func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        let value = try JSONValue.parse(request)
+        let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
+        guard !acceptedOperationIDs.isEmpty, kind == "inbox_start" || kind == "inbox_reconcile" else {
+            return try await emptyInboxReply(request, ref: ref)
+        }
+        var reply = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\",\"paging_version\":1,\"high_water\":2"
+        if kind == "inbox_start" {
+            let startupID = value.uniqueValue(named: "startup_id")?.stringValue?.rawValue ?? ""
+            reply += ",\"snapshot_id\":\"test-\(startupID)-h2\",\"items\":[],\"next_cursor\":null,\"receipt_cursor\":null}"
+        } else {
+            let snapshotID = value.uniqueValue(named: "snapshot_id")?.stringValue?.rawValue ?? ""
+            let batchID = value.uniqueValue(named: "batch_id")?.stringValue?.rawValue ?? ""
+            let results = (value.uniqueValue(named: "operations")?.arrayValues ?? []).map { operation -> String in
+                let opID = operation.uniqueValue(named: "op_id")?.stringValue?.rawValue ?? ""
+                guard let id = UUID(uuidString: opID), acceptedOperationIDs.contains(id) else {
+                    return "{\"op_id\":\"\(opID)\",\"status\":\"not_committed_at_snapshot\"}"
+                }
+                return "{\"op_id\":\"\(opID)\",\"status\":\"committed\",\"result\":{\"v\":1,\"type\":\"ok\",\"seq\":2,\"duplicate\":true},\"terminal\":{\"v\":1,\"type\":\"lifecycle\",\"seq\":2,\"sender_id\":\"sender\",\"message_id\":\"sample\",\"origin\":\"device\",\"state\":\"answered\",\"at\":1,\"answer\":\"got-it\"}}"
+            }
+            reply += ",\"snapshot_id\":\"\(snapshotID)\",\"batch_id\":\"\(batchID)\",\"results\":[\(results.joined(separator: ","))]}"
+        }
+        return Data((reply + "\n").utf8)
     }
 }

@@ -23,6 +23,12 @@ private final class InboxReplayFrameCollector: @unchecked Sendable {
 /// this code is test-only and is never available to an installed transport.
 extension AuthenticatedInboxPagingSession {
     func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        try await emptyInboxReply(request, ref: ref)
+    }
+
+    /// The empty paging reply, available to a fake that answers only some
+    /// inbox requests itself.
+    func emptyInboxReply(_ request: Data, ref: String) async throws -> Data {
         let value = try JSONValue.parse(request)
         guard let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue else {
             throw InstallationTransportError.unexpectedServerFrame
