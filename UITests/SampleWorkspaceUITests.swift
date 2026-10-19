@@ -152,6 +152,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("seen-message-in-replied-tab", app)
 
         app.buttons["inbox-tab-inbox"].tap()
+        enterSearch("nearly full", in: app)
         let warning = app.buttons["sample-warning-0"]
         XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
         warning.swipeRight()
