@@ -24,6 +24,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.Harklight
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
         DEVELOPMENT_TEAM: Z7R59J7QV8
         CODE_SIGN_STYLE: Automatic
         INFOPLIST_KEY_CFBundleDisplayName: Harklight
