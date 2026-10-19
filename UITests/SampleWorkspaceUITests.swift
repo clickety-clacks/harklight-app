@@ -229,7 +229,7 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     func testDesignedControlsAndComponentScreenshots() {
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let kinds = ["textChoice", "pictureChoice", "instructions", "review", "multipleChoice", "value", "point", "colorChoice", "soundChoice", "error", "warning", "information", "completed"]
