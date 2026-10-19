@@ -192,6 +192,38 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertTrue(settled.isRetracted(key))
     }
 
+    func testDeliveryReadAfterRetractionShowsItRetractedUntilItsLifecycleAgrees() throws {
+        let delivery = Data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"origin","as":"message","message":{"title":"Retained question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep","kind":"value","value":"keep"}]}},"request_revision":1,"session_handle":"handle","event_id":"1","state":"retracted","retracted_at":1760000000123}"#.utf8)
+        let wire = try RelayWire(profile: profile())
+        XCTAssertEqual(try wire.decodeEvent(delivery).conversation?.retractedAtMilliseconds, Self.retractedAt)
+        XCTAssertThrowsError(try wire.decodeEvent(edited(delivery, #","retracted_at":1760000000123"#, "")))
+        for lifecycleAgrees in [true, false] {
+            let context = profile()
+            let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+            let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+            try domain.apply(try RelayWire(profile: context).decodeEvent(delivery), context: context)
+            let port = AttentionDomainPort(store: domain)
+            let selector = try domain.selector(for: key, context: context)
+            XCTAssertThrowsError(try port.submit(SubmitIntent(context: port.context, selector: selector,
+                intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("keep"))])), "A retracted message takes no new answer")
+            let model = try LivePresentationStore(store: domain, context: context)
+            XCTAssertTrue(model.isRetracted(key))
+            XCTAssertEqual(model.retractionDate(key)?.timeIntervalSince1970 ?? 0, Self.retractedAtSeconds, accuracy: 0.000_5)
+            XCTAssertEqual(model.request(for: key)?.lifecycleStatus, .cleared)
+            XCTAssertEqual(model.request(for: key)?.title, ExactText("Retained question"))
+            XCTAssertFalse(model.openRequests.contains { $0.key == key }, "A retracted message no longer needs attention")
+            let lifecycle = try RelayWire(profile: context).decodeEvent(
+                lifecycleAgrees ? ordinary : edited(ordinary, "1760000000123", "1760000000124"))
+            if lifecycleAgrees {
+                try domain.apply(lifecycle, context: context)
+                XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
+                               Self.retractedAt)
+            } else {
+                XCTAssertThrowsError(try domain.apply(lifecycle, context: context), "One retraction has one time")
+            }
+        }
+    }
+
     func testPlainOriginClearHasNoRetractionMeaning() throws {
         let context = profile()
         let plain = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","by":"origin_withdrawal","author":"origin","event_id":"3","request_revision":1}"#.utf8)

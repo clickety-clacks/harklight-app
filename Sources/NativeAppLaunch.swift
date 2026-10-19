@@ -902,7 +902,8 @@ final class LivePresentationStore {
     }
 
     func retractionDate(_ key: RequestKey) -> Date? {
-        let timestamp = conversationThreads[key]?.retraction?.retractedAtMilliseconds ?? {
+        let thread = conversationThreads[key]
+        let timestamp = thread?.retraction?.retractedAtMilliseconds ?? thread?.reportedRetractedAtMilliseconds ?? {
             guard let outcome = request(for: key)?.intentReceipt?.relayOutcome,
                   case let .refusedByRetraction(retractedAtMilliseconds) = outcome else { return nil }
             return retractedAtMilliseconds

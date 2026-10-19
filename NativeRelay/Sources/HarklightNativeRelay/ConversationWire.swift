@@ -230,6 +230,10 @@ public struct ConversationWire: Sendable {
             let timestamp = try integer(value, "retracted_at")
             guard try integer(value, "at") == timestamp else { throw RelayWireError.invalidFrame }
             retractedAtMilliseconds = timestamp
+        } else if try text(value, "type") == "delivery",
+                  try optionalText(value, "state") == ExactText("retracted") {
+            // A delivery read after retraction reports the message's current state beside M.
+            retractedAtMilliseconds = try integer(value, "retracted_at")
         } else {
             retractedAtMilliseconds = nil
         }

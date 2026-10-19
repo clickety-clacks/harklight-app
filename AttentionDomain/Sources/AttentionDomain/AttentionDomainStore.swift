@@ -507,7 +507,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
         if let remote = state.remoteStates[intent.requestKey]?.state, remote != .cleared {
             throw AttentionStoreError.intentConflict
         }
-        if let prior = state.conversation?.threads[intent.requestKey]?.retraction?.retractedAtMilliseconds,
+        let thread = state.conversation?.threads[intent.requestKey]
+        if let prior = thread?.retraction?.retractedAtMilliseconds ?? thread?.reportedRetractedAtMilliseconds,
            prior != retractedAtMilliseconds {
             throw AttentionStoreError.intentConflict
         }
@@ -673,7 +674,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
             let reference = next.inboxReferences?.removeValue(forKey: request.key)
             let previous = next.remoteStates[request.key] ?? reference
-            next.remoteStates[request.key] = RemoteRequestState(state: previous?.state ?? next.conversation?.threads[request.key]?.terminal,
+            var remoteState = previous?.state ?? next.conversation?.threads[request.key]?.terminal
+            if event.conversation?.retractedAtMilliseconds != nil {
+                // Retraction keeps the legacy cleared state until its lifecycle terminal arrives.
+                guard remoteState == nil || remoteState == .cleared else {
+                    try recordRepair(.conflictingEvent(sequence: event.sequence))
+                    throw AttentionStoreError.eventConflict(event.sequence)
+                }
+                remoteState = .cleared
+            }
+            next.remoteStates[request.key] = RemoteRequestState(state: remoteState,
                                                                 authorizedOriginAnswer: previous?.authorizedOriginAnswer,
                                                                 classification: classification,
                                                                 eventSequence: event.sequence)
@@ -775,6 +785,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 thread.terminal = next.remoteStates[request.key]?.state
             }
             if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
+            if let reported = metadata.retractedAtMilliseconds {
+                guard thread.terminal == nil || thread.terminal == .cleared,
+                      [thread.retraction?.retractedAtMilliseconds, thread.reportedRetractedAtMilliseconds]
+                        .allSatisfy({ $0 == nil || $0 == reported }) else { throw ConversationError.conflict }
+                thread.terminal = .cleared
+                thread.reportedRetractedAtMilliseconds = reported
+            }
             if let id = metadata.eventID, !thread.turns.contains(where: { $0.id == id }) {
                 try validateConversationFiles(metadata.files ?? [])
                 thread.turns.append(ConversationTurn(id: id, binding: ConversationBinding(request: request.key, revision: 1),

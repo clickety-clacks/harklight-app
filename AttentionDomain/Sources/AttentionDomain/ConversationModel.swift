@@ -222,10 +222,12 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var redactedRevisions: Set<UInt64>?
     public var terminalAuthor: ConversationAuthor?
     public var retraction: ConversationRetraction?
+    /// Retraction time a delivery reported before its lifecycle terminal arrived.
+    public var reportedRetractedAtMilliseconds: UInt64?
     public var uploadGroups: [UUID: ConversationUploadGroup]?
     public var uploadCleanups: [UUID: ConversationUploadCleanup]?
 
-    public var isRetracted: Bool { retraction != nil }
+    public var isRetracted: Bool { retraction != nil || reportedRetractedAtMilliseconds != nil }
 
     public var revisionNumbers: [UInt64] { Set(revisions.keys).union(redactedRevisions ?? []).sorted() }
     /// Accepted sender facts remain available under their original request,
@@ -286,7 +288,9 @@ public struct ConversationThread: Equatable, Codable, Sendable {
                                    retractedAtMilliseconds: UInt64? = nil) throws {
         guard !turn.rawValue.isEmpty, sequence > 0, revision > 0,
               terminal == nil || terminal == .cleared,
-              terminalTurn == nil || terminalTurn == turn else { throw ConversationError.conflict }
+              terminalTurn == nil || terminalTurn == turn,
+              reportedRetractedAtMilliseconds == nil || retractedAtMilliseconds == nil ||
+                reportedRetractedAtMilliseconds == retractedAtMilliseconds else { throw ConversationError.conflict }
         let existing = retraction
         guard existing == nil || (existing?.turn == turn && existing?.terminalSequence == sequence &&
               existing?.revision == revision &&
