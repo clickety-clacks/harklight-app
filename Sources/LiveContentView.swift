@@ -518,9 +518,9 @@ struct LiveRequestDetail: View {
                                            node: sender.scene,
                                            store: store,
                                            readOnly: controlsReadOnly,
+                                           focusedReplyActionID: $focusedReplyActionID,
                                            localExample: localExample,
-                                           enlargePicture: { enlargedPicture = $0 },
-                                           focusedReplyActionID: $focusedReplyActionID)
+                                           enlargePicture: { enlargedPicture = $0 })
                 case let .compatibility(actions):
                     LiveCompatibilityActions(request: request,
                                              actions: actions,
@@ -932,8 +932,8 @@ private struct LiveProjectedSceneView: View {
     private func childView(_ child: ProjectedSceneNode) -> some View {
         LiveProjectedSceneView(request: request, sender: sender,
                                node: child, store: store, readOnly: readOnly,
-                               localExample: localExample, enlargePicture: enlargePicture,
-                               focusedReplyActionID: $focusedReplyActionID)
+                               focusedReplyActionID: $focusedReplyActionID,
+                               localExample: localExample, enlargePicture: enlargePicture)
     }
 }
 
