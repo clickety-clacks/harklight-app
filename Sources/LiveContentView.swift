@@ -4,6 +4,7 @@ import UIKit
 
 @MainActor
 struct LiveContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     let store: LivePresentationStore
     let samples: SampleLibrary
     let launch: NativeAppLaunch?
@@ -84,6 +85,9 @@ struct LiveContentView: View {
             }
             .onChange(of: store.presentation.revision) { _, _ in
                 fixtureStore?.refreshFromDurableStore()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { store.flushPendingDrafts() }
             }
         }
     }
@@ -884,18 +888,23 @@ private struct LiveProjectedInputView: View {
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
     @State private var pointGestureCapture = PointGestureCapture()
+    @State private var typedInputText: String?
+    @State private var replyEditorTexts: [ExactText: String] = [:]
     @GestureState private var pointGestureActive = false
     @FocusState private var focusedReplyActionID: String?
     @Environment(\.colorScheme) private var colorScheme
 
     private var draft: InputDraft? {
-        readOnly ? request.draft.inputs[input.id] : store.request(for: request.key)?.draft.inputs[input.id]
+        readOnly ? request.draft.inputs[input.id] : store.draft(for: request.key)?.inputs[input.id]
     }
 
     private var textEditor: some View {
         TextEditor(text: Binding(
-            get: { draft?.text?.rawValue ?? "" },
-            set: { store.updateText($0, input: input.id, action: nil, for: request.key) }
+            get: { typedInputText ?? draft?.text?.rawValue ?? "" },
+            set: {
+                typedInputText = $0
+                store.updateText($0, input: input.id, action: nil, for: request.key)
+            }
         ))
         .frame(minHeight: 120)
         .accessibilityLabel(input.label.rawValue)
@@ -937,8 +946,11 @@ private struct LiveProjectedInputView: View {
                                selected: selected, multiple: false, suggested: false,
                                ownAnswer: action.id.rawValue == "own", drawsSurface: false)
             TextEditor(text: Binding(
-                get: { draft?.textByActionID[action.id]?.rawValue ?? text },
-                set: { store.updateText($0, input: input.id, action: action.id, for: request.key) }
+                get: { replyEditorTexts[action.id] ?? draft?.textByActionID[action.id]?.rawValue ?? text },
+                set: {
+                    replyEditorTexts[action.id] = $0
+                    store.updateText($0, input: input.id, action: action.id, for: request.key)
+                }
             ))
             .font(.body)
             .foregroundStyle(.primary)
@@ -1131,9 +1143,10 @@ private struct LiveCompatibilityActions: View {
     let readOnly: Bool
     var localExample: SampleResponse? = nil
     var onSeen: ((ExactText) -> Void)? = nil
+    @State private var replyTextByActionID: [ExactText: String] = [:]
 
     private var selected: ExactText? {
-        readOnly ? request.draft.compatibility.selectedActionID : store.request(for: request.key)?.draft.compatibility.selectedActionID
+        readOnly ? request.draft.compatibility.selectedActionID : store.draft(for: request.key)?.compatibility.selectedActionID
     }
 
     @ViewBuilder
@@ -1192,8 +1205,14 @@ private struct LiveCompatibilityActions: View {
                    let action = actions.first(where: { $0.id == selected }),
                    action.kind == .text {
                     TextEditor(text: Binding(
-                        get: { (readOnly ? request.draft.compatibility : store.request(for: request.key)?.draft.compatibility)?.textByActionID[selected]?.rawValue ?? "" },
-                        set: { store.updateCompatibilityText($0, action: selected, for: request.key) }
+                        get: {
+                            replyTextByActionID[selected] ??
+                                (readOnly ? request.draft.compatibility : store.draft(for: request.key)?.compatibility)?.textByActionID[selected]?.rawValue ?? ""
+                        },
+                        set: {
+                            replyTextByActionID[selected] = $0
+                            store.updateCompatibilityText($0, action: selected, for: request.key)
+                        }
                     ))
                     .frame(minHeight: 120)
                     .accessibilityLabel(action.label.rawValue)

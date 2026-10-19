@@ -16,7 +16,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launch()
         let realRows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
         XCTAssertTrue(realRows.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
-        let original = app.buttons["request-row-review-01"]
+        let original = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
         let originalID = original.identifier
         capture("ordinary-inbox-before-shake", app)
@@ -39,7 +39,7 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "A request with a selected answer no longer appears in Inbox.")
         app.buttons["inbox-settings"].tap()
         app.buttons["Add example messages"].tap()
-        let row = app.buttons["sample-approval-0"]
+        let row = app.descendants(matching: .any)["sample-approval-0"]
         // Both sources remain in this same searchable list.
         enterSearch("Archive", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5))
@@ -48,7 +48,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let keep = app.buttons.containing(.staticText, identifier: "Keep here").firstMatch
         XCTAssertTrue(keep.waitForExistence(timeout: 5))
         keep.tap()
-        app.buttons["sample-finish"].tap()
+        app.descendants(matching: .any)["sample-finish"].tap()
         XCTAssertTrue(app.staticTexts["Answered locally · nothing sent"].waitForExistence(timeout: 5))
         capture("ordinary-example-card", app)
         showList(app)
@@ -107,7 +107,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
 
         enterSearch("Archive", in: app)
-        let ordinary = app.buttons["sample-approval-0"]
+        let ordinary = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(ordinary.waitForExistence(timeout: 5), app.debugDescription)
         ordinary.swipeLeft()
         let noComment = app.buttons.allElementsBoundByIndex.first { $0.label.contains("No comment") }
@@ -122,7 +122,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
 
         enterSearch("Thursday", in: app)
-        let informational = app.buttons["sample-information-0"]
+        let informational = app.descendants(matching: .any)["sample-information-0"]
         XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
         informational.swipeLeft()
         let seenActionAppeared = NSPredicate { _, _ in
@@ -148,12 +148,12 @@ final class SampleWorkspaceUITests: XCTestCase {
         repliedTab.tap()
         XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(informational.label.contains("Seen selected locally"), informational.label)
-        XCTAssertFalse(app.buttons["sample-approval-0"].exists, "An untouched request remains in Inbox")
+        XCTAssertFalse(app.descendants(matching: .any)["sample-approval-0"].exists, "An untouched request remains in Inbox")
         capture("seen-message-in-replied-tab", app)
 
         app.buttons["inbox-tab-inbox"].tap()
         enterSearch("nearly full", in: app)
-        let warning = app.buttons["sample-warning-0"]
+        let warning = app.descendants(matching: .any)["sample-warning-0"]
         XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
         warning.swipeRight()
         let rightEdgeSeen = NSPredicate { _, _ in self.seenSwipeAction(in: app) != nil }
@@ -171,7 +171,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Which approach", in: app)
-        let row = app.buttons["sample-textChoice-0"]
+        let row = app.descendants(matching: .any)["sample-textChoice-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
 
@@ -226,7 +226,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             default: "journal is ready"
             }
             enterSearch(query, in: app)
-            let row = app.buttons["sample-\(kind)-0"]
+            let row = app.descendants(matching: .any)["sample-\(kind)-0"]
             let found = row.waitForExistence(timeout: 5)
             if kind == "review" || !found { recordDiagnostics("search-\(kind)", app) }
             XCTAssertTrue(found, app.debugDescription)
@@ -236,7 +236,7 @@ final class SampleWorkspaceUITests: XCTestCase {
                 XCTAssertTrue(app.buttons["request-finish-seen"].waitForExistence(timeout: 5))
                 XCTAssertTrue(app.buttons["request-seen-action"].exists)
             } else {
-                XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.descendants(matching: .any)["sample-finish"].waitForExistence(timeout: 5))
             }
             capture("component-\(kind)", app)
             if ["textChoice", "review", "multipleChoice", "colorChoice", "soundChoice"].contains(kind) {
@@ -248,14 +248,14 @@ final class SampleWorkspaceUITests: XCTestCase {
                 reveal(answer, in: app.scrollViews["message-card-scroll"], app: app)
                 answer.tap(); answer.typeText("Leave room for a quiet corner.")
                 capture("component-own-answer", app)
-                app.buttons["sample-finish"].tap()
+                app.descendants(matching: .any)["sample-finish"].tap()
             }
             if kind == "pictureChoice" {
                 let card = app.scrollViews["message-card-scroll"]
                 let start = card.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.7))
                 let end = card.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
                 start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
-                XCTAssertTrue(app.buttons["sample-finish"].exists, "Ordinary scrolling retains this card")
+                XCTAssertTrue(app.descendants(matching: .any)["sample-finish"].exists, "Ordinary scrolling retains this card")
                 let picture = app.buttons.containing(.staticText, identifier: "Night sky").firstMatch
                 picture.tap(); picture.tap()
                 XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
@@ -332,7 +332,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Thursday", in: app)
-        app.buttons["sample-information-0"].tap()
+        app.descendants(matching: .any)["sample-information-0"].tap()
         app.buttons["Chat"].tap()
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
@@ -374,9 +374,9 @@ final class SampleWorkspaceUITests: XCTestCase {
             let landscape = orientation == .landscapeLeft || orientation == .landscapeRight
             XCTAssertEqual(app.frame.width > app.frame.height, landscape, app.debugDescription)
             enterSearch("Archive", in: app)
-            XCTAssertTrue(app.buttons["sample-approval-0"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.descendants(matching: .any)["sample-approval-0"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-list", app)
-            app.buttons["sample-approval-0"].tap()
+            app.descendants(matching: .any)["sample-approval-0"].tap()
             XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-card", app)
             app.buttons["Chat"].tap()
@@ -403,7 +403,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Thursday", in: app)
-        app.buttons["sample-information-0"].tap()
+        app.descendants(matching: .any)["sample-information-0"].tap()
         let card = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))

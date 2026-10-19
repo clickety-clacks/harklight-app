@@ -89,7 +89,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(inboxTab.isSelected)
         attachScreenshot("Inbox list", from: app)
 
-        let facilities = app.buttons["request-row-facilities-01"]
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
                       "An untouched request belongs in Inbox.\n\(app.debugDescription)")
         repliedTab.tap()
@@ -145,8 +145,8 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
         let list = app.scrollViews.firstMatch
-        let facilities = app.buttons["request-row-facilities-01"]
-        let others = [app.buttons["request-row-unknown-01"], app.buttons["request-row-review-01"]]
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
+        let others = [app.descendants(matching: .any)["request-row-unknown-01"], app.descendants(matching: .any)["request-row-review-01"]]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(others.allSatisfy { $0.waitForExistence(timeout: 5) }, app.debugDescription)
         let examples = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'"))
@@ -188,7 +188,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
-        let facilities = app.buttons["request-row-facilities-01"]
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(facilities.label.contains("Facilities"), facilities.label)
         XCTAssertFalse(facilities.label.contains("fixture:"), facilities.label)
@@ -232,7 +232,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
 
         let field = app.textFields["inbox-search-field"]
         field.typeText("preview could not\n")
-        let notice = app.buttons["sample-error-0"]
+        let notice = app.descendants(matching: .any)["sample-error-0"]
         XCTAssertTrue(notice.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(notice.label.contains("Collection assistant"), notice.label)
         attachScreenshot("Sample row in shared list renderer", from: app)
@@ -267,7 +267,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let field = app.textFields["inbox-search-field"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.typeText("Which approach\n")
-        let row = app.buttons["sample-textChoice-0"]
+        let row = app.descendants(matching: .any)["sample-textChoice-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         let approach = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Plan the whole space")).firstMatch
@@ -301,7 +301,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
 
     func testAnsweredRequestMovesFromInboxToReplied() throws {
         let app = launchFreshApp()
-        let facilities = app.buttons["request-row-facilities-01"]
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("ownOperationAccepted", in: app)
