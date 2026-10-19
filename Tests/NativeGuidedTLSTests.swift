@@ -174,7 +174,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 let cursor = try? store.snapshot(context: context).cursor
                 let threads = try? store.conversationSnapshot(context: context).threads.count
                 let checkpoint = "transport=\(progress.transportAttemptID?.uuidString ?? "none") " +
-                    "stage=\(progress.lastConfirmedStage?.diagnosticValue ?? "none") " +
+                    "stage=\(progress.lastConfirmedStage.map { String(describing: $0) } ?? "none") " +
                     "durable_cursor_at_observation=\(cursor.map(String.init) ?? "unavailable") " +
                     "threads=\(threads.map(String.init) ?? "unavailable")"
                 if checkpoints.last != checkpoint { checkpoints.append(checkpoint) }
