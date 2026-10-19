@@ -14,7 +14,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture"]
         app.launch()
-        let realRows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
+        let realRows = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
         XCTAssertTrue(realRows.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
         let original = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)

@@ -132,7 +132,7 @@ final class ConversationSampleUITests: XCTestCase {
         showInbox(app)
         let other = app.descendants(matching: .any)["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
-        guard reveal(other, in: app.scrollViews.firstMatch, app: app) else { return }
+        guard reveal(other, in: listContainer(app), app: app) else { return }
         other.tap()
         // In a regular-width split view the sidebar rows expose these titles too,
         // so only the detail card can show that the selection changed.
@@ -141,7 +141,7 @@ final class ConversationSampleUITests: XCTestCase {
         recordDiagnostics("after-departure", app)
         XCTAssertTrue(departed, "Selecting another row must change the detail identity before cleanup is assessed")
         showInbox(app)
-        guard reveal(row, in: app.scrollViews.firstMatch, app: app) else { return }
+        guard reveal(row, in: listContainer(app), app: app) else { return }
         row.tap()
         let returned = detail.staticTexts["Review the library welcome text"].waitForExistence(timeout: 5)
         recordDiagnostics("after-return", app)
@@ -169,7 +169,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launchArguments = ["--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let list = app.scrollViews.firstMatch
+        let list = listContainer(app)
         // The information, warning, error and note examples are short cards, so a pull past
         // their end moves between them. Open the first one while the last one is out of view.
         let opened = app.descendants(matching: .any)["request-row-sample-information-1"]
@@ -317,6 +317,11 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(searchButton.waitForExistence(timeout: 5) || searchField.waitForExistence(timeout: 5),
                       app.debugDescription)
+    }
+
+    private func listContainer(_ app: XCUIApplication) -> XCUIElement {
+        let scrollView = app.scrollViews.firstMatch
+        return scrollView.exists ? scrollView : app.collectionViews.firstMatch
     }
 
     /// Pulls past the end of the open message until the next one opens.
