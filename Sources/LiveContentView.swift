@@ -1191,6 +1191,8 @@ private struct LiveCompatibilityActions: View {
     var localExample: SampleResponse? = nil
     var onSeen: ((ExactText) -> Void)? = nil
     @State private var replyTextByActionID: [ExactText: String] = [:]
+    @FocusState private var focusedReplyActionID: String?
+    @Environment(\.colorScheme) private var colorScheme
 
     private var selected: ExactText? {
         readOnly ? request.draft.compatibility.selectedActionID : store.draft(for: request.key)?.compatibility.selectedActionID
@@ -1200,6 +1202,67 @@ private struct LiveCompatibilityActions: View {
         localExample?.localSeenSelected == true ||
             request.informationalSeenStatus == .pending ||
             request.informationalSeenStatus == .confirmed
+    }
+
+    private var replyEditorSurface: Color {
+        colorScheme == .dark
+            ? Color(uiColor: .secondarySystemBackground)
+            : Color(red: 0.96, green: 0.975, blue: 1)
+    }
+
+    private func activate(_ action: ProjectedAction) {
+        withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
+            store.selectAction(action.id, input: nil, for: request.key)
+        } completion: {
+            focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
+        }
+    }
+
+    private func compatibilityChoice(_ action: ProjectedAction,
+                                     selected: Bool,
+                                     detail: String,
+                                     text: String) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 16)
+        let card = VStack(spacing: 0) {
+            MessageChoiceLabel(title: action.label.rawValue, detail: detail,
+                               selected: selected, multiple: false, suggested: false,
+                               drawsSurface: false)
+            TextEditor(text: Binding(
+                get: {
+                    replyTextByActionID[action.id] ??
+                        (readOnly ? request.draft.compatibility : store.draft(for: request.key)?.compatibility)?
+                            .textByActionID[action.id]?.rawValue ?? text
+                },
+                set: {
+                    replyTextByActionID[action.id] = $0
+                    store.updateCompatibilityText($0, action: action.id, for: request.key)
+                }
+            ))
+            .font(.body)
+            .foregroundStyle(.primary)
+            .scrollContentBackground(.hidden)
+            .frame(minHeight: 120)
+            .padding(8)
+            .background(replyEditorSurface)
+            .focused($focusedReplyActionID, equals: action.id.rawValue)
+            .accessibilityLabel(action.label.rawValue)
+            .accessibilityIdentifier("request-compatibility-" + action.id.rawValue + "-response")
+            .disabled(readOnly || !selected)
+        }
+        .background(selected ? Color.blue : Color(uiColor: .systemBackground), in: shape)
+        .overlay(shape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
+        .clipShape(shape)
+        .opacity(selected ? 1 : 0.55)
+        .animation(.smooth(duration: 0.25), value: selected)
+
+        if selected {
+            card
+        } else {
+            Button { activate(action) } label: { card }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(.isButton)
+                .disabled(readOnly)
+        }
     }
 
     @ViewBuilder
@@ -1235,37 +1298,27 @@ private struct LiveCompatibilityActions: View {
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(actions, id: \.id) { action in
-                    Button {
-                        store.selectAction(action.id, input: nil, for: request.key)
-                    } label: {
                     let option = localExample?.message.options.first { $0.id == action.id.rawValue }
-                    MessageChoiceLabel(title: action.label.rawValue,
-                            detail: option?.detail ?? "",
-                            selected: selected == action.id, multiple: false,
-                            suggested: option.map { if case .suggested = $0.role { true } else { false } } ?? false,
-                            selectionColor: option.map { if case .destructive = $0.role { .red } else { .blue } } ?? .blue)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(selected == action.id ? .isSelected : [])
-                    .accessibilityValue(selected == action.id ? "Selected" : "Not selected")
-                    .disabled(readOnly)
-                }
-                if let selected,
-                   let action = actions.first(where: { $0.id == selected }),
-                   action.kind == .text {
-                    TextEditor(text: Binding(
-                        get: {
-                            replyTextByActionID[selected] ??
-                                (readOnly ? request.draft.compatibility : store.draft(for: request.key)?.compatibility)?.textByActionID[selected]?.rawValue ?? ""
-                        },
-                        set: {
-                            replyTextByActionID[selected] = $0
-                            store.updateCompatibilityText($0, action: selected, for: request.key)
+                    let isSelected = selected == action.id
+                    let replyText = replyTextByActionID[action.id] ??
+                        (readOnly ? request.draft.compatibility : store.draft(for: request.key)?.compatibility)?
+                            .textByActionID[action.id]?.rawValue ?? ""
+                    if action.kind == .text && (isSelected || !replyText.isEmpty) {
+                        compatibilityChoice(action, selected: isSelected, detail: option?.detail ?? "",
+                                            text: replyText)
+                    } else {
+                        Button { activate(action) } label: {
+                            MessageChoiceLabel(title: action.label.rawValue,
+                                    detail: option?.detail ?? "",
+                                    selected: isSelected, multiple: false,
+                                    suggested: option.map { if case .suggested = $0.role { true } else { false } } ?? false,
+                                    selectionColor: option.map { if case .destructive = $0.role { .red } else { .blue } } ?? .blue)
                         }
-                    ))
-                    .frame(minHeight: 120)
-                    .accessibilityLabel(action.label.rawValue)
-                    .disabled(readOnly)
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
+                        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+                        .disabled(readOnly)
+                    }
                 }
             }
         }

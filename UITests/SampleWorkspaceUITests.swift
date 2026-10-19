@@ -150,6 +150,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         replyChoice.tap()
         let replyEditor = app.textViews.firstMatch
         XCTAssertTrue(replyEditor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Selecting a text-only Reply focuses its embedded editor.")
         XCTAssertGreaterThan(noComment.frame.minY, replyEditor.frame.maxY,
                              "No comment stays after the expanded Reply editor.")
         capture("reply-only-no-comment-available", app)
