@@ -32,10 +32,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         let repliedTab = app.buttons["inbox-tab-replied"]
         XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
         repliedTab.tap()
-        XCTAssertTrue(app.buttons[originalID].waitForExistence(timeout: 5),
+        XCTAssertTrue(original.waitForExistence(timeout: 5),
                       "Choosing a reply moves the request to Replied.")
         inboxTab.tap()
-        XCTAssertFalse(app.buttons[originalID].exists,
+        XCTAssertFalse(original.exists,
                        "A request with a selected answer no longer appears in Inbox.")
         app.buttons["inbox-settings"].tap()
         app.buttons["Add example messages"].tap()
@@ -54,8 +54,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         showList(app)
         clearSearch(in: app)
         repliedTab.tap()
-        XCTAssertTrue(app.buttons[originalID].exists, app.debugDescription)
-        app.buttons[originalID].tap()
+        XCTAssertTrue(original.exists, app.debugDescription)
+        original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Cover A"].isSelected, "An ordinary draft survives local example actions")
         capture("ordinary-request-after-example", app)
