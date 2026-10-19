@@ -63,6 +63,8 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         revealInCard(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
+        XCTAssertEqual(note.value as? String, "Near the east entrance",
+                       "The editor must retain every character before the answer is submitted.")
 
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
