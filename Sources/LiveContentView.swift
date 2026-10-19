@@ -174,7 +174,7 @@ struct LiveInboxSettings: View {
     }
 
     private var disconnectDisclosure: String {
-        let account = record?.accountDisplayName ?? "this account"
+        let account = record?.savedAccountName ?? "this account"
         let drafts = editedDraftCount == 0
             ? "Saved messages, drafts, receipts and local attachment copies stay on this phone."
             : "Saved messages, \(editedDraftCount) edited \(editedDraftCount == 1 ? "draft" : "drafts"), receipts and local attachment copies stay on this phone."
@@ -198,7 +198,7 @@ struct LiveInboxSettings: View {
                 }
                 if let record {
                     Section("Account") {
-                        LabeledContent("Account", value: record.accountDisplayName ?? "Current account")
+                        LabeledContent("Account", value: record.savedAccountName ?? "Current account")
                         LabeledContent("Server", value: record.serverDisplayName ?? record.host)
                     }
                 }
@@ -212,7 +212,7 @@ struct LiveInboxSettings: View {
                                     launch.showArchivedAccount(departure)
                                     dismiss()
                                 } label: {
-                                    Label(departure.record.accountDisplayName ?? "Disconnected account",
+                                    Label(departure.record.savedAccountName ?? "Disconnected account",
                                           systemImage: "lock")
                                 }
                                 .accessibilityHint("Open this account’s saved messages and discussion read-only")

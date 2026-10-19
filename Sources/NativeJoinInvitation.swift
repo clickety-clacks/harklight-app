@@ -41,7 +41,8 @@ struct NativeJoinInvitation: Codable, Equatable {
         NativeEnrollmentSettings.certificateDER(from: caPEM) ?? Data()
     }
 
-    var claimedAccountLabel: String { personName ?? "The account in this invitation" }
+    static let unnamedAccountPlaceholder = "The account in this invitation"
+    var claimedAccountLabel: String { personName ?? Self.unnamedAccountPlaceholder }
     var approvingOwnerLabel: String { inviterName ?? "The server owner" }
 
     static func decode(_ url: URL) throws -> NativeJoinInvitation {

@@ -210,7 +210,7 @@ struct NativeEnrollmentView: View {
             card {
                 Text("Current account").font(.headline)
                 labeled("Server", flow.currentAccount?.serverDisplayName ?? flow.currentAccount?.host ?? "Harklight")
-                labeled("Joined as", flow.currentAccount?.accountDisplayName ?? "Your account")
+                labeled("Joined as", flow.currentAccount?.savedAccountName ?? "Your account")
             }
             destination
             primary("Keep current account") { Task { await flow.keepCurrentAccount() } }

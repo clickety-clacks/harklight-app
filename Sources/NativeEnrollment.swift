@@ -81,6 +81,11 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     var notificationBindings: [NativeNotificationBinding]? = nil
 
     var isApproved: Bool { personID != nil }
+    /// The invitation's person label, when it supplied one. Earlier builds saved
+    /// the join screen's placeholder when the label was absent; that is not a name.
+    var savedAccountName: String? {
+        accountDisplayName == NativeJoinInvitation.unnamedAccountPlaceholder ? nil : accountDisplayName
+    }
     var profileAuthority: String { localProfileAuthority ?? host }
 }
 

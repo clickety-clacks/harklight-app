@@ -465,7 +465,7 @@ final class NativeAppLaunch {
 
     private func disconnectedStatusMessage(for departure: NativeAccountDeparture,
                                            presentation: LivePresentationStore?) -> String {
-        let account = departure.record.accountDisplayName ?? "this account"
+        let account = departure.record.savedAccountName ?? "this account"
         let server = departure.record.serverDisplayName ?? departure.record.host
         if departure.removed {
             return "This phone is disconnected from \(account) on \(server). Saved messages, drafts and receipts remain read-only on this phone. Other devices and server history are unchanged."
