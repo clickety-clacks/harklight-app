@@ -184,7 +184,28 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                        "Back without switching messages must return to the exact list position: top row at \(top.frame.minY), expected \(scrolledTop).\n\(app.debugDescription)")
     }
 
-    func testDetailEdgeSwipeReturnsToListAndSearchRisesAboveKeyboard() throws {
+    func testSplitViewAdaptationKeepsTheSelectedMessage() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launchFreshApp()
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        facilities.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
+                      "Changing to the wide split view must keep the selected message.")
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
+                      "Adapting back to compact layout must not count as leaving the message.")
+
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    func testNativeInteractiveBackReturnsToListAndSearchRisesAboveKeyboard() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()

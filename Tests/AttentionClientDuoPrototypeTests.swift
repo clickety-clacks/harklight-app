@@ -763,6 +763,45 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
         XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).outbox.count, 1)
     }
 
+    @MainActor
+    func testReplyDraftIsSavedAfterTypingPauseAndSurvivesStoreRestart() async throws {
+        let fixtures = try loadFixtures()
+        let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
+        guard case let .sender(document) = fixture.interface else { return XCTFail("Expected the facilities sender document.") }
+        let noteInput = try XCTUnwrap(document.inputs.first(where: { if case .text = $0.kind { return true }; return false }))
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("attention-debounced-draft-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FileAttentionStatePersistence(directoryURL: directory)
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
+                                       personID: fixtures.accountScope,
+                                       deviceID: ExactText("device-a"))
+        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        let firstStore = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
+        let editor = try LivePresentationStore(localFixtureStore: firstStore, context: context)
+        let longReply = String(repeating: "Near the east entrance; please keep the access path clear. ", count: 8)
+
+        editor.updateText(longReply, input: noteInput.id, action: nil, for: fixture.key)
+        let beforePause = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
+        XCTAssertNotEqual(try beforePause.snapshot(context: context).drafts[fixture.key]?.inputs[noteInput.id]?.text?.rawValue,
+                          longReply,
+                          "Typing remains in view state until the debounce interval expires.")
+
+        try await Task.sleep(for: .milliseconds(600))
+        let afterPause = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
+        XCTAssertEqual(try afterPause.snapshot(context: context).drafts[fixture.key]?.inputs[noteInput.id]?.text?.rawValue,
+                       longReply,
+                       "The paused draft is durable and available after a new store opens.")
+
+        let flushedReply = longReply + " Still here."
+        editor.updateText(flushedReply, input: noteInput.id, action: nil, for: fixture.key)
+        editor.flushPendingDrafts()
+        let afterFlush = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
+        XCTAssertEqual(try afterFlush.snapshot(context: context).drafts[fixture.key]?.inputs[noteInput.id]?.text?.rawValue,
+                       flushedReply,
+                       "A forced flush durably saves the latest draft without waiting for another pause.")
+    }
+
     func testDurableFenceRejectsLateOriginalSubmitAfterRestartAndChangedDraft() throws {
         let fixtures = try loadFixtures()
         let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
