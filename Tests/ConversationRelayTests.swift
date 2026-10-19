@@ -13,6 +13,7 @@ final class ConversationRelayTests: XCTestCase {
         var onOrdinaryACK: (() throws -> Void)?
         var onConversationACK: (() throws -> Void)?
         var onConversationOpen: (() -> Void)?
+        var conversationOpenError: InstallationTransportError?
         var rejectFirstConversationACK = false
         var onLiveConversationWait: (() -> Void)?
         private var liveConversation: CheckedContinuation<Void, any Error>?
@@ -36,6 +37,7 @@ final class ConversationRelayTests: XCTestCase {
         }
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             onConversationOpen?()
+            if let conversationOpenError { throw conversationOpenError }
             for frame in conversation { try await consume(frame) }
         }
         func acknowledgeConversation(_ request: Data) async throws {
@@ -63,6 +65,57 @@ final class ConversationRelayTests: XCTestCase {
     private func event(_ kind: String, sequence: Int, fields: String) -> Data {
         data("{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(sequence),\"sender_id\":\"author\",\"message_id\":\"request\",\"origin\":\"origin\",\"session_handle\":\"handle\",\"request_revision\":1,\"kind\":\"\(kind)\",\(fields)}")
     }
+    func testUnavailableChatDoesNotFailInboxDrainOrProbeAgainUntilNewConnection() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversationOpenError = .conversationsUnavailable
+        var opens = 0
+        session.onConversationOpen = { opens += 1 }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let firstHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(firstHigh, 1)
+        let unavailable = await core.conversationsUnavailable
+        XCTAssertTrue(unavailable)
+        XCTAssertEqual(session.ordinaryACKs.count, 1)
+        XCTAssertTrue(session.conversationACKs.isEmpty)
+        XCTAssertEqual(try store.snapshot(context: context).requests.count, 1)
+
+        // A later inbox delivery uses the same connection after chat refusal.
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"later","origin":"origin","as":"message","message":{"title":"Still receiving"}}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        let secondHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(secondHigh, 2)
+        XCTAssertEqual(try store.snapshot(context: context).requests.count, 2)
+        XCTAssertEqual(session.ordinaryACKs.count, 2)
+        XCTAssertEqual(opens, 1)
+        await core.deactivate()
+
+        let supported = Session(context.identity)
+        supported.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        supported.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0}"#)]
+        let replacement = try NativeRelayCore(store: store, context: context, session: supported)
+        _ = try await replacement.resyncAndDrainOutbox()
+        let stillUnavailable = await replacement.conversationsUnavailable
+        XCTAssertFalse(stillUnavailable)
+        XCTAssertEqual(supported.conversationACKs.count, 1)
+        await replacement.deactivate()
+    }
+
+    func testOtherConversationRefusalsStillFailTheDrain() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversationOpenError = .serverRejected
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("An ordinary rejection must not be treated as missing chat support.")
+        } catch InstallationTransportError.serverRejected { }
+        let unavailable = await core.conversationsUnavailable
+        XCTAssertFalse(unavailable)
+        await core.deactivate()
+    }
+
     func testIndependentReplayCommitsBeforeItsACKAndNeverAdvancesOrdinaryCursor() async throws {
         let (context, _, store, session) = try setup()
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),

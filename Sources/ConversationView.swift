@@ -27,7 +27,9 @@ struct ConversationPanel: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(sender).font(.headline)
                     Text("About \(title)").font(.caption).foregroundStyle(.secondary)
-                    if let thread { ConversationAvailabilityLabel(availability: thread.availability, local: store.isLocalExample) }
+                    if let thread, store.conversationUnavailableMessage == nil {
+                        ConversationAvailabilityLabel(availability: thread.availability, local: store.isLocalExample)
+                    }
                 }.padding().frame(maxWidth: .infinity, alignment: .leading)
             }
             if let thread {
@@ -78,7 +80,13 @@ struct ConversationPanel: View {
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
-                if store.isReadOnly {
+                if let message = store.conversationUnavailableMessage {
+                    Text(message)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding()
+                        .accessibilityIdentifier("conversation-unavailable")
+                } else if store.isReadOnly {
                     ReadOnlyConversationDraftView(draft: draft) { file in
                         fileError = nil
                         inspectedFile = file

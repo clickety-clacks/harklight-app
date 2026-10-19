@@ -115,6 +115,8 @@ public actor NativeRelayCore {
     private var postCheckpointAcknowledgementTask: Task<Void, Never>?
     private var postCheckpointAcknowledgementWaiters: [InboxSequenceWaiter] = []
     private var pendingInboxPageWaiters: [CheckedContinuation<Bool, Error>] = []
+    // A core owns one authenticated connection; a new connection probes again.
+    public private(set) var conversationsUnavailable = false
     private var conversationReplay: ConversationReplayProgress?
     private var liveConversationConsumerTask: Task<Void, Never>?
     private var pendingLiveConversationReplay = false
@@ -189,6 +191,7 @@ public actor NativeRelayCore {
         busy = true
         defer { releaseBusy() }
         try validate()
+        guard !conversationsUnavailable else { throw InstallationTransportError.conversationsUnavailable }
         guard let transport = session as? any AuthenticatedConversationFileSession,
               let draft = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
@@ -966,6 +969,7 @@ public actor NativeRelayCore {
     }
 
     private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
+        guard !conversationsUnavailable else { return }
         diagnose(.conversation, .conversationReplay, .began)
         let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
         do {
@@ -980,6 +984,12 @@ public actor NativeRelayCore {
             }
             diagnose(.conversation, .acknowledgement, .completed)
             diagnose(.conversation, .conversationReplay, .completed)
+        } catch InstallationTransportError.conversationsUnavailable {
+            conversationsUnavailable = true
+            discoveredOriginURL = nil
+            // Ordinary replay and answer delivery already succeeded. The missing
+            // optional projection must not undo their connection confirmation.
+            return
         } catch {
             diagnose(.conversation, .conversationReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)

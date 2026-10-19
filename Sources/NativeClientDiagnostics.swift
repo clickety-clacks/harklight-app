@@ -276,6 +276,7 @@ final class NativeClientDiagnosticJournal {
             case .invalidServerTrust: return "server_trust_rejected"
             case .unexpectedServerFrame: return "unexpected_relay_frame"
             case .serverRejected: return "relay_server_rejected"
+            case .conversationsUnavailable: return "conversations_unavailable"
             case .acknowledgementBehind: return "relay_acknowledgement_behind"
             }
         }

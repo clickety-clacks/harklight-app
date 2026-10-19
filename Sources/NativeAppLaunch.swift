@@ -832,6 +832,11 @@ final class NativeAppLaunch {
 final class LivePresentationStore {
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     private(set) var conversationError: String?
+    @ObservationIgnored private let conversationAvailability: NativeConversationAvailability
+    var conversationUnavailableMessage: String? {
+        guard permitsDelivery, !isReadOnly else { return nil }
+        return conversationAvailability.message(for: profileContext)
+    }
     private(set) var isSendingDiscussion = false
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
@@ -855,9 +860,11 @@ final class LivePresentationStore {
     @ObservationIgnored private var observation: Task<Void, Never>?
 
     convenience init(store: AttentionDomainStore, context: ProfileContext,
+                     conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics)
+        try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
+                      conversationAvailability: conversationAvailability)
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
@@ -876,7 +883,9 @@ final class LivePresentationStore {
     private init(store: AttentionDomainStore, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
-                 captureFixtureRequestsAsSeen: Bool = false) throws {
+                 captureFixtureRequestsAsSeen: Bool = false,
+                 conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability) throws {
+        self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
         self.isReadOnly = isReadOnly
@@ -1111,7 +1120,7 @@ final class LivePresentationStore {
     }
 
     func sendDiscussion(for key: RequestKey, revision: UInt64) {
-        guard !isReadOnly else { return }
+        guard !isReadOnly, conversationUnavailableMessage == nil else { return }
         do {
             let binding = ConversationBinding(request: key, revision: revision)
             guard !hasPendingUploadCleanup(for: key, revision: revision),
@@ -1144,7 +1153,9 @@ final class LivePresentationStore {
                         do { try refreshFromDurableStore() }
                         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error,
                                          request: key, revision: revision) }
-                        if (error as? ConversationError) == .emptyDraft {
+                        if case InstallationTransportError.conversationsUnavailable = error {
+                            conversationError = nil // The conversation surface shows the capability message.
+                        } else if (error as? ConversationError) == .emptyDraft {
                             conversationError = "Add a message before sending these files. Your draft is retained."
                         } else {
                             conversationError = "Discussion could not be confirmed (\(error)). Your saved text and files are retained."

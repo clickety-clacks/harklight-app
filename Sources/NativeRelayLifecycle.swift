@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import HarklightNativeRelay
 import Security
+import Observation
 
 struct NativeRelayRefreshResult: Equatable, Sendable {
     enum PushRegistration: Equatable, Sendable {
@@ -754,6 +755,17 @@ final class ForegroundConnectDeadline {
     }
 }
 
+/// Presentation of a connection-scoped refusal, never persisted with a thread.
+@MainActor
+@Observable
+final class NativeConversationAvailability {
+    var unavailableContext: ProfileContext?
+
+    func message(for context: ProfileContext) -> String? {
+        unavailableContext == context ? String(localized: "Chat is not available on this server yet.") : nil
+    }
+}
+
 /// App-owned wake boundary. A future enrollment/profile owner supplies the
 /// authenticated installation material and the SAME C store used by live UI.
 /// Fixture launch deliberately leaves this unconfigured.
@@ -761,7 +773,10 @@ final class ForegroundConnectDeadline {
 final class NativeRelayLifecycle {
     static let shared = NativeRelayLifecycle()
 
-    private var core: NativeRelayCore?
+    let conversationAvailability = NativeConversationAvailability()
+    private var core: NativeRelayCore? {
+        didSet { conversationAvailability.unavailableContext = nil }
+    }
     private var transport: URLSessionInstallationSession?
     private var context: ProfileContext?
     private var confirmedRelayContext: ProfileContext?
@@ -1259,7 +1274,11 @@ final class NativeRelayLifecycle {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
         _ = try await core.resyncAndDrainOutbox()
-        guard refreshGeneration == generation, self.context == context else { throw NativeRelayCoreError.inactive }
+        let conversationsUnavailable = await core.conversationsUnavailable
+        guard refreshGeneration == generation, self.context == context, self.core === core else {
+            throw NativeRelayCoreError.inactive
+        }
+        conversationAvailability.unavailableContext = conversationsUnavailable ? context : nil
         confirmedRelayContext = context
         if let configuration {
             let threads = try configuration.store.conversationSnapshot(context: context).threads

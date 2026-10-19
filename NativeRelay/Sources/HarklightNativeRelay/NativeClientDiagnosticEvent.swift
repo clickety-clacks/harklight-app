@@ -200,7 +200,7 @@ public enum NativeDiagnosticCauseCode {
         "server_trust_rejected", "client_identity_challenge_rejected", "relay_protocol_error",
         "native_sync_error", "relay_redirect_refused", "notification_permission_not_granted", "application_support_unavailable",
         "unsupported_journal_version", "invalid_acceptance_sequence", "unexpected_relay_frame",
-        "saved_operation_frame_mismatch", "relay_server_rejected", "relay_acknowledgement_behind",
+        "saved_operation_frame_mismatch", "relay_server_rejected", "conversations_unavailable", "relay_acknowledgement_behind",
         "invalid_relay_endpoint", "invalid_trust_anchor", "wrong_device_identity",
         "relay_fixture_profile", "relay_wrong_installation", "relay_inactive", "relay_invalid_replay",
         "relay_origin_content_missing", "relay_event_rejected", "relay_operation_result_mismatch",
@@ -279,6 +279,7 @@ public enum NativeDiagnosticCauseCode {
             case .invalidServerTrust: return "server_trust_rejected"
             case .unexpectedServerFrame: return "unexpected_relay_frame"
             case .serverRejected: return "relay_server_rejected"
+            case .conversationsUnavailable: return "conversations_unavailable"
             case .acknowledgementBehind: return "relay_acknowledgement_behind"
             }
         }

@@ -113,6 +113,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             let senderID: String
             let messageID: String
             let ordinaryCursor: UInt64
+            let conversationsSupported: Bool
         }
         let bundle = Bundle(for: Self.self)
         guard let configurationURL = bundle.url(forResource: "foreground-post-ack", withExtension: "json") else {
@@ -139,26 +140,32 @@ final class NativeGuidedTLSTests: XCTestCase {
         let persistence = FileAttentionStatePersistence(directoryURL: directory)
         var store = try AttentionDomainStore(context: context, persistence: persistence)
         let runID = UUID()
+        let sessionHandle = ExactText("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
         for retainedThread in [false, true] {
             let name = retainedThread ? "retained-thread" : "empty-threads"
             if retainedThread {
-                // Restore the same committed ordinary state and identity. Add only
-                // synthetic historical conversation state; do not alter its cursor,
-                // requests, answers or replay receipts to manufacture a success.
+                // Restore the same identity and committed state. A capable server
+                // supplied the thread on the first replay. Only the older server
+                // needs synthetic saved history to reproduce its unsupported open.
                 store = try AttentionDomainStore(context: context, persistence: persistence)
                 let saved = try store.snapshot(context: context)
                 let message = try XCTUnwrap(saved.requests[request])
-                try store.applyConversation(ConversationEvent(sequence: 1,
-                    binding: ConversationBinding(request: request, revision: 1),
-                    fact: .request(sessionHandle: ExactText("retained-fixture-conversation"),
-                                   payload: message.originalPayload)), context: context)
+                if !fixture.conversationsSupported {
+                    try store.applyConversation(ConversationEvent(sequence: 1,
+                        binding: ConversationBinding(request: request, revision: 1),
+                        fact: .request(sessionHandle: sessionHandle,
+                                       payload: message.originalPayload)), context: context)
+                }
+                let retained = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request])
+                XCTAssertEqual(retained.sessionHandle, sessionHandle)
                 let after = try store.snapshot(context: context)
                 XCTAssertEqual(after.cursor, saved.cursor)
                 XCTAssertEqual(after.requests, saved.requests)
                 XCTAssertEqual(after.intents, saved.intents)
                 XCTAssertEqual(after.outbox, saved.outbox)
             }
+            let expectsConversationReplay = retainedThread || fixture.conversationsSupported
             let before = try store.snapshot(context: context)
             let threadsBefore = try store.conversationSnapshot(context: context)
             XCTAssertTrue(before.outbox.isEmpty)
@@ -166,6 +173,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             XCTAssertEqual(threadsBefore.threads.count, retainedThread ? 1 : 0)
             let journal = NativeClientDiagnosticJournal(fileURL: nil)
             let lifecycle = NativeRelayLifecycle()
+            let presentation = try LivePresentationStore(store: store, context: context,
+                conversationAvailability: lifecycle.conversationAvailability)
             try await lifecycle.activate(store: store, context: context, relayURL: fixture.relayURL,
                 clientIdentity: clientIdentity, trustedRootDER: rootDER, diagnostics: journal)
             var checkpoints: [String] = []
@@ -185,10 +194,17 @@ final class NativeGuidedTLSTests: XCTestCase {
                         $0.area == .relay && $0.phase == .ordinaryReplay && $0.transition == .completed &&
                             $0.attemptID == result.transportAttemptID
                     } &&
-                    (!retainedThread || journal.events.contains {
-                        $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .rejected
+                    (!expectsConversationReplay || journal.events.contains {
+                        $0.area == .conversation && $0.phase == .conversationReplay &&
+                            $0.transition == (fixture.conversationsSupported ? .completed : .rejected)
                     })
             }
+            // A later refresh on this connection must keep ordinary service
+            // confirmed without another conversation_open after its refusal.
+            let repeatedRefresh = await lifecycle.refreshResultFromTrustedRelay()
+            presentation.applyRefreshResult(repeatedRefresh)
+            XCTAssertTrue(repeatedRefresh.confirms(context, transportAttemptID: result.transportAttemptID))
+            let chatMessage = presentation.conversationUnavailableMessage
             let after = try store.snapshot(context: context)
             let threadsAfter = try store.conversationSnapshot(context: context)
             let diagnostic = NativeForegroundConnectDiagnostic(progress: result,
@@ -200,6 +216,9 @@ final class NativeGuidedTLSTests: XCTestCase {
                 "checkpoint_accepted=\(after.inboxCheckpoint?.checkpointAccepted == true) " +
                     "checkpoint_high_water=\(after.inboxCheckpoint?.highWater.map(String.init) ?? "unavailable")",
                 "ordinary_ack_expected=no_empty_replay",
+                "conversations_supported_expected=\(fixture.conversationsSupported)",
+                "chat_availability_message=\(chatMessage ?? "none")",
+                "connection_warning=\(presentation.connectionWarning ?? "none")",
                 "conversation_threads_before=\(threadsBefore.threads.count) after=\(threadsAfter.threads.count)",
                 "original_operation=none terminal_operation_replay=not_applicable",
                 "received_message_readable=\(after.requests[request] != nil)",
@@ -230,29 +249,46 @@ final class NativeGuidedTLSTests: XCTestCase {
             // completes an empty inbox_attach replay. The server trace records
             // those actual replies and the subsequent conversation_open/error.
             XCTAssertEqual(after.cursor, fixture.ordinaryCursor)
-            XCTAssertNotNil(after.requests[request], "Received messages survive an incomplete foreground result.")
+            XCTAssertNotNil(after.requests[request], "Received messages remain readable when chat is unavailable.")
             XCTAssertTrue(after.outbox.isEmpty)
             XCTAssertEqual(after.intents, before.intents)
-            XCTAssertEqual(threadsAfter.threads.count, retainedThread ? 1 : 0)
+            XCTAssertEqual(threadsAfter.threads.count, expectsConversationReplay ? 1 : 0)
             XCTAssertEqual(result.generationValidation, .passed)
             XCTAssertEqual(result.profileContextValidation, .passed)
-            if retainedThread {
-                XCTAssertEqual(result.outcome, .incomplete)
-                XCTAssertEqual(result.postAckDrainTransition, .failed)
-                XCTAssertEqual(result.lastCompletedPostAckBoundary, .none)
+            XCTAssertEqual(result.outcome, .confirmed)
+            XCTAssertEqual(result.postAckDrainTransition, .completed)
+            XCTAssertEqual(result.postAckRelayRefresh, .passed)
+            XCTAssertEqual(result.relayContextValidation, .passed)
+            XCTAssertNil(presentation.connectionWarning)
+            if retainedThread && !fixture.conversationsSupported {
+                XCTAssertEqual(chatMessage, "Chat is not available on this server yet.")
+                XCTAssertEqual(journal.events.filter {
+                    $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .rejected
+                }.count, 1, "Repeated ordinary refresh must not probe refused chat again on this connection.")
                 XCTAssertTrue(journal.events.contains {
                     $0.area == .conversation && $0.phase == .conversationReplay &&
                         $0.transition == .rejected && $0.attemptID == transportID
-                }, "Locate the rejection inside post-ACK conversation replay, not only the generic warning.")
+                }, "The deployed server refuses chat, while ordinary foreground confirmation succeeds.")
                 XCTAssertFalse(journal.events.contains {
                     $0.area == .conversation && $0.phase == .acknowledgement && $0.transition == .completed
                 })
             } else {
-                XCTAssertEqual(result.outcome, .confirmed)
-                XCTAssertEqual(result.postAckDrainTransition, .completed)
-                XCTAssertEqual(result.postAckRelayRefresh, .passed)
-                XCTAssertEqual(result.relayContextValidation, .passed)
-                XCTAssertFalse(journal.events.contains { $0.phase == .conversationReplay })
+                XCTAssertNil(chatMessage)
+                if expectsConversationReplay {
+                    XCTAssertTrue(journal.events.contains {
+                        $0.area == .conversation && $0.phase == .conversationReplay &&
+                            $0.transition == .completed && $0.attemptID == transportID
+                    })
+                    XCTAssertTrue(journal.events.contains {
+                        $0.area == .conversation && $0.phase == .acknowledgement &&
+                            $0.transition == .completed && $0.attemptID == transportID
+                    })
+                    XCTAssertFalse(journal.events.contains {
+                        $0.area == .conversation && $0.transition == .rejected
+                    })
+                } else {
+                    XCTAssertFalse(journal.events.contains { $0.phase == .conversationReplay })
+                }
             }
         }
     }
@@ -683,6 +719,90 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(live.inboxRows.last?.status.contains("Seen confirmed") == true)
         XCTAssertTrue(live.inboxRows.last?.isResolved == true,
                       "Resolved content stays in the ordered inbox projection below open requests.")
+    }
+
+    func testOnlyUnknownConversationOpenIsUnavailableAndOrdinaryExchangesContinue() async throws {
+        let namespace = "Harklight.chat-capability-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let bindingID = UUID().uuidString.lowercased()
+        for (reason, ref, acceptedFirst, missingChat) in [
+            ("unknown_type", "native-conversation-sync", false, true),
+            ("unknown_type", "unrelated-request", false, false),
+            ("invalid_cursor", "native-conversation-sync", false, false),
+            ("unknown_type", "native-conversation-sync", true, false)
+        ] {
+            let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+                if text.contains("\"conversation_open\"") {
+                    let error = "{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"\(reason)\"}\n"
+                    return acceptedFirst ? ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-conversation-sync\"}\n", error] : [error]
+                }
+                if text.contains("\"inbox_page\"") {
+                    return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"page\"}\n"]
+                }
+                if text.contains("\"push_register\"") {
+                    return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":1,\"binding_id\":\"\(bindingID)\"}\n"]
+                }
+                if text.contains("\"answer\"") {
+                    return ["{\"v\":1,\"type\":\"ok\",\"seq\":2}\n"]
+                }
+                return []
+            }
+            defer { relay.close() }
+            let port = try await relay.start()
+            let context = ProfileContext(identity: ProfileIdentity(
+                trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+                deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+            let session = try URLSessionInstallationSession(
+                profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+            do {
+                try await session.openConversation(ConversationWire(profile: context).open(since: 0)) { _ in }
+                XCTFail("This server refuses the conversation request.")
+            } catch InstallationTransportError.conversationsUnavailable {
+                XCTAssertTrue(missingChat)
+            } catch InstallationTransportError.serverRejected {
+                XCTAssertFalse(missingChat)
+            }
+            if missingChat {
+                let page = try await session.inboxRequest(
+                    Data(#"{"v":1,"type":"inbox_page","ref":"page"}"#.utf8) + Data([0x0A]), ref: "page")
+                XCTAssertEqual(try JSONValue.parse(page).uniqueValue(named: "ref")?.stringValue?.rawValue, "page")
+                let push = try await session.registerPush(address: String(repeating: "a", count: 64),
+                                                         operationID: UUID(), revision: 1)
+                XCTAssertEqual(push, bindingID)
+                let operation = UUID()
+                let answer = try await session.sendOriginalOperation(
+                    Data(#"{"v":1,"type":"answer"}"#.utf8) + Data([0x0A]), operationID: operation)
+                XCTAssertEqual(answer, .accepted(operationID: operation, terminalSequence: 2))
+            }
+            await session.close()
+        }
+    }
+
+    func testUnavailableChatMessageIsLocalToConversationAndDoesNotHideConnectionWarning() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let availability = NativeConversationAvailability()
+        let presentation = try LivePresentationStore(store: domain, context: context,
+                                                     conversationAvailability: availability)
+        availability.unavailableContext = context
+        presentation.applyRefreshResult(NativeRelayRefreshResult(relayConfirmed: true,
+            pushRegistration: .confirmed, confirmedContext: context, confirmedTransportAttemptID: UUID()))
+        XCTAssertEqual(presentation.conversationUnavailableMessage, "Chat is not available on this server yet.")
+        XCTAssertNil(presentation.connectionWarning)
+        XCTAssertNil(presentation.pushRegistrationWarning)
+        presentation.applyRefreshResult(.unavailable)
+        XCTAssertNotNil(presentation.connectionWarning, "A real refresh failure must still warn even when chat is unavailable.")
+        availability.unavailableContext = nil
+        XCTAssertNil(presentation.conversationUnavailableMessage, "A replacement connection clears the old refusal.")
     }
 
     func testLiveConversationFrameDuringInboxPagingKeepsTheRelayOpen() async throws {
@@ -1532,6 +1652,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let result = await run.value
 
         XCTAssertEqual(result.outcome, .timedOut)
+        XCTAssertEqual(result.headline, "Connection not confirmed")
         XCTAssertFalse(result.webSocketOpenObserved)
         XCTAssertTrue(result.message.contains("No WebSocket-open event arrived"))
         XCTAssertTrue(result.message.contains("cannot distinguish a TLS failure from a WebSocket-upgrade timeout"))
@@ -2398,6 +2519,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
 
         XCTAssertEqual(result.outcome, .timedOut)
+        XCTAssertEqual(result.headline, "Connection not confirmed",
+                       "An actual stalled relay must keep the existing connection warning.")
         XCTAssertEqual(result.failureClass, .foregroundDeadline)
         XCTAssertNotNil(result.attemptID)
         XCTAssertFalse(result.webSocketOpenObserved)
