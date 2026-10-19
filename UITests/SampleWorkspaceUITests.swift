@@ -237,8 +237,12 @@ final class SampleWorkspaceUITests: XCTestCase {
             showList(app)
             clearSearch(in: app)
             let inboxTab = app.buttons["inbox-tab-inbox"]
+            let repliedTab = app.buttons["inbox-tab-replied"]
             XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
-            if !inboxTab.isSelected { inboxTab.tap() }
+            XCTAssertTrue(repliedTab.exists, app.debugDescription)
+            // The value example starts with a prefilled reply draft, so it belongs in Replied.
+            let destinationTab = kind == "value" ? repliedTab : inboxTab
+            if !destinationTab.isSelected { destinationTab.tap() }
             // Search the fictional sender/title so the selected type is reachable
             // through normal navigation without a test-only destination.
             let query: String = switch kind {
