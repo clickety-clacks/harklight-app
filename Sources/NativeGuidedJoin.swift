@@ -569,7 +569,7 @@ final class NativeGuidedJoinStore {
                                                 statusExpiresAt: next.statusExpiresAt ?? attempt.invitation.expiresAt,
                                                 personID: response.personID)
             record.serverDisplayName = attempt.invitation.serverName
-            record.accountDisplayName = attempt.invitation.claimedAccountLabel
+            record.accountDisplayName = attempt.invitation.personName
             record.foregroundRelayConfirmed = false
             record.notificationExplanationSeen = false
             try enrollment.retainApprovedGuided(record, expectedPersonID: attempt.invitation.personID,

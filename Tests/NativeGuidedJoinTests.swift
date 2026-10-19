@@ -982,6 +982,42 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertNil(try store.loadAttempt())
     }
 
+    func testApprovedAccountSavesOnlyTheInvitationPersonLabelAsItsName() async throws {
+        for label in ["Mike", nil] as [String?] {
+            let fixture = try Fixture()
+            defer { fixture.cleanup() }
+            var payload = fixture.payload
+            payload["person_label"] = label
+            let invitation = try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: payload))
+            let transport = FakeTransport()
+            let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+            let prepared = try store.prepare(invitation, deviceLabel: "My phone")
+            fixture.retainForCleanup(prepared)
+            transport.handler = { _, _, _ in
+                try response(["state": "approved", "person_id": invitation.personID,
+                              "device_id": prepared.deviceID])
+            }
+            _ = try await store.checkApproval()
+            let record = try XCTUnwrap(store.approvedRecord())
+            XCTAssertEqual(record.personID, invitation.personID)
+            XCTAssertEqual(record.accountDisplayName, label)
+            XCTAssertEqual(record.savedAccountName, label)
+        }
+    }
+
+    func testEarlierSavedInvitationPlaceholderIsNotShownAsTheAccountName() {
+        var record = NativeEnrollmentRecord(host: "example.test", enrollmentPort: 443, relayPort: 443,
+                                            trustedRootDER: Data(), identityLabel: "identity",
+                                            deviceID: "device", approvalCode: "", statusSecret: "",
+                                            expiresAt: 1, statusExpiresAt: 1, personID: "person")
+        record.accountDisplayName = NativeJoinInvitation.unnamedAccountPlaceholder
+        XCTAssertNil(record.savedAccountName)
+        XCTAssertEqual(record.accountDisplayName, NativeJoinInvitation.unnamedAccountPlaceholder,
+                       "Reading the name leaves the saved record unchanged")
+        record.accountDisplayName = "Mike"
+        XCTAssertEqual(record.savedAccountName, "Mike")
+    }
+
     func testKeepingTheCurrentAccountWorksWhenInvitationOpensBeforeStartupRestore() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
