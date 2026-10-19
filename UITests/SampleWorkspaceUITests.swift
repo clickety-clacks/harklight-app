@@ -96,8 +96,8 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func seenSwipeAction(in app: XCUIApplication) -> XCUIElement? {
-        app.buttons.allElementsBoundByIndex
-            .first { $0.label == "Seen, Seen" }
+        let action = app.buttons["inbox-mark-seen"]
+        return action.exists ? action : nil
     }
 
     func testAnswerRequestSwipeOffersNoComment() {
@@ -134,7 +134,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTFail(app.debugDescription)
             return
         }
-        XCTAssertEqual(markSeen.label, "Seen, Seen")
+        XCTAssertEqual(markSeen.label, "Seen")
         capture("inbox-swipe-seen-revealed", app)
         // Revealing the action does not mark the message.
         XCTAssertTrue(informational.exists, "Swiping alone leaves the message in Inbox")
@@ -159,7 +159,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let rightEdgeSeen = NSPredicate { _, _ in self.seenSwipeAction(in: app) != nil }
         XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: rightEdgeSeen, object: nil)],
                                         timeout: 5), .completed, app.debugDescription)
-        XCTAssertEqual(seenSwipeAction(in: app)?.label, "Seen, Seen")
+        XCTAssertEqual(seenSwipeAction(in: app)?.label, "Seen")
         seenSwipeAction(in: app)?.tap()
         XCTAssertFalse(warning.waitForExistence(timeout: 5),
                        "The same Seen action on the opposite edge moves the message out of Inbox.")
