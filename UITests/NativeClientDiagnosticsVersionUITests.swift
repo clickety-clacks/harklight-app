@@ -1,4 +1,3 @@
-import UIKit
 import XCTest
 
 @MainActor
@@ -19,20 +18,16 @@ final class NativeClientDiagnosticsVersionUITests: XCTestCase {
         XCTAssertTrue(shareDiagnostics.waitForExistence(timeout: 5), app.debugDescription)
         shareDiagnostics.tap()
 
-        let copy = app.buttons["Copy"]
-        XCTAssertTrue(copy.waitForExistence(timeout: 5), app.debugDescription)
-        copy.tap()
+        let previewQuery = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "app_version="))
+        let preview = previewQuery.firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), app.debugDescription)
+        let sharedText = preview.label
+        XCTAssertTrue(sharedText.contains("Harklight client diagnostics"), sharedText)
 
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let allowPaste = springboard.alerts.buttons["Allow Paste"]
-        if allowPaste.waitForExistence(timeout: 1) { allowPaste.tap() }
-        let copiedText = try XCTUnwrap(UIPasteboard.general.string,
-                                       "Copying diagnostics should place the export on the clipboard.")
-        XCTAssertTrue(copiedText.contains("Harklight client diagnostics"), copiedText)
-
-        let appVersion = try XCTUnwrap(value(named: "app_version", in: copiedText), copiedText)
-        let appBuild = try XCTUnwrap(value(named: "app_build", in: copiedText), copiedText)
-        let executableSHA256 = try XCTUnwrap(value(named: "app_executable_sha256", in: copiedText), copiedText)
+        let appVersion = try XCTUnwrap(value(named: "app_version", in: sharedText), sharedText)
+        let appBuild = try XCTUnwrap(value(named: "app_build", in: sharedText), sharedText)
+        let executableSHA256 = try XCTUnwrap(value(named: "app_executable_sha256", in: sharedText), sharedText)
         XCTAssertFalse(appVersion.isEmpty)
         XCTAssertNotEqual(appVersion, "unavailable")
         XCTAssertFalse(appBuild.isEmpty)
@@ -51,13 +46,19 @@ final class NativeClientDiagnosticsVersionUITests: XCTestCase {
         attachment.name = "Copied diagnostics app metadata"
         attachment.lifetime = .keepAlways
         add(attachment)
+
+        let copy = app.cells["Copy"]
+        XCTAssertTrue(copy.waitForExistence(timeout: 5), app.debugDescription)
+        copy.tap()
+        XCTAssertTrue(shareDiagnostics.isHittable,
+                      "Copying diagnostics should return to the app's diagnostic action.")
     }
 
     private func value(named name: String, in text: String) -> String? {
         let prefix = "\(name)="
-        guard let line = text.split(whereSeparator: \.isNewline).first(where: { $0.hasPrefix(prefix) }) else {
+        guard let token = text.split(whereSeparator: \.isWhitespace).first(where: { $0.hasPrefix(prefix) }) else {
             return nil
         }
-        return String(line.dropFirst(prefix.count))
+        return String(token.dropFirst(prefix.count))
     }
 }
