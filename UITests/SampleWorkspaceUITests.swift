@@ -235,6 +235,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         let kinds = ["textChoice", "pictureChoice", "instructions", "review", "multipleChoice", "value", "point", "colorChoice", "soundChoice", "error", "warning", "information", "completed"]
         for kind in kinds {
             showList(app)
+            let inboxTab = app.buttons["inbox-tab-inbox"]
+            XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+            if !inboxTab.isSelected { inboxTab.tap() }
             // Search the fictional sender/title so the selected type is reachable
             // through normal navigation without a test-only destination.
             let query: String = switch kind {
