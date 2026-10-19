@@ -66,6 +66,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private var postCheckpointReadFailure: (any Error)?
     // Coalesced: one pending signal covers every entry after the core's cursor.
     private var liveConversationSignalled = false
+    /// True only while a conversation replay holds the socket exchange gate.
+    /// Live conversation frames are routed to readers only then.
+    private var conversationReplayReading = false
     private var liveConversationWaiters: [CheckedContinuation<Void, any Error>] = []
     private let socketExchangeGate = RelaySocketExchangeGate()
 
@@ -242,7 +245,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private func replay(_ request: Data, ref: String, event: String, end: String,
                         consume: @Sendable (Data) async throws -> Void) async throws {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        if event == "conversation" { conversationReplayReading = true }
+        defer {
+            if event == "conversation" { endConversationReplayReading() }
+            socketExchangeGate.leave()
+        }
         let area: NativeDiagnosticArea = event == "conversation" ? .conversation : .relay
         let phase: NativeDiagnosticPhase = event == "conversation" ? .conversationReplay : .ordinaryReplay
         do {
@@ -667,7 +674,14 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             while !Task.isCancelled {
                 let frame = try await receiveTaskFrame()
                 let kind = Self.frameType(frame)
-                if kind == "conversation" { signalLiveConversation() }
+                if kind == "conversation" {
+                    signalLiveConversation()
+                    // Outside a conversation replay no reader wants this frame,
+                    // and another exchange would treat it as fatal. The server
+                    // keeps it in the conversation journal, so the replay the
+                    // signal starts reads it again from the durable cursor.
+                    guard conversationReplayReading else { continue }
+                }
                 if kind == "delivery" || kind == "lifecycle" {
                     try await enqueuePostCheckpointInboxEvent(frame)
                 } else if !responseWaiters.isEmpty {
@@ -712,8 +726,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         conversationWaiters.forEach { $0.resume(throwing: error) }
     }
 
-    /// The frame still goes to any exchange reading the socket; an open
-    /// conversation replay consumes it there.
+    /// Frames buffered after the replay read its end are already signalled
+    /// and come back in the next replay.
+    private func endConversationReplayReading() {
+        conversationReplayReading = false
+        responseFrames.removeAll { Self.frameType($0) == "conversation" }
+    }
+
     private func signalLiveConversation() {
         if liveConversationWaiters.isEmpty {
             liveConversationSignalled = true
