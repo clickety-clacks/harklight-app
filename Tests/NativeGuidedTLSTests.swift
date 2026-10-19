@@ -771,14 +771,14 @@ final class NativeGuidedTLSTests: XCTestCase {
             }
             if missingChat {
                 let page = try await session.inboxRequest(
-                    Data(#"{"v":1,"type":"inbox_page","ref":"page"}"#.utf8), ref: "page")
+                    Data(#"{"v":1,"type":"inbox_page","ref":"page"}"#.utf8) + Data([0x0A]), ref: "page")
                 XCTAssertEqual(try JSONValue.parse(page).uniqueValue(named: "ref")?.stringValue?.rawValue, "page")
                 let push = try await session.registerPush(address: String(repeating: "a", count: 64),
                                                          operationID: UUID(), revision: 1)
                 XCTAssertEqual(push, bindingID)
                 let operation = UUID()
                 let answer = try await session.sendOriginalOperation(
-                    Data(#"{"v":1,"type":"answer"}"#.utf8), operationID: operation)
+                    Data(#"{"v":1,"type":"answer"}"#.utf8) + Data([0x0A]), operationID: operation)
                 XCTAssertEqual(answer, .accepted(operationID: operation, terminalSequence: 2))
             }
             await session.close()
