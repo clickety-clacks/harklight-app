@@ -910,7 +910,7 @@ private struct LiveProjectedInputView: View {
     }
 
     private func activate(_ action: ProjectedAction) {
-        withAnimation(.smooth(duration: 0.25)) {
+        withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
             if let localExample, action.id.rawValue == "own" {
                 if localExample.message.kind == .multipleChoice {
                     localExample.choices = []
@@ -919,8 +919,9 @@ private struct LiveProjectedInputView: View {
             } else {
                 store.selectAction(action.id, input: input.id, for: request.key)
             }
+        } completion: {
+            focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
         }
-        focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
     }
 
     @ViewBuilder
