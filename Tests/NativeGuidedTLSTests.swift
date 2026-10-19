@@ -5,7 +5,7 @@ import CryptoKit
 import Network
 import Security
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 private final class PagingExchangeSignal: @unchecked Sendable {
     private let lock = NSLock()

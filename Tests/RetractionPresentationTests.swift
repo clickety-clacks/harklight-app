@@ -1,7 +1,7 @@
 import AttentionDomain
 import HarklightNativeRelay
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 @MainActor
 final class RetractionPresentationTests: XCTestCase {

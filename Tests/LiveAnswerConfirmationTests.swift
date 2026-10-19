@@ -2,7 +2,7 @@ import AttentionDomain
 import Foundation
 import HarklightNativeRelay
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 @MainActor
 final class LiveAnswerConfirmationTests: XCTestCase {

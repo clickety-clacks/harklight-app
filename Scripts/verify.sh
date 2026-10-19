@@ -9,7 +9,7 @@ fail() {
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ACTION=${1:-test}
 DEVICE_ID=${HARKLIGHT_SIMULATOR_ID:-}
-BUNDLE_ID=com.example.attentionclient.duo-prototype
+BUNDLE_ID=co.clicketyclacks.Harklight
 
 case "$ACTION" in
     build|test|test-guided-tls|run|host-test|host-run|native-host-test) ;;
@@ -54,8 +54,8 @@ print(devices[0]["udid"])
 fi
 (cd "$ROOT" && xcodegen generate)
 
-PROJECT="$ROOT/AttentionClientDuoPrototype.xcodeproj"
-SCHEME=AttentionClientDuoPrototype
+PROJECT="$ROOT/Harklight.xcodeproj"
+SCHEME=Harklight
 DESTINATION="platform=iOS Simulator,id=$DEVICE_ID"
 DERIVED_DATA="$ROOT/DerivedData"
 
@@ -67,7 +67,7 @@ case "$ACTION" in
     test|test-guided-tls)
         set --
         if [ "$ACTION" = test-guided-tls ]; then
-            set -- -only-testing:AttentionClientDuoPrototypeTests/NativeGuidedTLSTests
+            set -- -only-testing:HarklightTests/NativeGuidedTLSTests
         elif [ -n "${HARKLIGHT_ONLY_TESTING:-}" ]; then
             for test_id in $HARKLIGHT_ONLY_TESTING; do
                 set -- "$@" "-only-testing:$test_id"
@@ -79,11 +79,11 @@ case "$ACTION" in
     run)
         xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" \
             -derivedDataPath "$DERIVED_DATA" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build
-        APP="$DERIVED_DATA/Build/Products/Debug-iphonesimulator/AttentionClientDuoPrototype.app"
+        APP="$DERIVED_DATA/Build/Products/Debug-iphonesimulator/Harklight.app"
         xcrun simctl install "$DEVICE_ID" "$APP"
         xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID"
         sleep 2
-        SCREENSHOT="$DERIVED_DATA/AttentionClientDuoPrototype-$DEVICE_ID.png"
+        SCREENSHOT="$DERIVED_DATA/Harklight-$DEVICE_ID.png"
         xcrun simctl io "$DEVICE_ID" screenshot --display=primary "$SCREENSHOT"
         DEVELOPER_DIR=$(xcode-select -p)
         SIMULATOR_APP="$DEVELOPER_DIR/Applications/Simulator.app"

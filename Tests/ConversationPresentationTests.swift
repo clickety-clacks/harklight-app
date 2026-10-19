@@ -2,7 +2,7 @@ import AttentionDomain
 import CryptoKit
 import Foundation
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {

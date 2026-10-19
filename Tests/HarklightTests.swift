@@ -1,8 +1,8 @@
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 import AttentionDomain
 
-final class AttentionClientDuoPrototypeTests: XCTestCase {
+final class HarklightTests: XCTestCase {
     @MainActor
     func testNativeLaunchKeepsFictionalFixtureBehindExplicitTestArgument() {
         let ordinary = NativeAppLaunch(arguments: ["Harklight"])
@@ -1092,7 +1092,7 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
     }
 
     private func loadFixtures() throws -> FixtureSet {
-        try FixtureSet.loadBundled(from: Bundle(for: AttentionClientDuoPrototypeTests.self))
+        try FixtureSet.loadBundled(from: Bundle(for: HarklightTests.self))
     }
 
     @MainActor

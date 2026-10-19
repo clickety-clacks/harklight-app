@@ -1,6 +1,6 @@
 import AttentionDomain
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 @MainActor
 final class SenderRevisionPresentationTests: XCTestCase {
