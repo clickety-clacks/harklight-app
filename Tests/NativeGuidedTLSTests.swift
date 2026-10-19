@@ -181,6 +181,10 @@ final class NativeGuidedTLSTests: XCTestCase {
             }
             let diagnosticsArrived = await eventually {
                 journal.events.contains { $0.phase == .foregroundCompletion && $0.attemptID == result.attemptID } &&
+                    journal.events.contains {
+                        $0.area == .relay && $0.phase == .ordinaryReplay && $0.transition == .completed &&
+                            $0.attemptID == result.transportAttemptID
+                    } &&
                     (!retainedThread || journal.events.contains {
                         $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .rejected
                     })
@@ -193,6 +197,9 @@ final class NativeGuidedTLSTests: XCTestCase {
                 "run=\(runID) case=\(name)",
                 "person=\(fixture.personID) device=\(fixture.deviceID) profile_generation=\(context.generation)",
                 "ordinary_cursor_before=\(before.cursor) ordinary_cursor_after=\(after.cursor)",
+                "checkpoint_accepted=\(after.inboxCheckpoint?.checkpointAccepted == true) " +
+                    "checkpoint_high_water=\(after.inboxCheckpoint?.highWater.map(String.init) ?? "unavailable")",
+                "ordinary_ack_expected=no_empty_replay",
                 "conversation_threads_before=\(threadsBefore.threads.count) after=\(threadsAfter.threads.count)",
                 "original_operation=none terminal_operation_replay=not_applicable",
                 "received_message_readable=\(after.requests[request] != nil)",
@@ -208,13 +215,20 @@ final class NativeGuidedTLSTests: XCTestCase {
             XCTAssertTrue(diagnosticsArrived)
             XCTAssertNotNil(result.attemptID)
             let transportID = try XCTUnwrap(result.transportAttemptID)
-            XCTAssertTrue(journal.events.contains {
+            XCTAssertFalse(journal.events.contains {
                 $0.area == .relay && $0.phase == .acknowledgement && $0.transition == .completed &&
                     ($0.transportAttemptID == transportID || $0.attemptID == transportID)
-            }, "The final transport must actually finish the ordinary ACK exchange.")
-            // With no operations or new server events, this cursor cannot move
-            // between the ACK and observation. The server trace supplies its
-            // exact seq/ref and the subsequent conversation_open/error frames.
+            }, "An empty replay after checkpoint acceptance has no new ordinary event to ACK.")
+            let checkpoint = try XCTUnwrap(after.inboxCheckpoint)
+            XCTAssertTrue(checkpoint.checkpointAccepted)
+            XCTAssertEqual(checkpoint.highWater, fixture.ordinaryCursor)
+            XCTAssertTrue(journal.events.contains {
+                $0.area == .relay && $0.phase == .ordinaryReplay && $0.transition == .completed &&
+                    $0.attemptID == transportID
+            }, "Checkpoint acceptance must be followed by completed ordinary replay on the final transport.")
+            // This quiescent fixture advances via inbox_checkpoint_ack, then
+            // completes an empty inbox_attach replay. The server trace records
+            // those actual replies and the subsequent conversation_open/error.
             XCTAssertEqual(after.cursor, fixture.ordinaryCursor)
             XCTAssertNotNil(after.requests[request], "Received messages survive an incomplete foreground result.")
             XCTAssertTrue(after.outbox.isEmpty)
@@ -224,8 +238,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             XCTAssertEqual(result.profileContextValidation, .passed)
             if retainedThread {
                 XCTAssertEqual(result.outcome, .incomplete)
-                XCTAssertEqual(result.postAckDrainTransition, .rejected)
-                XCTAssertEqual(result.lastCompletedPostAckBoundary, .nativeCursorAcknowledged)
+                XCTAssertEqual(result.postAckDrainTransition, .failed)
+                XCTAssertEqual(result.lastCompletedPostAckBoundary, .none)
                 XCTAssertTrue(journal.events.contains {
                     $0.area == .conversation && $0.phase == .conversationReplay &&
                         $0.transition == .rejected && $0.attemptID == transportID
