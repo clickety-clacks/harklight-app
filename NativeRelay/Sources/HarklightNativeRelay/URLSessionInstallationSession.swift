@@ -10,6 +10,7 @@ public enum InstallationTransportError: Error, Sendable {
     case invalidServerTrust
     case unexpectedServerFrame
     case serverRejected
+    case conversationsUnavailable
     case acknowledgementBehind
 }
 
@@ -262,6 +263,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 if kind == "error" {
                     let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
                     diagnose(area, phase, .rejected, causeCode: NativeDiagnosticCauseCode.serverReason(reason))
+                    // Only refusal of this unopened projection means the server
+                    // lacks chat. Other refusals still fail confirmation.
+                    if event == "conversation", !accepted, reason == "unknown_type",
+                       try JSONValue.parse(request).uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open",
+                       value.uniqueValue(named: "ref")?.stringValue?.rawValue == ref {
+                        throw InstallationTransportError.conversationsUnavailable
+                    }
                     throw InstallationTransportError.serverRejected
                 }
                 let ordinary = kind == "delivery" || kind == "lifecycle"
@@ -284,6 +292,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 try await consume(frame)
                 if kind == end { return }
             }
+        } catch InstallationTransportError.conversationsUnavailable {
+            throw InstallationTransportError.conversationsUnavailable
         } catch {
             diagnose(area, phase, NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
             throw error
