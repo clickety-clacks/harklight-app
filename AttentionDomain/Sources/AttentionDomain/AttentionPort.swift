@@ -234,6 +234,9 @@ public struct PresentedRequest: Equatable, Sendable {
     public let acceptanceOrder: UInt64
     public let title: ExactText?
     public let body: ExactText?
+    /// Sender-authored creation time, if the original message supplied one.
+    /// It never changes the server-assigned inbox order.
+    public let createdAt: Date?
     /// A UTF-8 JSON string for inert inspection. H must not parse it to render answers.
     public let originalContentJSON: String
     public let selector: BoundDocumentSelector?
@@ -255,6 +258,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 acceptanceOrder: UInt64,
                 title: ExactText?,
                 body: ExactText?,
+                createdAt: Date? = nil,
                 originalContentJSON: String,
                 selector: BoundDocumentSelector?,
                 draft: RequestDraft,
@@ -268,6 +272,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.acceptanceOrder = acceptanceOrder
         self.title = title
         self.body = body
+        self.createdAt = createdAt
         self.originalContentJSON = originalContentJSON
         self.selector = selector
         self.draft = draft
@@ -583,15 +588,28 @@ public final class AttentionDomainPort: @unchecked Sendable {
             throw AttentionStoreError.duplicateAcceptanceOrder
         }
         let requests = try orderedRequests.map { item in
-            try present(item.request,
+            let session = snapshot.fixtureSessions[item.request.key]
+            // Requests without a conversation thread are revision one on the
+            // wire, where requestRevision remains absent for legacy bindings.
+            // Treat that absent value as revision one only when no conversation
+            // revision history exists; versioned requests still require an exact
+            // revision match.
+            let conversationRevision = snapshot.conversationThreads[item.request.key]?.currentRevision
+            let matchesCurrentRevision: (Submission) -> Bool = { candidate in
+                guard candidate.requestKey == item.request.key else { return false }
+                guard let conversationRevision else { return candidate.requestRevision == nil }
+                return candidate.requestRevision == conversationRevision
+            }
+            let submission = snapshot.intents.values.first(where: matchesCurrentRevision)
+                ?? session?.lifecycle.submissionValue.flatMap { value in
+                    matchesCurrentRevision(value) ? value : nil
+                }
+            return try present(item.request,
                         acceptanceOrder: item.order,
                         draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),
-                        session: snapshot.fixtureSessions[item.request.key],
+                        session: session,
                         remote: snapshot.remoteStates[item.request.key],
-                        submission: snapshot.intents.values.first(where: {
-                            $0.requestKey == item.request.key &&
-                            $0.requestRevision == snapshot.conversationThreads[item.request.key]?.currentRevision
-                        }),
+                        submission: submission,
                         selector: selectors?[item.request.key],
                         inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
                             $0.contains(item.request.key)
@@ -740,6 +758,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 acceptanceOrder: acceptanceOrder,
                                 title: request.originalPayload.uniqueValue(named: "title")?.stringValue,
                                 body: request.originalPayload.uniqueValue(named: "body")?.stringValue,
+                                createdAt: request.createdAt,
                                 originalContentJSON: request.originalPayload.canonicalJSON,
                                 selector: selector,
                                 draft: draft,
@@ -835,6 +854,15 @@ private extension PresentationSnapshot {
 }
 
 private extension FixtureLifecycle {
+    var submissionValue: Submission? {
+        switch self {
+        case .open:
+            nil
+        case let .pending(submission), let .terminal(_, submission):
+            submission
+        }
+    }
+
     var terminalValue: FixtureTerminal? {
         if case let .terminal(terminal, _) = self { return terminal }
         return nil

@@ -100,6 +100,7 @@ struct ConversationPanel: View {
             }
         }
         .onAppear { if selectedRevision == nil { selectedRevision = thread?.currentRevision } }
+        .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
         .sheet(item: $inspectedFile) { file in
             NavigationStack {
                 Form {

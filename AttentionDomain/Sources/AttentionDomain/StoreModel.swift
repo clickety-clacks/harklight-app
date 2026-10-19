@@ -225,6 +225,16 @@ public struct StoredRequest: Equatable, Codable, Sendable {
         self.acceptanceOrder = nil
     }
 
+    /// Sender-authored creation time, retained in the original message as Unix
+    /// milliseconds. This is display metadata only; inbox order comes from the
+    /// server-assigned acceptance order.
+    public var createdAt: Date? {
+        guard let milliseconds = originalPayload.uniqueValue(named: "created_at")?.integerValue else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+    }
+
     init(key: RequestKey, originalPayload: JSONValue, acceptanceOrder: UInt64) {
         self.key = key
         self.originalPayload = originalPayload

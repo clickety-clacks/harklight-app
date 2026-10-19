@@ -979,6 +979,7 @@ final class LivePresentationStore {
             do {
                 let pending = try port.abandonConversationUploads(for: previous, context: port.context)
                 try refreshFromDurableStore()
+                UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) pending=\(pending.count)")
                 if !pending.isEmpty {
                     if permitsDelivery { Task { await retryUploadCleanup(for: previous) } }
                     else {
@@ -988,11 +989,14 @@ final class LivePresentationStore {
                     }
                 }
             } catch {
+                UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) error=\(error)")
                 conversationError = "Upload cleanup could not be saved. Return to this message and retry; deletion is not confirmed."
                 diagnose(.upload, .uploadCleanup,
                          NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
                          request: previous)
             }
+        } else {
+            UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) readOnly=\(self.isReadOnly)")
         }
         selectRequest(next)
     }
@@ -1171,12 +1175,14 @@ final class LivePresentationStore {
                 }
                 statusParts.append("Cached history · status not refreshed")
             }
-            return InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? $0.key.senderID.rawValue,
+            return InboxRequestRow(key: $0.key, title: $0.title?.rawValue ?? "Message",
                 sender: $0.key.senderID.rawValue,
                 status: statusParts.joined(separator: " · "),
-                bodyText: $0.body?.rawValue ?? "",
+                bodyText: $0.body?.rawValue,
                 symbol: $0.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: !$0.inboxStateIsCurrent || $0.isResolved)
+                isResolved: !$0.inboxStateIsCurrent || $0.isResolved, createdAt: $0.createdAt,
+                informationalSeenStatus: $0.informationalSeenStatus,
+                canMarkSeen: !isReadOnly && $0.informationalSeenStatus == .available)
         }
     }
 
@@ -1274,7 +1280,7 @@ final class LivePresentationStore {
         guard !isReadOnly else { throw LiveReplyError.disconnected }
         guard permitsDelivery else { throw LiveReplyError.localExample }
         let request = try inspectedRequest(key)
-        guard request.lifecycleStatus == .open,
+        guard !isRetracted(key), request.lifecycleStatus == .open,
               request.intentReceipt == nil,
               let selector = request.selector else {
             throw LiveReplyError.notOpen
@@ -1345,7 +1351,7 @@ final class LivePresentationStore {
         guard !isReadOnly else { return }
         do {
             let request = try inspectedRequest(key)
-            guard request.lifecycleStatus == .open,
+            guard !isRetracted(key), request.lifecycleStatus == .open,
                   request.intentReceipt == nil,
                   let selector = request.selector else { throw LiveReplyError.notOpen }
             var draft = request.draft

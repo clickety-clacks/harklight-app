@@ -33,7 +33,14 @@ struct HarklightConversationUITestHost: App {
                     if let conversationFixture {
                         LiveContentView(store: conversationFixture.viewModel, samples: samples)
                     } else if let prototypeFixture {
-                        ContentView(store: prototypeFixture, samples: samples)
+                        if let presentation = prototypeFixture.presentationStore {
+                            LiveContentView(store: presentation, samples: samples,
+                                            fixtureStore: prototypeFixture)
+                        } else {
+                            ContentUnavailableView(
+                                prototypeFixture.loadError ?? "The local example could not be opened.",
+                                systemImage: "exclamationmark.triangle")
+                        }
                     } else {
                         ContentUnavailableView("Local test model unavailable", systemImage: "questionmark.folder")
                     }
