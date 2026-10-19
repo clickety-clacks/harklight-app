@@ -485,7 +485,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
         await socketExchangeGate.enter()
         defer { socketExchangeGate.leave() }
-        let frame = Data(("{\"v\":1,\"type\":\"push_register\",\"ref\":\"native-push\",\"op_id\":\"\(operationID.uuidString.lowercased())\",\"revision\":\(revision),\"profile_id\":\"harklight-sandbox\",\"address_kind\":\"apns_token\",\"address\":\"\(address)\"}\n").utf8)
+        let profileID = PushRegistrationProfile.current.rawValue
+        let frame = Data(("{\"v\":1,\"type\":\"push_register\",\"ref\":\"native-push\",\"op_id\":\"\(operationID.uuidString.lowercased())\",\"revision\":\(revision),\"profile_id\":\"\(profileID)\",\"address_kind\":\"apns_token\",\"address\":\"\(address)\"}\n").utf8)
         do {
             try await send(frame)
             while true {
@@ -522,7 +523,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
                 case "delivery", "lifecycle", "conversation": continue
                 case "error": throw InstallationTransportError.serverRejected
-                default: return try PushBindingReply.status(value, revision: revision)
+                default: return try PushBindingReply.status(value, revision: revision,
+                                                             profile: .current)
                 }
             }
         } catch {

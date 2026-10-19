@@ -396,10 +396,30 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try store.load()?.notificationBindings, saved.notificationBindings,
                        "Delayed notifications can retain the old authenticated association")
 
-        let status = try JSONValue.parse(Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push-status\",\"push\":{\"revision\":7,\"binding_id\":\"\(id)\",\"profile_id\":\"harklight-sandbox\"}}".utf8))
-        XCTAssertEqual(try PushBindingReply.status(status, revision: 7), id)
-        XCTAssertThrowsError(try PushBindingReply.status(status, revision: 8))
-        XCTAssertThrowsError(try PushBindingReply.registration(status, revision: 7))
+        let sandboxStatus = try JSONValue.parse(Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push-status\",\"push\":{\"revision\":7,\"binding_id\":\"\(id)\",\"profile_id\":\"harklight-sandbox\"}}".utf8))
+        XCTAssertEqual(try PushBindingReply.status(sandboxStatus, revision: 7,
+                                                   profile: .sandbox), id)
+        XCTAssertThrowsError(try PushBindingReply.status(sandboxStatus, revision: 8,
+                                                          profile: .sandbox))
+        XCTAssertThrowsError(try PushBindingReply.status(sandboxStatus, revision: 7,
+                                                          profile: .production))
+        XCTAssertThrowsError(try PushBindingReply.registration(sandboxStatus, revision: 7))
+
+        let productionStatus = try JSONValue.parse(Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push-status\",\"push\":{\"revision\":7,\"binding_id\":\"\(id)\",\"profile_id\":\"harklight-production\"}}".utf8))
+        XCTAssertEqual(try PushBindingReply.status(productionStatus, revision: 7,
+                                                   profile: .production), id)
+        XCTAssertThrowsError(try PushBindingReply.status(productionStatus, revision: 7,
+                                                          profile: .sandbox))
+    }
+
+    func testPushRegistrationProfileSelectionFollowsBuildConfiguration() {
+        XCTAssertEqual(PushRegistrationProfile.forBuildConfiguration(.debug), .sandbox)
+        XCTAssertEqual(PushRegistrationProfile.forBuildConfiguration(.release), .production)
+        #if DEBUG
+        XCTAssertEqual(PushRegistrationProfile.current, .sandbox)
+        #else
+        XCTAssertEqual(PushRegistrationProfile.current, .production)
+        #endif
     }
 
     func testLegacyAcceptedPushBindingStatusRecoveryAddsOnlyAuthenticatedAssociation() throws {
@@ -746,6 +766,9 @@ final class NativeGuidedTLSTests: XCTestCase {
                     return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"page\"}\n"]
                 }
                 if text.contains("\"push_register\"") {
+                    let frame = try? JSONValue.parse(Data(text.utf8))
+                    XCTAssertEqual(frame?.uniqueValue(named: "profile_id")?.stringValue?.rawValue,
+                                   PushRegistrationProfile.current.rawValue)
                     return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":1,\"binding_id\":\"\(bindingID)\"}\n"]
                 }
                 if text.contains("\"answer\"") {
