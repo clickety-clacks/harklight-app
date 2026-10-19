@@ -61,18 +61,29 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                didReceive response: UNNotificationResponse) async {
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping @Sendable () -> Void) {
         // Default opening is navigation only. Dismissal and unsupported actions
         // do not alter navigation, domain state, or notification presentation.
-        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
-        let info = response.notification.request.content.userInfo
-        var payload: JSONValue = .null
-        let sequence = ((info["attention"] as? [String: Any])?["locator"] as? [String: Any])?["acceptance_seq"] as? NSNumber
-        let integerSequence = sequence.map { !["d", "f"].contains(String(cString: $0.objCType)) && CFGetTypeID($0) != CFBooleanGetTypeID() } ?? true
-        if integerSequence, let data = try? JSONSerialization.data(withJSONObject: info),
-           let decoded = try? JSONValue.parse(data) { payload = decoded }
-        let navigationPayload = payload
-        await MainActor.run { NativeNotificationRouter.shared.receive(navigationPayload, opened: true) }
+        let navigationPayload: JSONValue?
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            let info = response.notification.request.content.userInfo
+            var payload: JSONValue = .null
+            let sequence = ((info["attention"] as? [String: Any])?["locator"] as? [String: Any])?["acceptance_seq"] as? NSNumber
+            let integerSequence = sequence.map { !["d", "f"].contains(String(cString: $0.objCType)) && CFGetTypeID($0) != CFBooleanGetTypeID() } ?? true
+            if integerSequence, let data = try? JSONSerialization.data(withJSONObject: info),
+               let decoded = try? JSONValue.parse(data) { payload = decoded }
+            navigationPayload = payload
+        } else {
+            navigationPayload = nil
+        }
+        Task { @MainActor in
+            if let navigationPayload {
+                NativeNotificationRouter.shared.receive(navigationPayload, opened: true)
+            }
+            // UIKit snapshots the app after this completion; finish on the main thread.
+            completionHandler()
+        }
     }
 
     private func clearAddressAndSetStatus(_ status: String) {
