@@ -310,11 +310,6 @@ struct LocalSampleContext: View {
                 Label(deadline, systemImage: "clock")
                     .foregroundStyle(response.message.missed ? Color.orange : Color.secondary)
             }
-            if response.message.hasChat {
-                Label(response.message.chatUnread && !response.chatRead ? "Unread conversation" : "Conversation",
-                      systemImage: "bubble.left.and.bubble.right")
-                    .foregroundStyle(response.message.chatUnread && !response.chatRead ? Color.blue : Color.secondary)
-            }
         }
         .font(.caption)
         .accessibilityElement(children: .combine)

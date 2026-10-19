@@ -123,11 +123,28 @@ public struct ConversationWire: Sendable {
         let key = RequestKey(accountScope: profile.identity.personID, senderID: ExactText(try text(value, "sender_id")),
             messageID: ExactText(try text(value, "message_id")))
         let binding = ConversationBinding(request: key, revision: revision)
-        let origin = try text(value, "origin"), handle = ExactText(try text(value, "session_handle"))
+        let origin = try text(value, "origin")
         let kind = try text(value, "kind")
+        let sessionHandle: ExactText?
+        if let rawHandle = value.uniqueValue(named: "session_handle") {
+            guard let parsed = rawHandle.stringValue, !parsed.rawValue.isEmpty else {
+                throw RelayWireError.invalidFrame
+            }
+            sessionHandle = parsed
+        } else {
+            sessionHandle = nil
+        }
+        guard kind == "attention_tier" || sessionHandle != nil else { throw RelayWireError.invalidFrame }
+        let handle = sessionHandle ?? ExactText("")
         let fact: ConversationEvent.Fact
         var retractedAtMilliseconds: UInt64? = nil
         switch kind {
+        case "attention_tier":
+            guard let eventID = try? text(value, "event_id"),
+                  let rawTier = value.uniqueValue(named: "attention_tier")?.stringValue?.rawValue,
+                  let tier = AttentionTier(rawValue: rawTier) else { throw RelayWireError.invalidFrame }
+            fact = .attentionTier(eventID: ExactText(eventID), origin: ExactText(origin), tier: tier,
+                                  sessionHandle: sessionHandle)
         case "discussion", "reply", "revision", "result":
             guard let author = ConversationAuthor(rawValue: try text(value, "author")),
                   let turnKind = ConversationTurn.Kind(rawValue: kind) else { throw RelayWireError.invalidFrame }

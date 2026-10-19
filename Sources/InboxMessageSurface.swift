@@ -32,7 +32,9 @@ struct InboxCardContext {
 /// Native scroll and toolbar host shared by admitted messages and local examples.
 struct MessageCardSurface<Content: View>: View {
     let context: InboxCardContext
+    var backgroundColor: Color = Color(red: 0.89, green: 0.94, blue: 1)
     @ViewBuilder let content: () -> Content
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var pull: CGFloat = 0
     @State private var armedDirection = 0
     @State private var contentHeight: CGFloat = 0
@@ -67,7 +69,10 @@ struct MessageCardSurface<Content: View>: View {
                     Color.clear.frame(height: bottomToolbarClearance).accessibilityHidden(true)
                 }
             }
-            .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
+            .background {
+                (horizontalSizeClass == .compact ? backgroundColor : Color(uiColor: .systemBackground))
+                    .ignoresSafeArea()
+            }
             .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
             .navigationBarTitleDisplayMode(.inline)
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
@@ -140,27 +145,49 @@ struct MessageChoiceLabel: View {
     let multiple: Bool
     let suggested: Bool
     var selectionColor: Color = .blue
+    var ownAnswer = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: multiple
-                  ? (selected ? "checkmark.square.fill" : "square")
-                  : (selected ? "checkmark.circle.fill" : "circle"))
-                .foregroundStyle(selected ? selectionColor : .secondary).font(.title3)
+            ZStack {
+                if multiple {
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(selected ? Color.white : Color.secondary, lineWidth: 1.5)
+                        .frame(width: 20, height: 20)
+                    if selected { Image(systemName: "checkmark").font(.caption.bold()) }
+                } else {
+                    Circle()
+                        .stroke(selected ? Color.white : Color.secondary, lineWidth: 1.5)
+                        .frame(width: 20, height: 20)
+                    if selected { Circle().fill(.white).frame(width: 11, height: 11) }
+                }
+            }
+            .frame(width: 20, height: 22)
             VStack(alignment: .leading, spacing: 5) {
-                Text(title).font(.headline)
-                if !detail.isEmpty { Text(detail).font(.subheadline).foregroundStyle(.secondary) }
-                if suggested { Text("Suggested").font(.caption.weight(.semibold)).foregroundStyle(.blue) }
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(title).font(.headline)
+                    if suggested {
+                        Text("Suggested")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(selected ? Color.white : Color.blue)
+                    }
+                }
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
+                }
             }
             Spacer(minLength: 0)
         }
-        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-        .background(selected ? selectionColor.opacity(0.13)
-                    : suggested ? Color.blue.opacity(0.05) : Color(uiColor: .systemBackground),
-                    in: RoundedRectangle(cornerRadius: 14))
+        .foregroundStyle(selected ? Color.white : Color.primary)
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? selectionColor : Color(uiColor: .systemBackground),
+                    in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 14)
-            .stroke(selected ? selectionColor : Color(uiColor: .separator).opacity(0.25),
-                    lineWidth: selected ? 2 : 1))
+            .strokeBorder(selected ? Color.clear : Color(uiColor: .separator).opacity(ownAnswer ? 0.6 : 0),
+                          style: StrokeStyle(lineWidth: ownAnswer ? 1.5 : 0,
+                                             dash: ownAnswer ? [5, 4] : [])))
         .contentShape(RoundedRectangle(cornerRadius: 14))
     }
 }

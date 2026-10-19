@@ -248,6 +248,7 @@ public struct PresentedRequest: Equatable, Sendable {
     public let intentReceipt: IntentReceipt?
     public let projection: AdmittedRequestProjection
     public let informationalSeenStatus: InformationalSeenStatus?
+    public let attentionTier: AttentionTier
     /// Whether lifecycle and Seen state were established by the accepted
     /// bounded snapshot, a receipt, or later contiguous relay activity.
     public let inboxStateIsCurrent: Bool
@@ -269,6 +270,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 intentReceipt: IntentReceipt?,
                 projection: AdmittedRequestProjection,
                 informationalSeenStatus: InformationalSeenStatus? = nil,
+                attentionTier: AttentionTier = .middle,
                 inboxStateIsCurrent: Bool = true) {
         self.key = key
         self.acceptanceOrder = acceptanceOrder
@@ -283,6 +285,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.intentReceipt = intentReceipt
         self.projection = projection
         self.informationalSeenStatus = informationalSeenStatus
+        self.attentionTier = attentionTier
         self.inboxStateIsCurrent = inboxStateIsCurrent
     }
 }
@@ -633,11 +636,27 @@ public final class AttentionDomainPort: @unchecked Sendable {
             }
             return left.key.messageID.rawValue < right.key.messageID.rawValue
         }
+        var sourceOrderedRequests = displayRequests
+        if let sourceOrder = snapshot.inboxSourceOrder {
+            var sourceRank: [RequestKey: Int] = [:]
+            for (index, key) in sourceOrder.enumerated() where sourceRank[key] == nil {
+                sourceRank[key] = index
+            }
+            let pagePositions = displayRequests.indices.filter {
+                sourceRank[displayRequests[$0].key] != nil
+            }
+            let pageRows = pagePositions.map { displayRequests[$0] }.sorted {
+                sourceRank[$0.key, default: .max] < sourceRank[$1.key, default: .max]
+            }
+            for (position, row) in zip(pagePositions, pageRows) {
+                sourceOrderedRequests[position] = row
+            }
+        }
         return PresentationSnapshot(revision: snapshot.revision,
                                     cursor: snapshot.cursor,
                                     replayBarrier: snapshot.replayBarrier,
                                     repairIssues: snapshot.repairIssues,
-                                    requests: displayRequests)
+                                    requests: sourceOrderedRequests)
     }
 
     private func present(_ request: StoredRequest,
@@ -783,6 +802,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
                                     status: status, remote: remote, submission: submission),
+                                attentionTier: remote?.attentionTier ?? .middle,
                                 inboxStateIsCurrent: inboxStateIsCurrent)
     }
 

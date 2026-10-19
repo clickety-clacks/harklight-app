@@ -36,26 +36,25 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         selectFacilitiesRequest(in: app)
         XCTAssertTrue(app.staticTexts["Select the location on the floor plan and add a note."]
             .waitForExistence(timeout: 5))
-        let lifecycle = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5))
-        XCTAssertEqual(lifecycle.label, "Open",
-                       "A fresh fixture request starts open, before a local answer is submitted.")
+        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
+                       "The card omits the extra Open status line from the design.")
         XCTAssertFalse(app.staticTexts["fixture:Facilities"].exists,
                        "Raw fixture identity stays in request details, not the task framing.")
         XCTAssertFalse(app.buttons["fixture-outcome-menu"].exists,
                         "Fixture outcomes are available only after an answer enters Pending.")
 
         let centerPoint = setFacilitiesPoint(in: app, x: 500, y: 500)
-        let details = app.buttons["request-details-disclosure"]
-        revealInCard(details, in: app)
-        details.tap()
+        openRequestDetails(in: app)
         XCTAssertTrue(app.staticTexts["Sender: fixture:Facilities"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Message: facilities-01"].exists)
         let originalContent = app.staticTexts["request-original-content-json"]
         XCTAssertTrue(originalContent.waitForExistence(timeout: 5))
         XCTAssertTrue(originalContent.label.contains("facilities-01"))
-        details.tap()
-        XCTAssertEqual(app.staticTexts["request-point-value-location"].label,
+        attachScreenshot("Request history sheet", from: app)
+        app.buttons["request-details-done"].tap()
+        let retainedPoint = app.staticTexts["request-point-value-location"]
+        revealInCard(retainedPoint, in: app)
+        XCTAssertEqual(retainedPoint.label,
                        "Horizontal \(centerPoint.x), vertical \(centerPoint.y)",
                        "Inspecting request details must preserve the active point draft.")
 
@@ -75,6 +74,35 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["fixture-outcome-menu"].waitForExistence(timeout: 5),
                       "The local outcome simulation appears on the ordinary pending fixture card.")
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
+    }
+
+    func testPreexistingOpenRequestAppearsInSeenAndRemainsAnswerableFixture() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-preexisting-seen-fixture"]
+        app.launch()
+
+        let seenTab = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Seen")).firstMatch
+        XCTAssertTrue(seenTab.waitForExistence(timeout: 10), app.debugDescription)
+        seenTab.tap()
+
+        let facilities = app.buttons["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
+                      "The initial saved fixture request should be visible in Seen.\n\(app.debugDescription)")
+        XCTAssertTrue(facilities.label.contains("Seen"), facilities.label)
+        attachScreenshot("Open preexisting request in Seen (fixture)", from: app)
+        facilities.tap()
+
+        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists)
+        _ = setFacilitiesPoint(in: app, x: 240, y: 500)
+        let note = app.textViews["request-input-note"]
+        revealInCard(note, in: app)
+        note.tap()
+        note.typeText("Still answerable")
+        let finish = app.buttons["request-finish"]
+        XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(finish.isEnabled, "A preexisting open request remains answerable from Seen.")
+        attachScreenshot("Preexisting open request remains answerable in Seen (fixture)", from: app)
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
@@ -164,6 +192,113 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                        "Back without switching messages must return to the exact list position: top row at \(top.frame.minY), expected \(scrolledTop).\n\(app.debugDescription)")
     }
 
+    func testDetailEdgeSwipeReturnsToListAndSearchRisesAboveKeyboard() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let facilities = app.buttons["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(facilities.label.contains("Facilities"), facilities.label)
+        XCTAssertFalse(facilities.label.contains("fixture:"), facilities.label)
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.isHittable)
+        attachScreenshot("Inbox list with collapsed controls", from: app)
+        facilities.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        attachScreenshot("Request detail", from: app)
+
+        let back = app.buttons["harklight-detail-back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
+                      "Back must return to the same inbox list.")
+        facilities.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
+                      "An edge swipe from detail must return to the inbox list.")
+        XCTAssertTrue(facilities.isHittable, app.debugDescription)
+
+        let search = app.buttons["inbox-search-button"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        for frame in 0..<5 {
+            attachScreenshot("Search transition frame \(frame)", from: app)
+        }
+        XCTAssertTrue(app.textFields["inbox-search-field"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Search should expand directly above the keyboard.")
+        XCTAssertTrue(settings.isHittable, "Header settings must remain visible during search.")
+        XCTAssertLessThan(settings.frame.maxY, app.textFields["inbox-search-field"].frame.minY,
+                          "Settings belong in the header, not beside expanded search.")
+        attachScreenshot("Expanded search above keyboard", from: app)
+
+        let field = app.textFields["inbox-search-field"]
+        field.typeText("preview could not\n")
+        let notice = app.buttons["sample-error-0"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(notice.label.contains("Collection assistant"), notice.label)
+        attachScreenshot("Sample row in shared list renderer", from: app)
+        notice.tap()
+        let seenAction = app.buttons["request-seen-action"]
+        XCTAssertTrue(seenAction.waitForExistence(timeout: 5),
+                      "The notice card must present its Seen action.")
+        XCTAssertFalse(app.buttons["request-later-action"].exists,
+                       "The bottom glass clock is the only Later action in card mode.")
+        let finishSeen = app.buttons["request-finish-seen"]
+        XCTAssertTrue(finishSeen.exists && finishSeen.isEnabled,
+                      "The top check must perform the same Seen action as the card control.")
+        XCTAssertFalse(app.staticTexts["Seen available"].exists)
+        attachScreenshot("Notice card with Seen action", from: app)
+        finishSeen.tap()
+        XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"].waitForExistence(timeout: 5))
+    }
+
+    func testTextChoiceCardMatchesReferenceCapture() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let search = app.buttons["inbox-search-button"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10))
+        search.tap()
+        let field = app.textFields["inbox-search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("Which approach\n")
+        let row = app.buttons["sample-textChoice-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        let approach = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Plan the whole space")).firstMatch
+        XCTAssertTrue(approach.waitForExistence(timeout: 5), app.debugDescription)
+        approach.tap()
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected"), object: approach)
+        XCTAssertEqual(XCTWaiter().wait(for: [selected], timeout: 5), .completed)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        attachScreenshot("Text choice card with selected answer", from: app)
+    }
+
+    func testExplicitTierAndFriendlyDateReferenceCapture() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-tier-reference"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Top · 8 lines"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Middle · 4 lines"].exists)
+        XCTAssertTrue(app.staticTexts["Low · 2 lines"].exists)
+        attachScreenshot("Explicit top middle low cell tiers", from: app)
+        app.scrollViews.firstMatch.swipeUp()
+        XCTAssertTrue(app.staticTexts["Older date"].waitForExistence(timeout: 5))
+        attachScreenshot("Friendly date cases in tier fixtures", from: app)
+    }
+
+    private func attachScreenshot(_ name: String, from app: XCUIApplication) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testAnsweredRequestStaysAtTheBottomOfUnseenAndNeverMovesToSeen() throws {
         let app = launchFreshApp()
         let facilities = app.buttons["request-row-facilities-01"]
@@ -183,6 +318,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: atBottom, object: nil)],
                                         timeout: 5), .completed,
                        "An answered request sits below every other request in Unseen.\n\(app.debugDescription)")
+        XCTAssertFalse(facilities.label.contains("Answered"),
+                       "The resolved row should recede without an extra status caption.")
+        attachScreenshot("Post-install answered request at bottom of Unseen", from: app)
 
         // An answered request is not offered the Seen swipe.
         facilities.swipeLeft()
@@ -190,12 +328,15 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
             .first { $0.label == "Seen, Seen" }
         XCTAssertNil(seenSwipeAction, app.debugDescription)
 
-        let tabs = app.segmentedControls["inbox-message-tabs"]
-        XCTAssertTrue(tabs.waitForExistence(timeout: 5), app.debugDescription)
-        tabs.buttons["Seen"].tap()
-        XCTAssertTrue(tabs.buttons["Seen"].isSelected, app.debugDescription)
+        let seenTab = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Seen")).firstMatch
+        let unseenTab = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Unseen")).firstMatch
+        XCTAssertTrue(seenTab.waitForExistence(timeout: 5), app.debugDescription)
+        seenTab.tap()
+        XCTAssertTrue(seenTab.isSelected, app.debugDescription)
         XCTAssertFalse(facilities.waitForExistence(timeout: 2), "An answered request does not move to Seen")
-        tabs.buttons["Unseen"].tap()
+        unseenTab.tap()
         XCTAssertTrue(facilities.waitForExistence(timeout: 5), "The answered request stays in Unseen")
     }
 
@@ -215,14 +356,29 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
     }
 
     private func assertExactFacilitiesReceipt(in app: XCUIApplication, point: PointValue) {
-        let details = app.buttons["request-details-disclosure"]
-        revealInCard(details, in: app)
-        details.tap()
+        openRequestDetails(in: app)
         let receipt = app.staticTexts["request-details-original-answer-json"]
         XCTAssertTrue(receipt.waitForExistence(timeout: 5))
         XCTAssertEqual(receipt.label,
                        "{\"point\":{\"x\":\(point.x),\"y\":\(point.y)},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}",
                        "The terminal fixture outcome must preserve the exact originally submitted answer.")
+        attachScreenshot("Exact saved answer sheet", from: app)
+        app.buttons["request-details-done"].tap()
+    }
+
+    private func openRequestDetails(in app: XCUIApplication) {
+        let heading = app.descendants(matching: .any)["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        let scroll = app.scrollViews["message-card-scroll"]
+        for _ in 0..<8 where !heading.isHittable { scroll.swipeDown() }
+        XCTAssertTrue(heading.isHittable, "The message heading must expose its context menu.")
+        heading.press(forDuration: 1.1)
+        let action = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ OR label == %@", "request-details-menu-action", "Request details")).firstMatch
+        XCTAssertTrue(action.waitForExistence(timeout: 5), app.debugDescription)
+        action.tap()
+        XCTAssertTrue(app.buttons["request-details-done"].waitForExistence(timeout: 5),
+                      "Request history must open off the detail card face.")
     }
 
     private func selectFacilitiesRequest(in app: XCUIApplication) {

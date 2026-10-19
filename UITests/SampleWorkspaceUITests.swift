@@ -126,9 +126,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         wait(for: [leftUnseen], timeout: 5)
         clearSearch(in: app)
 
-        let tabs = app.segmentedControls["inbox-message-tabs"]
-        XCTAssertTrue(tabs.waitForExistence(timeout: 5), app.debugDescription)
-        tabs.buttons["Seen"].tap()
+        let seenTab = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Seen")).firstMatch
+        XCTAssertTrue(seenTab.waitForExistence(timeout: 5), app.debugDescription)
+        seenTab.tap()
         XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(informational.label.contains("Seen selected locally"), informational.label)
         XCTAssertFalse(app.buttons["sample-approval-0"].exists, "Only Seen messages are in the Seen tab")

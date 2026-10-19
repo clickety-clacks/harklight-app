@@ -176,6 +176,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
             } ?? true)
             let validInboxCheckpoints = [loaded.inboxCheckpoint, loaded.inboxCandidate].compactMap { $0 }.allSatisfy { checkpoint in
                 checkpoint.loadedKeys.allSatisfy { $0.accountScope == context.identity.personID } &&
+                (checkpoint.sourceOrder.map { order in
+                    Set(order).count == order.count &&
+                    order.allSatisfy { $0.accountScope == context.identity.personID } &&
+                    Set(order).isSubset(of: checkpoint.loadedKeys)
+                } ?? true) &&
                 (checkpoint.freshKeys ?? []).allSatisfy { $0.accountScope == context.identity.personID } &&
                 (checkpoint.receiptLastSequence.map { last in
                     last >= checkpoint.since && (checkpoint.highWater.map { $0 >= last } ?? true)
@@ -564,10 +569,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
-        next.remoteStates[intent.requestKey] = RemoteRequestState(state: terminalState,
-                                                                  authorizedOriginAnswer: effectiveAuthorizedAnswer,
-                                                                  classification: state.remoteStates[intent.requestKey]?.classification,
-                                                                  eventSequence: sequence)
+        var remote = next.remoteStates[intent.requestKey] ?? RemoteRequestState()
+        remote.state = terminalState
+        remote.authorizedOriginAnswer = effectiveAuthorizedAnswer
+        remote.eventSequence = sequence
+        next.remoteStates[intent.requestKey] = remote
         if var published = next.replayPublishedIntents {
             published[intentID] = intent
             next.replayPublishedIntents = published
@@ -633,12 +639,37 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 var next = state
                 next.appliedEvents[event.sequence] = event
                 if let old = next.remoteStates[request.key] {
-                    next.remoteStates[request.key] = RemoteRequestState(state: old.state,
-                                                                        authorizedOriginAnswer: old.authorizedOriginAnswer,
-                                                                        classification: classification,
-                                                                        eventSequence: old.eventSequence)
+                    var updated = old
+                    updated.classification = classification
+                    next.remoteStates[request.key] = updated
                 }
                 try commit(next)
+            }
+            if previous.attentionTierWasProvided || event.attentionTierWasProvided {
+                let key: RequestKey?
+                switch event.body {
+                case let .delivery(request, _): key = request.key
+                case let .originReference(requestKey): key = requestKey
+                case .terminal, .attentionTierChange: key = nil
+                }
+                if let key {
+                    var next = state
+                    let previousState = next.remoteStates[key]
+                    var updated = previousState ?? RemoteRequestState()
+                    try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
+                        origin: event.origin,
+                        allowSameSequenceReplacement: previous.attentionTierWasProvided !=
+                            event.attentionTierWasProvided,
+                        in: &updated)
+                    let eventTierPresenceChanged = previous.attentionTierWasProvided !=
+                        event.attentionTierWasProvided
+                    let eventAddsOrigin = previous.origin == nil && event.origin != nil
+                    if previousState != updated || eventTierPresenceChanged || eventAddsOrigin {
+                        next.remoteStates[key] = updated
+                        next.appliedEvents[event.sequence] = event
+                        try commit(next)
+                    }
+                }
             }
             return state.cursor
         }
@@ -683,21 +714,26 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
                 remoteState = .cleared
             }
-            next.remoteStates[request.key] = RemoteRequestState(state: remoteState,
-                                                                authorizedOriginAnswer: previous?.authorizedOriginAnswer,
-                                                                classification: classification,
-                                                                eventSequence: event.sequence)
+            var updated = previous ?? RemoteRequestState()
+            updated.state = remoteState
+            updated.authorizedOriginAnswer = previous?.authorizedOriginAnswer
+            updated.classification = classification
+            updated.eventSequence = event.sequence
+            try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
+                                    origin: event.origin, in: &updated)
+            next.remoteStates[request.key] = updated
         case let .originReference(requestKey):
             try validate(requestKey, in: context.identity)
             guard next.requests[requestKey] != nil else {
                 try recordRepair(.missingOriginContent(sequence: event.sequence, requestKey: requestKey))
                 throw AttentionStoreError.missingOriginContent(requestKey)
             }
-            let previous = next.remoteStates[requestKey] ?? RemoteRequestState()
-            next.remoteStates[requestKey] = RemoteRequestState(state: previous.state,
-                                                               authorizedOriginAnswer: previous.authorizedOriginAnswer,
-                                                               classification: nil,
-                                                               eventSequence: event.sequence)
+            var updated = next.remoteStates[requestKey] ?? RemoteRequestState()
+            updated.classification = nil
+            updated.eventSequence = event.sequence
+            try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
+                                    origin: event.origin, in: &updated)
+            next.remoteStates[requestKey] = updated
         case let .terminal(requestKey, terminalState, authorizedOriginAnswer):
             try validate(requestKey, in: context.identity)
             guard next.requests[requestKey] != nil else {
@@ -710,10 +746,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 throw AttentionStoreError.eventConflict(event.sequence)
             }
             let effectiveAuthorizedAnswer = authorizedOriginAnswer ?? previous.authorizedOriginAnswer
-            next.remoteStates[requestKey] = RemoteRequestState(state: terminalState,
-                                                               authorizedOriginAnswer: effectiveAuthorizedAnswer,
-                                                               classification: previous.classification,
-                                                               eventSequence: event.sequence)
+            var updated = previous
+            updated.state = terminalState
+            updated.authorizedOriginAnswer = effectiveAuthorizedAnswer
+            updated.eventSequence = event.sequence
+            next.remoteStates[requestKey] = updated
             if let intentID = next.intentByRequest[requestKey], var intent = next.intents[intentID] {
                 if case let .refusedByRetraction(retractedAt) = intent.disposition {
                     guard terminalState == .cleared,
@@ -731,6 +768,25 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     next.intents[intentID] = intent
                 }
                 next.outboxOrder.removeAll(where: { $0 == intentID })
+            }
+        case let .attentionTierChange(requestKey):
+            try validate(requestKey, in: context.identity)
+            let isRequest = next.requests[requestKey] != nil
+            guard isRequest || next.inboxReferences?[requestKey] != nil else {
+                try recordRepair(.missingOriginContent(sequence: event.sequence, requestKey: requestKey))
+                throw AttentionStoreError.missingOriginContent(requestKey)
+            }
+            var updated = isRequest
+                ? (next.remoteStates[requestKey] ?? RemoteRequestState())
+                : (next.inboxReferences?[requestKey] ?? RemoteRequestState())
+            try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
+                                    origin: event.origin, in: &updated)
+            if isRequest {
+                next.remoteStates[requestKey] = updated
+            } else {
+                var references = next.inboxReferences ?? [:]
+                references[requestKey] = updated
+                next.inboxReferences = references
             }
         }
         try applyOrdinaryConversationMetadata(event, to: &next)
@@ -778,6 +834,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
                 thread = prior
             } else {
+                for prior in conversation.events.values where prior.binding.request == request.key {
+                    guard case let .attentionTier(_, _, _, priorSessionHandle) = prior.fact,
+                          let priorSessionHandle else { continue }
+                    guard priorSessionHandle == handle else { throw ConversationError.conflict }
+                }
                 thread = ConversationThread(request: request.key, sessionHandle: handle,
                     revision: 1, payload: request.originalPayload)
                 if let availability = metadata.availability { thread.availability = availability }
@@ -843,6 +904,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
             }
             conversation.threads[key] = thread
+        case .attentionTierChange:
+            return
         }
         next.conversation = conversation
     }
@@ -891,6 +954,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
         case .terminal:
             throw AttentionStoreError.inboxPageConflict
+        case .attentionTierChange:
+            throw AttentionStoreError.inboxPageConflict
         }
         let hasContent = next.requests[key] != nil
         let previous = hasContent ? next.remoteStates[key] : next.inboxReferences?[key]
@@ -903,7 +968,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 let current = RemoteRequestState(state: terminalState,
                     authorizedOriginAnswer: answer ?? previous?.authorizedOriginAnswer,
                     classification: classification ?? previous?.classification,
-                    eventSequence: terminal.sequence)
+                    eventSequence: terminal.sequence,
+                    attentionTier: previous?.attentionTier,
+                    attentionTierSequence: previous?.attentionTierSequence,
+                    attentionTierFeed: previous?.attentionTierFeed,
+                    attentionTierOrigin: previous?.attentionTierOrigin)
                 if hasContent {
                     next.remoteStates[key] = current
                     // The acceptance opens the thread that the terminal's retraction is recorded on.
@@ -921,7 +990,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 let current = RemoteRequestState(state: nil,
                     authorizedOriginAnswer: previous?.authorizedOriginAnswer,
                     classification: classification ?? previous?.classification,
-                    eventSequence: acceptance.sequence)
+                    eventSequence: acceptance.sequence,
+                    attentionTier: previous?.attentionTier,
+                    attentionTierSequence: previous?.attentionTierSequence,
+                    attentionTierFeed: previous?.attentionTierFeed,
+                    attentionTierOrigin: previous?.attentionTierOrigin)
                 if hasContent {
                     next.remoteStates[key] = current
                 } else {
@@ -930,6 +1003,19 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     next.inboxReferences = references
                 }
             }
+        }
+        var tierState = hasContent
+            ? (next.remoteStates[key] ?? RemoteRequestState())
+            : (next.inboxReferences?[key] ?? RemoteRequestState())
+        try updateAttentionTier(item.attentionTier, sequence: highWater, feed: .relay,
+                                origin: acceptance.origin, allowSameSequenceReplacement: true,
+                                in: &tierState)
+        if hasContent {
+            next.remoteStates[key] = tierState
+        } else {
+            var references = next.inboxReferences ?? [:]
+            references[key] = tierState
+            next.inboxReferences = references
         }
         if hasContent { try applyOrdinaryConversationMetadata(acceptance, to: &next) }
 
@@ -951,7 +1037,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
               key.accountScope == context.identity.personID,
               event.sequence > 0 else { throw AttentionStoreError.inboxPageConflict }
         switch event.body {
-        case .originReference:
+        case .originReference, .attentionTierChange:
             try validate(key, in: context.identity)
             if let prior = next.appliedEvents[event.sequence] {
                 guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
@@ -1010,10 +1096,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
                let oldState = currentPrevious.state, oldState != terminalState {
                 throw AttentionStoreError.eventConflict(event.sequence)
             }
-            let updated = RemoteRequestState(state: terminalState,
+            var updated = RemoteRequestState(state: terminalState,
                 authorizedOriginAnswer: answer ?? currentPrevious.authorizedOriginAnswer,
                 classification: currentPrevious.classification,
-                eventSequence: event.sequence)
+                eventSequence: event.sequence,
+                attentionTier: currentPrevious.attentionTier,
+                attentionTierSequence: currentPrevious.attentionTierSequence,
+                attentionTierFeed: currentPrevious.attentionTierFeed,
+                attentionTierOrigin: currentPrevious.attentionTierOrigin)
             if hasContent {
                 next.remoteStates[key] = updated
                 try applyOrdinaryConversationMetadata(event, to: &next)
@@ -1024,13 +1114,25 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
         case .originReference:
             if event.sequence < (currentPrevious.eventSequence ?? 0) { return }
-            let updated = RemoteRequestState(state: currentPrevious.state,
-                authorizedOriginAnswer: currentPrevious.authorizedOriginAnswer,
-                classification: nil,
-                eventSequence: event.sequence)
+            var updated = currentPrevious
+            updated.classification = nil
+            updated.eventSequence = event.sequence
+            try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
+                                    origin: event.origin, in: &updated)
             if hasContent {
                 next.remoteStates[key] = updated
                 try applyOrdinaryConversationMetadata(event, to: &next)
+            } else {
+                var references = next.inboxReferences ?? [:]
+                references[key] = updated
+                next.inboxReferences = references
+            }
+        case .attentionTierChange:
+            var updated = currentPrevious
+            try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
+                                    origin: event.origin, in: &updated)
+            if hasContent {
+                next.remoteStates[key] = updated
             } else {
                 var references = next.inboxReferences ?? [:]
                 references[key] = updated
@@ -1041,6 +1143,49 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
     }
 
+    private func updateAttentionTier(_ tier: AttentionTier,
+                                     sequence: UInt64,
+                                     feed: AttentionTierFeed,
+                                     origin: ExactText?,
+                                     allowSameSequenceReplacement: Bool = false,
+                                     in state: inout RemoteRequestState) throws {
+        if let previousOrigin = state.attentionTierOrigin,
+           let origin,
+           previousOrigin != origin {
+            throw ConversationError.conflict
+        }
+
+        switch (state.attentionTierFeed, feed) {
+        case (.some(.conversation), .relay):
+            // Conversation changes may arrive before the ordinary delivery.
+            return
+        case (.some(.relay), .conversation):
+            // The two cursors are independent; the conversation fact is the change to apply.
+            break
+        case (.some(.relay), .relay), (.some(.conversation), .conversation):
+            if let previousSequence = state.attentionTierSequence {
+                if sequence < previousSequence { return }
+                if sequence == previousSequence {
+                    guard state.attentionTier == tier || allowSameSequenceReplacement else {
+                        throw ConversationError.conflict
+                    }
+                    if state.attentionTier != tier {
+                        state.attentionTier = tier
+                    }
+                    if let origin { state.attentionTierOrigin = origin }
+                    return
+                }
+            }
+        case (.none, _):
+            break
+        }
+
+        state.attentionTier = tier
+        state.attentionTierSequence = sequence
+        state.attentionTierFeed = feed
+        if let origin { state.attentionTierOrigin = origin }
+    }
+
     private func refreshAcceptedReplayIndexes(for requestKeys: some Sequence<RequestKey>) {
         for key in requestKeys { refreshAcceptedReplayIndex(for: key) }
     }
@@ -1048,7 +1193,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private static func requestKey(in event: RelayEvent) -> RequestKey? {
         switch event.body {
         case let .delivery(request, _): request.key
-        case let .originReference(key), let .terminal(key, _, _): key
+        case let .originReference(key), let .terminal(key, _, _), let .attentionTierChange(key): key
         }
     }
 
@@ -1138,7 +1283,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                   key.accountScope == context.identity.personID,
                   state.requests[key] == nil else { return nil }
             switch event.body {
-            case .terminal, .originReference: break
+            case .terminal, .originReference, .attentionTierChange: break
             case .delivery: return nil
             }
             if let barrier = state.replayBarrier, event.sequence > barrier { return .gap(expected: barrier) }
@@ -1233,10 +1378,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
             next.drafts[request.key] = RequestDraft(interface: request.interface)
         }
         next.appliedEvents[sequence] = RelayEvent(sequence: sequence, body: .originReference(request.key))
-        next.remoteStates[request.key] = RemoteRequestState(state: next.remoteStates[request.key]?.state,
-                                                            authorizedOriginAnswer: next.remoteStates[request.key]?.authorizedOriginAnswer,
-                                                            classification: nil,
-                                                            eventSequence: sequence)
+        var remote = next.remoteStates[request.key] ?? RemoteRequestState()
+        remote.classification = nil
+        remote.eventSequence = sequence
+        next.remoteStates[request.key] = remote
         next.cursor = sequence
         next.repairIssues.removeAll { $0 == .missingOriginContent(sequence: sequence, requestKey: request.key) }
         try commit(next)
@@ -1351,7 +1496,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
                   candidate.highWater == highWater,
                   candidate.nextCursor == nextCursor,
                   candidate.receiptCursor == receiptCursor,
-                  candidate.loadedKeys == Set(keys) else { throw AttentionStoreError.inboxPageConflict }
+                  candidate.loadedKeys == Set(keys),
+                  candidate.sourceOrder == nil || candidate.sourceOrder == keys else {
+                throw AttentionStoreError.inboxPageConflict
+            }
+            if candidate.sourceOrder == nil {
+                candidate.sourceOrder = keys
+                var next = state
+                next.inboxCandidate = candidate
+                try commit(next)
+            }
             return
         }
         var next = state
@@ -1360,6 +1514,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         candidate.highWater = highWater
         candidate.nextCursor = nextCursor
         candidate.receiptCursor = receiptCursor
+        candidate.sourceOrder = keys
         candidate.hasInitialPage = true
         candidate.loadedKeys = Set(keys)
         candidate.freshKeys = Set(keys)
@@ -1399,6 +1554,23 @@ public final class AttentionDomainStore: @unchecked Sendable {
               nextCursor != cursor else { throw AttentionStoreError.inboxPageConflict }
         var next = state
         for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        let previousSourceOrder: [RequestKey]
+        if let sourceOrder = checkpoint.sourceOrder {
+            previousSourceOrder = sourceOrder
+        } else {
+            previousSourceOrder = checkpoint.loadedKeys.sorted { left, right in
+                let leftOrder = state.requests[left]?.acceptanceOrder ??
+                    state.remoteStates[left]?.eventSequence ?? state.inboxReferences?[left]?.eventSequence ?? 0
+                let rightOrder = state.requests[right]?.acceptanceOrder ??
+                    state.remoteStates[right]?.eventSequence ?? state.inboxReferences?[right]?.eventSequence ?? 0
+                if leftOrder != rightOrder { return leftOrder > rightOrder }
+                if left.senderID.rawValue != right.senderID.rawValue {
+                    return left.senderID.rawValue < right.senderID.rawValue
+                }
+                return left.messageID.rawValue < right.messageID.rawValue
+            }
+        }
+        checkpoint.sourceOrder = previousSourceOrder + keys
         checkpoint.loadedKeys.formUnion(keys)
         checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
         checkpoint.nextCursor = nextCursor
@@ -1633,6 +1805,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         } else {
             inboxCurrentKeys = nil
         }
+        let inboxSourceOrder = state.inboxCheckpoint.flatMap {
+            $0.checkpointAccepted ? $0.sourceOrder : nil
+        }
         return AttentionStoreSnapshot(requests: publishedRequests,
                                       drafts: visibleDrafts,
                                       intents: state.replayPublishedIntents ?? state.intents,
@@ -1646,6 +1821,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       conversationThreads: state.conversation?.threads ?? [:],
                                       inboxCheckpoint: state.inboxCheckpoint,
                                       inboxCandidate: state.inboxCandidate,
+                                      inboxSourceOrder: inboxSourceOrder,
                                       inboxCurrentKeys: inboxCurrentKeys,
                                       pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
                                       inboxReferences: state.inboxReferences ?? [:])
@@ -1711,6 +1887,30 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try conversation.apply(event)
         if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
         let key = event.binding.request
+        if case let .attentionTier(_, origin, tier, sessionHandle) = event.fact {
+            if let thread = conversation.threads[key], sessionHandle != thread.sessionHandle {
+                throw ConversationError.conflict
+            }
+            let hasRequest = next.requests[key] != nil
+            var remote: RemoteRequestState
+            if hasRequest {
+                remote = next.remoteStates[key] ?? RemoteRequestState()
+            } else {
+                var references = next.inboxReferences ?? [:]
+                remote = references.removeValue(forKey: key) ??
+                    next.remoteStates.removeValue(forKey: key) ?? RemoteRequestState()
+                next.inboxReferences = references
+            }
+            try updateAttentionTier(tier, sequence: event.sequence, feed: .conversation,
+                                    origin: origin, in: &remote)
+            if hasRequest {
+                next.remoteStates[key] = remote
+            } else {
+                var references = next.inboxReferences ?? [:]
+                references[key] = remote
+                next.inboxReferences = references
+            }
+        }
         if let previous = state.conversation?.threads[key],
            let current = conversation.threads[key], current.currentRevision != previous.currentRevision {
             var archived = previous.answerDrafts ?? [:]
@@ -1738,9 +1938,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         if case let .terminal(_, _, terminal) = event.fact, next.requests[key] != nil {
             let previous = next.remoteStates[key] ?? RemoteRequestState()
             guard previous.state == nil || previous.state == terminal else { throw ConversationError.conflict }
-            next.remoteStates[key] = RemoteRequestState(state: terminal,
-                authorizedOriginAnswer: previous.authorizedOriginAnswer, classification: previous.classification,
-                eventSequence: previous.eventSequence)
+            var updated = previous
+            updated.state = terminal
+            next.remoteStates[key] = updated
             next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
         }
         if case let .retraction(_, sequence) = event.fact, next.requests[key] != nil {
@@ -1748,9 +1948,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
             // action locally without advancing or fabricating its ordinary cursor.
             let previous = next.remoteStates[key] ?? RemoteRequestState()
             guard previous.state == nil || previous.state == .cleared else { throw ConversationError.conflict }
-            next.remoteStates[key] = RemoteRequestState(state: .cleared,
-                authorizedOriginAnswer: previous.authorizedOriginAnswer, classification: previous.classification,
-                eventSequence: sequence)
+            var updated = previous
+            updated.state = .cleared
+            updated.eventSequence = sequence
+            next.remoteStates[key] = updated
             if let saved = next.drafts[key], let revision = conversation.threads[key]?.currentRevision {
                 var archived = conversation.threads[key]?.answerDrafts ?? [:]
                 archived[revision] = saved
@@ -2287,7 +2488,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 },
                 terminalReason: old.terminalReason, retractedAtMilliseconds: old.retractedAtMilliseconds)
         }
-        return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata)
+        return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata,
+                          origin: event.origin,
+                          attentionTier: event.attentionTierWasProvided ? event.attentionTier : nil)
     }
 
     private static func externalizingConversationFiles(in checkpoint: InboxPagingCheckpoint,

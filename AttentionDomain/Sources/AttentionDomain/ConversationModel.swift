@@ -186,6 +186,7 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         case fileTransfer(turn: ExactText, file: ExactText, ConversationFileTransfer)
         case fileUse(turn: ExactText, file: ExactText, ConversationFileUse)
         case terminal(turn: ExactText, author: ConversationAuthor, state: TerminalState)
+        case attentionTier(eventID: ExactText, origin: ExactText, tier: AttentionTier, sessionHandle: ExactText?)
         /// Reference to the same ordinary terminal, never another ordinary event.
         case retraction(turn: ExactText, terminalSequence: UInt64)
     }
@@ -415,13 +416,22 @@ struct ConversationState: Codable {
                 threads[binding.request] = thread
             } else {
                 guard binding.revision == 1 else { throw ConversationError.invalidBinding }
+                for prior in events.values where prior.binding.request == binding.request {
+                    guard case let .attentionTier(_, _, _, priorSessionHandle) = prior.fact,
+                          let priorSessionHandle else { continue }
+                    guard priorSessionHandle == handle else { throw ConversationError.conflict }
+                }
                 threads[binding.request] = ConversationThread(request: binding.request,
                     sessionHandle: handle, revision: binding.revision, payload: payload)
             }
         }
         // A revision also carries its immutable turn, but never consumes a second sequence.
         let appliesTurn: Bool
-        if case .revision = event.fact { appliesTurn = true } else { appliesTurn = question == nil }
+        switch event.fact {
+        case .attentionTier: appliesTurn = false
+        case .revision: appliesTurn = true
+        default: appliesTurn = question == nil
+        }
         if appliesTurn {
             guard var thread = threads[binding.request], thread.revisionNumbers.contains(binding.revision) else {
                 throw ConversationError.missingRequest
@@ -457,6 +467,8 @@ struct ConversationState: Codable {
                 guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
                 thread.availability = availability
                 thread.listeningSupport = support
+            case .attentionTier:
+                throw ConversationError.invalidBinding
             case let .terminal(turn, author, state):
                 if let terminal = thread.terminal {
                     guard terminal == state, thread.terminalTurn == turn else { throw ConversationError.conflict }
