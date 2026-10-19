@@ -164,6 +164,41 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                        "Back without switching messages must return to the exact list position: top row at \(top.frame.minY), expected \(scrolledTop).\n\(app.debugDescription)")
     }
 
+    func testAnsweredRequestStaysAtTheBottomOfUnseenAndNeverMovesToSeen() throws {
+        let app = launchFreshApp()
+        let facilities = app.buttons["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
+        applyFixtureOutcome("ownOperationAccepted", in: app)
+        let status = app.staticTexts["request-lifecycle-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.label, "Answered")
+        showRequestsListIfNeeded(in: app)
+
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
+        let atBottom = NSPredicate { _, _ in
+            let others = rows.allElementsBoundByIndex.filter { $0.identifier != facilities.identifier }
+            return !others.isEmpty && others.allSatisfy { $0.frame.minY < facilities.frame.minY }
+        }
+        XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: atBottom, object: nil)],
+                                        timeout: 5), .completed,
+                       "An answered request sits below every other request in Unseen.\n\(app.debugDescription)")
+
+        // An answered request is not offered the Seen swipe.
+        facilities.swipeLeft()
+        let seenSwipeAction = app.buttons.allElementsBoundByIndex
+            .first { $0.label == "Seen, Seen" }
+        XCTAssertNil(seenSwipeAction, app.debugDescription)
+
+        let tabs = app.segmentedControls["inbox-message-tabs"]
+        XCTAssertTrue(tabs.waitForExistence(timeout: 5), app.debugDescription)
+        tabs.buttons["Seen"].tap()
+        XCTAssertTrue(tabs.buttons["Seen"].isSelected, app.debugDescription)
+        XCTAssertFalse(facilities.waitForExistence(timeout: 2), "An answered request does not move to Seen")
+        tabs.buttons["Unseen"].tap()
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5), "The answered request stays in Unseen")
+    }
+
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
         let outcomeButton = app.buttons["fixture-outcome-menu"]
         XCTAssertTrue(outcomeButton.waitForExistence(timeout: 5),

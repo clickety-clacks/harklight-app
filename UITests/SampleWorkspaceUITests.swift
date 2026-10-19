@@ -85,6 +85,56 @@ final class SampleWorkspaceUITests: XCTestCase {
         if dismiss.exists && dismiss.isHittable { dismiss.tap() }
     }
 
+    private func seenSwipeAction(in app: XCUIApplication) -> XCUIElement? {
+        app.buttons.allElementsBoundByIndex
+            .first { $0.label == "Seen, Seen" }
+    }
+
+    func testSwipeSeenMovesOnlyAnInformationalMessageToSeen() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+
+        // A message that asks for an answer offers no Seen swipe.
+        enterSearch("Archive", in: app)
+        let ordinary = app.buttons["sample-approval-0"]
+        XCTAssertTrue(ordinary.waitForExistence(timeout: 5), app.debugDescription)
+        ordinary.swipeLeft()
+        XCTAssertNil(seenSwipeAction(in: app), app.debugDescription)
+        clearSearch(in: app)
+
+        enterSearch("Thursday", in: app)
+        let informational = app.buttons["sample-information-0"]
+        XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
+        informational.swipeLeft()
+        let seenActionAppeared = NSPredicate { _, _ in
+            self.seenSwipeAction(in: app) != nil
+        }
+        let actionExpectation = XCTNSPredicateExpectation(predicate: seenActionAppeared, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [actionExpectation], timeout: 5), .completed, app.debugDescription)
+        guard let markSeen = seenSwipeAction(in: app) else {
+            XCTFail(app.debugDescription)
+            return
+        }
+        XCTAssertEqual(markSeen.label, "Seen, Seen")
+        capture("inbox-swipe-seen-revealed", app)
+        // Revealing the action does not mark the message.
+        XCTAssertTrue(informational.exists, "Swiping alone keeps the message in Unseen")
+        markSeen.tap()
+        let leftUnseen = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: informational)
+        wait(for: [leftUnseen], timeout: 5)
+        clearSearch(in: app)
+
+        let tabs = app.segmentedControls["inbox-message-tabs"]
+        XCTAssertTrue(tabs.waitForExistence(timeout: 5), app.debugDescription)
+        tabs.buttons["Seen"].tap()
+        XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(informational.label.contains("Seen selected locally"), informational.label)
+        XCTAssertFalse(app.buttons["sample-approval-0"].exists, "Only Seen messages are in the Seen tab")
+        capture("inbox-swipe-seen-in-seen-tab", app)
+    }
+
     func testDesignedControlsAndComponentScreenshots() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
