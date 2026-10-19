@@ -257,7 +257,10 @@ final class SampleWorkspaceUITests: XCTestCase {
             let found = row.waitForExistence(timeout: 5)
             if kind == "review" || !found { recordDiagnostics("search-\(kind)", app) }
             XCTAssertTrue(found, app.debugDescription)
-            reveal(row, in: app.scrollViews.firstMatch, app: app)
+            let listContainer = app.scrollViews.firstMatch.exists
+                ? app.scrollViews.firstMatch : app.collectionViews.firstMatch
+            XCTAssertTrue(listContainer.exists, app.debugDescription)
+            reveal(row, in: listContainer, app: app)
             row.tap()
             if ["error", "warning", "information", "completed"].contains(kind) {
                 XCTAssertTrue(app.buttons["request-finish-seen"].waitForExistence(timeout: 5))
