@@ -230,7 +230,7 @@ public struct ConversationWire: Sendable {
                                  retractedAtMilliseconds: retractedAtMilliseconds)
     }
     func ordinaryMetadata(_ value: JSONValue) throws -> RelayConversationMetadata? {
-        guard value.uniqueValue(named: "request_revision") != nil else { return nil }
+        guard value.uniqueValue(named: "request_revision") != nil else { return try snapshotRetraction(value) }
         let revision = try integer(value, "request_revision")
         guard revision > 0 else { throw RelayWireError.invalidFrame }
         let author: ConversationAuthor?
@@ -260,6 +260,16 @@ public struct ConversationWire: Sendable {
             listeningSupport: value.uniqueValue(named: "listening_support"), author: author,
             files: value.uniqueValue(named: "files") == nil ? nil : try files(value), terminalReason: reason,
             retractedAtMilliseconds: retractedAtMilliseconds)
+    }
+    /// Inbox page and reconcile terminals use the legacy lifecycle projection, which
+    /// reports a retraction's time without the live event's conversation join fields.
+    private func snapshotRetraction(_ value: JSONValue) throws -> RelayConversationMetadata? {
+        guard let reason = try optionalText(value, "terminal_reason") else { return nil }
+        guard reason == ExactText("retracted"), try text(value, "type") == "lifecycle",
+              try text(value, "state") == "cleared" else { throw RelayWireError.invalidFrame }
+        let timestamp = try integer(value, "retracted_at")
+        guard try integer(value, "at") == timestamp else { throw RelayWireError.invalidFrame }
+        return RelayConversationMetadata(revision: nil, terminalReason: reason, retractedAtMilliseconds: timestamp)
     }
     private func availability(_ value: JSONValue) throws -> ConversationAvailability {
         switch try text(value, "availability") {

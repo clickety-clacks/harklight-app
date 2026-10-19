@@ -9,6 +9,8 @@ final class RetractionPresentationTests: XCTestCase {
     private static let retractedAtSeconds: TimeInterval = 1_760_000_000.123
     private let ordinary = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","terminal_reason":"retracted","by":"origin_withdrawal","author":"origin","event_id":"3","request_revision":1,"at":1760000000123,"retracted_at":1760000000123}"#.utf8)
     private let projected = Data(#"{"v":1,"type":"conversation","conversation_seq":1,"kind":"retraction","sender_id":"sender","message_id":"request","origin":"origin","author":"origin","session_handle":"handle","event_id":"3","request_revision":1,"terminal_seq":2,"terminal_state":"retracted","retracted_at":1760000000123}"#.utf8)
+    /// Inbox page and reconcile terminals keep the legacy lifecycle field set.
+    private let snapshotTerminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","terminal_reason":"retracted","by":"origin_withdrawal","at":1760000000123,"retracted_at":1760000000123}"#.utf8)
     private let refusal = Data(#"{"v":1,"type":"error","reason":"retracted","terminal":{"state":"retracted","retracted_at":1760000000123}}"#.utf8)
 
     func testInstalledDecoderAcceptsTheSameAdditiveLifecycleWithoutChangingItsLegacyMeaning() throws {
@@ -105,6 +107,14 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertThrowsError(try relay.decodeEvent(edited(ordinary, #""at":1760000000123"#, #""at":1760000000124"#)),
                              "The lifecycle time and the retraction time are one fact")
         XCTAssertThrowsError(try conversation.decodeEvent(edited(projected, #","retracted_at":1760000000123"#, "")))
+        let snapshot = try relay.decodeEvent(snapshotTerminal)
+        XCTAssertEqual(snapshot.conversation?.terminalReason, ExactText("retracted"))
+        XCTAssertEqual(snapshot.conversation?.retractedAtMilliseconds, Self.retractedAt)
+        XCTAssertNil(snapshot.conversation?.revision)
+        XCTAssertThrowsError(try relay.decodeEvent(edited(snapshotTerminal, #","retracted_at":1760000000123"#, "")))
+        XCTAssertThrowsError(try relay.decodeEvent(edited(snapshotTerminal, #""at":1760000000123"#, #""at":1760000000124"#)))
+        XCTAssertNil(try relay.decodeEvent(edited(snapshotTerminal, #""terminal_reason":"retracted","#, "")).conversation,
+                     "A plain legacy terminal still carries no conversation meaning")
     }
 
     func testFreshInboxPageKeepsTheRetractionTimeOfItsTerminal() throws {
@@ -114,7 +124,7 @@ final class RetractionPresentationTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let delivery = #"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"origin","as":"message","message":{"title":"Retained question"},"request_revision":1,"session_handle":"handle","event_id":"1"}"#
         let frame = Data((#"{"v":1,"type":"ok","ref":"native-inbox","paging_version":1,"snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":"#
-            + delivery + #","terminal":"# + String(decoding: ordinary, as: UTF8.self)
+            + delivery + #","terminal":"# + String(decoding: snapshotTerminal, as: UTF8.self)
             + #"}],"next_cursor":null,"receipt_cursor":null}"#).utf8)
         let page = try InboxPagingWire(profile: context).decodeStart(frame, ref: "native-inbox")
         XCTAssertEqual(page.items.first?.terminal?.conversation?.retractedAtMilliseconds, Self.retractedAt)
@@ -124,7 +134,11 @@ final class RetractionPresentationTests: XCTestCase {
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
         XCTAssertTrue(thread.isRetracted)
-        XCTAssertEqual(thread.retraction?.retractedAtMilliseconds, Self.retractedAt)
+        XCTAssertEqual(thread.terminal, .cleared)
+        XCTAssertEqual(thread.reportedRetractedAtMilliseconds, Self.retractedAt)
+        try restored.applyConversation(ConversationWire(profile: context).decodeEvent(projected), context: context)
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
+                       Self.retractedAt, "The conversation stream adds the retraction turn at the same time")
     }
 
     func testDefinitiveAnswerRefusalRequiresTheRetractedTerminalSnapshot() throws {
