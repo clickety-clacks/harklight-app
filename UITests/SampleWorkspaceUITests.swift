@@ -168,7 +168,12 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(found, app.debugDescription)
             reveal(row, in: app.scrollViews.firstMatch, app: app)
             row.tap()
-            XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5))
+            if ["error", "warning", "information", "completed"].contains(kind) {
+                XCTAssertTrue(app.buttons["request-finish-seen"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons["request-seen-action"].exists)
+            } else {
+                XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5))
+            }
             capture("component-\(kind)", app)
             if ["textChoice", "review", "multipleChoice", "colorChoice", "soundChoice"].contains(kind) {
                 let ownAnswer = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch

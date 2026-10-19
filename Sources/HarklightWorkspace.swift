@@ -971,7 +971,7 @@ struct InboxRowContent: View {
 
     private var titleColor: Color {
         if row.isResolved { return .secondary }
-        switch row.emphasis {
+        return switch row.emphasis {
         case .error: Color(red: 0.70, green: 0, blue: 0.06)
         case .warning: Color(red: 0.48, green: 0.30, blue: 0)
         case .completed: .secondary
@@ -988,7 +988,7 @@ struct InboxRowContent: View {
 
     private var symbolColor: Color {
         if row.isResolved { return .secondary }
-        switch row.emphasis {
+        return switch row.emphasis {
         case .error: .red
         case .warning: .orange
         case .completed: .green

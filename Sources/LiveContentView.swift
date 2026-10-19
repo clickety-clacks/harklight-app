@@ -400,7 +400,10 @@ struct LiveRequestDetail: View {
         MessageCardSurface(context: context,
             backgroundColor: Color(red: 0.89, green: 0.94, blue: 1)) {
             VStack(alignment: .leading, spacing: 12) {
-                MessageHeading(sender: localExample?.message.sender
+                Button {
+                    requestDetailsPresented = true
+                } label: {
+                    MessageHeading(sender: localExample?.message.sender
                                    ?? InboxSenderDisplay.name(for: request.key.senderID.rawValue),
                                initials: localExample?.message.initials
                                    ?? String(InboxSenderDisplay.name(for: request.key.senderID.rawValue)
@@ -414,14 +417,10 @@ struct LiveRequestDetail: View {
                                        ? Color(red: 0.48, green: 0.30, blue: 0)
                                        : .primary,
                                chatUnread: conversationIndicator)
-                    .accessibilityIdentifier("request-heading")
-                    .accessibilityHint("Touch and hold for request details")
-                    .contextMenu {
-                        Button("Request details", systemImage: "info.circle") {
-                            requestDetailsPresented = true
-                        }
-                        .accessibilityIdentifier("request-details-menu-action")
-                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("request-heading")
+                .accessibilityHint("Open request details")
                 if let localExample {
                     if localExample.message.revised || localExample.message.deadline != nil {
                         LocalSampleContext(response: localExample)
@@ -1058,6 +1057,7 @@ private struct LiveProjectedInputView: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityAddTraits(selected ? .isSelected : [])
             .accessibilityValue(selected ? "Selected" : "Not selected")
             .disabled(readOnly)
         }
@@ -1126,6 +1126,7 @@ private struct LiveCompatibilityActions: View {
                             selectionColor: option.map { if case .destructive = $0.role { .red } else { .blue } } ?? .blue)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected == action.id ? .isSelected : [])
                     .accessibilityValue(selected == action.id ? "Selected" : "Not selected")
                     .disabled(readOnly)
                 }
