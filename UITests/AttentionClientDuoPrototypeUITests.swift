@@ -186,7 +186,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
 
         // An answered request is not offered the Seen swipe.
         facilities.swipeLeft()
-        XCTAssertFalse(app.buttons["inbox-mark-seen"].waitForExistence(timeout: 2), app.debugDescription)
+        let seenSwipeAction = app.buttons.allElementsBoundByIndex
+            .first { $0.label == "Seen, Seen" }
+        XCTAssertNil(seenSwipeAction, app.debugDescription)
 
         let tabs = app.segmentedControls["inbox-message-tabs"]
         XCTAssertTrue(tabs.waitForExistence(timeout: 5), app.debugDescription)
