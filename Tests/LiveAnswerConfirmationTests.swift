@@ -169,7 +169,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         session.failReplayAfterSend = false
-        _ = try await core.resyncAndDrainOutbox()
+        // A failed replay retires its connection's core; reconnect, as the
+        // lifecycle does, with a fresh core over the same durable store.
+        let reconnected = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await reconnected.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
