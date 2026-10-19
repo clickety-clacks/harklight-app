@@ -142,9 +142,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
 
     func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
         app.launch()
-        let list = app.scrollViews.firstMatch
+        let list = app.collectionViews.firstMatch
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         let others = [app.descendants(matching: .any)["request-row-unknown-01"], app.descendants(matching: .any)["request-row-review-01"]]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
@@ -322,7 +322,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
     }
 
     func testAnsweredRequestMovesFromInboxToReplied() throws {
-        let app = launchFreshApp()
+        let app = launchFreshApp(diagnostics: true)
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
@@ -337,8 +337,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
 
         let replied = app.buttons["inbox-tab-replied"]
         XCTAssertTrue(replied.waitForExistence(timeout: 5), app.debugDescription)
+        let diagnostics = app.descendants(matching: .any)["inbox-ui-diagnostics"]
         XCTAssertTrue(replied.isSelected,
-                      "Back returns to the tab that owns the acted-on message.\n\(app.debugDescription)")
+                      "Back returns to the tab that owns the acted-on message.\(diagnostics.exists ? "\n\(diagnostics.label)" : "")\n\(app.debugDescription)")
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
                       "An answered request returns in Replied.\n\(app.debugDescription)")
         attachScreenshot("Answered request in Replied", from: app)
@@ -478,9 +479,10 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         return selectedPoint
     }
 
-    private func launchFreshApp() -> XCUIApplication {
+    private func launchFreshApp(diagnostics: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
+        if diagnostics { app.launchArguments.append("--harklight-ui-diagnostics") }
         app.launch()
         return app
     }
