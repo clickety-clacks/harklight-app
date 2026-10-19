@@ -140,26 +140,32 @@ final class NativeGuidedTLSTests: XCTestCase {
         let persistence = FileAttentionStatePersistence(directoryURL: directory)
         var store = try AttentionDomainStore(context: context, persistence: persistence)
         let runID = UUID()
+        let sessionHandle = ExactText("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
         for retainedThread in [false, true] {
             let name = retainedThread ? "retained-thread" : "empty-threads"
             if retainedThread {
-                // Restore the same committed ordinary state and identity. Add only
-                // synthetic historical conversation state; do not alter its cursor,
-                // requests, answers or replay receipts to manufacture a success.
+                // Restore the same identity and committed state. A capable server
+                // supplied the thread on the first replay. Only the older server
+                // needs synthetic saved history to reproduce its unsupported open.
                 store = try AttentionDomainStore(context: context, persistence: persistence)
                 let saved = try store.snapshot(context: context)
                 let message = try XCTUnwrap(saved.requests[request])
-                try store.applyConversation(ConversationEvent(sequence: 1,
-                    binding: ConversationBinding(request: request, revision: 1),
-                    fact: .request(sessionHandle: ExactText("retained-fixture-conversation"),
-                                   payload: message.originalPayload)), context: context)
+                if !fixture.conversationsSupported {
+                    try store.applyConversation(ConversationEvent(sequence: 1,
+                        binding: ConversationBinding(request: request, revision: 1),
+                        fact: .request(sessionHandle: sessionHandle,
+                                       payload: message.originalPayload)), context: context)
+                }
+                let retained = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request])
+                XCTAssertEqual(retained.sessionHandle, sessionHandle)
                 let after = try store.snapshot(context: context)
                 XCTAssertEqual(after.cursor, saved.cursor)
                 XCTAssertEqual(after.requests, saved.requests)
                 XCTAssertEqual(after.intents, saved.intents)
                 XCTAssertEqual(after.outbox, saved.outbox)
             }
+            let expectsConversationReplay = retainedThread || fixture.conversationsSupported
             let before = try store.snapshot(context: context)
             let threadsBefore = try store.conversationSnapshot(context: context)
             XCTAssertTrue(before.outbox.isEmpty)
@@ -188,7 +194,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                         $0.area == .relay && $0.phase == .ordinaryReplay && $0.transition == .completed &&
                             $0.attemptID == result.transportAttemptID
                     } &&
-                    (!retainedThread || journal.events.contains {
+                    (!expectsConversationReplay || journal.events.contains {
                         $0.area == .conversation && $0.phase == .conversationReplay &&
                             $0.transition == (fixture.conversationsSupported ? .completed : .rejected)
                     })
@@ -246,7 +252,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             XCTAssertNotNil(after.requests[request], "Received messages remain readable when chat is unavailable.")
             XCTAssertTrue(after.outbox.isEmpty)
             XCTAssertEqual(after.intents, before.intents)
-            XCTAssertEqual(threadsAfter.threads.count, retainedThread ? 1 : 0)
+            XCTAssertEqual(threadsAfter.threads.count, expectsConversationReplay ? 1 : 0)
             XCTAssertEqual(result.generationValidation, .passed)
             XCTAssertEqual(result.profileContextValidation, .passed)
             XCTAssertEqual(result.outcome, .confirmed)
@@ -268,7 +274,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 })
             } else {
                 XCTAssertNil(chatMessage)
-                if retainedThread {
+                if expectsConversationReplay {
                     XCTAssertTrue(journal.events.contains {
                         $0.area == .conversation && $0.phase == .conversationReplay &&
                             $0.transition == .completed && $0.attemptID == transportID
