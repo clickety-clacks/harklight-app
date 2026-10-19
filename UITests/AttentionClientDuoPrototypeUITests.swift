@@ -149,7 +149,8 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let others = [app.descendants(matching: .any)["request-row-unknown-01"], app.descendants(matching: .any)["request-row-review-01"]]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(others.allSatisfy { $0.waitForExistence(timeout: 5) }, app.debugDescription)
-        let examples = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'"))
+        let examples = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'"))
         XCTAssertTrue(examples.firstMatch.waitForExistence(timeout: 10),
                       "Local examples make the list long enough to scroll.")
         XCTAssertTrue(others.contains { $0.frame.minY > facilities.frame.minY },
@@ -336,7 +337,8 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
 
         let replied = app.buttons["inbox-tab-replied"]
         XCTAssertTrue(replied.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(replied.isSelected, "Back returns to the tab that owns the acted-on message.")
+        XCTAssertTrue(replied.isSelected,
+                      "Back returns to the tab that owns the acted-on message.\n\(app.debugDescription)")
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
                       "An answered request returns in Replied.\n\(app.debugDescription)")
         attachScreenshot("Answered request in Replied", from: app)
