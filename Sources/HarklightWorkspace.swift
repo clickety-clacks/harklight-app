@@ -277,11 +277,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func restoreLastViewedListPosition() {
-        UIDiagnostics.shared.record("inbox.restorePosition keys last=\(lastViewedSelection.map(diagnosticKey) ?? "nil") rows=\(rows.map { diagnosticKey($0.id) })")
+        let lastViewedRow = lastViewedSelection.flatMap { id in rows.first { $0.id == id } }
+        UIDiagnostics.shared.record("inbox.restorePosition last=\(lastViewedSelection.map(diagnosticKey) ?? "nil") replied=\(lastViewedRow?.belongsToReplied.description ?? "missing") rows=\(rows.map { diagnosticKey($0.id) + ":" + ($0.belongsToReplied ? "R" : "I") })")
         guard navigatedBetweenMessages else {
-            if let lastViewedSelection,
-               let lastViewedItem = rows.first(where: { $0.id == lastViewedSelection }) {
-                selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
+            if let lastViewedRow {
+                selectedTab = lastViewedRow.belongsToReplied ? .replied : .inbox
             } else if let listTabOnMessageEntry {
                 selectedTab = listTabOnMessageEntry
             }
@@ -292,13 +292,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         navigatedBetweenMessages = false
         listTabOnMessageEntry = nil
-        guard let lastViewedSelection,
-              let lastViewedItem = rows.first(where: { $0.id == lastViewedSelection }) else {
+        guard let lastViewedSelection, let lastViewedRow else {
             restoreLastViewedOnReturn = false
             UIDiagnostics.shared.record("inbox.restorePosition missing last=\(UIDiagnostics.describe(lastViewedSelection))")
             return
         }
-        selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
+        selectedTab = lastViewedRow.belongsToReplied ? .replied : .inbox
         restoreLastViewedOnReturn = true
         UIDiagnostics.shared.record("inbox.restorePosition lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) tab=\(selectedTab.rawValue)")
     }
