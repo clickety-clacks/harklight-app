@@ -79,14 +79,20 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertTrue(session.conversationACKs.isEmpty)
         XCTAssertEqual(try store.snapshot(context: context).requests.count, 1)
 
-        // Repeated foreground/push drains use the same healthy connection.
+        // A later inbox delivery uses the same connection after chat refusal.
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"later","origin":"origin","as":"message","message":{"title":"Still receiving"}}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
         let secondHigh = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(secondHigh, 1)
+        XCTAssertEqual(secondHigh, 2)
+        XCTAssertEqual(try store.snapshot(context: context).requests.count, 2)
+        XCTAssertEqual(session.ordinaryACKs.count, 2)
         XCTAssertEqual(opens, 1)
         await core.deactivate()
 
         let supported = Session(context.identity)
-        supported.ordinary = session.ordinary
+        supported.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
         supported.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0}"#)]
         let replacement = try NativeRelayCore(store: store, context: context, session: supported)
