@@ -2,7 +2,7 @@ import XCTest
 import AttentionDomain
 
 @MainActor
-final class AttentionClientDuoPrototypeUITests: XCTestCase {
+final class HarklightUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait

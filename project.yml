@@ -1,4 +1,4 @@
-name: AttentionClientDuoPrototype
+name: Harklight
 options:
   bundleIdPrefix: com.example.attentionclient
   deploymentTarget:
@@ -9,7 +9,7 @@ packages:
   HarklightNativeRelay:
     path: NativeRelay
 targets:
-  AttentionClientDuoPrototype:
+  Harklight:
     type: application
     platform: iOS
     dependencies:
@@ -23,14 +23,16 @@ targets:
         buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype
+        PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.Harklight
+        DEVELOPMENT_TEAM: Z7R59J7QV8
+        CODE_SIGN_STYLE: Automatic
         INFOPLIST_KEY_CFBundleDisplayName: Harklight
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_FILE: Configuration/HarklightInfo.plist
         IPHONEOS_DEPLOYMENT_TARGET: "27.0"
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
-        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_ALLOWED: YES
   HarklightConversationUITestHost:
     type: application
     platform: iOS
@@ -42,7 +44,7 @@ targets:
     sources:
       - path: Sources
         excludes:
-          - AttentionClientDuoPrototypeApp.swift
+          - HarklightApp.swift
       - path: UITestHost
       - path: Resources
         buildPhase: resources
@@ -56,7 +58,7 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: NO
-  AttentionClientDuoPrototypeTests:
+  HarklightTests:
     type: bundle.unit-test
     platform: iOS
     sources:
@@ -68,7 +70,7 @@ targets:
         product: AttentionDomain
       - package: HarklightNativeRelay
         product: HarklightNativeRelay
-      - target: AttentionClientDuoPrototype
+      - target: Harklight
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.tests
@@ -77,7 +79,7 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: NO
-  AttentionClientDuoPrototypeUITests:
+  HarklightUITests:
     type: bundle.ui-testing
     platform: iOS
     sources:
@@ -85,7 +87,7 @@ targets:
         excludes:
           - ConversationSampleUITests.swift
     dependencies:
-      - target: AttentionClientDuoPrototype
+      - target: Harklight
       - package: AttentionDomain
         product: AttentionDomain
     settings:
@@ -96,7 +98,7 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: NO
-        TEST_TARGET_NAME: AttentionClientDuoPrototype
+        TEST_TARGET_NAME: Harklight
   HarklightConversationUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -116,13 +118,13 @@ targets:
         CODE_SIGNING_ALLOWED: NO
         TEST_TARGET_NAME: HarklightConversationUITestHost
 schemes:
-  AttentionClientDuoPrototype:
+  Harklight:
     build:
       targets:
-        AttentionClientDuoPrototype: all
+        Harklight: all
     test:
       config: Debug
       targets:
-        - AttentionClientDuoPrototypeTests
-        - AttentionClientDuoPrototypeUITests
+        - HarklightTests
+        - HarklightUITests
         - HarklightConversationUITests

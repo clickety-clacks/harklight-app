@@ -1,0 +1,1141 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0053F575C119A8E676072E2E /* SharedMessageRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B412A14FC3FDBB5787422E3 /* SharedMessageRendering.swift */; };
+		0507747FEC7DD8500EA5ABC2 /* HarklightWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B98C9EEBD955363D00AC737 /* HarklightWorkspace.swift */; };
+		09DF70066D3C28184BECAE84 /* attention-client-m2-r1-compat.json in Resources */ = {isa = PBXBuildFile; fileRef = D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */; };
+		0BC9EB296999010C1D6DAB10 /* SampleWorkspaceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C68B1C8C342277A72B59A3D /* SampleWorkspaceUITests.swift */; };
+		0F5D4EECAC00D18DDC00A2B6 /* NativeNotificationPermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEA39F969EDE1E6B2FA7678C /* NativeNotificationPermission.swift */; };
+		12DE80E44F47DA906C83647F /* SampleLibraryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72BA617D53D9A15FC5D2F58 /* SampleLibraryTests.swift */; };
+		1322B5DC49375AD84FFCF888 /* NativeInstallationIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C4F9E78BF2506606ABA7742 /* NativeInstallationIdentity.swift */; };
+		13A97B14B08570A7E49888F0 /* InboxVisualRulesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92EB6E77E7267A8DF8A2B1DB /* InboxVisualRulesTests.swift */; };
+		1633FFB274522FF591DD5935 /* NativeRelayLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */; };
+		17DEB0A678698B7E8369CD27 /* ConversationFileStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FD0F77C018CF082033BCA6E /* ConversationFileStorage.swift */; };
+		197B6DCA970EB115C340C0F5 /* HarklightWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B98C9EEBD955363D00AC737 /* HarklightWorkspace.swift */; };
+		198D3B50DE4080A7FECBAC7B /* HarklightNativeRelay in Frameworks */ = {isa = PBXBuildFile; productRef = FC5638FF239B1E5020076982 /* HarklightNativeRelay */; };
+		1A55C162499D99E4BFDD5736 /* InboxSeenBaseline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A880C0F331A2A2B67F0EF495 /* InboxSeenBaseline.swift */; };
+		1CE1DD773EB94AA8F1EA176E /* ConversationRelayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04C670B08914C6F62366492 /* ConversationRelayTests.swift */; };
+		22DDB77EA028F97652A80979 /* NativeJoinInvitation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */; };
+		253FF6D928101B02B4093646 /* PrototypeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEC8516B5AF186CD58914057 /* PrototypeStore.swift */; };
+		25687C2E7B8A6FCEA937DE63 /* ConversationJoinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DFF574DDDAA420FDCF79D76 /* ConversationJoinTests.swift */; };
+		2B49E00075AB3899F518B1B1 /* HarklightNativeRelay in Frameworks */ = {isa = PBXBuildFile; productRef = 48453C5BED656765F891BB5E /* HarklightNativeRelay */; };
+		32C25EF03B9BF5D1C1095F73 /* DevelopmentAPNsAddressStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E324FFEA53B23DC189F2078B /* DevelopmentAPNsAddressStoreTests.swift */; };
+		353967DAF6FD69BC61B8DA36 /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 5F912978D0628D83E6624A9A /* AttentionDomain */; };
+		36286A1268E94779236BBBAB /* NativeGuidedIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2B25DD9CA13B8F3993D9BB /* NativeGuidedIdentityTests.swift */; };
+		3B5256DF599C29BBE67FDC2E /* HarklightConversationUITestHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 641E40458DF87034CD087B52 /* HarklightConversationUITestHost.swift */; };
+		4132D611C16A7A8746EC9773 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68B30BAF95249EB48C166A9 /* ConversationView.swift */; };
+		437A73A6271E258BE1CC70ED /* InboxItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9338A49F12238750815D8518 /* InboxItem.swift */; };
+		448F5E46A16D5CE40C37F8D7 /* LiveAnswerConfirmationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F28B1EA798F4B9BD079D83D /* LiveAnswerConfirmationTests.swift */; };
+		44A7FEAAFCC7C68FF7DE1B95 /* ConversationUploadCleanupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 255502492F966DB5F48DEAD8 /* ConversationUploadCleanupTests.swift */; };
+		45E6B1F77CF2F6EB2E0DA45E /* attention-client-m2-fixtures.json in Resources */ = {isa = PBXBuildFile; fileRef = EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */; };
+		45E8CA9F06237BC17E8584CC /* UIDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8286E1FCE4892900854DCF31 /* UIDiagnostics.swift */; };
+		488E20D4EC4E76FEC02C9D8C /* SampleCardScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */; };
+		49996B71D523EA72BB90C951 /* ConversationSubmissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C4376D606915388C880D04 /* ConversationSubmissionTests.swift */; };
+		4B06047B37C597023BA94175 /* NativeGuidedJoin.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */; };
+		4C2FECF89B2A209A3D6527B4 /* attention-client-m2-fixtures.json in Resources */ = {isa = PBXBuildFile; fileRef = EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */; };
+		53754083DF8313BEFA327034 /* RetractionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82A636EA3A9AD62ED6E2B6D3 /* RetractionPresentationTests.swift */; };
+		54976060574B865FBF118C4A /* NativeEnrollment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BC5F8F8783FB9F06698C460 /* NativeEnrollment.swift */; };
+		549FA351946B6562D74E529B /* NativeGuidedJoinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F320A27E5B0E129F5A38828 /* NativeGuidedJoinTests.swift */; };
+		5557A9F9F180F64E0EC99108 /* NativeEnrollment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BC5F8F8783FB9F06698C460 /* NativeEnrollment.swift */; };
+		57CA950E036FB4F19ED8A29A /* ConversationFileWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0AD8019ECA7CAEFEAEDDF5 /* ConversationFileWireTests.swift */; };
+		583306081ABB5948FB0C9A78 /* UIDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8286E1FCE4892900854DCF31 /* UIDiagnostics.swift */; };
+		5B3C628638BE1366BBCE7A08 /* SampleMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 321798AEF657AEBF709D6F76 /* SampleMedia.swift */; };
+		5FAA08D77C7D7A90F5B0D173 /* BoundedNativeJoinExchange.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */; };
+		63234435983A5FA811AC667C /* InboxSeenBaselineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 324D024284FFFF7D0170CD99 /* InboxSeenBaselineTests.swift */; };
+		63F44E763F683E3A18C463A0 /* SenderRevisionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3AD83C5473F6DFB7981B536 /* SenderRevisionPresentationTests.swift */; };
+		68E5DA318170672675F2F3F0 /* NativeJoinInvitation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */; };
+		695B08E084DD584FDFDBBFC4 /* DevelopmentPushRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 407E539F1063EFB0E135C9A1 /* DevelopmentPushRegistration.swift */; };
+		6A5434D1F1A9F8C3F6CE2C84 /* InboxItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9338A49F12238750815D8518 /* InboxItem.swift */; };
+		6D4480601A5BBB0C9E99A2B7 /* SampleFixtureDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */; };
+		6DDCBA19885E60DDD5D98579 /* NativeNotificationRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52949BDC0CBA558115562E33 /* NativeNotificationRouting.swift */; };
+		6E6C074BD5717BB6D2CBDD57 /* HarklightNativeRelay in Frameworks */ = {isa = PBXBuildFile; productRef = C116660513A2FE807B80AAD3 /* HarklightNativeRelay */; };
+		6FCE111E5FBE12F820254A81 /* attention-client-m2-fixtures.json in Resources */ = {isa = PBXBuildFile; fileRef = EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */; };
+		73E1C95C8C0B539645C93648 /* NativeRelayLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */; };
+		764918613CBACFC9E367C980 /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 5491828815E9F9310A8FB19B /* AttentionDomain */; };
+		782CD559247C24AFCC18A24F /* LiveContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7753DC115D8E0AF282B32EB7 /* LiveContentView.swift */; };
+		78CBE0A1F4BC73DE17C9F271 /* NativeAppLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */; };
+		7BDFD2B2D70BD71596D8B6C5 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68B30BAF95249EB48C166A9 /* ConversationView.swift */; };
+		8DB41E7415DD218BC6E405FB /* LiveContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7753DC115D8E0AF282B32EB7 /* LiveContentView.swift */; };
+		8E80CAD6B583184A43DBBA80 /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 9207A7DBF50D40572ADD6DC0 /* AttentionDomain */; };
+		8F92F083F4EC747848ADD5E8 /* NativeInstallationIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C4F9E78BF2506606ABA7742 /* NativeInstallationIdentity.swift */; };
+		9532F1957B8A1A801102CE86 /* NativeNotificationPermissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69EEC3F07C72D78B3516529C /* NativeNotificationPermissionTests.swift */; };
+		99600D5791D337E606EFF33F /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 5954B3B8B73E147E3A8640AB /* README.md */; };
+		99FA8FC1192D50771C2D80A6 /* SampleCardScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */; };
+		9D262F1A9341068BB8EFA25E /* NativeAppLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */; };
+		A27D48651D89DAC048631C30 /* AttentionTierClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D08AC0D6D784E9C72FE43E /* AttentionTierClientTests.swift */; };
+		A3CF1B415AF68605EE55643F /* SampleFixtureDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */; };
+		A4B67EB0B1355A91F57E9C54 /* InboxMessageSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B98DB32B39F5FB6D0FADF4F /* InboxMessageSurface.swift */; };
+		A633968774AF49ECD2385C61 /* ConversationPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CB8B5332A9351FEA4DE078 /* ConversationPresentationTests.swift */; };
+		AA155EE708EDFA1CD6C9FC25 /* PrototypeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEC8516B5AF186CD58914057 /* PrototypeStore.swift */; };
+		AA58624DC49964D8D5B07CB8 /* ConversationSampleUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25F29EBA65F53DDD48291079 /* ConversationSampleUITests.swift */; };
+		AE4F3DDAE591865D84D685E0 /* NativeClientDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */; };
+		B3C08BF4ABBD8D6D3C45506B /* NativeNotificationRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52949BDC0CBA558115562E33 /* NativeNotificationRouting.swift */; };
+		B5518512516A448A8F26776D /* attention-client-m2-r1-compat.json in Resources */ = {isa = PBXBuildFile; fileRef = D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */; };
+		BE643B97C8A33F2D233B3982 /* HarklightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F494026B1521CC27BCB3AA3 /* HarklightTests.swift */; };
+		C0E907D35A2BE0D76A5389AE /* NativeNotificationPermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEA39F969EDE1E6B2FA7678C /* NativeNotificationPermission.swift */; };
+		C2C9693CD9622596022A9C6C /* ConversationDomainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E74397EED841B8F6A5601C9 /* ConversationDomainTests.swift */; };
+		C3F2ACDF6B6FDBEBF2C5E6FC /* BoundedNativeJoinExchange.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */; };
+		C58F9DAB29034D462893213A /* SampleMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3B9732F966E6F1372B2C35C /* SampleMessages.swift */; };
+		D115595E684D1EA54457AEF2 /* NativeEnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF276C5C5CAA98BC82FE81BB /* NativeEnrollmentView.swift */; };
+		D3AB5F8C10715ACB5A57BA91 /* NativeGuidedJoinCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F233FE6DF42A345529BFBCB9 /* NativeGuidedJoinCoordinator.swift */; };
+		D41A9266F23BD611E896E68C /* NativeGuidedTLSTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 130EE825A778D0A7E64C7673 /* NativeGuidedTLSTests.swift */; };
+		D6B291EA7DB6E31752A36F1A /* NativePushRefreshTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 396BC71281F0B01FF57E83FB /* NativePushRefreshTests.swift */; };
+		D733B61044A60B58FF0DC7C8 /* InboxSeenBaseline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A880C0F331A2A2B67F0EF495 /* InboxSeenBaseline.swift */; };
+		D806EBE7DE30D227ED11206E /* NativeGuidedJoinCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F233FE6DF42A345529BFBCB9 /* NativeGuidedJoinCoordinator.swift */; };
+		E38A481FFBFBCE5A07ECC09A /* SampleMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 321798AEF657AEBF709D6F76 /* SampleMedia.swift */; };
+		EB268D8018E0E94991604D07 /* InstalledRelayDecoderFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B2803FE632975943E92BCAF /* InstalledRelayDecoderFixture.swift */; };
+		EE3096EA3E5BE32F11F847AC /* attention-client-m2-r1-compat.json in Resources */ = {isa = PBXBuildFile; fileRef = D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */; };
+		F1317BCFF0AEE23CF8A4DF01 /* NativeEnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF276C5C5CAA98BC82FE81BB /* NativeEnrollmentView.swift */; };
+		F15AF91B58F871F3A3851A94 /* SharedMessageRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B412A14FC3FDBB5787422E3 /* SharedMessageRendering.swift */; };
+		F18F75AD2A5194919506AFED /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 686F4569923D303921C5E650 /* AttentionDomain */; };
+		F2FA7ED45E91937AC37A2944 /* InboxPagingSessionTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11A405C60454A2FFEFCFDA45 /* InboxPagingSessionTestSupport.swift */; };
+		F36887DCDAA5F75F19215E44 /* HarklightUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C8B4B064109D84BB2B0FBF2 /* HarklightUITests.swift */; };
+		F6557C25C76DBFDCB628E154 /* SampleMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3B9732F966E6F1372B2C35C /* SampleMessages.swift */; };
+		F6D494F49D42E37FE1769737 /* HarklightApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EA260044E9E03BE572ABF11 /* HarklightApp.swift */; };
+		F81B025E53C8D48163280624 /* ConversationFileStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FD0F77C018CF082033BCA6E /* ConversationFileStorage.swift */; };
+		FAAEC6DD7ADD88708C8B5C30 /* InboxMessageSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B98DB32B39F5FB6D0FADF4F /* InboxMessageSurface.swift */; };
+		FC1C60DA08989C469053AE8F /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 8045345F214DAA29775F7EB0 /* AttentionDomain */; };
+		FC59D2E238B12E619897AF1C /* NativeGuidedJoin.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */; };
+		FD60725972D79FDF0DB82F5E /* DevelopmentPushRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 407E539F1063EFB0E135C9A1 /* DevelopmentPushRegistration.swift */; };
+		FE9A2435E3DEEA8115BA04B5 /* NativeClientDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A5D2CF80EBDF76757358E802 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 65E0F54CAE33A9EC4FF405E2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2ADDD431D61AFF533D88C48C;
+			remoteInfo = Harklight;
+		};
+		C9A9F9D128F6AE5FA7E10495 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 65E0F54CAE33A9EC4FF405E2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 759D83DCB9456A16ABDFA1B3;
+			remoteInfo = HarklightConversationUITestHost;
+		};
+		FAC27E8E91B10CCEED0C79F5 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 65E0F54CAE33A9EC4FF405E2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2ADDD431D61AFF533D88C48C;
+			remoteInfo = Harklight;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleFixtureDomain.swift; sourceTree = "<group>"; };
+		09DB4C20F00F7F2F62E90594 /* HarklightConversationUITestHost.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HarklightConversationUITestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0FD0F77C018CF082033BCA6E /* ConversationFileStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationFileStorage.swift; sourceTree = "<group>"; };
+		11A405C60454A2FFEFCFDA45 /* InboxPagingSessionTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxPagingSessionTestSupport.swift; sourceTree = "<group>"; };
+		130EE825A778D0A7E64C7673 /* NativeGuidedTLSTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedTLSTests.swift; sourceTree = "<group>"; };
+		1B2803FE632975943E92BCAF /* InstalledRelayDecoderFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstalledRelayDecoderFixture.swift; sourceTree = "<group>"; };
+		255502492F966DB5F48DEAD8 /* ConversationUploadCleanupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationUploadCleanupTests.swift; sourceTree = "<group>"; };
+		25F29EBA65F53DDD48291079 /* ConversationSampleUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSampleUITests.swift; sourceTree = "<group>"; };
+		2B2B25DD9CA13B8F3993D9BB /* NativeGuidedIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedIdentityTests.swift; sourceTree = "<group>"; };
+		2B412A14FC3FDBB5787422E3 /* SharedMessageRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedMessageRendering.swift; sourceTree = "<group>"; };
+		2BC5F8F8783FB9F06698C460 /* NativeEnrollment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEnrollment.swift; sourceTree = "<group>"; };
+		2C8B4B064109D84BB2B0FBF2 /* HarklightUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarklightUITests.swift; sourceTree = "<group>"; };
+		2F28B1EA798F4B9BD079D83D /* LiveAnswerConfirmationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveAnswerConfirmationTests.swift; sourceTree = "<group>"; };
+		2F61C6602BDC255EEA48B801 /* NativeRelay */ = {isa = PBXFileReference; lastKnownFileType = folder; name = NativeRelay; path = NativeRelay; sourceTree = SOURCE_ROOT; };
+		321798AEF657AEBF709D6F76 /* SampleMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleMedia.swift; sourceTree = "<group>"; };
+		324D024284FFFF7D0170CD99 /* InboxSeenBaselineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxSeenBaselineTests.swift; sourceTree = "<group>"; };
+		396BC71281F0B01FF57E83FB /* NativePushRefreshTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushRefreshTests.swift; sourceTree = "<group>"; };
+		3DFF574DDDAA420FDCF79D76 /* ConversationJoinTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationJoinTests.swift; sourceTree = "<group>"; };
+		407E539F1063EFB0E135C9A1 /* DevelopmentPushRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentPushRegistration.swift; sourceTree = "<group>"; };
+		4B98C9EEBD955363D00AC737 /* HarklightWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarklightWorkspace.swift; sourceTree = "<group>"; };
+		4BD61AC108D650D1CBEDF256 /* AttentionDomain */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AttentionDomain; path = AttentionDomain; sourceTree = SOURCE_ROOT; };
+		4F494026B1521CC27BCB3AA3 /* HarklightTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarklightTests.swift; sourceTree = "<group>"; };
+		52949BDC0CBA558115562E33 /* NativeNotificationRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeNotificationRouting.swift; sourceTree = "<group>"; };
+		53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAppLaunch.swift; sourceTree = "<group>"; };
+		5954B3B8B73E147E3A8640AB /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		5E74397EED841B8F6A5601C9 /* ConversationDomainTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDomainTests.swift; sourceTree = "<group>"; };
+		5F320A27E5B0E129F5A38828 /* NativeGuidedJoinTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedJoinTests.swift; sourceTree = "<group>"; };
+		641E40458DF87034CD087B52 /* HarklightConversationUITestHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarklightConversationUITestHost.swift; sourceTree = "<group>"; };
+		660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleCardScreen.swift; sourceTree = "<group>"; };
+		69EEC3F07C72D78B3516529C /* NativeNotificationPermissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeNotificationPermissionTests.swift; sourceTree = "<group>"; };
+		70CB8B5332A9351FEA4DE078 /* ConversationPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentationTests.swift; sourceTree = "<group>"; };
+		744822124B96AC0842A6CD4D /* HarklightConversationUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HarklightConversationUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		7753DC115D8E0AF282B32EB7 /* LiveContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveContentView.swift; sourceTree = "<group>"; };
+		7B98DB32B39F5FB6D0FADF4F /* InboxMessageSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxMessageSurface.swift; sourceTree = "<group>"; };
+		7C4F9E78BF2506606ABA7742 /* NativeInstallationIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeInstallationIdentity.swift; sourceTree = "<group>"; };
+		8286E1FCE4892900854DCF31 /* UIDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIDiagnostics.swift; sourceTree = "<group>"; };
+		82A636EA3A9AD62ED6E2B6D3 /* RetractionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetractionPresentationTests.swift; sourceTree = "<group>"; };
+		8C68B1C8C342277A72B59A3D /* SampleWorkspaceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleWorkspaceUITests.swift; sourceTree = "<group>"; };
+		92EB6E77E7267A8DF8A2B1DB /* InboxVisualRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxVisualRulesTests.swift; sourceTree = "<group>"; };
+		9338A49F12238750815D8518 /* InboxItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxItem.swift; sourceTree = "<group>"; };
+		962E8942C7FC38C447AABC29 /* HarklightTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HarklightTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9EA260044E9E03BE572ABF11 /* HarklightApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarklightApp.swift; sourceTree = "<group>"; };
+		9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeJoinInvitation.swift; sourceTree = "<group>"; };
+		A880C0F331A2A2B67F0EF495 /* InboxSeenBaseline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxSeenBaseline.swift; sourceTree = "<group>"; };
+		AEC8516B5AF186CD58914057 /* PrototypeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrototypeStore.swift; sourceTree = "<group>"; };
+		AF276C5C5CAA98BC82FE81BB /* NativeEnrollmentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEnrollmentView.swift; sourceTree = "<group>"; };
+		B3AD83C5473F6DFB7981B536 /* SenderRevisionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderRevisionPresentationTests.swift; sourceTree = "<group>"; };
+		B3F0434BA70BF47D003E427C /* HarklightUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HarklightUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B72BA617D53D9A15FC5D2F58 /* SampleLibraryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleLibraryTests.swift; sourceTree = "<group>"; };
+		D3B9732F966E6F1372B2C35C /* SampleMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleMessages.swift; sourceTree = "<group>"; };
+		D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedNativeJoinExchange.swift; sourceTree = "<group>"; };
+		D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "attention-client-m2-r1-compat.json"; sourceTree = "<group>"; };
+		D8D93E814ACCCDA16B02D075 /* Harklight.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Harklight.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRelayLifecycle.swift; sourceTree = "<group>"; };
+		DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedJoin.swift; sourceTree = "<group>"; };
+		E324FFEA53B23DC189F2078B /* DevelopmentAPNsAddressStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentAPNsAddressStoreTests.swift; sourceTree = "<group>"; };
+		E5D08AC0D6D784E9C72FE43E /* AttentionTierClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionTierClientTests.swift; sourceTree = "<group>"; };
+		EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "attention-client-m2-fixtures.json"; sourceTree = "<group>"; };
+		EE0AD8019ECA7CAEFEAEDDF5 /* ConversationFileWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationFileWireTests.swift; sourceTree = "<group>"; };
+		EEA39F969EDE1E6B2FA7678C /* NativeNotificationPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeNotificationPermission.swift; sourceTree = "<group>"; };
+		F04C670B08914C6F62366492 /* ConversationRelayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRelayTests.swift; sourceTree = "<group>"; };
+		F0C4376D606915388C880D04 /* ConversationSubmissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSubmissionTests.swift; sourceTree = "<group>"; };
+		F233FE6DF42A345529BFBCB9 /* NativeGuidedJoinCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedJoinCoordinator.swift; sourceTree = "<group>"; };
+		F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeClientDiagnostics.swift; sourceTree = "<group>"; };
+		F68B30BAF95249EB48C166A9 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		3C0A9C8378588271D5FD318F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FC1C60DA08989C469053AE8F /* AttentionDomain in Frameworks */,
+				198D3B50DE4080A7FECBAC7B /* HarklightNativeRelay in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4B8B058B821EA1534994B131 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8E80CAD6B583184A43DBBA80 /* AttentionDomain in Frameworks */,
+				2B49E00075AB3899F518B1B1 /* HarklightNativeRelay in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6F776F7CC722A8469954E67F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				764918613CBACFC9E367C980 /* AttentionDomain in Frameworks */,
+				6E6C074BD5717BB6D2CBDD57 /* HarklightNativeRelay in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		91F7E28B773FC094C257BFC4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				353967DAF6FD69BC61B8DA36 /* AttentionDomain in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CF0F596BA27F7978DB4001FA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F18F75AD2A5194919506AFED /* AttentionDomain in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		4354075FA994AADEF393D3D1 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				4BD61AC108D650D1CBEDF256 /* AttentionDomain */,
+				2F61C6602BDC255EEA48B801 /* NativeRelay */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		4F07B0696947245A002E287D /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */,
+				D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		579221C23F35915E70DA3221 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				25F29EBA65F53DDD48291079 /* ConversationSampleUITests.swift */,
+				2C8B4B064109D84BB2B0FBF2 /* HarklightUITests.swift */,
+				8C68B1C8C342277A72B59A3D /* SampleWorkspaceUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+		61A85EC4CCB753A6BADAD7EA /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				5954B3B8B73E147E3A8640AB /* README.md */,
+			);
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
+		6BFD38E38AB4D05164ED1A05 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				E5D08AC0D6D784E9C72FE43E /* AttentionTierClientTests.swift */,
+				5E74397EED841B8F6A5601C9 /* ConversationDomainTests.swift */,
+				EE0AD8019ECA7CAEFEAEDDF5 /* ConversationFileWireTests.swift */,
+				3DFF574DDDAA420FDCF79D76 /* ConversationJoinTests.swift */,
+				70CB8B5332A9351FEA4DE078 /* ConversationPresentationTests.swift */,
+				F04C670B08914C6F62366492 /* ConversationRelayTests.swift */,
+				F0C4376D606915388C880D04 /* ConversationSubmissionTests.swift */,
+				255502492F966DB5F48DEAD8 /* ConversationUploadCleanupTests.swift */,
+				E324FFEA53B23DC189F2078B /* DevelopmentAPNsAddressStoreTests.swift */,
+				4F494026B1521CC27BCB3AA3 /* HarklightTests.swift */,
+				11A405C60454A2FFEFCFDA45 /* InboxPagingSessionTestSupport.swift */,
+				324D024284FFFF7D0170CD99 /* InboxSeenBaselineTests.swift */,
+				92EB6E77E7267A8DF8A2B1DB /* InboxVisualRulesTests.swift */,
+				1B2803FE632975943E92BCAF /* InstalledRelayDecoderFixture.swift */,
+				2F28B1EA798F4B9BD079D83D /* LiveAnswerConfirmationTests.swift */,
+				2B2B25DD9CA13B8F3993D9BB /* NativeGuidedIdentityTests.swift */,
+				5F320A27E5B0E129F5A38828 /* NativeGuidedJoinTests.swift */,
+				130EE825A778D0A7E64C7673 /* NativeGuidedTLSTests.swift */,
+				69EEC3F07C72D78B3516529C /* NativeNotificationPermissionTests.swift */,
+				396BC71281F0B01FF57E83FB /* NativePushRefreshTests.swift */,
+				82A636EA3A9AD62ED6E2B6D3 /* RetractionPresentationTests.swift */,
+				B72BA617D53D9A15FC5D2F58 /* SampleLibraryTests.swift */,
+				B3AD83C5473F6DFB7981B536 /* SenderRevisionPresentationTests.swift */,
+				61A85EC4CCB753A6BADAD7EA /* Fixtures */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		6E8E45F8386F230FA1D5124D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D8D93E814ACCCDA16B02D075 /* Harklight.app */,
+				09DB4C20F00F7F2F62E90594 /* HarklightConversationUITestHost.app */,
+				744822124B96AC0842A6CD4D /* HarklightConversationUITests.xctest */,
+				962E8942C7FC38C447AABC29 /* HarklightTests.xctest */,
+				B3F0434BA70BF47D003E427C /* HarklightUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		8697B3B598B7EE2125CD5327 /* UITestHost */ = {
+			isa = PBXGroup;
+			children = (
+				641E40458DF87034CD087B52 /* HarklightConversationUITestHost.swift */,
+			);
+			path = UITestHost;
+			sourceTree = "<group>";
+		};
+		A519C56B747BEF4CA5C1F171 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */,
+				0FD0F77C018CF082033BCA6E /* ConversationFileStorage.swift */,
+				F68B30BAF95249EB48C166A9 /* ConversationView.swift */,
+				407E539F1063EFB0E135C9A1 /* DevelopmentPushRegistration.swift */,
+				9EA260044E9E03BE572ABF11 /* HarklightApp.swift */,
+				4B98C9EEBD955363D00AC737 /* HarklightWorkspace.swift */,
+				9338A49F12238750815D8518 /* InboxItem.swift */,
+				7B98DB32B39F5FB6D0FADF4F /* InboxMessageSurface.swift */,
+				A880C0F331A2A2B67F0EF495 /* InboxSeenBaseline.swift */,
+				7753DC115D8E0AF282B32EB7 /* LiveContentView.swift */,
+				53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */,
+				F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */,
+				2BC5F8F8783FB9F06698C460 /* NativeEnrollment.swift */,
+				AF276C5C5CAA98BC82FE81BB /* NativeEnrollmentView.swift */,
+				DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */,
+				F233FE6DF42A345529BFBCB9 /* NativeGuidedJoinCoordinator.swift */,
+				7C4F9E78BF2506606ABA7742 /* NativeInstallationIdentity.swift */,
+				9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */,
+				EEA39F969EDE1E6B2FA7678C /* NativeNotificationPermission.swift */,
+				52949BDC0CBA558115562E33 /* NativeNotificationRouting.swift */,
+				DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */,
+				AEC8516B5AF186CD58914057 /* PrototypeStore.swift */,
+				660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */,
+				01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */,
+				321798AEF657AEBF709D6F76 /* SampleMedia.swift */,
+				D3B9732F966E6F1372B2C35C /* SampleMessages.swift */,
+				2B412A14FC3FDBB5787422E3 /* SharedMessageRendering.swift */,
+				8286E1FCE4892900854DCF31 /* UIDiagnostics.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		B43F62B0F067CF241550A906 = {
+			isa = PBXGroup;
+			children = (
+				4354075FA994AADEF393D3D1 /* Packages */,
+				4F07B0696947245A002E287D /* Resources */,
+				A519C56B747BEF4CA5C1F171 /* Sources */,
+				6BFD38E38AB4D05164ED1A05 /* Tests */,
+				8697B3B598B7EE2125CD5327 /* UITestHost */,
+				579221C23F35915E70DA3221 /* UITests */,
+				6E8E45F8386F230FA1D5124D /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2ADDD431D61AFF533D88C48C /* Harklight */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 67C9BA428DB86FD2D8A9219B /* Build configuration list for PBXNativeTarget "Harklight" */;
+			buildPhases = (
+				9E2B8E73804442DFBB5531E1 /* Sources */,
+				77A9AB6BA1852269793FE05A /* Resources */,
+				6F776F7CC722A8469954E67F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Harklight;
+			packageProductDependencies = (
+				5491828815E9F9310A8FB19B /* AttentionDomain */,
+				C116660513A2FE807B80AAD3 /* HarklightNativeRelay */,
+			);
+			productName = Harklight;
+			productReference = D8D93E814ACCCDA16B02D075 /* Harklight.app */;
+			productType = "com.apple.product-type.application";
+		};
+		759D83DCB9456A16ABDFA1B3 /* HarklightConversationUITestHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 29B8D8D9CA49E683B5CE07F4 /* Build configuration list for PBXNativeTarget "HarklightConversationUITestHost" */;
+			buildPhases = (
+				5E3BAD43CFB4DD3FDD8111D8 /* Sources */,
+				1734126829A00D864C8CE855 /* Resources */,
+				4B8B058B821EA1534994B131 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HarklightConversationUITestHost;
+			packageProductDependencies = (
+				9207A7DBF50D40572ADD6DC0 /* AttentionDomain */,
+				48453C5BED656765F891BB5E /* HarklightNativeRelay */,
+			);
+			productName = HarklightConversationUITestHost;
+			productReference = 09DB4C20F00F7F2F62E90594 /* HarklightConversationUITestHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+		81AC58E6E599B744FFFC142B /* HarklightConversationUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5F2AED0E7AF9B8607DE6AE68 /* Build configuration list for PBXNativeTarget "HarklightConversationUITests" */;
+			buildPhases = (
+				5EAF22E9FF570F2B11D0F5B6 /* Sources */,
+				91F7E28B773FC094C257BFC4 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				01A8BA009EFAFC5A48BC28EF /* PBXTargetDependency */,
+			);
+			name = HarklightConversationUITests;
+			packageProductDependencies = (
+				5F912978D0628D83E6624A9A /* AttentionDomain */,
+			);
+			productName = HarklightConversationUITests;
+			productReference = 744822124B96AC0842A6CD4D /* HarklightConversationUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		D15DB2522363B6D2EB4CBF83 /* HarklightUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1E8EFB338516EAFF0D73314A /* Build configuration list for PBXNativeTarget "HarklightUITests" */;
+			buildPhases = (
+				EC1DCFBCEDF2DD3D481F22D1 /* Sources */,
+				CF0F596BA27F7978DB4001FA /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BFC32EBB987CECFF224F9C61 /* PBXTargetDependency */,
+			);
+			name = HarklightUITests;
+			packageProductDependencies = (
+				686F4569923D303921C5E650 /* AttentionDomain */,
+			);
+			productName = HarklightUITests;
+			productReference = B3F0434BA70BF47D003E427C /* HarklightUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		D190648242CFB697DA9999EC /* HarklightTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E0A3D34F61079E35299216CC /* Build configuration list for PBXNativeTarget "HarklightTests" */;
+			buildPhases = (
+				2E9F5DED9DFFEEB4376DAE82 /* Sources */,
+				128CE33B733C6ABF0715F7E7 /* Resources */,
+				3C0A9C8378588271D5FD318F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1DB83E28EF35E92D2746FACF /* PBXTargetDependency */,
+			);
+			name = HarklightTests;
+			packageProductDependencies = (
+				8045345F214DAA29775F7EB0 /* AttentionDomain */,
+				FC5638FF239B1E5020076982 /* HarklightNativeRelay */,
+			);
+			productName = HarklightTests;
+			productReference = 962E8942C7FC38C447AABC29 /* HarklightTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		65E0F54CAE33A9EC4FF405E2 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					2ADDD431D61AFF533D88C48C = {
+						DevelopmentTeam = Z7R59J7QV8;
+						ProvisioningStyle = Automatic;
+					};
+					81AC58E6E599B744FFFC142B = {
+						TestTargetID = 759D83DCB9456A16ABDFA1B3;
+					};
+					D15DB2522363B6D2EB4CBF83 = {
+						TestTargetID = 2ADDD431D61AFF533D88C48C;
+					};
+				};
+			};
+			buildConfigurationList = D5AAEC1254AAF5147EC83489 /* Build configuration list for PBXProject "Harklight" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B43F62B0F067CF241550A906;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				FA71828AC67489CFD75DB4FC /* XCLocalSwiftPackageReference "AttentionDomain" */,
+				725D27150C4829CA67513F9A /* XCLocalSwiftPackageReference "NativeRelay" */,
+			);
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				2ADDD431D61AFF533D88C48C /* Harklight */,
+				759D83DCB9456A16ABDFA1B3 /* HarklightConversationUITestHost */,
+				81AC58E6E599B744FFFC142B /* HarklightConversationUITests */,
+				D190648242CFB697DA9999EC /* HarklightTests */,
+				D15DB2522363B6D2EB4CBF83 /* HarklightUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		128CE33B733C6ABF0715F7E7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				99600D5791D337E606EFF33F /* README.md in Resources */,
+				45E6B1F77CF2F6EB2E0DA45E /* attention-client-m2-fixtures.json in Resources */,
+				B5518512516A448A8F26776D /* attention-client-m2-r1-compat.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1734126829A00D864C8CE855 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4C2FECF89B2A209A3D6527B4 /* attention-client-m2-fixtures.json in Resources */,
+				09DF70066D3C28184BECAE84 /* attention-client-m2-r1-compat.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		77A9AB6BA1852269793FE05A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6FCE111E5FBE12F820254A81 /* attention-client-m2-fixtures.json in Resources */,
+				EE3096EA3E5BE32F11F847AC /* attention-client-m2-r1-compat.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2E9F5DED9DFFEEB4376DAE82 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A27D48651D89DAC048631C30 /* AttentionTierClientTests.swift in Sources */,
+				C2C9693CD9622596022A9C6C /* ConversationDomainTests.swift in Sources */,
+				57CA950E036FB4F19ED8A29A /* ConversationFileWireTests.swift in Sources */,
+				25687C2E7B8A6FCEA937DE63 /* ConversationJoinTests.swift in Sources */,
+				A633968774AF49ECD2385C61 /* ConversationPresentationTests.swift in Sources */,
+				1CE1DD773EB94AA8F1EA176E /* ConversationRelayTests.swift in Sources */,
+				49996B71D523EA72BB90C951 /* ConversationSubmissionTests.swift in Sources */,
+				44A7FEAAFCC7C68FF7DE1B95 /* ConversationUploadCleanupTests.swift in Sources */,
+				32C25EF03B9BF5D1C1095F73 /* DevelopmentAPNsAddressStoreTests.swift in Sources */,
+				BE643B97C8A33F2D233B3982 /* HarklightTests.swift in Sources */,
+				F2FA7ED45E91937AC37A2944 /* InboxPagingSessionTestSupport.swift in Sources */,
+				63234435983A5FA811AC667C /* InboxSeenBaselineTests.swift in Sources */,
+				13A97B14B08570A7E49888F0 /* InboxVisualRulesTests.swift in Sources */,
+				EB268D8018E0E94991604D07 /* InstalledRelayDecoderFixture.swift in Sources */,
+				448F5E46A16D5CE40C37F8D7 /* LiveAnswerConfirmationTests.swift in Sources */,
+				36286A1268E94779236BBBAB /* NativeGuidedIdentityTests.swift in Sources */,
+				549FA351946B6562D74E529B /* NativeGuidedJoinTests.swift in Sources */,
+				D41A9266F23BD611E896E68C /* NativeGuidedTLSTests.swift in Sources */,
+				9532F1957B8A1A801102CE86 /* NativeNotificationPermissionTests.swift in Sources */,
+				D6B291EA7DB6E31752A36F1A /* NativePushRefreshTests.swift in Sources */,
+				53754083DF8313BEFA327034 /* RetractionPresentationTests.swift in Sources */,
+				12DE80E44F47DA906C83647F /* SampleLibraryTests.swift in Sources */,
+				63F44E763F683E3A18C463A0 /* SenderRevisionPresentationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5E3BAD43CFB4DD3FDD8111D8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5FAA08D77C7D7A90F5B0D173 /* BoundedNativeJoinExchange.swift in Sources */,
+				F81B025E53C8D48163280624 /* ConversationFileStorage.swift in Sources */,
+				7BDFD2B2D70BD71596D8B6C5 /* ConversationView.swift in Sources */,
+				FD60725972D79FDF0DB82F5E /* DevelopmentPushRegistration.swift in Sources */,
+				3B5256DF599C29BBE67FDC2E /* HarklightConversationUITestHost.swift in Sources */,
+				0507747FEC7DD8500EA5ABC2 /* HarklightWorkspace.swift in Sources */,
+				437A73A6271E258BE1CC70ED /* InboxItem.swift in Sources */,
+				FAAEC6DD7ADD88708C8B5C30 /* InboxMessageSurface.swift in Sources */,
+				D733B61044A60B58FF0DC7C8 /* InboxSeenBaseline.swift in Sources */,
+				8DB41E7415DD218BC6E405FB /* LiveContentView.swift in Sources */,
+				78CBE0A1F4BC73DE17C9F271 /* NativeAppLaunch.swift in Sources */,
+				AE4F3DDAE591865D84D685E0 /* NativeClientDiagnostics.swift in Sources */,
+				5557A9F9F180F64E0EC99108 /* NativeEnrollment.swift in Sources */,
+				F1317BCFF0AEE23CF8A4DF01 /* NativeEnrollmentView.swift in Sources */,
+				FC59D2E238B12E619897AF1C /* NativeGuidedJoin.swift in Sources */,
+				D806EBE7DE30D227ED11206E /* NativeGuidedJoinCoordinator.swift in Sources */,
+				8F92F083F4EC747848ADD5E8 /* NativeInstallationIdentity.swift in Sources */,
+				68E5DA318170672675F2F3F0 /* NativeJoinInvitation.swift in Sources */,
+				C0E907D35A2BE0D76A5389AE /* NativeNotificationPermission.swift in Sources */,
+				B3C08BF4ABBD8D6D3C45506B /* NativeNotificationRouting.swift in Sources */,
+				73E1C95C8C0B539645C93648 /* NativeRelayLifecycle.swift in Sources */,
+				253FF6D928101B02B4093646 /* PrototypeStore.swift in Sources */,
+				99FA8FC1192D50771C2D80A6 /* SampleCardScreen.swift in Sources */,
+				A3CF1B415AF68605EE55643F /* SampleFixtureDomain.swift in Sources */,
+				5B3C628638BE1366BBCE7A08 /* SampleMedia.swift in Sources */,
+				F6557C25C76DBFDCB628E154 /* SampleMessages.swift in Sources */,
+				F15AF91B58F871F3A3851A94 /* SharedMessageRendering.swift in Sources */,
+				45E8CA9F06237BC17E8584CC /* UIDiagnostics.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5EAF22E9FF570F2B11D0F5B6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA58624DC49964D8D5B07CB8 /* ConversationSampleUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9E2B8E73804442DFBB5531E1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C3F2ACDF6B6FDBEBF2C5E6FC /* BoundedNativeJoinExchange.swift in Sources */,
+				17DEB0A678698B7E8369CD27 /* ConversationFileStorage.swift in Sources */,
+				4132D611C16A7A8746EC9773 /* ConversationView.swift in Sources */,
+				695B08E084DD584FDFDBBFC4 /* DevelopmentPushRegistration.swift in Sources */,
+				F6D494F49D42E37FE1769737 /* HarklightApp.swift in Sources */,
+				197B6DCA970EB115C340C0F5 /* HarklightWorkspace.swift in Sources */,
+				6A5434D1F1A9F8C3F6CE2C84 /* InboxItem.swift in Sources */,
+				A4B67EB0B1355A91F57E9C54 /* InboxMessageSurface.swift in Sources */,
+				1A55C162499D99E4BFDD5736 /* InboxSeenBaseline.swift in Sources */,
+				782CD559247C24AFCC18A24F /* LiveContentView.swift in Sources */,
+				9D262F1A9341068BB8EFA25E /* NativeAppLaunch.swift in Sources */,
+				FE9A2435E3DEEA8115BA04B5 /* NativeClientDiagnostics.swift in Sources */,
+				54976060574B865FBF118C4A /* NativeEnrollment.swift in Sources */,
+				D115595E684D1EA54457AEF2 /* NativeEnrollmentView.swift in Sources */,
+				4B06047B37C597023BA94175 /* NativeGuidedJoin.swift in Sources */,
+				D3AB5F8C10715ACB5A57BA91 /* NativeGuidedJoinCoordinator.swift in Sources */,
+				1322B5DC49375AD84FFCF888 /* NativeInstallationIdentity.swift in Sources */,
+				22DDB77EA028F97652A80979 /* NativeJoinInvitation.swift in Sources */,
+				0F5D4EECAC00D18DDC00A2B6 /* NativeNotificationPermission.swift in Sources */,
+				6DDCBA19885E60DDD5D98579 /* NativeNotificationRouting.swift in Sources */,
+				1633FFB274522FF591DD5935 /* NativeRelayLifecycle.swift in Sources */,
+				AA155EE708EDFA1CD6C9FC25 /* PrototypeStore.swift in Sources */,
+				488E20D4EC4E76FEC02C9D8C /* SampleCardScreen.swift in Sources */,
+				6D4480601A5BBB0C9E99A2B7 /* SampleFixtureDomain.swift in Sources */,
+				E38A481FFBFBCE5A07ECC09A /* SampleMedia.swift in Sources */,
+				C58F9DAB29034D462893213A /* SampleMessages.swift in Sources */,
+				0053F575C119A8E676072E2E /* SharedMessageRendering.swift in Sources */,
+				583306081ABB5948FB0C9A78 /* UIDiagnostics.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EC1DCFBCEDF2DD3D481F22D1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F36887DCDAA5F75F19215E44 /* HarklightUITests.swift in Sources */,
+				0BC9EB296999010C1D6DAB10 /* SampleWorkspaceUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		01A8BA009EFAFC5A48BC28EF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 759D83DCB9456A16ABDFA1B3 /* HarklightConversationUITestHost */;
+			targetProxy = C9A9F9D128F6AE5FA7E10495 /* PBXContainerItemProxy */;
+		};
+		1DB83E28EF35E92D2746FACF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2ADDD431D61AFF533D88C48C /* Harklight */;
+			targetProxy = A5D2CF80EBDF76757358E802 /* PBXContainerItemProxy */;
+		};
+		BFC32EBB987CECFF224F9C61 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2ADDD431D61AFF533D88C48C /* Harklight */;
+			targetProxy = FAC27E8E91B10CCEED0C79F5 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0B90821959E4381E19C40E12 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Configuration/HarklightInfo.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Harklight Conversation UI Tests";
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.attentionclient.duo-prototype.uitesthost";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		0CF2C3A96C4A78510D3E3C52 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.attentionclient.duo-prototype.conversation.uitests";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = HarklightConversationUITestHost;
+			};
+			name = Release;
+		};
+		5494A46F2C3B7D497B4DE45F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		607A2CE1BC017C99F6AA3F90 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		62690A00A7F21039AF1B1083 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.attentionclient.duo-prototype.tests";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Harklight.app/Harklight";
+			};
+			name = Release;
+		};
+		8AD9931EFAE9E7C17CC18AB4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Z7R59J7QV8;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Configuration/HarklightInfo.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Harklight;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.Harklight;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		8DDCAA7C2EAAC669AB79BD6B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.attentionclient.duo-prototype.conversation.uitests";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = HarklightConversationUITestHost;
+			};
+			name = Debug;
+		};
+		CA5B3759D72C7127B58AD251 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Configuration/HarklightInfo.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Harklight Conversation UI Tests";
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.attentionclient.duo-prototype.uitesthost";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		D9C444364F911600DD3E22D8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.attentionclient.duo-prototype.uitests";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Harklight;
+			};
+			name = Debug;
+		};
+		E2E687EA264DACE2AAB48A8A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.attentionclient.duo-prototype.uitests";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Harklight;
+			};
+			name = Release;
+		};
+		EC5A99CC884A722372028DA8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.attentionclient.duo-prototype.tests";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Harklight.app/Harklight";
+			};
+			name = Debug;
+		};
+		F8E5B42F98A2192E3AA38027 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Z7R59J7QV8;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Configuration/HarklightInfo.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Harklight;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.Harklight;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1E8EFB338516EAFF0D73314A /* Build configuration list for PBXNativeTarget "HarklightUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D9C444364F911600DD3E22D8 /* Debug */,
+				E2E687EA264DACE2AAB48A8A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		29B8D8D9CA49E683B5CE07F4 /* Build configuration list for PBXNativeTarget "HarklightConversationUITestHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0B90821959E4381E19C40E12 /* Debug */,
+				CA5B3759D72C7127B58AD251 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		5F2AED0E7AF9B8607DE6AE68 /* Build configuration list for PBXNativeTarget "HarklightConversationUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8DDCAA7C2EAAC669AB79BD6B /* Debug */,
+				0CF2C3A96C4A78510D3E3C52 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		67C9BA428DB86FD2D8A9219B /* Build configuration list for PBXNativeTarget "Harklight" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F8E5B42F98A2192E3AA38027 /* Debug */,
+				8AD9931EFAE9E7C17CC18AB4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D5AAEC1254AAF5147EC83489 /* Build configuration list for PBXProject "Harklight" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5494A46F2C3B7D497B4DE45F /* Debug */,
+				607A2CE1BC017C99F6AA3F90 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E0A3D34F61079E35299216CC /* Build configuration list for PBXNativeTarget "HarklightTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EC5A99CC884A722372028DA8 /* Debug */,
+				62690A00A7F21039AF1B1083 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		725D27150C4829CA67513F9A /* XCLocalSwiftPackageReference "NativeRelay" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = NativeRelay;
+		};
+		FA71828AC67489CFD75DB4FC /* XCLocalSwiftPackageReference "AttentionDomain" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = AttentionDomain;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		48453C5BED656765F891BB5E /* HarklightNativeRelay */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HarklightNativeRelay;
+		};
+		5491828815E9F9310A8FB19B /* AttentionDomain */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AttentionDomain;
+		};
+		5F912978D0628D83E6624A9A /* AttentionDomain */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AttentionDomain;
+		};
+		686F4569923D303921C5E650 /* AttentionDomain */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AttentionDomain;
+		};
+		8045345F214DAA29775F7EB0 /* AttentionDomain */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AttentionDomain;
+		};
+		9207A7DBF50D40572ADD6DC0 /* AttentionDomain */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AttentionDomain;
+		};
+		C116660513A2FE807B80AAD3 /* HarklightNativeRelay */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HarklightNativeRelay;
+		};
+		FC5638FF239B1E5020076982 /* HarklightNativeRelay */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HarklightNativeRelay;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 65E0F54CAE33A9EC4FF405E2 /* Project object */;
+}

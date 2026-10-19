@@ -3,7 +3,7 @@ import Foundation
 import HarklightNativeRelay
 import Security
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 @MainActor
 final class NativeGuidedJoinTests: XCTestCase {

@@ -1,6 +1,6 @@
 import UserNotifications
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 @MainActor
 final class NativeNotificationPermissionTests: XCTestCase {

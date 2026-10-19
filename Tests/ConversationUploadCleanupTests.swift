@@ -1,7 +1,7 @@
 import AttentionDomain
 import HarklightNativeRelay
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 final class ConversationUploadCleanupTests: XCTestCase {
     private func setup() throws -> (ProfileContext, MemoryAttentionStatePersistence, AttentionDomainStore, ConversationBinding) {

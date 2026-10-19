@@ -15,10 +15,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "D31AC8CCB5B0FAD792364E1D"
-               BuildableName = "AttentionClientDuoPrototype.app"
-               BlueprintName = "AttentionClientDuoPrototype"
-               ReferencedContainer = "container:AttentionClientDuoPrototype.xcodeproj">
+               BlueprintIdentifier = "2ADDD431D61AFF533D88C48C"
+               BuildableName = "Harklight.app"
+               BlueprintName = "Harklight"
+               ReferencedContainer = "container:Harklight.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -32,10 +32,10 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "D31AC8CCB5B0FAD792364E1D"
-            BuildableName = "AttentionClientDuoPrototype.app"
-            BlueprintName = "AttentionClientDuoPrototype"
-            ReferencedContainer = "container:AttentionClientDuoPrototype.xcodeproj">
+            BlueprintIdentifier = "2ADDD431D61AFF533D88C48C"
+            BuildableName = "Harklight.app"
+            BlueprintName = "Harklight"
+            ReferencedContainer = "container:Harklight.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
@@ -44,10 +44,32 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "9E407EC1FA59E827FE412A51"
-               BuildableName = "AttentionClientDuoPrototypeTests.xctest"
-               BlueprintName = "AttentionClientDuoPrototypeTests"
-               ReferencedContainer = "container:AttentionClientDuoPrototype.xcodeproj">
+               BlueprintIdentifier = "D190648242CFB697DA9999EC"
+               BuildableName = "HarklightTests.xctest"
+               BlueprintName = "HarklightTests"
+               ReferencedContainer = "container:Harklight.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "D15DB2522363B6D2EB4CBF83"
+               BuildableName = "HarklightUITests.xctest"
+               BlueprintName = "HarklightUITests"
+               ReferencedContainer = "container:Harklight.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "81AC58E6E599B744FFFC142B"
+               BuildableName = "HarklightConversationUITests.xctest"
+               BlueprintName = "HarklightConversationUITests"
+               ReferencedContainer = "container:Harklight.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -68,10 +90,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "D31AC8CCB5B0FAD792364E1D"
-            BuildableName = "AttentionClientDuoPrototype.app"
-            BlueprintName = "AttentionClientDuoPrototype"
-            ReferencedContainer = "container:AttentionClientDuoPrototype.xcodeproj">
+            BlueprintIdentifier = "2ADDD431D61AFF533D88C48C"
+            BuildableName = "Harklight.app"
+            BlueprintName = "Harklight"
+            ReferencedContainer = "container:Harklight.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -85,10 +107,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "D31AC8CCB5B0FAD792364E1D"
-            BuildableName = "AttentionClientDuoPrototype.app"
-            BlueprintName = "AttentionClientDuoPrototype"
-            ReferencedContainer = "container:AttentionClientDuoPrototype.xcodeproj">
+            BlueprintIdentifier = "2ADDD431D61AFF533D88C48C"
+            BuildableName = "Harklight.app"
+            BlueprintName = "Harklight"
+            ReferencedContainer = "container:Harklight.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>
