@@ -146,12 +146,9 @@ final class SampleResponse {
     var canDeclineLocally: Bool {
         guard !finished, !deferred, !viewModel.isReadOnly,
               let request = viewModel.request(for: key),
-              !viewModel.isRetracted(key), request.lifecycleStatus == .open,
-              request.intentReceipt == nil else { return false }
-        switch request.projection {
-        case .sender, .compatibility: return true
-        case .unsupported: return false
-        }
+              request.inboxStateIsCurrent, !viewModel.isRetracted(key), request.lifecycleStatus == .open,
+              request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
+        return true
     }
 
     var noCommentSelected = false

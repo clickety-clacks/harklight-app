@@ -1202,6 +1202,9 @@ final class LivePresentationStore {
                 let lifecycle = isRetracted(request.key) ? retractionLabel(request.key) :
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
                 statusParts.append(lifecycle)
+                if request.noCommentUnavailable {
+                    statusParts.append("No comment not delivered · unsupported by this server")
+                }
                 if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
                     statusParts.append(informationalSeenRowStatus(seenStatus))
                 }
@@ -1218,12 +1221,15 @@ final class LivePresentationStore {
                 symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
                 isResolved: !request.inboxStateIsCurrent || request.isResolved, createdAt: request.createdAt,
                 informationalSeenStatus: request.informationalSeenStatus,
-                canMarkSeen: !isReadOnly && request.informationalSeenStatus == .available,
+                canMarkSeen: !isReadOnly && request.inboxStateIsCurrent &&
+                    !isRetracted(request.key) && request.lifecycleStatus == .open &&
+                    request.intentReceipt == nil && request.informationalSeenStatus == .available,
                 canNoComment: canNoComment(request),
                 noCommentUnavailable: request.noCommentUnavailable,
                 hasUserAction: request.intentReceipt != nil || request.draft.hasEdits ||
                     request.lifecycleStatus == .answered ||
                     request.lifecycleStatus == .noComment ||
+                    request.noCommentUnavailable ||
                     request.informationalSeenStatus == .pending ||
                     request.informationalSeenStatus == .confirmed,
                 tier: request.attentionTier.inboxRowStyleTier)
@@ -1234,10 +1240,9 @@ final class LivePresentationStore {
         guard !isReadOnly, request.inboxStateIsCurrent, !isRetracted(request.key),
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil else { return false }
-        return switch request.projection {
-        case .sender, .compatibility: true
-        case .unsupported: false
-        }
+        // No comment is its own wire answer and does not depend on the
+        // request's typed-answer interface being understood by this client.
+        return true
     }
 
     private func cachedOperationStatus(_ state: LocalIntentState?) -> String? {
@@ -1432,6 +1437,7 @@ final class LivePresentationStore {
         let request = try inspectedRequest(key)
         guard !isRetracted(key), request.inboxStateIsCurrent,
               request.lifecycleStatus == .open, request.intentReceipt == nil,
+              request.informationalSeenStatus == nil,
               !request.noCommentUnavailable,
               let selector = request.selector,
               canSubmitNoComment(request) else { throw LiveReplyError.notOpen }
@@ -1445,10 +1451,7 @@ final class LivePresentationStore {
     }
 
     private func canSubmitNoComment(_ request: PresentedRequest) -> Bool {
-        switch request.projection {
-        case .sender, .compatibility: true
-        case .unsupported: false
-        }
+        request.informationalSeenStatus == nil
     }
 
     func retryPendingDelivery() {

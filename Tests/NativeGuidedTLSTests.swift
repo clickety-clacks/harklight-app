@@ -785,6 +785,36 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
     }
 
+    func testOlderRelayUnsupportedVersionResponseMarksNoCommentUnsupported() async throws {
+        let namespace = "Harklight.no-comment-compatibility-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard text.contains("\"type\":\"answer_no_comment\"") else { return [] }
+            return ["{\"v\":1,\"type\":\"error\",\"reason\":\"unsupported_version\"}\n"]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(
+            profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let operationID = UUID()
+        let result = try await session.sendOriginalOperation(
+            Data(#"{"type":"answer_no_comment","request_id":"request"}"#.utf8) + Data([0x0A]),
+            operationID: operationID)
+        XCTAssertEqual(result, .unsupported(operationID: operationID),
+                       "An older relay's version-first rejection leaves No comment unavailable, never a text fallback.")
+        await session.close()
+    }
+
     func testUnavailableChatMessageIsLocalToConversationAndDoesNotHideConnectionWarning() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))

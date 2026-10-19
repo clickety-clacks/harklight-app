@@ -115,6 +115,19 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(noComment.label, "No comment")
         capture("inbox-swipe-no-comment-revealed", app)
+        noComment.tap()
+        XCTAssertFalse(ordinary.waitForExistence(timeout: 5),
+                       "The row action sends No comment and removes the request from Inbox.")
+
+        clearSearch(in: app)
+        enterSearch("Which approach", in: app)
+        let replyOnly = app.descendants(matching: .any)["sample-textChoice-0"]
+        XCTAssertTrue(replyOnly.waitForExistence(timeout: 5), app.debugDescription)
+        replyOnly.swipeRight()
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5),
+                      "The same No comment action is available from the opposite swipe edge.")
+        XCTAssertEqual(noComment.label, "No comment")
+        capture("inbox-swipe-no-comment-opposite-edge", app)
     }
 
     func testNoCommentIsAvailableForReplyOnlyRequests() {
@@ -130,6 +143,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         let noComment = app.buttons["request-no-comment"]
         XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(noComment.isEnabled, app.debugDescription)
+        let reply = app.textViews["request-input-answer-response"]
+        XCTAssertTrue(reply.exists, "A text-only request keeps its reply editor.")
+        XCTAssertGreaterThan(noComment.frame.minY, reply.frame.maxY,
+                             "No comment is listed after the typed-reply choice.")
         capture("reply-only-no-comment-available", app)
 
         noComment.tap()
@@ -141,6 +158,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["sample-approval-0"]
             .waitForExistence(timeout: 5), "No comment moves the request to Replied.")
         capture("reply-only-no-comment-selected", app)
+        app.descendants(matching: .any)["sample-approval-0"].swipeLeft()
+        XCTAssertFalse(app.buttons["inbox-no-comment"].exists,
+                       "Replied rows have no swipe action.")
     }
 
     func testSeenActionFromEitherSwipeEdgeMovesTheMessageToReplied() {
@@ -176,6 +196,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         repliedTab.tap()
         XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(informational.label.contains("Seen selected locally"), informational.label)
+        informational.swipeLeft()
+        XCTAssertFalse(app.buttons["inbox-mark-seen"].exists,
+                       "Replied rows have no Seen swipe action.")
         XCTAssertFalse(app.descendants(matching: .any)["sample-approval-0"].exists, "An untouched request remains in Inbox")
         capture("seen-message-in-replied-tab", app)
 

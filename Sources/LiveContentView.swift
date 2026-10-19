@@ -381,15 +381,13 @@ struct LiveRequestDetail: View {
     }
 
     private var canOfferNoComment: Bool {
+        guard request.informationalSeenStatus == nil else { return false }
         if let localExample { return localExample.canDeclineLocally }
         if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
         guard request.inboxStateIsCurrent, !store.isReadOnly,
               !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
-        switch request.projection {
-        case .sender, .compatibility: return true
-        case .unsupported: return false
-        }
+        return true
     }
 
     private func submitNoCommentAction() {
@@ -533,17 +531,20 @@ struct LiveRequestDetail: View {
                 }
                 if canOfferNoComment {
                     Button(action: submitNoCommentAction) {
-                        Label("No comment", systemImage: "bubble.left")
+                        MessageChoiceLabel(title: "No comment", detail: "",
+                                           selected: false, multiple: false,
+                                           suggested: false)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.plain)
                     .disabled(request.noCommentUnavailable)
+                    .opacity(request.noCommentUnavailable ? 0.48 : 1)
                     .accessibilityHint(request.noCommentUnavailable
-                        ? "This server does not support No comment for this request."
+                        ? "No comment was not delivered because this server does not support it."
                         : "Send a final No comment answer to the sender.")
                     .accessibilityIdentifier("request-no-comment")
                 }
                 if request.noCommentUnavailable {
-                    Text("This server does not support No comment for this request. You can still answer it.")
+                    Text("No comment was not delivered because this server does not support it. You can still answer this request.")
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-no-comment-unavailable")
                 }

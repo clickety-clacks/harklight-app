@@ -625,15 +625,15 @@ struct InboxList: View {
                     }
                     .tag(row.id)
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        if row.canMarkSeen {
+                        if selectedTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
                             Button { markSeen(row.id) } label: {
                                 Label("Seen", systemImage: "checkmark")
                             }
                             .tint(.blue)
                             .accessibilityIdentifier("inbox-mark-seen")
-                        } else if row.canNoComment {
+                        } else if selectedTab == .inbox, !row.belongsToReplied, row.canNoComment {
                             Button { markNoComment(row.id) } label: {
-                                Label("No comment", systemImage: "bubble.left")
+                                Label("No comment", systemImage: "hand.raised")
                             }
                             .tint(.gray)
                             .disabled(row.noCommentUnavailable)
@@ -641,15 +641,15 @@ struct InboxList: View {
                         }
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                        if row.canMarkSeen {
+                        if selectedTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
                             Button { markSeen(row.id) } label: {
                                 Label("Seen", systemImage: "checkmark")
                             }
                             .tint(.blue)
                             .accessibilityIdentifier("inbox-mark-seen")
-                        } else if row.canNoComment {
+                        } else if selectedTab == .inbox, !row.belongsToReplied, row.canNoComment {
                             Button { markNoComment(row.id) } label: {
-                                Label("No comment", systemImage: "bubble.left")
+                                Label("No comment", systemImage: "hand.raised")
                             }
                             .tint(.gray)
                             .disabled(row.noCommentUnavailable)

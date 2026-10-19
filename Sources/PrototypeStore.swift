@@ -287,13 +287,13 @@ final class PrototypeStore {
     }
 
     func canSendNoCommentLocally(for key: RequestKey) -> Bool {
-        guard let request = presentationStore?.request(for: key),
+        guard let presentationStore, !presentationStore.isReadOnly,
+              let request = presentationStore.request(for: key),
+              request.inboxStateIsCurrent, !presentationStore.isRetracted(key),
               request.lifecycleStatus == .open, request.intentReceipt == nil,
+              request.informationalSeenStatus == nil,
               !request.noCommentUnavailable else { return false }
-        switch request.projection {
-        case .sender, .compatibility: return true
-        case .unsupported: return false
-        }
+        return true
     }
 
     @discardableResult

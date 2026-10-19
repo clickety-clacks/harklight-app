@@ -442,7 +442,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard suppliedContext.transportMode == .relay || suppliedContext.transportMode == .fixture,
               state.replayBarrier == nil,
               isUUIDv4(intentID) else { throw AttentionStoreError.invalidSubmission }
-        if case .unsupported = request.interface { throw AttentionStoreError.unsupportedInterface }
         let descriptorFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
         var fingerprintParts = [
             request.key.accountScope.rawValue,
