@@ -384,7 +384,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     }
                 } catch {
                     diagnose(.answer, .originalOperationDelivery, .unresolved,
-                             causeCode: "invalid_retraction_refusal", error: error,
+                             error: error, causeCode: "invalid_retraction_refusal",
                              operationID: operationID, receipt: .unknown)
                     close()
                     return .unresolved
