@@ -65,8 +65,19 @@ struct ConversationPanel: View {
                     }
                 }
                 if let terminal = thread.terminal {
-                    Label(thread.isRetracted ? "Retracted" : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
+                    if thread.isRetracted, let retractedAt = store.retractionDate(key) {
+                        Label {
+                            Text("Retracted by \(key.senderID.rawValue) at \(retractedAt, format: .dateTime.month().day().year().hour().minute())",
+                                 comment: "Names the sender who retracted this conversation and the localized time of retraction.")
+                        } icon: {
+                            Image(systemName: "checkmark.circle")
+                        }
                         .font(.caption).padding(8)
+                    } else {
+                        Label(thread.isRetracted ? "Retracted by \(key.senderID.rawValue)" : "Request \(terminal.rawValue)",
+                              systemImage: "checkmark.circle")
+                            .font(.caption).padding(8)
+                    }
                 }
                 HStack {
                     Spacer(minLength: 0)

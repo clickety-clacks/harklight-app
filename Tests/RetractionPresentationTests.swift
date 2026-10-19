@@ -5,13 +5,14 @@ import XCTest
 
 @MainActor
 final class RetractionPresentationTests: XCTestCase {
-    private let ordinary = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","terminal_reason":"retracted","by":"origin_withdrawal","author":"origin","event_id":"3","request_revision":1}"#.utf8)
-    private let projected = Data(#"{"v":1,"type":"conversation","conversation_seq":1,"kind":"retraction","sender_id":"sender","message_id":"request","origin":"origin","author":"origin","session_handle":"handle","event_id":"3","request_revision":1,"terminal_seq":2,"terminal_state":"retracted"}"#.utf8)
+    private let ordinary = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","terminal_reason":"retracted","retracted_at":1700000000123,"at":1700000000123,"by":"origin_withdrawal","author":"origin","event_id":"3","request_revision":1}"#.utf8)
+    private let projected = Data(#"{"v":1,"type":"conversation","conversation_seq":1,"kind":"retraction","sender_id":"sender","message_id":"request","origin":"origin","author":"origin","session_handle":"handle","event_id":"3","request_revision":1,"terminal_seq":2,"terminal_state":"retracted","retracted_at":1700000000123}"#.utf8)
 
     func testInstalledDecoderAcceptsTheSameAdditiveLifecycleWithoutChangingItsLegacyMeaning() throws {
         let context = profile()
         let decoded = try InstalledRelayDecoder.RelayWire(profile: context).decodeEvent(ordinary)
         XCTAssertEqual(decoded.sequence, 2)
+        XCTAssertEqual(decoded.conversation?.retractedAtMilliseconds, 1_700_000_000_123)
         guard case let .terminal(_, state, answer) = decoded.body else { return XCTFail("Expected the installed terminal path") }
         XCTAssertEqual(state, .cleared)
         XCTAssertNil(answer)
@@ -65,6 +66,7 @@ final class RetractionPresentationTests: XCTestCase {
             XCTAssertEqual(thread.turns.filter { $0.kind == .terminal }.count, 1)
             XCTAssertEqual(thread.terminalTurn, ExactText("3"))
             XCTAssertEqual(thread.retraction?.terminalSequence, 2)
+            XCTAssertEqual(thread.retraction?.retractedAtMilliseconds, 1_700_000_000_123)
             XCTAssertEqual(thread.drafts[1]?.text, ExactText("Unsent original note"))
             XCTAssertEqual(thread.drafts[1]?.disposition, .rejected(ExactText("Not delivered: request retracted")))
             let retained = try XCTUnwrap(domain.lookupIntent(receipt.intentID, context: context))
@@ -83,6 +85,8 @@ final class RetractionPresentationTests: XCTestCase {
             XCTAssertTrue(model.isRetracted(key))
             XCTAssertTrue(model.inboxRows.first?.status.contains("Retracted") == true)
             XCTAssertEqual(model.request(for: key)?.lifecycleStatus, .cleared)
+        XCTAssertEqual(try XCTUnwrap(model.retractionDate(key)).timeIntervalSince1970,
+                       1_700_000_000.123, accuracy: 0.001)
             XCTAssertEqual(try domain.snapshot(context: context).requests.count, 1)
         }
     }

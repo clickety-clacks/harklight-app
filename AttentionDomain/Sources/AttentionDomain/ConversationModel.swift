@@ -171,6 +171,7 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
     public let sequence: UInt64
     public let binding: ConversationBinding
     public let fact: Fact
+    public let retractedAtMilliseconds: UInt64?
 
     public enum Fact: Equatable, Codable, Sendable {
         case request(sessionHandle: ExactText, payload: JSONValue)
@@ -189,10 +190,19 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         case retraction(turn: ExactText, terminalSequence: UInt64)
     }
 
-    public init(sequence: UInt64, binding: ConversationBinding, fact: Fact) {
+    public init(sequence: UInt64,
+                binding: ConversationBinding,
+                fact: Fact,
+                retractedAtMilliseconds: UInt64? = nil) {
         self.sequence = sequence
         self.binding = binding
         self.fact = fact
+        self.retractedAtMilliseconds = retractedAtMilliseconds
+    }
+
+    func canEnrich(_ old: ConversationEvent) -> Bool {
+        sequence == old.sequence && binding == old.binding && fact == old.fact &&
+            (old.retractedAtMilliseconds == nil || old.retractedAtMilliseconds == retractedAtMilliseconds)
     }
 }
 
@@ -270,11 +280,22 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         orderTurns()
     }
 
-    mutating func recordRetraction(turn: ExactText, sequence: UInt64, revision: UInt64) throws {
+    mutating func recordRetraction(turn: ExactText,
+                                   sequence: UInt64,
+                                   revision: UInt64,
+                                   retractedAtMilliseconds: UInt64? = nil) throws {
         guard !turn.rawValue.isEmpty, sequence > 0, revision > 0,
               terminal == nil || terminal == .cleared,
               terminalTurn == nil || terminalTurn == turn else { throw ConversationError.conflict }
-        let fact = ConversationRetraction(turn: turn, terminalSequence: sequence, revision: revision)
+        let existing = retraction
+        guard existing == nil || (existing?.turn == turn && existing?.terminalSequence == sequence &&
+              existing?.revision == revision &&
+              (existing?.retractedAtMilliseconds == nil || retractedAtMilliseconds == nil ||
+               existing?.retractedAtMilliseconds == retractedAtMilliseconds)) else {
+            throw ConversationError.conflict
+        }
+        let fact = ConversationRetraction(turn: turn, terminalSequence: sequence, revision: revision,
+            retractedAtMilliseconds: existing?.retractedAtMilliseconds ?? retractedAtMilliseconds)
         guard retraction == nil || retraction == fact else { throw ConversationError.conflict }
         retraction = fact
         terminal = .cleared
@@ -306,6 +327,17 @@ public struct ConversationRetraction: Equatable, Codable, Sendable {
     public let turn: ExactText
     public let terminalSequence: UInt64
     public let revision: UInt64
+    public let retractedAtMilliseconds: UInt64?
+
+    public init(turn: ExactText,
+                terminalSequence: UInt64,
+                revision: UInt64,
+                retractedAtMilliseconds: UInt64? = nil) {
+        self.turn = turn
+        self.terminalSequence = terminalSequence
+        self.revision = revision
+        self.retractedAtMilliseconds = retractedAtMilliseconds
+    }
 }
 
 public enum ConversationError: Error, Equatable, Sendable {
@@ -331,7 +363,18 @@ struct ConversationState: Codable {
     mutating func apply(_ event: ConversationEvent) throws {
         guard event.binding.revision > 0 else { throw ConversationError.invalidBinding }
         if event.sequence <= cursor {
-            guard events[event.sequence] == event else { throw ConversationError.conflict }
+            guard let previous = events[event.sequence], event.canEnrich(previous) else {
+                throw ConversationError.conflict
+            }
+            if previous != event {
+                guard case let .retraction(turn, terminalSequence) = event.fact,
+                      var thread = threads[event.binding.request] else { throw ConversationError.conflict }
+                try thread.recordRetraction(turn: turn, sequence: terminalSequence,
+                    revision: event.binding.revision,
+                    retractedAtMilliseconds: event.retractedAtMilliseconds)
+                threads[event.binding.request] = thread
+                events[event.sequence] = event
+            }
             return
         }
         guard cursor < UInt64.max, event.sequence == cursor + 1 else {
@@ -426,7 +469,8 @@ struct ConversationState: Codable {
                     }
                 }
             case let .retraction(turn, sequence):
-                try thread.recordRetraction(turn: turn, sequence: sequence, revision: binding.revision)
+                try thread.recordRetraction(turn: turn, sequence: sequence, revision: binding.revision,
+                    retractedAtMilliseconds: event.retractedAtMilliseconds)
             case let .delivered(turn):
                 try requireTurn(turn, binding: binding, in: thread)
                 thread.facts[turn, default: ConversationTurnFacts()].delivered = true

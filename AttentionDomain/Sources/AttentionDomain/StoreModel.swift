@@ -102,6 +102,7 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     case accepted(sequence: UInt64?)
     case lost
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)
+    case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case repairRequired
 }
 
@@ -152,6 +153,7 @@ public struct Submission: Equatable, Codable, Sendable {
 
 public enum OwnOutcome: String, Equatable, Codable, Sendable {
     case accepted
+    case refused
     case unconfirmed
     case notApplicable
 }
@@ -321,11 +323,13 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
     public let listeningSupport: JSONValue?
     public let author: ConversationAuthor?
     public let terminalReason: ExactText?
+    public let retractedAtMilliseconds: UInt64?
     public let files: [ConversationFile]?
 
     public init(revision: UInt64, sessionHandle: ExactText? = nil, eventID: ExactText? = nil,
                 availability: ConversationAvailability? = nil, listeningSupport: JSONValue? = nil,
-                author: ConversationAuthor? = nil, files: [ConversationFile]? = nil, terminalReason: ExactText? = nil) {
+                author: ConversationAuthor? = nil, files: [ConversationFile]? = nil,
+                terminalReason: ExactText? = nil, retractedAtMilliseconds: UInt64? = nil) {
         self.revision = revision
         self.sessionHandle = sessionHandle
         self.eventID = eventID
@@ -333,6 +337,7 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
         self.listeningSupport = listeningSupport
         self.author = author
         self.terminalReason = terminalReason
+        self.retractedAtMilliseconds = retractedAtMilliseconds
         self.files = files
     }
 
@@ -341,7 +346,8 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
         (old.eventID == nil || old.eventID == eventID) && (old.availability == nil || old.availability == availability) &&
         (old.listeningSupport == nil || old.listeningSupport == listeningSupport) &&
         (old.author == nil || old.author == author) && (old.files == nil || old.files == files) &&
-        (old.terminalReason == nil || old.terminalReason == terminalReason)
+        (old.terminalReason == nil || old.terminalReason == terminalReason) &&
+        (old.retractedAtMilliseconds == nil || old.retractedAtMilliseconds == retractedAtMilliseconds)
     }
 }
 

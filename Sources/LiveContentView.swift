@@ -285,8 +285,20 @@ struct LiveRequestDetail: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-update-fact")
                 }
-                Text(store.isRetracted(request.key) ? "Retracted" : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-                    .font(.caption).foregroundStyle(.secondary)
+                if store.isRetracted(request.key) {
+                    if let retractedAt = store.retractionDate(request.key) {
+                        Text("Retracted by \(request.key.senderID.rawValue) at \(retractedAt, format: .dateTime.month().day().year().hour().minute())",
+                             comment: "Names the sender who retracted this request and the localized time of retraction.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Retracted by \(request.key.senderID.rawValue)",
+                             comment: "Names the sender who retracted this request when its stored time is unavailable.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text(LiveLifecycleTitle(request.lifecycleStatus).label)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if let seenStatus = request.informationalSeenStatus {
                     Label(Self.informationalSeenText(seenStatus),
                           systemImage: Self.informationalSeenSymbol(seenStatus))
@@ -294,7 +306,7 @@ struct LiveRequestDetail: View {
                         .accessibilityIdentifier("informational-seen-status")
                 }
                 if store.isRetracted(request.key) {
-                    Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
+                    Text("The sender retracted this request. Saved work and the original answer result remain available, and no new answer can be sent.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if deferred {

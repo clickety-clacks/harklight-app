@@ -231,8 +231,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             return .unresolved
         }
         while true {
+            let frame: Data
             let value: JSONValue
-            do { value = try JSONValue.parse(try await receive()) }
+            do {
+                frame = try await receive()
+                value = try JSONValue.parse(frame)
+            }
             catch {
                 // The response could still arrive later. Retire this socket
                 // so a stale uncorrelated `ok` cannot confirm a later send.
@@ -257,6 +261,21 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 return .accepted(operationID: operationID, terminalSequence: sequence)
             case "error":
                 let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
+                do {
+                    if let result = try RelayWire(profile: profileContext)
+                        .decodeAnswerRefusal(frame, operationID: operationID) {
+                        diagnose(.answer, .originalOperationDelivery, .rejected,
+                                 causeCode: NativeDiagnosticCauseCode.serverReason("retracted"),
+                                 operationID: operationID, receipt: .terminal)
+                        return result
+                    }
+                } catch {
+                    diagnose(.answer, .originalOperationDelivery, .unresolved,
+                             causeCode: "invalid_retraction_refusal", error: error,
+                             operationID: operationID, receipt: .unknown)
+                    close()
+                    return .unresolved
+                }
                 diagnose(.answer, .originalOperationDelivery, .unresolved,
                          causeCode: NativeDiagnosticCauseCode.serverReason(reason),
                          operationID: operationID, receipt: .unknown)

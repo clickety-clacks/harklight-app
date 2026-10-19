@@ -278,24 +278,32 @@ private struct RequestStatusPresentation {
         switch (state, outcome) {
         case (.answered, .accepted):
             LocalizedStringResource("Answered. This fixture simulates acceptance for this submission; no relay or source result exists, and source use is not shown.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
+        case (.answered, .refused):
+            LocalizedStringResource("Answered. The relay refused this answer because the sender had already retracted the request.", comment: "Accessible name when another terminal state is shown alongside this device's definite retraction refusal.")
         case (.answered, .unconfirmed):
             LocalizedStringResource("Answered. Your submission outcome is unconfirmed; the original operation outcome remains unresolved.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
         case (.answered, .notApplicable):
             LocalizedStringResource("Answered. No result for this device's submission is established.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
         case (.cleared, .accepted):
             LocalizedStringResource("Cleared. This fixture simulates acceptance for this submission; no relay or source result exists, and source use is not shown.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
+        case (.cleared, .refused):
+            LocalizedStringResource("Retracted. The relay refused this answer because the sender had retracted the request.", comment: "Accessible name for a request retracted by its sender after the relay refused this device's answer.")
         case (.cleared, .unconfirmed):
             LocalizedStringResource("Cleared. Your submission outcome is unconfirmed; the original operation outcome remains unresolved.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
         case (.cleared, .notApplicable):
             LocalizedStringResource("Cleared. No result for this device's submission is established.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
         case (.expired, .accepted):
             LocalizedStringResource("Expired. This fixture simulates acceptance for this submission; no relay or source result exists, and source use is not shown.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
+        case (.expired, .refused):
+            LocalizedStringResource("Expired. The relay refused this answer because the sender had already retracted the request.", comment: "Accessible name when another terminal state is shown alongside this device's definite retraction refusal.")
         case (.expired, .unconfirmed):
             LocalizedStringResource("Expired. Your submission outcome is unconfirmed; the original operation outcome remains unresolved.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
         case (.expired, .notApplicable):
             LocalizedStringResource("Expired. No result for this device's submission is established.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
         case (.superseded, .accepted):
             LocalizedStringResource("Superseded. This fixture simulates acceptance for this submission; no relay or source result exists, and source use is not shown.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
+        case (.superseded, .refused):
+            LocalizedStringResource("Superseded. The relay refused this answer because the sender had already retracted the request.", comment: "Accessible name when another terminal state is shown alongside this device's definite retraction refusal.")
         case (.superseded, .unconfirmed):
             LocalizedStringResource("Superseded. Your submission outcome is unconfirmed; the original operation outcome remains unresolved.", comment: "Accessible name for the request status button; this sentence combines lifecycle and this device's outcome.")
         case (.superseded, .notApplicable):
@@ -305,6 +313,8 @@ private struct RequestStatusPresentation {
 
     private static func terminalOutcomeDetails(for outcome: OwnOutcome) -> LocalizedStringResource {
         switch outcome {
+        case .refused:
+            "The relay definitively refused this answer because the sender had already retracted the request. The answer was not accepted."
         case .accepted:
             "This fictional fixture simulates acceptance for this submission. No relay or source receipt exists, and source use is not shown."
         case .unconfirmed:

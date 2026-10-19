@@ -52,6 +52,168 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(snapshot.requests.map(\.isResolved), [false, true, true])
     }
 
+    func testRetractionWireRetainsTheServerTimestampAndRequiresItsTerminalSnapshot() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-retraction-wire"),
+                                       deviceID: ExactText("device-retraction-wire"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let retractedAt: UInt64 = 1_700_000_000_123
+        let ordinary = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","terminal_reason":"retracted","retracted_at":1700000000123,"at":1700000000123,"by":"origin_withdrawal","author":"origin","event_id":"3","request_revision":1}"#.utf8)
+        let conversation = Data(#"{"v":1,"type":"conversation","conversation_seq":1,"kind":"retraction","sender_id":"sender","message_id":"request","origin":"origin","author":"origin","session_handle":"handle","event_id":"3","request_revision":1,"terminal_seq":2,"terminal_state":"retracted","retracted_at":1700000000123}"#.utf8)
+
+        let lifecycleEvent = try RelayWire(profile: context).decodeEvent(ordinary)
+        let conversationEvent = try ConversationWire(profile: context).decodeEvent(conversation)
+        XCTAssertEqual(lifecycleEvent.conversation?.retractedAtMilliseconds, retractedAt)
+        XCTAssertEqual(conversationEvent.retractedAtMilliseconds, retractedAt)
+        let mismatchedLegacyTime = Data(String(decoding: ordinary, as: UTF8.self)
+            .replacingOccurrences(of: #""at":1700000000123"#, with: #""at":1700000000124"#).utf8)
+        XCTAssertThrowsError(try RelayWire(profile: context).decodeEvent(mismatchedLegacyTime))
+        let missingConversationTime = Data(String(decoding: conversation, as: UTF8.self)
+            .replacingOccurrences(of: #","retracted_at":1700000000123"#, with: "").utf8)
+        XCTAssertThrowsError(try ConversationWire(profile: context).decodeEvent(missingConversationTime))
+
+        let operationID = UUID()
+        let refusal = Data(#"{"v":1,"type":"error","reason":"retracted","terminal":{"state":"retracted","retracted_at":1700000000123}}"#.utf8)
+        XCTAssertEqual(try RelayWire(profile: context).decodeAnswerRefusal(refusal, operationID: operationID),
+                       .refusedByRetraction(operationID: operationID, retractedAtMilliseconds: retractedAt))
+        let malformed = Data(#"{"v":1,"type":"error","reason":"retracted","terminal":{"state":"retracted"}}"#.utf8)
+        XCTAssertThrowsError(try RelayWire(profile: context).decodeAnswerRefusal(malformed, operationID: operationID))
+        let unrelated = Data(#"{"v":1,"type":"error","reason":"already_answered"}"#.utf8)
+        XCTAssertNil(try RelayWire(profile: context).decodeAnswerRefusal(unrelated, operationID: operationID))
+    }
+
+    func testQueuedAnswerRetractionRefusalIsDurableAndDoesNotAdvanceReplayCursors() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-retraction-refusal"),
+                                       deviceID: ExactText("device-retraction-refusal"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender-refusal"),
+                             messageID: ExactText("request-refusal"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Retained request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"approve","label":"Approve","kind":"value","value":"approved"}]}}"#.utf8))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"))),
+            context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("approve"))]))
+        let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+
+        let retractedAt: UInt64 = 1_700_000_000_123
+        let session = U2ReplaySession(identity)
+        session.result = .refusedByRetraction(operationID: original.operationID,
+                                              retractedAtMilliseconds: retractedAt)
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let attempted = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(attempted, 1)
+        XCTAssertEqual(session.sent.map(\.1), [original.operationID])
+
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let durable = try restored.lookupIntent(receipt.intentID, context: context)
+        XCTAssertEqual(durable?.operationID, original.operationID)
+        XCTAssertEqual(durable?.answer, original.answer)
+        XCTAssertEqual(durable?.disposition, .refusedByRetraction(retractedAtMilliseconds: retractedAt))
+        XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
+        XCTAssertEqual(try restored.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 0)
+
+        let presentation = try LivePresentationStore(store: restored, context: context)
+        let request = try XCTUnwrap(presentation.request(for: key))
+        XCTAssertEqual(request.lifecycleStatus, .cleared)
+        XCTAssertEqual(request.receiptFacts?.ownOutcome, .refused)
+        XCTAssertTrue(request.receiptFacts?.evidenceLabel.contains("refused") == true)
+        XCTAssertEqual(request.intentReceipt?.exactAnswer, original.answer)
+        XCTAssertEqual(request.intentReceipt?.relayOutcome,
+                       .refusedByRetraction(retractedAtMilliseconds: retractedAt))
+        XCTAssertTrue(presentation.isRetracted(key))
+        XCTAssertEqual(try XCTUnwrap(presentation.retractionDate(key)).timeIntervalSince1970,
+                       1_700_000_000.123, accuracy: 0.001)
+        XCTAssertTrue(presentation.inboxRows.first?.status.contains("Retracted") == true)
+        XCTAssertThrowsError(try presentation.submit(key, explicitCompatibilityAction: ExactText("approve")))
+    }
+
+    func testRetractionKeepsAnAlreadyAcceptedAnswerReceiptVisible() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-retraction-accepted"),
+                                       deviceID: ExactText("device-retraction-accepted"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender-accepted"),
+                             messageID: ExactText("request-accepted"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Retained request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"approve","label":"Approve","kind":"value","value":"approved"}]}}"#.utf8))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"))),
+            context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("approve"))]))
+        try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                          terminalSequence: 2, context: context)
+
+        let retractedAt: UInt64 = 1_700_000_000_123
+        let lifecycle = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender-accepted","message_id":"request-accepted","origin":"origin","state":"cleared","terminal_reason":"retracted","retracted_at":1700000000123,"at":1700000000123,"by":"origin_withdrawal","author":"origin","event_id":"3","request_revision":1}"#.utf8)
+        try store.apply(RelayWire(profile: context).decodeEvent(lifecycle), context: context)
+
+        let retained = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+        XCTAssertEqual(retained.disposition, .accepted(sequence: 2))
+        XCTAssertEqual(retained.answer, receipt.exactAnswer)
+        let presentation = try LivePresentationStore(store: store, context: context)
+        let request = try XCTUnwrap(presentation.request(for: key))
+        XCTAssertEqual(request.lifecycleStatus, .cleared)
+        XCTAssertEqual(request.intentReceipt?.exactAnswer, receipt.exactAnswer)
+        XCTAssertEqual(request.intentReceipt?.relayOutcome, .accepted(sequence: 2))
+        XCTAssertTrue(presentation.isRetracted(key))
+        XCTAssertEqual(try XCTUnwrap(presentation.retractionDate(key)).timeIntervalSince1970,
+                       1_700_000_000.123, accuracy: 0.001)
+    }
+
+    func testLiveRetractionUpdatesTheRetainedMessageAndKeepsEarlierConversationReply() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-retraction-history"),
+                                       deviceID: ExactText("device-retraction-history"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender-history"),
+                             messageID: ExactText("request-history"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Retained request"}"#.utf8))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"))),
+            context: context)
+        let presentation = try LivePresentationStore(store: store, context: context)
+        let binding = ConversationBinding(request: key, revision: 1)
+        let earlierReply = ConversationTurn(id: ExactText("person-reply"), binding: binding,
+            author: .person, sessionHandle: ExactText("handle"), text: ExactText("Earlier sent reply"), kind: .reply)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding, fact: .turn(earlierReply)),
+                                   context: context)
+
+        let lifecycle = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender-history","message_id":"request-history","origin":"origin","state":"cleared","terminal_reason":"retracted","retracted_at":1700000000123,"at":1700000000123,"by":"origin_withdrawal","author":"origin","event_id":"origin-terminal","request_revision":1}"#.utf8)
+        try store.apply(RelayWire(profile: context).decodeEvent(lifecycle), context: context)
+        try presentation.refreshFromDurableStore()
+        XCTAssertEqual(presentation.presentation.requests.map(\.key), [key])
+        XCTAssertEqual(presentation.request(for: key)?.lifecycleStatus, .cleared)
+        XCTAssertTrue(presentation.isRetracted(key))
+
+        let projected = Data(#"{"v":1,"type":"conversation","conversation_seq":2,"kind":"retraction","sender_id":"sender-history","message_id":"request-history","origin":"origin","author":"origin","session_handle":"handle","event_id":"origin-terminal","request_revision":1,"terminal_seq":2,"terminal_state":"retracted","retracted_at":1700000000123}"#.utf8)
+        try store.applyConversation(try ConversationWire(profile: context).decodeEvent(projected), context: context)
+        try presentation.refreshFromDurableStore()
+        let thread = try XCTUnwrap(presentation.conversation(for: key))
+        XCTAssertTrue(thread.isRetracted)
+        XCTAssertEqual(thread.retraction?.retractedAtMilliseconds, 1_700_000_000_123)
+        XCTAssertTrue(thread.turns.contains(earlierReply), "Retraction preserves the already-sent conversation reply.")
+        XCTAssertEqual(presentation.presentation.requests.map(\.key), [key])
+        XCTAssertEqual(try XCTUnwrap(presentation.retractionDate(key)).timeIntervalSince1970,
+                       1_700_000_000.123, accuracy: 0.001)
+    }
+
     func testExplicitSeenRequiresCanonicalDescriptorAndConfirmsOnlyAuthorizedEvidence() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-seen"), deviceID: ExactText("device-seen"))

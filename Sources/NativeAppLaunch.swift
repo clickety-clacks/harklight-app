@@ -789,7 +789,26 @@ final class LivePresentationStore {
     func hasAcceptedUpdate(for key: RequestKey) -> Bool {
         conversationThreads[key]?.acceptedUpdates.isEmpty == false
     }
-    func isRetracted(_ key: RequestKey) -> Bool { conversationThreads[key]?.isRetracted == true }
+    func isRetracted(_ key: RequestKey) -> Bool {
+        if conversationThreads[key]?.isRetracted == true { return true }
+        if let outcome = request(for: key)?.intentReceipt?.relayOutcome,
+           case .refusedByRetraction = outcome { return true }
+        return false
+    }
+
+    func retractionDate(_ key: RequestKey) -> Date? {
+        let timestamp: UInt64?
+        if let conversationTimestamp = conversationThreads[key]?.retraction?.retractedAtMilliseconds {
+            timestamp = conversationTimestamp
+        } else if let outcome = request(for: key)?.intentReceipt?.relayOutcome,
+                  case let .refusedByRetraction(retractedAtMilliseconds) = outcome {
+            timestamp = retractedAtMilliseconds
+        } else {
+            timestamp = nil
+        }
+        guard let timestamp else { return nil }
+        return Date(timeIntervalSince1970: Double(timestamp) / 1_000)
+    }
 
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
 
@@ -1044,7 +1063,11 @@ final class LivePresentationStore {
                 String(localized: LiveLifecycleTitle($0.lifecycleStatus).label)
             var statusParts: [String] = []
             if hasAcceptedUpdate(for: $0.key) { statusParts.append("Updated") }
-            statusParts.append(lifecycle)
+            if isRetracted($0.key), let retractedAt = retractionDate($0.key) {
+                statusParts.append("Retracted · \(retractedAt.formatted(date: .abbreviated, time: .shortened))")
+            } else {
+                statusParts.append(lifecycle)
+            }
             if let seenStatus = $0.informationalSeenStatus {
                 statusParts.append(informationalSeenRowStatus(seenStatus))
             }
