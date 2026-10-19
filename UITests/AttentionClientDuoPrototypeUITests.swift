@@ -177,6 +177,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.buttons["inbox-tab-inbox"].isSelected)
         XCTAssertTrue(facilities.exists, "An untouched request stays in Inbox after native Back.")
+        attachScreenshot("Last viewed row in Inbox", from: app)
         let kept = NSPredicate { _, _ in abs(top.frame.minY - scrolledTop) <= 1 }
         let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
         XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
