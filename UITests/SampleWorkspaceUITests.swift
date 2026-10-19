@@ -179,12 +179,13 @@ final class SampleWorkspaceUITests: XCTestCase {
         let otherChoice = app.buttons.containing(.staticText, identifier: "Start small").firstMatch
         XCTAssertTrue(otherChoice.waitForExistence(timeout: 5), app.debugDescription)
         otherChoice.tap()
-        XCTAssertTrue(editor.exists, "Typed Reply stays visible after another choice is selected.")
-        XCTAssertFalse(editor.isEnabled, "A deselected Reply editor is ghosted and cannot be edited.")
-        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        let ghostedReply = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
+        XCTAssertTrue(ghostedReply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(ghostedReply.label.contains("Keep the smaller first step."), ghostedReply.label)
         capture("reply-editor-deselected-with-draft", app)
 
-        replyChoice.tap()
+        ghostedReply.tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(editor.isEnabled, "Tapping the Reply card reselects it.")
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "Reselecting Reply focuses its editor.")
