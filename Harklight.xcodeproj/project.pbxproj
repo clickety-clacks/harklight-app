@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		0053F575C119A8E676072E2E /* SharedMessageRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B412A14FC3FDBB5787422E3 /* SharedMessageRendering.swift */; };
 		0507747FEC7DD8500EA5ABC2 /* HarklightWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B98C9EEBD955363D00AC737 /* HarklightWorkspace.swift */; };
+		0608B149AEEF38132FBC94AC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DA73983703AF494F97B44D03 /* Assets.xcassets */; };
+		09DF56C0F9A249D2933FADD1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DA73983703AF494F97B44D03 /* Assets.xcassets */; };
 		09DF70066D3C28184BECAE84 /* attention-client-m2-r1-compat.json in Resources */ = {isa = PBXBuildFile; fileRef = D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */; };
 		0BC9EB296999010C1D6DAB10 /* SampleWorkspaceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C68B1C8C342277A72B59A3D /* SampleWorkspaceUITests.swift */; };
 		0F5D4EECAC00D18DDC00A2B6 /* NativeNotificationPermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEA39F969EDE1E6B2FA7678C /* NativeNotificationPermission.swift */; };
@@ -21,6 +23,7 @@
 		198D3B50DE4080A7FECBAC7B /* HarklightNativeRelay in Frameworks */ = {isa = PBXBuildFile; productRef = FC5638FF239B1E5020076982 /* HarklightNativeRelay */; };
 		1A55C162499D99E4BFDD5736 /* InboxSeenBaseline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A880C0F331A2A2B67F0EF495 /* InboxSeenBaseline.swift */; };
 		1CE1DD773EB94AA8F1EA176E /* ConversationRelayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04C670B08914C6F62366492 /* ConversationRelayTests.swift */; };
+		20703BDE3924BA4E3385A904 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DA73983703AF494F97B44D03 /* Assets.xcassets */; };
 		22DDB77EA028F97652A80979 /* NativeJoinInvitation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */; };
 		253FF6D928101B02B4093646 /* PrototypeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEC8516B5AF186CD58914057 /* PrototypeStore.swift */; };
 		25687C2E7B8A6FCEA937DE63 /* ConversationJoinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DFF574DDDAA420FDCF79D76 /* ConversationJoinTests.swift */; };
@@ -28,6 +31,7 @@
 		32C25EF03B9BF5D1C1095F73 /* DevelopmentAPNsAddressStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E324FFEA53B23DC189F2078B /* DevelopmentAPNsAddressStoreTests.swift */; };
 		353967DAF6FD69BC61B8DA36 /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 5F912978D0628D83E6624A9A /* AttentionDomain */; };
 		36286A1268E94779236BBBAB /* NativeGuidedIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2B25DD9CA13B8F3993D9BB /* NativeGuidedIdentityTests.swift */; };
+		37E4C22CB53D4BD1BA7598C9 /* NativeClientDiagnosticsVersionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2FEF6E138B9762AA2BE4AE1 /* NativeClientDiagnosticsVersionUITests.swift */; };
 		3B5256DF599C29BBE67FDC2E /* HarklightConversationUITestHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 641E40458DF87034CD087B52 /* HarklightConversationUITestHost.swift */; };
 		4132D611C16A7A8746EC9773 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68B30BAF95249EB48C166A9 /* ConversationView.swift */; };
 		437A73A6271E258BE1CC70ED /* InboxItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9338A49F12238750815D8518 /* InboxItem.swift */; };
@@ -180,10 +184,12 @@
 		B3AD83C5473F6DFB7981B536 /* SenderRevisionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderRevisionPresentationTests.swift; sourceTree = "<group>"; };
 		B3F0434BA70BF47D003E427C /* HarklightUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HarklightUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B72BA617D53D9A15FC5D2F58 /* SampleLibraryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleLibraryTests.swift; sourceTree = "<group>"; };
+		D2FEF6E138B9762AA2BE4AE1 /* NativeClientDiagnosticsVersionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeClientDiagnosticsVersionUITests.swift; sourceTree = "<group>"; };
 		D3B9732F966E6F1372B2C35C /* SampleMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleMessages.swift; sourceTree = "<group>"; };
 		D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedNativeJoinExchange.swift; sourceTree = "<group>"; };
 		D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "attention-client-m2-r1-compat.json"; sourceTree = "<group>"; };
 		D8D93E814ACCCDA16B02D075 /* Harklight.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Harklight.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DA73983703AF494F97B44D03 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRelayLifecycle.swift; sourceTree = "<group>"; };
 		DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedJoin.swift; sourceTree = "<group>"; };
 		E324FFEA53B23DC189F2078B /* DevelopmentAPNsAddressStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentAPNsAddressStoreTests.swift; sourceTree = "<group>"; };
@@ -257,6 +263,7 @@
 		4F07B0696947245A002E287D /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				DA73983703AF494F97B44D03 /* Assets.xcassets */,
 				EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */,
 				D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */,
 			);
@@ -268,6 +275,7 @@
 			children = (
 				25F29EBA65F53DDD48291079 /* ConversationSampleUITests.swift */,
 				2C8B4B064109D84BB2B0FBF2 /* HarklightUITests.swift */,
+				D2FEF6E138B9762AA2BE4AE1 /* NativeClientDiagnosticsVersionUITests.swift */,
 				8C68B1C8C342277A72B59A3D /* SampleWorkspaceUITests.swift */,
 			);
 			path = UITests;
@@ -540,6 +548,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				09DF56C0F9A249D2933FADD1 /* Assets.xcassets in Resources */,
 				99600D5791D337E606EFF33F /* README.md in Resources */,
 				45E6B1F77CF2F6EB2E0DA45E /* attention-client-m2-fixtures.json in Resources */,
 				B5518512516A448A8F26776D /* attention-client-m2-r1-compat.json in Resources */,
@@ -550,6 +559,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				20703BDE3924BA4E3385A904 /* Assets.xcassets in Resources */,
 				4C2FECF89B2A209A3D6527B4 /* attention-client-m2-fixtures.json in Resources */,
 				09DF70066D3C28184BECAE84 /* attention-client-m2-r1-compat.json in Resources */,
 			);
@@ -559,6 +569,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0608B149AEEF38132FBC94AC /* Assets.xcassets in Resources */,
 				6FCE111E5FBE12F820254A81 /* attention-client-m2-fixtures.json in Resources */,
 				EE3096EA3E5BE32F11F847AC /* attention-client-m2-r1-compat.json in Resources */,
 			);
@@ -680,6 +691,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F36887DCDAA5F75F19215E44 /* HarklightUITests.swift in Sources */,
+				37E4C22CB53D4BD1BA7598C9 /* NativeClientDiagnosticsVersionUITests.swift in Sources */,
 				0BC9EB296999010C1D6DAB10 /* SampleWorkspaceUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
