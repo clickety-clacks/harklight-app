@@ -627,11 +627,14 @@ final class NativeGuidedTLSTests: XCTestCase {
             Data("{\"v\":1,\"type\":\"conversation_sync\",\"ref\":\"native-conversation-sync\"}\n".utf8)
         ) { frame in
             frames.append(frame)
+            frames.noteQueued(await session.queuedResponseFrameCount)
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         XCTAssertEqual(frames.types.first, "ok")
         XCTAssertEqual(frames.types.last, "conversation_resynced")
         XCTAssertEqual(frames.conversationSeqs, Array(1...backlog))
+        // At most the next entry and the end frame wait behind the consumer.
+        XCTAssertLessThanOrEqual(frames.maxQueued, 2)
         await session.close()
     }
 
@@ -2749,6 +2752,11 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
 private final class ConversationFrameCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var frames: [Data] = []
+    private var queuedHighWater = 0
+    var maxQueued: Int {
+        lock.lock(); defer { lock.unlock() }
+        return queuedHighWater
+    }
     var types: [String?] {
         lock.lock(); defer { lock.unlock() }
         return frames.map { try? JSONValue.parse($0).uniqueValue(named: "type")?.stringValue?.rawValue }
@@ -2764,6 +2772,10 @@ private final class ConversationFrameCollector: @unchecked Sendable {
 
     func append(_ frame: Data) {
         lock.lock(); frames.append(frame); lock.unlock()
+    }
+
+    func noteQueued(_ count: Int) {
+        lock.lock(); queuedHighWater = max(queuedHighWater, count); lock.unlock()
     }
 }
 

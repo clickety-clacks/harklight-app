@@ -73,6 +73,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private var conversationReplaySpaceWaiters: [CheckedContinuation<Void, any Error>] = []
     private var liveConversationWaiters: [CheckedContinuation<Void, any Error>] = []
     private let socketExchangeGate = RelaySocketExchangeGate()
+    /// Tests read this to check that a replay's catch-up stays bounded.
+    var queuedResponseFrameCount: Int { responseFrames.count }
 
     public init(profile: ProfileContext,
                 relayURL: URL,
