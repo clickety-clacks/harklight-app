@@ -1234,7 +1234,7 @@ final class LivePresentationStore {
         guard !isReadOnly, request.inboxStateIsCurrent, !isRetracted(request.key),
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil else { return false }
-        switch request.projection {
+        return switch request.projection {
         case .sender, .compatibility: true
         case .unsupported: false
         }
