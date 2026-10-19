@@ -827,7 +827,6 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
         let context = ProfileContext(identity: identity, transportMode: .fixture)
         let store = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
         let port = AttentionDomainPort(store: store)
-        let selector = try XCTUnwrap(port.inspect(context: port.context, request: fixture.key).requests.first?.selector)
         let originalID = UUID()
         let original: [TypedInputRecord] = [
             .point(input: point.id, point: PointValue(x: 240, y: 610)),
