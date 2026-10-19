@@ -963,7 +963,7 @@ private struct LiveProjectedInputView: View {
             get: { typedInputText ?? draft?.text?.rawValue ?? "" },
             set: {
                 typedInputText = $0
-                store.updateText($0, input: input.id, action: nil, for: request.key)
+                store.stageText($0, input: input.id, action: nil, for: request.key)
             }
         ))
         .frame(minHeight: 120)
@@ -1009,7 +1009,7 @@ private struct LiveProjectedInputView: View {
                 get: { replyEditorTexts[action.id] ?? draft?.textByActionID[action.id]?.rawValue ?? text },
                 set: {
                     replyEditorTexts[action.id] = $0
-                    store.updateText($0, input: input.id, action: action.id, for: request.key)
+                    store.stageText($0, input: input.id, action: action.id, for: request.key)
                 }
             ))
             .font(.body)
@@ -1249,7 +1249,7 @@ private struct LiveCompatibilityActions: View {
                 },
                 set: {
                     replyTextByActionID[action.id] = $0
-                    store.updateCompatibilityText($0, action: action.id, for: request.key)
+                    store.stageCompatibilityText($0, action: action.id, for: request.key)
                 }
             ))
             .font(.body)
