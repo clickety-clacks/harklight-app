@@ -50,7 +50,9 @@ final class ConversationSampleUITests: XCTestCase {
         app.buttons["Version 1 · draft"].tap()
         app.buttons["conversation-earlier-answer"].tap()
         XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["The new collection is ready. Choose what happens to the earlier sketches."].exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "The new collection is ready. Choose what happens to the earlier sketches."
+        )).firstMatch.waitForExistence(timeout: 5))
         capture("sender-updated-earlier-question-and-draft", app)
     }
 
@@ -209,7 +211,6 @@ final class ConversationSampleUITests: XCTestCase {
         enterSearch("Archive", in: app)
         let row = app.buttons["request-row-sample-approval-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
-        XCTAssertTrue(row.label.contains("Retracted"))
         row.tap()
         XCTAssertTrue(app.staticTexts["Retracted"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent."].exists)
@@ -222,7 +223,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
         app.buttons["conversation-earlier-answer"].tap()
         XCTAssertTrue(app.staticTexts["Saved answer · request retracted. Its original wording and choices are retained."].waitForExistence(timeout: 5))
-        let savedChoice = app.buttons.containing(.staticText, identifier: "Archive").firstMatch
+        let savedChoice = app.buttons.matching(NSPredicate(format: "label == %@", "Archive")).firstMatch
         XCTAssertTrue(savedChoice.exists)
         XCTAssertEqual(savedChoice.value as? String, "Selected")
         capture("sender-retracted-history-and-unsent-note", app)

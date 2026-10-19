@@ -68,6 +68,7 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
         XCTAssertTrue(finish.isEnabled, "A valid point and note should enable the shared answer action.")
         finish.tap()
+        let lifecycle = app.staticTexts["request-lifecycle-status"]
         XCTAssertTrue(lifecycle.waitForExistence(timeout: 5))
         XCTAssertEqual(lifecycle.label, "Pending",
                        "A local submission remains pending until its fixture outcome is explicitly simulated.")
@@ -367,18 +368,21 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
     }
 
     private func openRequestDetails(in app: XCUIApplication) {
-        let heading = app.descendants(matching: .any)["request-heading"]
+        let heading = app.buttons["request-heading"]
         XCTAssertTrue(heading.waitForExistence(timeout: 5))
         let scroll = app.scrollViews["message-card-scroll"]
-        for _ in 0..<8 where !heading.isHittable { scroll.swipeDown() }
-        XCTAssertTrue(heading.isHittable, "The message heading must expose its context menu.")
-        heading.press(forDuration: 1.1)
-        let action = app.buttons.matching(NSPredicate(
-            format: "identifier == %@ OR label == %@", "request-details-menu-action", "Request details")).firstMatch
-        XCTAssertTrue(action.waitForExistence(timeout: 5), app.debugDescription)
-        action.tap()
+        let visibleTop = app.navigationBars.firstMatch.frame.maxY
+        for _ in 0..<8 {
+            if heading.isHittable && heading.frame.minY >= visibleTop { break }
+            scroll.swipeDown()
+        }
+        XCTAssertTrue(heading.isHittable, "The message heading must open request history.")
+        XCTAssertGreaterThanOrEqual(heading.frame.minY, visibleTop,
+                                    "The heading must be below the navigation bar before tapping it.")
+        heading.tap()
+        attachScreenshot("Request history interaction", from: app)
         XCTAssertTrue(app.buttons["request-details-done"].waitForExistence(timeout: 5),
-                      "Request history must open off the detail card face.")
+                      "Request history must open off the detail card face.\n\(app.debugDescription)")
     }
 
     private func selectFacilitiesRequest(in app: XCUIApplication) {
