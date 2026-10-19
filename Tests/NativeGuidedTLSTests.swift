@@ -113,6 +113,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             let senderID: String
             let messageID: String
             let ordinaryCursor: UInt64
+            let conversationsSupported: Bool
         }
         let bundle = Bundle(for: Self.self)
         guard let configurationURL = bundle.url(forResource: "foreground-post-ack", withExtension: "json") else {
@@ -188,7 +189,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                             $0.attemptID == result.transportAttemptID
                     } &&
                     (!retainedThread || journal.events.contains {
-                        $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .rejected
+                        $0.area == .conversation && $0.phase == .conversationReplay &&
+                            $0.transition == (fixture.conversationsSupported ? .completed : .rejected)
                     })
             }
             // A later refresh on this connection must keep ordinary service
@@ -208,6 +210,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 "checkpoint_accepted=\(after.inboxCheckpoint?.checkpointAccepted == true) " +
                     "checkpoint_high_water=\(after.inboxCheckpoint?.highWater.map(String.init) ?? "unavailable")",
                 "ordinary_ack_expected=no_empty_replay",
+                "conversations_supported_expected=\(fixture.conversationsSupported)",
                 "chat_availability_message=\(chatMessage ?? "none")",
                 "connection_warning=\(presentation.connectionWarning ?? "none")",
                 "conversation_threads_before=\(threadsBefore.threads.count) after=\(threadsAfter.threads.count)",
@@ -251,7 +254,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             XCTAssertEqual(result.postAckRelayRefresh, .passed)
             XCTAssertEqual(result.relayContextValidation, .passed)
             XCTAssertNil(presentation.connectionWarning)
-            if retainedThread {
+            if retainedThread && !fixture.conversationsSupported {
                 XCTAssertEqual(chatMessage, "Chat is not available on this server yet.")
                 XCTAssertEqual(journal.events.filter {
                     $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .rejected
@@ -265,7 +268,21 @@ final class NativeGuidedTLSTests: XCTestCase {
                 })
             } else {
                 XCTAssertNil(chatMessage)
-                XCTAssertFalse(journal.events.contains { $0.phase == .conversationReplay })
+                if retainedThread {
+                    XCTAssertTrue(journal.events.contains {
+                        $0.area == .conversation && $0.phase == .conversationReplay &&
+                            $0.transition == .completed && $0.attemptID == transportID
+                    })
+                    XCTAssertTrue(journal.events.contains {
+                        $0.area == .conversation && $0.phase == .acknowledgement &&
+                            $0.transition == .completed && $0.attemptID == transportID
+                    })
+                    XCTAssertFalse(journal.events.contains {
+                        $0.area == .conversation && $0.transition == .rejected
+                    })
+                } else {
+                    XCTAssertFalse(journal.events.contains { $0.phase == .conversationReplay })
+                }
             }
         }
     }
@@ -2444,6 +2461,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
 
         XCTAssertEqual(result.outcome, .timedOut)
+        XCTAssertEqual(result.headline, "Connection not confirmed",
+                       "An actual stalled relay must keep the existing connection warning.")
         XCTAssertEqual(result.failureClass, .foregroundDeadline)
         XCTAssertNotNil(result.attemptID)
         XCTAssertFalse(result.webSocketOpenObserved)
