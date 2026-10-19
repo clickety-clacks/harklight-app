@@ -998,18 +998,6 @@ private struct LiveProjectedInputView: View {
                               input.id.rawValue == "answer" && action.id.rawValue == "options")
                         }, id: \.id) { action in actionButton(action) }
                     }
-                    if let selected = draft?.selectedActionID,
-                       let action = actions.first(where: { $0.id == selected }),
-                       action.kind == .text {
-                        TextEditor(text: Binding(
-                            get: { draft?.textByActionID[selected]?.rawValue ?? "" },
-                            set: { store.updateText($0, input: input.id, action: selected, for: request.key) }
-                        ))
-                        .frame(minHeight: 120)
-                        .accessibilityLabel(action.label.rawValue)
-                        .accessibilityIdentifier("request-input-" + input.id.rawValue + "-response")
-                        .disabled(readOnly)
-                    }
                 }
             }
         case .text:
