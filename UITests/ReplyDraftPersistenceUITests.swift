@@ -1,8 +1,8 @@
 import XCTest
 
 @MainActor
-final class ReplyTypingPerformanceUITests: XCTestCase {
-    func testLongReplyTypingLatencyAndDraftSurviveAppRelaunch() async throws {
+final class ReplyDraftPersistenceUITests: XCTestCase {
+    func testLongReplyDraftSurvivesAppRelaunch() async throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
@@ -18,23 +18,8 @@ final class ReplyTypingPerformanceUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
 
         let longReply = String(repeating: "a", count: 256)
-        let started = ProcessInfo.processInfo.systemUptime
-        for character in longReply {
-            editor.typeText(String(character))
-        }
-        let elapsedMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1_000
+        editor.typeText(longReply)
         XCTAssertEqual(editor.value as? String, longReply)
-
-        let measurement = """
-        scenario=reply text editor
-        characters=\(longReply.count)
-        elapsed_ms=\(String(format: "%.1f", elapsedMilliseconds))
-        average_ms_per_character=\(String(format: "%.2f", elapsedMilliseconds / Double(longReply.count)))
-        """
-        let attachment = XCTAttachment(data: Data(measurement.utf8), uniformTypeIdentifier: "public.plain-text")
-        attachment.name = "reply-typing-latency"
-        attachment.lifetime = .keepAlways
-        add(attachment)
 
         try await Task.sleep(for: .milliseconds(700))
         app.terminate()
