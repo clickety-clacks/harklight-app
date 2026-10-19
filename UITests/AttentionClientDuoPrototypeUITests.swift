@@ -274,11 +274,9 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         XCTAssertTrue(finishSeen.exists,
                       "The Seen button stays in place after the action.")
         XCTAssertTrue(finishSeen.label.contains("Seen"), finishSeen.label)
-        XCTAssertEqual(finishSeen.value as? String, "Completed")
         XCTAssertFalse(finishSeen.isEnabled,
                        "The completed Seen button is ghosted and cannot be tapped again.")
         XCTAssertTrue(seenAction.label.contains("Seen"), seenAction.label)
-        XCTAssertEqual(seenAction.value as? String, "Completed")
         XCTAssertFalse(seenAction.isEnabled,
                        "The completed card action stays in place as a disabled Seen button.")
         attachScreenshot("Seen button remains after action", from: app)

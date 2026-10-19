@@ -623,7 +623,6 @@ struct LiveRequestDetail: View {
                     .tint(seenActionIsComplete ? .green : .blue)
                     .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
                     .disabled(controlsReadOnly || availableSeenAction == nil)
-                    .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
                     .accessibilityIdentifier("request-finish-seen")
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
@@ -1228,7 +1227,6 @@ private struct LiveCompatibilityActions: View {
                 .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
                 .disabled(readOnly || seenStatus != .available)
                 .opacity(seenActionIsComplete ? 0.76 : (readOnly ? 0.48 : 1))
-                .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
                 .accessibilityIdentifier("request-seen-action")
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
