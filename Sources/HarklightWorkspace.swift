@@ -277,6 +277,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func restoreLastViewedListPosition() {
+        UIDiagnostics.shared.record("inbox.restorePosition keys last=\(lastViewedSelection.map(diagnosticKey) ?? "nil") rows=\(rows.map { diagnosticKey($0.id) })")
         guard navigatedBetweenMessages else {
             if let lastViewedSelection,
                let lastViewedItem = rows.first(where: { $0.id == lastViewedSelection }) {
@@ -300,6 +301,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
         restoreLastViewedOnReturn = true
         UIDiagnostics.shared.record("inbox.restorePosition lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) tab=\(selectedTab.rawValue)")
+    }
+
+    private func diagnosticKey(_ selection: InboxSelection) -> String {
+        switch selection {
+        case let .request(key): "request:\(key.accountScope.rawValue)|\(key.senderID.rawValue)|\(key.messageID.rawValue)"
+        case let .sample(id): "sample:\(id)"
+        }
     }
 
     private func diagnosticSummary(landscape: Bool) -> String {
