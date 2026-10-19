@@ -529,6 +529,63 @@ final class NativeGuidedTLSTests: XCTestCase {
                       "Resolved content stays in the ordered inbox projection below open requests.")
     }
 
+    func testLiveConversationFrameDuringInboxPagingKeepsTheRelayOpen() async throws {
+        let namespace = "Harklight.relay-live-conversation-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let live: @Sendable (Int) -> String = { seq in
+            "{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(seq)}\n"
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            if text.contains("\"inbox_attach\"") {
+                return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"attach\",\"paging_version\":1,"
+                            + "\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        "{\"v\":1,\"type\":\"resynced\"}\n",
+                        live(5)]
+            }
+            if text.contains("\"inbox_page\"") {
+                return [live(6), "{\"v\":1,\"type\":\"ok\",\"ref\":\"page\"}\n"]
+            }
+            if text.contains("\"conversation_sync\"") {
+                return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-conversation-sync\"}\n",
+                        live(5), live(6),
+                        "{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":6}\n"]
+            }
+            return []
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(
+            profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+
+        try await session.attachInboxReplay(Data("{\"v\":1,\"type\":\"inbox_attach\",\"ref\":\"attach\"}\n".utf8),
+                                            ref: "attach") { _ in }
+        // A live reply while nothing is reading the socket signals the core
+        // without leaving a frame for the next exchange to read.
+        try await session.nextLiveConversationSignal()
+        // A live reply while an inbox page is pending does not reach the page reader.
+        let page = try await session.inboxRequest(Data("{\"v\":1,\"type\":\"inbox_page\",\"ref\":\"page\"}\n".utf8),
+                                                  ref: "page")
+        XCTAssertEqual(try JSONValue.parse(page).uniqueValue(named: "ref")?.stringValue?.rawValue, "page")
+        try await session.nextLiveConversationSignal()
+        // The replay the signal starts reads both replies from the durable cursor.
+        let frames = ConversationFrameCollector()
+        try await session.openConversation(
+            Data("{\"v\":1,\"type\":\"conversation_sync\",\"ref\":\"native-conversation-sync\"}\n".utf8)
+        ) { frames.append($0) }
+        XCTAssertEqual(frames.types, ["ok", "conversation", "conversation", "conversation_resynced"])
+        await session.close()
+    }
+
     func testAuthenticatedRelayRefusesToFollowAnotherEndpoint() async throws {
         let namespace = "Harklight.relay-redirect-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -2447,6 +2504,14 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
         self.advertiseSize = advertiseSize
         self.redirectTo = redirectTo
         self.stallRequest = stallRequest
+        let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
+        rootDER = root
+        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+    }
+
+    static func fixtureTLS(expectedDevice: String?, queue: DispatchQueue) throws -> (NWProtocolTLS.Options, Data) {
         let bundle = Bundle(for: NativeGuidedTLSTests.self)
         guard let certificateURL = bundle.url(forResource: "guided-local-tls", withExtension: "pem"),
               let identityURL = bundle.url(forResource: "guided-local-tls", withExtension: "p12"),
@@ -2454,7 +2519,6 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
                                                                                    encoding: .utf8)) else {
             throw NativeEnrollmentError.invalidIdentity
         }
-        rootDER = root
         var items: CFArray?
         guard SecPKCS12Import(try Data(contentsOf: identityURL) as CFData,
                               [kSecImportExportPassphrase as String: "public-fixture-only"] as CFDictionary,
@@ -2475,9 +2539,7 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
                                                            expectedDeviceID: expectedDevice))
             }, queue)
         }
-        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
-        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
-        listener = try NWListener(using: parameters)
+        return (tls, root)
     }
 
     func start() async throws -> UInt16 {
@@ -2554,6 +2616,97 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
             connections.forEach { $0.cancel() }
             connections.removeAll()
         }
+    }
+}
+
+/// A local TLS WebSocket relay. Each text message from the app is passed to
+/// `reply`, and the returned frames are sent back in order.
+private final class LocalRelayWebSocket: @unchecked Sendable {
+    let rootDER: Data
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "Harklight.local-relay-websocket")
+    private let reply: @Sendable (String) -> [String]
+    // All connection ownership is serialized on queue, including close().
+    private var connections: [NWConnection] = []
+
+    init(expectedDevice: String, reply: @escaping @Sendable (String) -> [String]) throws {
+        self.reply = reply
+        let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
+        rootDER = root
+        let webSocket = NWProtocolWebSocket.Options()
+        webSocket.autoReplyPing = true
+        webSocket.setClientRequestHandler(queue) { _, _ in
+            NWProtocolWebSocket.Response(status: .accept, subprotocol: "attention-relay/1", additionalHeaders: nil)
+        }
+        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+    }
+
+    func start() async throws -> UInt16 {
+        try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    listener.stateUpdateHandler = nil
+                    guard let port = listener.port else {
+                        continuation.resume(throwing: NativeJoinError.unavailable); return
+                    }
+                    continuation.resume(returning: port.rawValue)
+                case let .failed(error):
+                    listener.stateUpdateHandler = nil
+                    continuation.resume(throwing: error)
+                default: break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { return }
+                connections.append(connection)
+                connection.start(queue: queue)
+                receive(connection)
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    private func receive(_ connection: NWConnection) {
+        connection.receiveMessage { [weak self] data, context, _, error in
+            guard let self, error == nil else { connection.cancel(); return }
+            let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
+                as? NWProtocolWebSocket.Metadata
+            if metadata?.opcode == .text, let data, let text = String(data: data, encoding: .utf8) {
+                for frame in reply(text) {
+                    let context = NWConnection.ContentContext(
+                        identifier: "relay-frame", metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])
+                    connection.send(content: Data(frame.utf8), contentContext: context, isComplete: true,
+                                    completion: .idempotent)
+                }
+            }
+            receive(connection)
+        }
+    }
+
+    func close() {
+        queue.sync {
+            listener.cancel()
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
+}
+
+private final class ConversationFrameCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var frames: [Data] = []
+    var types: [String?] {
+        lock.lock(); defer { lock.unlock() }
+        return frames.map { try? JSONValue.parse($0).uniqueValue(named: "type")?.stringValue?.rawValue }
+    }
+
+    func append(_ frame: Data) {
+        lock.lock(); frames.append(frame); lock.unlock()
     }
 }
 

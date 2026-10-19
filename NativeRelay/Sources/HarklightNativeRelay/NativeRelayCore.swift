@@ -41,6 +41,13 @@ public protocol AuthenticatedConversationSession: AuthenticatedInstallationSessi
     func acknowledgeConversation(_ request: Data) async throws
 }
 
+/// After the projection is opened, the relay pushes new conversation entries
+/// on the same connection. The transport only reports that one arrived; the
+/// core then replays from its durable conversation cursor and ACKs.
+public protocol AuthenticatedConversationEventSession: AuthenticatedConversationSession {
+    func nextLiveConversationSignal() async throws
+}
+
 public protocol AuthenticatedConversationFileSession: AuthenticatedConversationSession {
     func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits
     func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
@@ -109,6 +116,8 @@ public actor NativeRelayCore {
     private var postCheckpointAcknowledgementWaiters: [InboxSequenceWaiter] = []
     private var pendingInboxPageWaiters: [CheckedContinuation<Bool, Error>] = []
     private var conversationReplay: ConversationReplayProgress?
+    private var liveConversationConsumerTask: Task<Void, Never>?
+    private var pendingLiveConversationReplay = false
     private var inspectedConversationMetadata = false
     private var discoveredOriginURL: URL?
     private var activeCleanupRequests: Set<UUID> = []
@@ -332,6 +341,9 @@ public actor NativeRelayCore {
         postCheckpointInboxConsumerTask = nil
         postCheckpointAcknowledgementTask?.cancel()
         postCheckpointAcknowledgementTask = nil
+        liveConversationConsumerTask?.cancel()
+        liveConversationConsumerTask = nil
+        pendingLiveConversationReplay = false
         resumePostCheckpointWaiters(throwing: NativeRelayCoreError.inactive)
     }
 
@@ -973,6 +985,39 @@ public actor NativeRelayCore {
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
             throw error
         }
+        // The relay pushes later entries only once this device has opened the
+        // projection, so start listening for them after the first open.
+        if liveConversationConsumerTask == nil,
+           let events = transport as? any AuthenticatedConversationEventSession {
+            liveConversationConsumerTask = Task { [weak self] in
+                await self?.consumeLiveConversationSignals(from: events)
+            }
+        }
+    }
+
+    private func consumeLiveConversationSignals(from events: any AuthenticatedConversationEventSession) async {
+        while !Task.isCancelled {
+            do { try await events.nextLiveConversationSignal() }
+            catch { return }
+            await replayLiveConversation()
+        }
+    }
+
+    /// A live entry is applied the same way as any other: replay from C's
+    /// durable conversation cursor, commit, then ACK. While another operation
+    /// owns the socket, run once after it releases.
+    private func replayLiveConversation() async {
+        guard active, liveConversationConsumerTask != nil,
+              let transport = session as? any AuthenticatedConversationSession else { return }
+        guard !busy else {
+            pendingLiveConversationReplay = true
+            return
+        }
+        busy = true
+        defer { releaseBusy() }
+        // A failure leaves the durable cursor unchanged; the next live entry,
+        // foreground or push resync replays from it.
+        try? await replayConversationAndAcknowledge(using: transport)
     }
 
     private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,
@@ -1052,6 +1097,10 @@ public actor NativeRelayCore {
 
     private func releaseBusy() {
         busy = false
+        if pendingLiveConversationReplay {
+            pendingLiveConversationReplay = false
+            Task { await replayLiveConversation() }
+        }
         guard !pendingInboxPageWaiters.isEmpty else { return }
         let waiters = pendingInboxPageWaiters
         pendingInboxPageWaiters.removeAll()
