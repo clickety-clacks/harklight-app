@@ -233,8 +233,8 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         facilities.tap()
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
 
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5))
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.25))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.25))
         start.press(forDuration: 0.05, thenDragTo: end)
         let returnedToInbox = facilities.waitForExistence(timeout: 5)
         if !returnedToInbox { attachScreenshot("Detail after native edge swipe", from: app) }
