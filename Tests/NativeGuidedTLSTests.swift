@@ -101,6 +101,148 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
 /// request an optional certificate; that server seam needs server integration.
 @MainActor
 final class NativeGuidedTLSTests: XCTestCase {
+    /// Run only with an isolated, preapproved fixture matching the deployed
+    /// server. The fixture remains quiescent after seeding its ordinary message.
+    /// Resources are copied into Tests/Fixtures before the unchanged wrapper runs;
+    /// this test neither enrolls an identity nor starts or reconfigures a server.
+    func testIsolatedForegroundCompletionWithEmptyAndRetainedConversationThreads() async throws {
+        struct Fixture: Decodable {
+            let relayURL: URL
+            let personID: String
+            let deviceID: String
+            let senderID: String
+            let messageID: String
+            let ordinaryCursor: UInt64
+        }
+        let bundle = Bundle(for: Self.self)
+        guard let configurationURL = bundle.url(forResource: "foreground-post-ack", withExtension: "json") else {
+            throw XCTSkip("Requires the isolated foreground-post-ack fixture and preapproved synthetic identity.")
+        }
+        let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: configurationURL))
+        let rootURL = try XCTUnwrap(bundle.url(forResource: "foreground-post-ack-ca", withExtension: "pem"))
+        let identityURL = try XCTUnwrap(bundle.url(forResource: "foreground-post-ack-client", withExtension: "p12"))
+        let rootDER = try XCTUnwrap(NativeEnrollmentSettings.certificateDER(
+            from: String(contentsOf: rootURL, encoding: .utf8)))
+        var importedItems: CFArray?
+        XCTAssertEqual(SecPKCS12Import(try Data(contentsOf: identityURL) as CFData,
+            [kSecImportExportPassphrase as String: "public-fixture-only"] as CFDictionary,
+            &importedItems), errSecSuccess)
+        let importedIdentity = try XCTUnwrap((importedItems as? [[String: Any]])?.first?[kSecImportItemIdentity as String])
+        let clientIdentity = importedIdentity as! SecIdentity
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText(try XCTUnwrap(fixture.relayURL.host)),
+            personID: ExactText(fixture.personID), deviceID: ExactText(fixture.deviceID))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let request = RequestKey(accountScope: identity.personID, senderID: ExactText(fixture.senderID),
+            messageID: ExactText(fixture.messageID))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FileAttentionStatePersistence(directoryURL: directory)
+        var store = try AttentionDomainStore(context: context, persistence: persistence)
+        let runID = UUID()
+
+        for retainedThread in [false, true] {
+            let name = retainedThread ? "retained-thread" : "empty-threads"
+            if retainedThread {
+                // Restore the same committed ordinary state and identity. Add only
+                // synthetic historical conversation state; do not alter its cursor,
+                // requests, answers or replay receipts to manufacture a success.
+                store = try AttentionDomainStore(context: context, persistence: persistence)
+                let saved = try store.snapshot(context: context)
+                let message = try XCTUnwrap(saved.requests[request])
+                try store.applyConversation(ConversationEvent(sequence: 1,
+                    binding: ConversationBinding(request: request, revision: 1),
+                    fact: .request(sessionHandle: ExactText("retained-fixture-conversation"),
+                                   payload: message.originalPayload)), context: context)
+                let after = try store.snapshot(context: context)
+                XCTAssertEqual(after.cursor, saved.cursor)
+                XCTAssertEqual(after.requests, saved.requests)
+                XCTAssertEqual(after.intents, saved.intents)
+                XCTAssertEqual(after.outbox, saved.outbox)
+            }
+            let before = try store.snapshot(context: context)
+            let threadsBefore = try store.conversationSnapshot(context: context)
+            XCTAssertTrue(before.outbox.isEmpty)
+            XCTAssertTrue(before.intents.isEmpty, "This baseline has no original operation or terminal replay to invent.")
+            XCTAssertEqual(threadsBefore.threads.count, retainedThread ? 1 : 0)
+            let journal = NativeClientDiagnosticJournal(fileURL: nil)
+            let lifecycle = NativeRelayLifecycle()
+            try await lifecycle.activate(store: store, context: context, relayURL: fixture.relayURL,
+                clientIdentity: clientIdentity, trustedRootDER: rootDER, diagnostics: journal)
+            var checkpoints: [String] = []
+            print("Foreground fixture begin run=\(runID) case=\(name) person=\(fixture.personID) device=\(fixture.deviceID)")
+            let result = await lifecycle.confirmForegroundProgress(for: context) { progress in
+                let cursor = try? store.snapshot(context: context).cursor
+                let threads = try? store.conversationSnapshot(context: context).threads.count
+                let checkpoint = "transport=\(progress.transportAttemptID?.uuidString ?? "none") " +
+                    "stage=\(progress.lastConfirmedStage?.diagnosticValue ?? "none") " +
+                    "durable_cursor_at_observation=\(cursor.map(String.init) ?? "unavailable") " +
+                    "threads=\(threads.map(String.init) ?? "unavailable")"
+                if checkpoints.last != checkpoint { checkpoints.append(checkpoint) }
+            }
+            let diagnosticsArrived = await eventually {
+                journal.events.contains { $0.phase == .foregroundCompletion && $0.attemptID == result.attemptID } &&
+                    (!retainedThread || journal.events.contains {
+                        $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .rejected
+                    })
+            }
+            let after = try store.snapshot(context: context)
+            let threadsAfter = try store.conversationSnapshot(context: context)
+            let diagnostic = NativeForegroundConnectDiagnostic(progress: result,
+                operationSnapshot: lifecycle.foregroundOperationDiagnostics(for: context))
+            let evidence = [
+                "run=\(runID) case=\(name)",
+                "person=\(fixture.personID) device=\(fixture.deviceID) profile_generation=\(context.generation)",
+                "ordinary_cursor_before=\(before.cursor) ordinary_cursor_after=\(after.cursor)",
+                "conversation_threads_before=\(threadsBefore.threads.count) after=\(threadsAfter.threads.count)",
+                "original_operation=none terminal_operation_replay=not_applicable",
+                "received_message_readable=\(after.requests[request] != nil)",
+                checkpoints.joined(separator: "\n"), diagnostic.shareText, journal.shareText
+            ].joined(separator: "\n")
+            let attachment = XCTAttachment(string: evidence)
+            attachment.name = "Foreground post-ACK \(name)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            print(evidence)
+            await lifecycle.deactivate()
+
+            XCTAssertTrue(diagnosticsArrived)
+            XCTAssertNotNil(result.attemptID)
+            let transportID = try XCTUnwrap(result.transportAttemptID)
+            XCTAssertTrue(journal.events.contains {
+                $0.area == .relay && $0.phase == .acknowledgement && $0.transition == .completed &&
+                    ($0.transportAttemptID == transportID || $0.attemptID == transportID)
+            }, "The final transport must actually finish the ordinary ACK exchange.")
+            // With no operations or new server events, this cursor cannot move
+            // between the ACK and observation. The server trace supplies its
+            // exact seq/ref and the subsequent conversation_open/error frames.
+            XCTAssertEqual(after.cursor, fixture.ordinaryCursor)
+            XCTAssertNotNil(after.requests[request], "Received messages survive an incomplete foreground result.")
+            XCTAssertTrue(after.outbox.isEmpty)
+            XCTAssertEqual(after.intents, before.intents)
+            XCTAssertEqual(threadsAfter.threads.count, retainedThread ? 1 : 0)
+            XCTAssertEqual(result.generationValidation, .passed)
+            XCTAssertEqual(result.profileContextValidation, .passed)
+            if retainedThread {
+                XCTAssertEqual(result.outcome, .incomplete)
+                XCTAssertEqual(result.postAckDrainTransition, .rejected)
+                XCTAssertEqual(result.lastCompletedPostAckBoundary, .nativeCursorAcknowledged)
+                XCTAssertTrue(journal.events.contains {
+                    $0.area == .conversation && $0.phase == .conversationReplay &&
+                        $0.transition == .rejected && $0.attemptID == transportID
+                }, "Locate the rejection inside post-ACK conversation replay, not only the generic warning.")
+                XCTAssertFalse(journal.events.contains {
+                    $0.area == .conversation && $0.phase == .acknowledgement && $0.transition == .completed
+                })
+            } else {
+                XCTAssertEqual(result.outcome, .confirmed)
+                XCTAssertEqual(result.postAckDrainTransition, .completed)
+                XCTAssertEqual(result.postAckRelayRefresh, .passed)
+                XCTAssertEqual(result.relayContextValidation, .passed)
+                XCTAssertFalse(journal.events.contains { $0.phase == .conversationReplay })
+            }
+        }
+    }
+
     func testNativeRelayACKAndPushExchangesKeepFIFORepliesWithTheirRequests() async {
         let pushWaiting = PagingExchangeSignal()
         let gate = RelaySocketExchangeGate(onWaiterQueued: { pushWaiting.signal() })
