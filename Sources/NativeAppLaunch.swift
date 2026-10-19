@@ -1424,7 +1424,7 @@ final class LivePresentationStore {
         guard !isReadOnly,
               let request = request(for: key),
               !isRetracted(key), request.lifecycleStatus == .open,
-              request.intentReceipt == nil, request.selector != nil else { return }
+              request.intentReceipt == nil else { return }
         var draft = pendingDrafts[key] ?? request.draft
         change(&draft)
         pendingDrafts[key] = draft
