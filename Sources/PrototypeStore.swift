@@ -42,6 +42,7 @@ final class PrototypeStore {
     private(set) var selectedRequestKey: RequestKey?
     private(set) var persistenceError: String?
     private(set) var snapshot: AttentionStoreSnapshot?
+    private(set) var presentationStore: LivePresentationStore?
 
     @ObservationIgnored private let domainStore: AttentionDomainStore?
     @ObservationIgnored private let profileContext: ProfileContext
@@ -67,6 +68,7 @@ final class PrototypeStore {
 
         var createdStore: AttentionDomainStore?
         var createdPort: AttentionDomainPort?
+        var createdPresentation: LivePresentationStore?
         var initialSnapshot: AttentionStoreSnapshot?
         var initializationError: String?
         do {
@@ -81,12 +83,18 @@ final class PrototypeStore {
             }
             createdStore = store
             createdPort = AttentionDomainPort(store: store)
+            createdPresentation = try LivePresentationStore(
+                localFixtureStore: store,
+                context: profile,
+                captureFixtureRequestsAsSeen: ProcessInfo.processInfo.arguments.contains(
+                    "--harklight-preexisting-seen-fixture"))
             initialSnapshot = try store.snapshot(context: profile)
         } catch {
             initializationError = error.localizedDescription
         }
         self.domainStore = createdStore
         self.port = createdPort
+        self.presentationStore = createdPresentation
         self.snapshot = initialSnapshot
         self.loadError = loadError ?? initializationError.map { "Local durable state could not be opened: \($0)" }
     }
@@ -258,13 +266,6 @@ final class PrototypeStore {
         persistDraft(session.draft, for: key)
     }
 
-    func stepPoint(horizontal: Bool, by amount: Int, for key: RequestKey, inputID: ExactText) {
-        guard let point = sessions[key]?.draft.inputs[inputID]?.effectivePoint else { return }
-        let changed = horizontal ? PointValue(x: min(1000, max(0, point.x + amount)), y: point.y)
-                                 : PointValue(x: point.x, y: min(1000, max(0, point.y + amount)))
-        setPoint(changed, for: key, inputID: inputID)
-    }
-
     func cancelDraft(for key: RequestKey) {
         guard let session = sessions[key], case .open = session.lifecycle,
               let port, let selector = try? boundSelector(for: key) else { return }
@@ -288,9 +289,12 @@ final class PrototypeStore {
     }
 
     @discardableResult
-    func sendSelectedAnswer(for key: RequestKey) -> Bool {
+    func sendSelectedAnswer(for key: RequestKey,
+                            explicitCompatibilityAction: ExactText? = nil) -> Bool {
+        refreshSnapshot()
         guard let session = sessions[key], case .open = session.lifecycle,
-              let port, let records = typedRecords(for: key, draft: session.draft),
+              let port, let records = typedRecords(for: key, draft: session.draft,
+                                                   explicitCompatibilityAction: explicitCompatibilityAction),
               let selector = try? boundSelector(for: key) else { return false }
         do {
             let intent = SubmitIntent(context: port.context,
@@ -308,6 +312,7 @@ final class PrototypeStore {
 
     @discardableResult
     func simulateTerminal(for key: RequestKey, scenario: DemoTerminalScenario) -> Bool {
+        refreshSnapshot()
         guard let store = domainStore, let session = sessions[key],
               case let .pending(submission) = session.lifecycle else { return false }
         let terminal: FixtureTerminal
@@ -364,6 +369,10 @@ final class PrototypeStore {
         }
     }
 
+    func refreshFromDurableStore() {
+        refreshSnapshot()
+    }
+
     private func boundSelector(for key: RequestKey) throws -> BoundDocumentSelector {
         if let cached = selectors[key] { return cached }
         guard let domainStore else { throw AttentionStoreError.persistence("The durable store is unavailable.") }
@@ -372,7 +381,9 @@ final class PrototypeStore {
         return selector
     }
 
-    private func typedRecords(for key: RequestKey, draft: RequestDraft) -> [TypedInputRecord]? {
+    private func typedRecords(for key: RequestKey,
+                              draft: RequestDraft,
+                              explicitCompatibilityAction: ExactText? = nil) -> [TypedInputRecord]? {
         guard let request = request(for: key) else { return nil }
         switch request.interface {
         case let .sender(document):
@@ -400,7 +411,7 @@ final class PrototypeStore {
             }
             return records
         case let .compatibility(form):
-            guard let actionID = draft.compatibility.selectedActionID,
+            guard let actionID = explicitCompatibilityAction ?? draft.compatibility.selectedActionID,
                   let action = form.action(withID: actionID) else { return nil }
             if action.kind == .value { return [.compatibilityValue(action: actionID)] }
             guard let text = draft.compatibility.textByActionID[actionID] else { return nil }

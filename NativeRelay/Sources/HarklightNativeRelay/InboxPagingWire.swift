@@ -266,11 +266,12 @@ public struct InboxPagingWire: Sendable {
             guard let acceptanceValue = raw.uniqueValue(named: "acceptance") else {
                 throw InboxPagingWireError.invalidFrame
             }
+            let attentionTier = try decodeAttentionTier(raw)
             let acceptance = try relay.decodeEvent(Data((acceptanceValue.jsonString + "\n").utf8))
             switch acceptance.body {
             case .delivery, .originReference:
                 break
-            case .terminal:
+            case .terminal, .attentionTierChange:
                 throw InboxPagingWireError.invalidFrame
             }
             let terminalValue = raw.uniqueValue(named: "terminal")
@@ -291,7 +292,8 @@ public struct InboxPagingWire: Sendable {
             guard key.accountScope == profile.identity.personID,
                   identities.insert(key).inserted,
                   acceptance.sequence <= highWater else { throw InboxPagingWireError.invalidFrame }
-            items.append(InboxSnapshotItem(acceptance: acceptance, terminal: terminal))
+            items.append(InboxSnapshotItem(acceptance: acceptance, terminal: terminal,
+                                           attentionTier: attentionTier))
         }
         return InboxPageResponse(snapshotID: snapshotID, highWater: highWater, items: items,
                                  nextCursor: next, receiptCursor: receiptCursor)
@@ -342,10 +344,17 @@ public struct InboxPagingWire: Sendable {
         return UInt64(number.lexeme)
     }
 
+    private func decodeAttentionTier(_ item: JSONValue) throws -> AttentionTier {
+        guard let raw = item.uniqueValue(named: "attention_tier") else { return .middle }
+        guard let value = raw.stringValue?.rawValue,
+              let tier = AttentionTier(rawValue: value) else { throw InboxPagingWireError.invalidFrame }
+        return tier
+    }
+
     private static func key(_ body: RelayEventBody) -> RequestKey {
         switch body {
         case let .delivery(request, _): request.key
-        case let .originReference(key), let .terminal(key, _, _): key
+        case let .originReference(key), let .terminal(key, _, _), let .attentionTierChange(key): key
         }
     }
 

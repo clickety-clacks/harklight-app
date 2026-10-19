@@ -52,8 +52,10 @@ struct SampleMessage: Identifiable, Equatable {
     let revised: Bool
     let chatUnread: Bool
     let hasChat: Bool
-    // Prescribed fixture emphasis, never computed from deadlines or live requests.
-    let emphasis: Int
+    var tier: InboxAttentionTier = .middle
+    // Stable per fixture identity so repeated registration keeps the original
+    // payload instead of looking like an update to an existing request.
+    let fixtureCreatedAtMilliseconds: Int
 }
 
 struct SampleMark: Identifiable, Equatable, Codable {
@@ -84,6 +86,119 @@ final class SampleResponse {
     }
 
     private var draft: RequestDraft? { viewModel.request(for: key)?.draft }
+    var inboxRow: InboxRequestRow? {
+        guard let request = viewModel.request(for: key) else { return nil }
+        var statusParts: [String] = []
+        if viewModel.hasAcceptedUpdate(for: key) { statusParts.append("Updated") }
+        statusParts.append(viewModel.isRetracted(key)
+            ? "Retracted"
+            : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
+        if let seen = request.informationalSeenStatus,
+           seen != .available, !localSeenSelected {
+            statusParts.append(LiveRequestDetail.informationalSeenText(seen))
+        }
+        let localStatus: String?
+        if finished {
+            localStatus = request.informationalSeenStatus == nil
+                ? "Answered locally · nothing sent"
+                : "Seen selected locally · nothing sent"
+        } else if deferred {
+            localStatus = "Deferred locally"
+        } else {
+            localStatus = nil
+        }
+        let emphasis: InboxRowEmphasis = switch message.kind {
+        case .error: .error
+        case .warning: .warning
+        case .completed: .completed
+        default: .standard
+        }
+        return InboxRequestRow(key: request.key,
+            title: request.title?.rawValue ?? "Message",
+            sender: message.sender,
+            status: statusParts.joined(separator: " · "),
+            bodyText: request.body?.rawValue,
+            symbol: message.kind.symbol,
+            isResolved: request.isResolved, createdAt: request.createdAt,
+            isLocalExample: true, localStatus: localStatus,
+            informationalSeenStatus: request.informationalSeenStatus,
+            localSeenSelected: localSeenSelected,
+            chatUnread: message.hasChat ? message.chatUnread && !chatRead : nil,
+            initials: message.initials,
+            emphasis: emphasis,
+            tier: message.tier)
+    }
+
+    var localSeenSelected: Bool {
+        guard finished, let request = viewModel.request(for: key) else { return false }
+        return request.informationalSeenStatus == .available
+    }
+
+    var canMarkSeenLocally: Bool {
+        guard let request = viewModel.request(for: key),
+              !viewModel.isRetracted(key),
+              request.lifecycleStatus == .open,
+              request.intentReceipt == nil,
+              request.informationalSeenStatus == .available else { return false }
+        return !finished && !deferred
+    }
+
+    var canFinishLocally: Bool {
+        guard let request = viewModel.request(for: key),
+              !viewModel.isRetracted(key),
+              request.lifecycleStatus == .open,
+              request.intentReceipt == nil else { return false }
+        if request.informationalSeenStatus != nil || message.kind == .instructions { return true }
+        if message.kind == .multipleChoice {
+            if ownAnswer {
+                return request.draft.inputs[ExactText("answer")]?.textByActionID[ExactText("own")]?.rawValue
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            }
+            return !choices.isEmpty
+        }
+        switch request.projection {
+        case let .sender(sender):
+            var hasAnswerInput = false
+            for input in sender.inputs {
+                switch input.kind {
+                case let .response(actions):
+                    hasAnswerInput = true
+                    guard let selected = request.draft.inputs[input.id]?.selectedActionID,
+                          let action = actions.first(where: { $0.id == selected }) else { return false }
+                    if action.kind == .text,
+                       request.draft.inputs[input.id]?.textByActionID[selected]?.rawValue
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                        return false
+                    }
+                case .text:
+                    if input.id.rawValue == "value" {
+                        hasAnswerInput = true
+                        guard let rawValue = request.draft.inputs[input.id]?.text?.rawValue,
+                              let value = Double(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+                              (7...90).contains(value) else { return false }
+                    }
+                case .point:
+                    hasAnswerInput = true
+                    guard request.draft.inputs[input.id]?.effectivePoint != nil else { return false }
+                }
+            }
+            return hasAnswerInput
+        case let .compatibility(actions):
+            guard let selected = request.draft.compatibility.selectedActionID,
+                  let action = actions.first(where: { $0.id == selected }) else { return false }
+            return action.kind != .text || request.draft.compatibility.textByActionID[selected]?.rawValue
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        case .unsupported:
+            return false
+        }
+    }
+
+    func finishLocally() {
+        guard canFinishLocally else { return }
+        finished = true
+        deferred = false
+    }
+
     var isClosed: Bool {
         guard let status = viewModel.request(for: key)?.lifecycleStatus else { return false }
         return status != .open && status != .pending
@@ -253,11 +368,11 @@ final class SampleLibrary {
         let projected = fixture.viewModel.presentation.requests.compactMap { request -> SampleMessage? in
             guard let metadata = catalog[request.key.messageID.rawValue] else { return nil }
             return SampleMessage(id: request.key.messageID.rawValue, kind: metadata.kind,
-                sender: request.key.senderID.rawValue, initials: metadata.initials,
+                sender: metadata.sender, initials: metadata.initials,
                 title: request.title?.rawValue ?? "", body: request.body?.rawValue ?? "",
                 options: metadata.options, deadline: metadata.deadline, missed: metadata.missed,
                 revised: metadata.revised, chatUnread: metadata.chatUnread, hasChat: metadata.hasChat,
-                emphasis: metadata.emphasis)
+                fixtureCreatedAtMilliseconds: metadata.fixtureCreatedAtMilliseconds)
         }
         guard !reorderedIDs.isEmpty else { return projected }
         let byID = Dictionary(uniqueKeysWithValues: projected.map { ($0.id, $0) })
@@ -291,6 +406,14 @@ final class SampleLibrary {
     }
 
     func select(_ id: String?) {
+        select(id, departingFrom: selectedID)
+    }
+
+    func select(_ id: String?, departingFrom previousID: String?) {
+        let previousKey = previousID.flatMap { responses[$0]?.key }
+        let nextKey = id.flatMap { responses[$0]?.key }
+        fixture?.viewModel.navigateMessage(from: previousKey, to: nextKey)
+        UIDiagnostics.shared.record("samples.select \(previousID ?? "nil")->\(id ?? "nil") selectedID=\(selectedID ?? "nil") requests=\(fixture?.viewModel.presentation.requests.count ?? -1) messages=\(messages.count)")
         selectedID = id
         if let id {
             lastViewedID = id
@@ -318,12 +441,15 @@ enum SampleCatalog {
             let context = ["studio", "garden", "library"][variation]
             let content = content(for: kind, context: context)
             return SampleMessage(id: "sample-\(kind.rawValue)-\(variation)", kind: kind,
-                                 sender: content.sender, initials: String(content.sender.split(separator: " ").compactMap(\.first)),
+                                 sender: content.sender, initials: String(content.sender.split(separator: " ").compactMap(\.first)).uppercased(),
                                  title: content.title, body: content.body, options: content.options,
                                  deadline: index.isMultiple(of: 3) ? (variation == 1 ? "Due yesterday" : "By 5 PM") : nil,
                                  missed: variation == 1 && index.isMultiple(of: 3), revised: variation == 2,
                                  chatUnread: variation == 0 && index.isMultiple(of: 2), hasChat: variation != 1,
-                                 emphasis: variation == 0 ? max(0, 3 - index / 3) : (variation == 1 ? 1 : 0))
+                                 tier: variation == 0 && kind == .approval ? .top
+                                    : variation == 0 && kind == .pictureChoice ? .low : .middle,
+                                 fixtureCreatedAtMilliseconds: 1_790_000_000_000
+                                    + (variation * SampleKind.allCases.count + index) * 60_000)
         }
     }
 
@@ -338,18 +464,18 @@ enum SampleCatalog {
         switch kind {
         case .approval:
             Content(sender: "Project assistant", title: "Archive the old \(context) sketches?",
-                    body: "The new collection is ready. Choose what happens to the earlier sketches.", options: [
+                    body: "The new collection is ready. Choose what happens to the earlier sketches. The sketches remain useful as a record of the original ideas, and nothing will be removed until you decide. Archiving keeps them available without filling the active collection. Keeping them here lets you compare both versions while the new layout settles. Deleting them clears space after you have confirmed you no longer need the old drafts.", options: [
                         .init(id: "archive", title: "Archive", detail: "Keep a copy out of the active collection.", role: .suggested),
                         .init(id: "delete", title: "Delete", detail: "Remove the earlier sketches.", role: .destructive),
                         .init(id: "keep", title: "Keep here", detail: "Leave both collections visible.")])
         case .textChoice:
             Content(sender: "Planning assistant", title: "Which approach for the \(context)?",
-                    body: "We can take a small first step or prepare the whole space. Pick an approach, or describe your own.", options: [
+                    body: "We can take a small first step or prepare the whole space. A small start gives us feedback before we commit the rest of the layout. Planning everything first settles the complete arrangement before anything moves. Pick an approach, or describe your own.", options: [
                         .init(id: "small", title: "Start small", detail: "Try one area, then adjust based on what we learn."),
                         .init(id: "whole", title: "Plan the whole space", detail: "Resolve the layout before moving anything.", role: .suggested)])
         case .pictureChoice:
             Content(sender: "Design assistant", title: "Which cover for the \(context) journal?",
-                    body: "Three covers, the same text. Select a picture; tap it again or hold to enlarge.", options: pictures)
+                    body: "Three covers use the same text but give the journal very different first impressions. Select a picture; tap it again or hold to enlarge. You can still change the cover before the journal is shared.", options: pictures)
         case .instructions:
             Content(sender: "Setup assistant", title: "Prepare the \(context) display",
                     body: "1. Place the display on its stand.\n\n2. Adjust the angle so the page is easy to read.\n\n3. Check the light, then mark this done.")

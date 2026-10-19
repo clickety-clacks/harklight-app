@@ -66,6 +66,7 @@ public enum LocalIntentState: Equatable, Sendable {
     case durable
     case queuedForRelay
     case accepted(sequence: UInt64?)
+    case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case terminalUnconfirmed
     case repairRequired
 }
@@ -74,6 +75,7 @@ public enum RelayOutcome: Equatable, Sendable {
     case unknown
     case accepted(sequence: UInt64?)
     case terminal(state: TerminalState, authorizedAnswer: JSONValue?, sequence: UInt64?)
+    case refusedByRetraction(retractedAtMilliseconds: UInt64)
 }
 
 public struct IntentReceipt: Equatable, Sendable {
@@ -234,6 +236,9 @@ public struct PresentedRequest: Equatable, Sendable {
     public let acceptanceOrder: UInt64
     public let title: ExactText?
     public let body: ExactText?
+    /// Sender-authored creation time, if the original message supplied one.
+    /// It never changes the server-assigned inbox order.
+    public let createdAt: Date?
     /// A UTF-8 JSON string for inert inspection. H must not parse it to render answers.
     public let originalContentJSON: String
     public let selector: BoundDocumentSelector?
@@ -243,6 +248,7 @@ public struct PresentedRequest: Equatable, Sendable {
     public let intentReceipt: IntentReceipt?
     public let projection: AdmittedRequestProjection
     public let informationalSeenStatus: InformationalSeenStatus?
+    public let attentionTier: AttentionTier
     /// Whether lifecycle and Seen state were established by the accepted
     /// bounded snapshot, a receipt, or later contiguous relay activity.
     public let inboxStateIsCurrent: Bool
@@ -255,6 +261,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 acceptanceOrder: UInt64,
                 title: ExactText?,
                 body: ExactText?,
+                createdAt: Date? = nil,
                 originalContentJSON: String,
                 selector: BoundDocumentSelector?,
                 draft: RequestDraft,
@@ -263,11 +270,13 @@ public struct PresentedRequest: Equatable, Sendable {
                 intentReceipt: IntentReceipt?,
                 projection: AdmittedRequestProjection,
                 informationalSeenStatus: InformationalSeenStatus? = nil,
+                attentionTier: AttentionTier = .middle,
                 inboxStateIsCurrent: Bool = true) {
         self.key = key
         self.acceptanceOrder = acceptanceOrder
         self.title = title
         self.body = body
+        self.createdAt = createdAt
         self.originalContentJSON = originalContentJSON
         self.selector = selector
         self.draft = draft
@@ -276,6 +285,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.intentReceipt = intentReceipt
         self.projection = projection
         self.informationalSeenStatus = informationalSeenStatus
+        self.attentionTier = attentionTier
         self.inboxStateIsCurrent = inboxStateIsCurrent
     }
 }
@@ -501,6 +511,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
         case let .terminal(state, sequence, authorizedAnswer):
             localState = .terminalUnconfirmed
             relayOutcome = .terminal(state: state, authorizedAnswer: authorizedAnswer, sequence: sequence)
+        case let .refusedByRetraction(retractedAtMilliseconds):
+            localState = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
+            relayOutcome = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
         case .repairRequired:
             localState = .repairRequired
             relayOutcome = .unknown
@@ -583,15 +596,28 @@ public final class AttentionDomainPort: @unchecked Sendable {
             throw AttentionStoreError.duplicateAcceptanceOrder
         }
         let requests = try orderedRequests.map { item in
-            try present(item.request,
+            let session = snapshot.fixtureSessions[item.request.key]
+            // Requests without a conversation thread are revision one on the
+            // wire, where requestRevision remains absent for legacy bindings.
+            // Treat that absent value as revision one only when no conversation
+            // revision history exists; versioned requests still require an exact
+            // revision match.
+            let conversationRevision = snapshot.conversationThreads[item.request.key]?.currentRevision
+            let matchesCurrentRevision: (Submission) -> Bool = { candidate in
+                guard candidate.requestKey == item.request.key else { return false }
+                guard let conversationRevision else { return candidate.requestRevision == nil }
+                return candidate.requestRevision == conversationRevision
+            }
+            let submission = snapshot.intents.values.first(where: matchesCurrentRevision)
+                ?? session?.lifecycle.submissionValue.flatMap { value in
+                    matchesCurrentRevision(value) ? value : nil
+                }
+            return try present(item.request,
                         acceptanceOrder: item.order,
                         draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),
-                        session: snapshot.fixtureSessions[item.request.key],
+                        session: session,
                         remote: snapshot.remoteStates[item.request.key],
-                        submission: snapshot.intents.values.first(where: {
-                            $0.requestKey == item.request.key &&
-                            $0.requestRevision == snapshot.conversationThreads[item.request.key]?.currentRevision
-                        }),
+                        submission: submission,
                         selector: selectors?[item.request.key],
                         inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
                             $0.contains(item.request.key)
@@ -610,11 +636,27 @@ public final class AttentionDomainPort: @unchecked Sendable {
             }
             return left.key.messageID.rawValue < right.key.messageID.rawValue
         }
+        var sourceOrderedRequests = displayRequests
+        if let sourceOrder = snapshot.inboxSourceOrder {
+            var sourceRank: [RequestKey: Int] = [:]
+            for (index, key) in sourceOrder.enumerated() where sourceRank[key] == nil {
+                sourceRank[key] = index
+            }
+            let pagePositions = displayRequests.indices.filter {
+                sourceRank[displayRequests[$0].key] != nil
+            }
+            let pageRows = pagePositions.map { displayRequests[$0] }.sorted {
+                sourceRank[$0.key, default: .max] < sourceRank[$1.key, default: .max]
+            }
+            for (position, row) in zip(pagePositions, pageRows) {
+                sourceOrderedRequests[position] = row
+            }
+        }
         return PresentationSnapshot(revision: snapshot.revision,
                                     cursor: snapshot.cursor,
                                     replayBarrier: snapshot.replayBarrier,
                                     repairIssues: snapshot.repairIssues,
-                                    requests: displayRequests)
+                                    requests: sourceOrderedRequests)
     }
 
     private func present(_ request: StoredRequest,
@@ -642,7 +684,13 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                     ownOutcome: terminal.ownOutcome,
                                                     originalOperationUncertainty: terminal.ownOutcome == .unconfirmed)
         case .some(.open), .none:
-            if let terminal = remote?.state {
+            if let submission, case .refusedByRetraction = submission.disposition {
+                status = .cleared
+                receiptFacts = ReceiptPresentationFacts(
+                    evidenceLabel: "The relay refused this answer after the sender retracted the request. The answer was not accepted.",
+                    ownOutcome: .refused,
+                    originalOperationUncertainty: false)
+            } else if let terminal = remote?.state {
                 status = AppLifecycleStatus(rawValue: terminal.rawValue) ?? .open
                 let hasAcceptedIntent = submission.map { value in
                     if case .accepted = value.disposition { return true }
@@ -674,7 +722,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
             let scene: SceneNode
             let terminalState: TerminalState?
             let authorizedAnswer: JSONValue?
-            if let terminal = session?.lifecycle.terminalValue {
+            if let submission, case .refusedByRetraction = submission.disposition {
+                terminalState = .cleared
+                authorizedAnswer = nil
+                scene = document.terminalScene(state: .cleared, authorizedAnswer: nil)
+            } else if let terminal = session?.lifecycle.terminalValue {
                 terminalState = terminal.state
                 authorizedAnswer = terminal.authorizedAnswer
                 scene = document.terminalScene(state: terminal.state, authorizedAnswer: terminal.authorizedAnswer)
@@ -740,6 +792,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 acceptanceOrder: acceptanceOrder,
                                 title: request.originalPayload.uniqueValue(named: "title")?.stringValue,
                                 body: request.originalPayload.uniqueValue(named: "body")?.stringValue,
+                                createdAt: request.createdAt,
                                 originalContentJSON: request.originalPayload.canonicalJSON,
                                 selector: selector,
                                 draft: draft,
@@ -749,6 +802,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
                                     status: status, remote: remote, submission: submission),
+                                attentionTier: remote?.attentionTier ?? .middle,
                                 inboxStateIsCurrent: inboxStateIsCurrent)
     }
 
@@ -835,6 +889,15 @@ private extension PresentationSnapshot {
 }
 
 private extension FixtureLifecycle {
+    var submissionValue: Submission? {
+        switch self {
+        case .open:
+            nil
+        case let .pending(submission), let .terminal(_, submission):
+            submission
+        }
+    }
+
     var terminalValue: FixtureTerminal? {
         if case let .terminal(terminal, _) = self { return terminal }
         return nil

@@ -17,7 +17,9 @@ struct AttentionClientDuoPrototypeApp: App {
         WindowGroup {
             ShakeHostingView(onShake: { samples.populate() }) {
                 Group {
-                    if let archive = launch.selectedArchivedPresentation,
+                    if ProcessInfo.processInfo.arguments.contains("--harklight-tier-reference") {
+                        InboxTierReferenceScreen()
+                    } else if let archive = launch.selectedArchivedPresentation,
                        let departure = launch.selectedArchivedAccount {
                         LiveContentView(store: archive, samples: samples, launch: launch,
                                         archiveDeparture: departure)
@@ -37,7 +39,14 @@ struct AttentionClientDuoPrototypeApp: App {
                         case let .enrollmentPending(record):
                             NativeEnrollmentView(launch: launch, pending: record)
                         case let .fixture(store):
-                            ContentView(store: store, samples: samples)
+                            if let presentation = store.presentationStore {
+                                LiveContentView(store: presentation, samples: samples,
+                                                fixtureStore: store)
+                            } else {
+                                ContentUnavailableView(
+                                    store.loadError ?? "The local example could not be opened.",
+                                    systemImage: "exclamationmark.triangle")
+                            }
                         case .live, .disconnected:
                             DisconnectedAccountRecoveryView(launch: launch)
                         }

@@ -65,7 +65,7 @@ struct ConversationPanel: View {
                     }
                 }
                 if let terminal = thread.terminal {
-                    Label(thread.isRetracted ? "Retracted" : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
+                    Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
                 }
                 HStack {
@@ -100,6 +100,7 @@ struct ConversationPanel: View {
             }
         }
         .onAppear { if selectedRevision == nil { selectedRevision = thread?.currentRevision } }
+        .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
         .sheet(item: $inspectedFile) { file in
             NavigationStack {
                 Form {

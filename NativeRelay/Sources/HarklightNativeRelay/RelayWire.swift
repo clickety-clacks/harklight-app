@@ -33,12 +33,20 @@ public struct RelayWire: Sendable {
         let origin = try text(value, "origin")
         let isOrigin = origin == profile.identity.deviceID.rawValue
         let conversation = try ConversationWire(profile: profile).ordinaryMetadata(value)
-        switch try text(value, "type") {
+        let eventType = try text(value, "type")
+        let attentionTier: AttentionTier?
+        switch eventType {
+        case "delivery": attentionTier = try decodeAttentionTier(value, required: false)
+        case "attention_tier": attentionTier = try decodeAttentionTier(value, required: true)
+        default: attentionTier = nil
+        }
+        switch eventType {
         case "delivery":
             if isOrigin {
                 guard value.uniqueValue(named: "message") == nil,
                       value.uniqueValue(named: "as") == nil else { throw RelayWireError.invalidFrame }
-                return RelayEvent(sequence: seq, body: .originReference(key), conversation: conversation)
+                return RelayEvent(sequence: seq, body: .originReference(key), conversation: conversation,
+                                  origin: ExactText(origin), attentionTier: attentionTier)
             }
             guard let payload = value.uniqueValue(named: "message"),
                   case .object = payload,
@@ -46,7 +54,8 @@ public struct RelayWire: Sendable {
                 throw RelayWireError.invalidFrame
             }
             return RelayEvent(sequence: seq,
-                              body: .delivery(StoredRequest(key: key, originalPayload: payload), classification), conversation: conversation)
+                              body: .delivery(StoredRequest(key: key, originalPayload: payload), classification),
+                              conversation: conversation, origin: ExactText(origin), attentionTier: attentionTier)
         case "lifecycle":
             guard let state = TerminalState(rawValue: try text(value, "state")),
                   (isOrigin || value.uniqueValue(named: "answer") == nil) else {
@@ -54,7 +63,12 @@ public struct RelayWire: Sendable {
             }
             // A present JSON null is distinct from an absent answer in the wire.
             return RelayEvent(sequence: seq,
-                              body: .terminal(key, state, value.uniqueValue(named: "answer")), conversation: conversation)
+                              body: .terminal(key, state, value.uniqueValue(named: "answer")),
+                              conversation: conversation)
+        case "attention_tier":
+            guard seq > 0 else { throw RelayWireError.invalidFrame }
+            return RelayEvent(sequence: seq, body: .attentionTierChange(key),
+                              origin: ExactText(origin), attentionTier: attentionTier)
         default:
             throw RelayWireError.unsupportedEvent
         }
@@ -64,6 +78,26 @@ public struct RelayWire: Sendable {
         let value = try parseFrame(bytes)
         guard try text(value, "type") == "resynced" else { throw RelayWireError.invalidFrame }
         return try sequence(value)
+    }
+
+    /// Returns a definite answer refusal only when the v1 error includes the
+    /// server's matching retracted terminal snapshot.
+    public func decodeAnswerRefusal(_ bytes: Data, operationID: UUID) throws -> OriginalOperationResult? {
+        let value = try parseFrame(bytes)
+        guard try text(value, "type") == "error",
+              value.uniqueValue(named: "reason")?.stringValue?.rawValue == "retracted" else {
+            return nil
+        }
+        guard let terminal = value.uniqueValue(named: "terminal"),
+              case .object = terminal,
+              terminal.hasUniqueObjectKeys,
+              terminal.uniqueValue(named: "state")?.stringValue?.rawValue == "retracted",
+              case let .number(timestamp)? = terminal.uniqueValue(named: "retracted_at"),
+              let retractedAtMilliseconds = UInt64(timestamp.lexeme) else {
+            throw RelayWireError.invalidFrame
+        }
+        return .refusedByRetraction(operationID: operationID,
+                                    retractedAtMilliseconds: retractedAtMilliseconds)
     }
 
     public func isResyncAccepted(_ bytes: Data) throws -> Bool {
@@ -98,5 +132,15 @@ public struct RelayWire: Sendable {
         RequestKey(accountScope: profile.identity.personID,
                    senderID: ExactText(try text(value, "sender_id")),
                    messageID: ExactText(try text(value, "message_id")))
+    }
+
+    private func decodeAttentionTier(_ value: JSONValue, required: Bool) throws -> AttentionTier? {
+        guard let raw = value.uniqueValue(named: "attention_tier") else {
+            guard !required else { throw RelayWireError.invalidFrame }
+            return nil
+        }
+        guard let string = raw.stringValue?.rawValue,
+              let tier = AttentionTier(rawValue: string) else { throw RelayWireError.invalidFrame }
+        return tier
     }
 }

@@ -1,9 +1,11 @@
 import XCTest
+import AttentionDomain
 
 @MainActor
 final class AttentionClientDuoPrototypeUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
     }
 
     func testUnjoinedDeviceCanPasteAnInvitationWithoutAssemblingCredentials() throws {
@@ -28,176 +30,325 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
                       "A refused paste must let the person enter the fresh invitation without restarting")
     }
 
-    func testInitializedPointEditorsRemainAvailableForCorrectionInPlace() throws {
+    func testSharedPointDraftAndExactReceiptRemainAvailable() throws {
         let app = launchFreshApp()
 
         selectFacilitiesRequest(in: app)
-        XCTAssertEqual(app.staticTexts["request-heading"].label, "Facilities desk")
-        XCTAssertFalse(app.staticTexts["fixture:Facilities"].exists,
-                       "Raw fixture identity belongs in read-only details, not the task framing.")
-        XCTAssertFalse(app.buttons["Choose example outcome"].exists,
-                       "Simulation controls belong on the separate Demo controls screen.")
-
-        let instructions = app.buttons["message-instructions-disclosure"]
-        XCTAssertTrue(instructions.waitForExistence(timeout: 5))
-        instructions.tap()
         XCTAssertTrue(app.staticTexts["Select the location on the floor plan and add a note."]
             .waitForExistence(timeout: 5))
-        instructions.tap()
+        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
+                       "The card omits the extra Open status line from the design.")
+        XCTAssertFalse(app.staticTexts["fixture:Facilities"].exists,
+                       "Raw fixture identity stays in request details, not the task framing.")
+        XCTAssertFalse(app.buttons["fixture-outcome-menu"].exists,
+                        "Fixture outcomes are available only after an answer enters Pending.")
 
-        let status = app.buttons["request-status-details"]
-        XCTAssertTrue(status.exists)
-        XCTAssertEqual(status.label, "Open. No answer has been submitted.")
-        let availableCompactWidth = app.windows.firstMatch.frame.width - 32
-        XCTAssertLessThanOrEqual(status.frame.width, min(320, availableCompactWidth) + 1,
-                                 "The compact status action should stay badge-sized instead of filling the detail column.")
-        status.tap()
-        XCTAssertTrue(app.staticTexts["request-details-outcome"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.staticTexts["identity-value-account"].label, "fictional-sample-account")
-        XCTAssertEqual(app.staticTexts["identity-value-sender-id"].label, "fixture:Facilities")
-        XCTAssertEqual(app.staticTexts["identity-value-message-id"].label, "facilities-01")
-        let senderLabel = app.staticTexts["Sender ID"]
-        let senderValue = app.staticTexts["identity-value-sender-id"]
-        XCTAssertTrue(senderLabel.exists)
-        XCTAssertTrue(senderValue.exists)
-        let inlineGap = senderValue.frame.minX - senderLabel.frame.maxX
-        let isInlineGroup = abs(inlineGap) <= 12 &&
-            abs(senderValue.frame.midY - senderLabel.frame.midY) <= 12
-        let isStackedGroup = abs(senderValue.frame.minX - senderLabel.frame.minX) <= 12 &&
-            senderValue.frame.minY >= senderLabel.frame.maxY &&
-            senderValue.frame.minY - senderLabel.frame.maxY <= 16
-        XCTAssertTrue(isInlineGroup || isStackedGroup,
-                      "The exact sender label and value should stay in one compact group.\n\(app.debugDescription)")
-        XCTAssertTrue(app.staticTexts["identity-value-created"].exists,
-                      "The exact creation metadata should remain available in details.")
-        let detailsBack = app.buttons["request-details-return"]
-        XCTAssertTrue(detailsBack.waitForExistence(timeout: 5))
-        detailsBack.tap()
-        XCTAssertTrue(app.buttons["request-status-details"].waitForExistence(timeout: 5))
+        let centerPoint = setFacilitiesPoint(in: app, x: 500, y: 500)
+        openRequestDetails(in: app)
+        XCTAssertTrue(app.staticTexts["Sender: fixture:Facilities"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Message: facilities-01"].exists)
+        let originalContent = app.staticTexts["request-original-content-json"]
+        XCTAssertTrue(originalContent.waitForExistence(timeout: 5))
+        XCTAssertTrue(originalContent.label.contains("facilities-01"))
+        attachScreenshot("Request history sheet", from: app)
+        app.buttons["request-details-done"].tap()
+        let retainedPoint = app.staticTexts["request-point-value-location"]
+        revealInCard(retainedPoint, in: app)
+        XCTAssertEqual(retainedPoint.label,
+                       "Horizontal \(centerPoint.x), vertical \(centerPoint.y)",
+                       "Inspecting request details must preserve the active point draft.")
 
-        let setPoint = app.buttons["set-point"]
-        XCTAssertTrue(setPoint.waitForExistence(timeout: 5))
-        setPoint.tap()
-
-        let statusAfterDraft = app.buttons["request-status-details"]
-        XCTAssertTrue(statusAfterDraft.waitForExistence(timeout: 5))
-        // XCTest scrolls the identified control into view, as it does for Set point above.
-        statusAfterDraft.tap()
-        XCTAssertTrue(app.staticTexts["request-details-outcome"].waitForExistence(timeout: 5))
-        app.buttons["request-details-return"].tap()
-        XCTAssertEqual(app.textFields["coordinate-horizontal"].value as? String, "500")
-        XCTAssertEqual(app.textFields["coordinate-vertical"].value as? String, "500",
-                       "Inspecting outcome details must preserve the active scene draft.")
-
-        let horizontal = app.textFields["coordinate-horizontal"]
-        let vertical = app.textFields["coordinate-vertical"]
-        replaceText(in: horizontal, with: "1001")
-
-        XCTAssertTrue(app.staticTexts["coordinate-entry-error"].waitForExistence(timeout: 5))
-        XCTAssertTrue(horizontal.exists, "The initialized horizontal editor must remain visible after invalid text.")
-        XCTAssertTrue(vertical.exists, "The initialized vertical editor must remain visible after invalid text.")
-        XCTAssertFalse(app.buttons["set-point"].exists, "Invalid text must not reset an initialized point.")
-        XCTAssertFalse(app.buttons["send-answer"].isEnabled)
-
-        replaceText(in: horizontal, with: "240")
-        XCTAssertFalse(app.staticTexts["coordinate-entry-error"].exists)
-        XCTAssertTrue(vertical.exists)
-
-        let note = app.textViews["text-input-note"]
-        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        let submittedPoint = setFacilitiesPoint(in: app, x: 240, y: 500)
+        let note = app.textViews["request-input-note"]
+        revealInCard(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
 
-        let send = app.buttons["send-answer"]
-        XCTAssertTrue(send.isEnabled, "Correcting the coordinate in place should restore a valid answer.")
-        send.tap()
-        let pendingStatus = app.buttons["request-status-details"]
-        XCTAssertTrue(pendingStatus.waitForExistence(timeout: 5))
-        XCTAssertEqual(pendingStatus.label,
-                       "Pending. The answer is saved locally in this fixture; no relay is connected.")
-        XCTAssertFalse(app.staticTexts["Your submitted answer · exact JSON"].exists,
-                       "Receipt inspection should stay out of the principal task composition.")
-        pendingStatus.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["request-details-receipt"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Your submitted answer · exact JSON"].exists)
-        let expectedReceipt = "{\"point\":{\"x\":240,\"y\":500},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}"
-        let submittedAnswer = app.staticTexts["request-details-receipt-json"]
-        XCTAssertTrue(submittedAnswer.waitForExistence(timeout: 5),
-                      "Exact answer JSON should be exposed in read-only details. Hierarchy:\n\(app.debugDescription)")
-        XCTAssertEqual(submittedAnswer.label, expectedReceipt,
-                       "Read-only details should retain the exact submitted answer, including its large integer.")
-}
-    func testAcceptedAnswerShowsKnownAnsweredSceneAfterDemoReturn() throws {
+        let finish = app.buttons["request-finish"]
+        XCTAssertTrue(finish.waitForExistence(timeout: 5))
+        XCTAssertTrue(finish.isEnabled, "A valid point and note should enable the shared answer action.")
+        finish.tap()
+        let lifecycle = app.staticTexts["request-lifecycle-status"]
+        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5))
+        XCTAssertEqual(lifecycle.label, "Pending",
+                       "A local submission remains pending until its fixture outcome is explicitly simulated.")
+        XCTAssertTrue(app.buttons["fixture-outcome-menu"].waitForExistence(timeout: 5),
+                      "The local outcome simulation appears on the ordinary pending fixture card.")
+        assertExactFacilitiesReceipt(in: app, point: submittedPoint)
+    }
+
+    func testPreexistingOpenRequestAppearsInSeenAndRemainsAnswerableFixture() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-preexisting-seen-fixture"]
+        app.launch()
+
+        let seenTab = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Seen")).firstMatch
+        XCTAssertTrue(seenTab.waitForExistence(timeout: 10), app.debugDescription)
+        seenTab.tap()
+
+        let facilities = app.buttons["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
+                      "The initial saved fixture request should be visible in Seen.\n\(app.debugDescription)")
+        XCTAssertTrue(facilities.label.contains("Seen"), facilities.label)
+        attachScreenshot("Open preexisting request in Seen (fixture)", from: app)
+        facilities.tap()
+
+        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists)
+        _ = setFacilitiesPoint(in: app, x: 240, y: 500)
+        let note = app.textViews["request-input-note"]
+        revealInCard(note, in: app)
+        note.tap()
+        note.typeText("Still answerable")
+        let finish = app.buttons["request-finish"]
+        XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(finish.isEnabled, "A preexisting open request remains answerable from Seen.")
+        attachScreenshot("Preexisting open request remains answerable in Seen (fixture)", from: app)
+    }
+    func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
-
-        selectFacilitiesRequest(in: app)
-        let setPoint = app.buttons["set-point"]
-        XCTAssertTrue(setPoint.waitForExistence(timeout: 5))
-        setPoint.tap()
-        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-horizontal"], with: "240")
-        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-vertical"], with: "610")
-
-        let note = app.textViews["text-input-note"]
-        XCTAssertTrue(note.waitForExistence(timeout: 5))
-        revealOutcomeEditor(note, in: app)
-        note.tap()
-        note.typeText("Near the east entrance")
-
-        let send = app.buttons["send-answer"]
-        XCTAssertTrue(send.isEnabled)
-        send.tap()
-        XCTAssertTrue(app.buttons["request-status-details"].waitForExistence(timeout: 5))
+        let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
 
-        let acceptedStatus = app.buttons["request-status-details"]
+        let acceptedStatus = app.staticTexts["request-lifecycle-status"]
         XCTAssertTrue(acceptedStatus.waitForExistence(timeout: 5))
-        XCTAssertEqual(acceptedStatus.label,
-                       "Answered. This fixture simulates acceptance for this submission; no relay or source result exists, and source use is not shown.",
-                       "The spoken button name includes the simulated outcome while the visible capsule remains lifecycle-only.")
-        XCTAssertLessThanOrEqual(acceptedStatus.frame.height, 48,
-                                 "The lifecycle status should remain a compact badge.")
-        let knownPoint = app.staticTexts["Established submitted location"].firstMatch
+        XCTAssertEqual(acceptedStatus.label, "Answered")
+        let acceptedEvidence = app.staticTexts["request-receipt-evidence"]
+        XCTAssertTrue(acceptedEvidence.waitForExistence(timeout: 5))
+        XCTAssertEqual(acceptedEvidence.label,
+                       "simulated success for this original operation",
+                       "The fixture must identify acceptance for this exact submission.")
+        let knownPoint = app.descendants(matching: .any)["Established submitted location"].firstMatch
         XCTAssertTrue(knownPoint.waitForExistence(timeout: 5),
                       "The accepted original operation should select the known sender result scene.")
-        XCTAssertEqual(knownPoint.value as? String, "Horizontal 240, vertical 610")
+        XCTAssertEqual(knownPoint.value as? String,
+                       "Horizontal \(submittedPoint.x), vertical \(submittedPoint.y)")
 
-        acceptedStatus.tap()
-        let acceptedOutcome = app.staticTexts["request-details-outcome"]
-        XCTAssertTrue(acceptedOutcome.waitForExistence(timeout: 5))
-        XCTAssertTrue(acceptedOutcome.label.contains("No relay or source receipt exists"))
-        assertExactFacilitiesReceipt(in: app)
+        assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
     func testUnconfirmedAnswerOutcomeKeepsNeutralSceneAndExactReceipt() throws {
         let app = launchFreshApp()
-        submitFacilitiesAnswer(in: app, horizontal: "240", vertical: "610")
+        let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("answerOutcomeUnconfirmed", in: app)
 
-        let unconfirmedStatus = app.buttons["request-status-details"]
+        let unconfirmedStatus = app.staticTexts["request-lifecycle-status"]
         XCTAssertTrue(unconfirmedStatus.waitForExistence(timeout: 5))
-        XCTAssertEqual(unconfirmedStatus.label,
-                       "Answered. Your submission outcome is unconfirmed; the original operation outcome remains unresolved.",
-                       "The spoken button name preserves the unconfirmed original-operation outcome.")
-        XCTAssertFalse(app.staticTexts["Established submitted location"].exists,
+        XCTAssertEqual(unconfirmedStatus.label, "Answered")
+        let unconfirmedEvidence = app.staticTexts["request-receipt-evidence"]
+        XCTAssertTrue(unconfirmedEvidence.waitForExistence(timeout: 5))
+        XCTAssertEqual(unconfirmedEvidence.label,
+                       "simulated closure without this operation's result",
+                       "The fixture must retain the unconfirmed original-operation distinction.")
+        XCTAssertFalse(app.descendants(matching: .any)["Established submitted location"].exists,
                        "An unconfirmed closure must keep the neutral sender scene.")
 
-        unconfirmedStatus.tap()
-        let outcome = app.staticTexts["request-details-outcome"]
-        XCTAssertTrue(outcome.waitForExistence(timeout: 5))
-        XCTAssertTrue(outcome.label.contains("original operation outcome remains unconfirmed"))
-        XCTAssertTrue(app.staticTexts["Your submitted answer · exact JSON"].exists,
-                      "Read-only inspection retains the captured answer without calling it the winning result.")
-        assertExactFacilitiesReceipt(in: app)
+        assertExactFacilitiesReceipt(in: app, point: submittedPoint)
+    }
+
+    func testBackWithoutSwitchingKeepsListPositionWhenAnsweredRequestMovesDown() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let list = app.scrollViews.firstMatch
+        let facilities = app.buttons["request-row-facilities-01"]
+        let others = [app.buttons["request-row-unknown-01"], app.buttons["request-row-review-01"]]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(others.allSatisfy { $0.waitForExistence(timeout: 5) }, app.debugDescription)
+        let examples = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'"))
+        XCTAssertTrue(examples.firstMatch.waitForExistence(timeout: 10),
+                      "Local examples make the list long enough to scroll.")
+        XCTAssertTrue(others.contains { $0.frame.minY > facilities.frame.minY },
+                      "The open request starts above another open request, so finishing it moves it down.")
+
+        // Scroll part of a row so the position Back must keep is not the list's top.
+        let top = ([facilities] + others).min { $0.frame.minY < $1.frame.minY }!
+        let unscrolledTop = top.frame.minY
+        let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -(top.frame.height * 0.5 + 20))),
+                    withVelocity: .slow, thenHoldForDuration: 0.5)
+        let scrolledTop = top.frame.minY
+        XCTAssertLessThan(scrolledTop, unscrolledTop - 10, "The list must be scrolled away from its top.")
+
+        XCTAssertTrue(facilities.isHittable, app.debugDescription)
+        facilities.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        _ = answerSelectedFacilitiesRequest(in: app, x: 240, y: 610)
+        applyFixtureOutcome("ownOperationAccepted", in: app)
+        let status = app.staticTexts["request-lifecycle-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.label, "Answered")
+
+        let back = app.buttons["harklight-detail-back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
+        let movedDown = NSPredicate { _, _ in others.allSatisfy { $0.frame.minY < facilities.frame.minY } }
+        wait(for: [XCTNSPredicateExpectation(predicate: movedDown, object: nil)], timeout: 5)
+        let kept = NSPredicate { _, _ in abs(top.frame.minY - scrolledTop) <= 1 }
+        let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
+                       "Back without switching messages must return to the exact list position: top row at \(top.frame.minY), expected \(scrolledTop).\n\(app.debugDescription)")
+    }
+
+    func testDetailEdgeSwipeReturnsToListAndSearchRisesAboveKeyboard() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let facilities = app.buttons["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(facilities.label.contains("Facilities"), facilities.label)
+        XCTAssertFalse(facilities.label.contains("fixture:"), facilities.label)
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.isHittable)
+        attachScreenshot("Inbox list with collapsed controls", from: app)
+        facilities.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        attachScreenshot("Request detail", from: app)
+
+        let back = app.buttons["harklight-detail-back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
+                      "Back must return to the same inbox list.")
+        facilities.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
+                      "An edge swipe from detail must return to the inbox list.")
+        XCTAssertTrue(facilities.isHittable, app.debugDescription)
+
+        let search = app.buttons["inbox-search-button"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        for frame in 0..<5 {
+            attachScreenshot("Search transition frame \(frame)", from: app)
+        }
+        XCTAssertTrue(app.textFields["inbox-search-field"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Search should expand directly above the keyboard.")
+        XCTAssertTrue(settings.isHittable, "Header settings must remain visible during search.")
+        XCTAssertLessThan(settings.frame.maxY, app.textFields["inbox-search-field"].frame.minY,
+                          "Settings belong in the header, not beside expanded search.")
+        attachScreenshot("Expanded search above keyboard", from: app)
+
+        let field = app.textFields["inbox-search-field"]
+        field.typeText("preview could not\n")
+        let notice = app.buttons["sample-error-0"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(notice.label.contains("Collection assistant"), notice.label)
+        attachScreenshot("Sample row in shared list renderer", from: app)
+        notice.tap()
+        let seenAction = app.buttons["request-seen-action"]
+        XCTAssertTrue(seenAction.waitForExistence(timeout: 5),
+                      "The notice card must present its Seen action.")
+        XCTAssertFalse(app.buttons["request-later-action"].exists,
+                       "The bottom glass clock is the only Later action in card mode.")
+        let finishSeen = app.buttons["request-finish-seen"]
+        XCTAssertTrue(finishSeen.exists && finishSeen.isEnabled,
+                      "The top check must perform the same Seen action as the card control.")
+        XCTAssertFalse(app.staticTexts["Seen available"].exists)
+        attachScreenshot("Notice card with Seen action", from: app)
+        finishSeen.tap()
+        XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"].waitForExistence(timeout: 5))
+    }
+
+    func testTextChoiceCardMatchesReferenceCapture() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let search = app.buttons["inbox-search-button"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10))
+        search.tap()
+        let field = app.textFields["inbox-search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("Which approach\n")
+        let row = app.buttons["sample-textChoice-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        let approach = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Plan the whole space")).firstMatch
+        XCTAssertTrue(approach.waitForExistence(timeout: 5), app.debugDescription)
+        approach.tap()
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected"), object: approach)
+        XCTAssertEqual(XCTWaiter().wait(for: [selected], timeout: 5), .completed)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        attachScreenshot("Text choice card with selected answer", from: app)
+    }
+
+    func testExplicitTierAndFriendlyDateReferenceCapture() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-tier-reference"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Top · 8 lines"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Middle · 4 lines"].exists)
+        XCTAssertTrue(app.staticTexts["Low · 2 lines"].exists)
+        attachScreenshot("Explicit top middle low cell tiers", from: app)
+        app.scrollViews.firstMatch.swipeUp()
+        XCTAssertTrue(app.staticTexts["Older date"].waitForExistence(timeout: 5))
+        attachScreenshot("Friendly date cases in tier fixtures", from: app)
+    }
+
+    private func attachScreenshot(_ name: String, from app: XCUIApplication) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testAnsweredRequestStaysAtTheBottomOfUnseenAndNeverMovesToSeen() throws {
+        let app = launchFreshApp()
+        let facilities = app.buttons["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
+        applyFixtureOutcome("ownOperationAccepted", in: app)
+        let status = app.staticTexts["request-lifecycle-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.label, "Answered")
+        showRequestsListIfNeeded(in: app)
+
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
+        let atBottom = NSPredicate { _, _ in
+            let others = rows.allElementsBoundByIndex.filter { $0.identifier != facilities.identifier }
+            return !others.isEmpty && others.allSatisfy { $0.frame.minY < facilities.frame.minY }
+        }
+        XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: atBottom, object: nil)],
+                                        timeout: 5), .completed,
+                       "An answered request sits below every other request in Unseen.\n\(app.debugDescription)")
+        XCTAssertFalse(facilities.label.contains("Answered"),
+                       "The resolved row should recede without an extra status caption.")
+        attachScreenshot("Post-install answered request at bottom of Unseen", from: app)
+
+        // An answered request is not offered the Seen swipe.
+        facilities.swipeLeft()
+        let seenSwipeAction = app.buttons.allElementsBoundByIndex
+            .first { $0.label == "Seen, Seen" }
+        XCTAssertNil(seenSwipeAction, app.debugDescription)
+
+        let seenTab = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Seen")).firstMatch
+        let unseenTab = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Unseen")).firstMatch
+        XCTAssertTrue(seenTab.waitForExistence(timeout: 5), app.debugDescription)
+        seenTab.tap()
+        XCTAssertTrue(seenTab.isSelected, app.debugDescription)
+        XCTAssertFalse(facilities.waitForExistence(timeout: 2), "An answered request does not move to Seen")
+        unseenTab.tap()
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5), "The answered request stays in Unseen")
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
-        let outcomeButton = app.buttons["fixture-outcome-button"]
+        let outcomeButton = app.buttons["fixture-outcome-menu"]
         XCTAssertTrue(outcomeButton.waitForExistence(timeout: 5),
                       "The ordinary pending fixture card must expose its local outcome control.")
-        XCTAssertTrue(outcomeButton.isHittable)
+        revealInCard(outcomeButton, in: app)
         outcomeButton.tap()
+        // The confirmation-dialog snapshot exposes this native action as both a
+        // parent and its nested button node; interact with the first visible match.
         let outcome = app.buttons.matching(identifier: "fixture-outcome-" + scenario).firstMatch
         XCTAssertTrue(outcome.waitForExistence(timeout: 5))
         XCTAssertTrue(outcome.isEnabled && outcome.isHittable,
@@ -205,12 +356,33 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         outcome.tap()
     }
 
-    private func assertExactFacilitiesReceipt(in app: XCUIApplication) {
-        let receipt = app.staticTexts["request-details-receipt-json"]
+    private func assertExactFacilitiesReceipt(in app: XCUIApplication, point: PointValue) {
+        openRequestDetails(in: app)
+        let receipt = app.staticTexts["request-details-original-answer-json"]
         XCTAssertTrue(receipt.waitForExistence(timeout: 5))
         XCTAssertEqual(receipt.label,
-                       "{\"point\":{\"x\":240,\"y\":610},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}",
+                       "{\"point\":{\"x\":\(point.x),\"y\":\(point.y)},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}",
                        "The terminal fixture outcome must preserve the exact originally submitted answer.")
+        attachScreenshot("Exact saved answer sheet", from: app)
+        app.buttons["request-details-done"].tap()
+    }
+
+    private func openRequestDetails(in app: XCUIApplication) {
+        let heading = app.buttons["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        let scroll = app.scrollViews["message-card-scroll"]
+        let visibleTop = app.navigationBars.firstMatch.frame.maxY
+        for _ in 0..<8 {
+            if heading.isHittable && heading.frame.minY >= visibleTop { break }
+            scroll.swipeDown()
+        }
+        XCTAssertTrue(heading.isHittable, "The message heading must open request history.")
+        XCTAssertGreaterThanOrEqual(heading.frame.minY, visibleTop,
+                                    "The heading must be below the navigation bar before tapping it.")
+        heading.tap()
+        attachScreenshot("Request history interaction", from: app)
+        XCTAssertTrue(app.buttons["request-details-done"].waitForExistence(timeout: 5),
+                      "Request history must open off the detail card face.\n\(app.debugDescription)")
     }
 
     private func selectFacilitiesRequest(in app: XCUIApplication) {
@@ -225,74 +397,78 @@ final class AttentionClientDuoPrototypeUITests: XCTestCase {
         let requestRow = app.descendants(matching: .any)["request-row-facilities-01"]
         guard !requestRow.isHittable else { return }
 
-        let sidebarButton = app.buttons["Show Sidebar"]
-        if sidebarButton.exists {
-            sidebarButton.tap()
-        } else {
-            let backButton = app.buttons["BackButton"]
-            XCTAssertTrue(backButton.waitForExistence(timeout: 5),
-                          "The selected request must provide a way back to the Requests list.")
+        let backButton = app.buttons["harklight-detail-back"]
+        if backButton.exists && backButton.isHittable {
             backButton.tap()
+        } else {
+            let sidebarButton = app.buttons["Show Sidebar"]
+            XCTAssertTrue(sidebarButton.waitForExistence(timeout: 5),
+                          "The selected request must provide a way back to the Requests list.")
+            sidebarButton.tap()
         }
         XCTAssertTrue(requestRow.waitForExistence(timeout: 5),
                       "Returning from the selected request should reveal the Requests list.")
     }
 
-    private func replaceText(in field: XCUIElement, with value: String) {
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.tap()
-        let existingText = field.value as? String ?? ""
-        if !existingText.isEmpty {
-            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existingText.count))
-        }
-        field.typeText(value)
-    }
-
-    private func revealOutcomeEditor(_ editor: XCUIElement, in app: XCUIApplication) {
-        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+    private func revealInCard(_ element: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(element.waitForExistence(timeout: 5))
+        let scroll = app.scrollViews["message-card-scroll"]
         for _ in 0..<8 {
-            let keyboard = app.keyboards.firstMatch
-            let keyboardTop = keyboard.exists ? keyboard.frame.minY : app.frame.maxY
-            let cancel = app.buttons["Cancel draft"]
-            let bottom = min(keyboardTop, cancel.exists ? cancel.frame.minY : app.frame.maxY - 80)
-            let frame = editor.frame
-            if editor.isHittable && frame.minY >= 100 && frame.maxY < bottom - 44 { return }
-            let direction: CGFloat = frame.minY < 100 ? 1 : -1
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0))
-                .withOffset(CGVector(dx: 0, dy: bottom - 160))
-            let end = start.withOffset(CGVector(dx: 0, dy: direction * 120))
-            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+            if element.isHittable { return }
+            // A central pan scrolls the card without hitting either system edge or indicator.
+            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
+            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast,
+                        thenHoldForDuration: 0)
         }
-        XCTFail("The ordinary card must reveal the editor above its bars and keyboard.\n\(app.debugDescription)")
+        XCTAssertTrue(element.isHittable,
+                      "The shared message card should make its existing control reachable.\n\(app.debugDescription)")
     }
 
-    private func replaceOutcomeCoordinate(in app: XCUIApplication, field: XCUIElement, with value: String) {
-        revealOutcomeEditor(field, in: app)
-        let existing = field.value as? String ?? ""
-        field.tap()
-        if !existing.isEmpty { field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.count)) }
-        field.typeText(value)
-        XCTAssertEqual(field.value as? String, value)
+    private func setFacilitiesPoint(in app: XCUIApplication, x: Int, y: Int) -> PointValue {
+        let pointSurface = app.descendants(matching: .any)["request-point-location"]
+        revealInCard(pointSurface, in: app)
+        pointSurface.coordinate(withNormalizedOffset: CGVector(dx: CGFloat(x) / 1000,
+                                                                dy: CGFloat(y) / 1000)).tap()
+        let pointValue = app.staticTexts["request-point-value-location"]
+        XCTAssertTrue(pointValue.waitForExistence(timeout: 5))
+        let components = pointValue.label
+            .replacingOccurrences(of: "Horizontal ", with: "")
+            .replacingOccurrences(of: "vertical ", with: "")
+            .split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard components.count == 2 else {
+            XCTFail("The point control must expose its saved integer coordinates.")
+            return PointValue(x: x, y: y)
+        }
+        let selected = PointValue(x: components[0], y: components[1])
+        XCTAssertLessThanOrEqual(abs(selected.x - x), 1,
+                                 "The selected point should remain within one normalized unit of the tap.")
+        XCTAssertLessThanOrEqual(abs(selected.y - y), 1,
+                                 "The selected point should remain within one normalized unit of the tap.")
+        return selected
     }
 
-    private func submitFacilitiesAnswer(in app: XCUIApplication,
-                                        horizontal: String,
-                                        vertical: String) {
+    private func submitFacilitiesAnswer(in app: XCUIApplication, x: Int, y: Int) -> PointValue {
         selectFacilitiesRequest(in: app)
-        let setPoint = app.buttons["set-point"]
-        XCTAssertTrue(setPoint.waitForExistence(timeout: 5))
-        setPoint.tap()
-        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-horizontal"], with: horizontal)
-        replaceOutcomeCoordinate(in: app, field: app.textFields["coordinate-vertical"], with: vertical)
-        let note = app.textViews["text-input-note"]
-        XCTAssertTrue(note.waitForExistence(timeout: 5))
-        revealOutcomeEditor(note, in: app)
+        return answerSelectedFacilitiesRequest(in: app, x: x, y: y)
+    }
+
+    private func answerSelectedFacilitiesRequest(in app: XCUIApplication, x: Int, y: Int) -> PointValue {
+        let selectedPoint = setFacilitiesPoint(in: app, x: x, y: y)
+        let note = app.textViews["request-input-note"]
+        revealInCard(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
-        let send = app.buttons["send-answer"]
-        XCTAssertTrue(send.isEnabled)
-        send.tap()
-        XCTAssertTrue(app.buttons["request-status-details"].waitForExistence(timeout: 5))
+        let finish = app.buttons["request-finish"]
+        XCTAssertTrue(finish.waitForExistence(timeout: 5))
+        XCTAssertTrue(finish.isEnabled)
+        finish.tap()
+        let status = app.staticTexts["request-lifecycle-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.label, "Pending",
+                       "The local answer stays pending until its fixture outcome is explicitly simulated.")
+        return selectedPoint
     }
 
     private func launchFreshApp() -> XCUIApplication {

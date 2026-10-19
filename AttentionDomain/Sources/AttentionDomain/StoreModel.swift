@@ -102,6 +102,7 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     case accepted(sequence: UInt64?)
     case lost
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)
+    case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case repairRequired
 }
 
@@ -152,6 +153,7 @@ public struct Submission: Equatable, Codable, Sendable {
 
 public enum OwnOutcome: String, Equatable, Codable, Sendable {
     case accepted
+    case refused
     case unconfirmed
     case notApplicable
 }
@@ -194,20 +196,45 @@ public enum RemoteDeliveryClassification: String, Equatable, Codable, Sendable {
     case knock
 }
 
+public enum AttentionTier: String, Equatable, Codable, Sendable {
+    case top
+    case middle
+    case low
+}
+
+/// The feed whose cursor orders the latest tier projection for one request.
+public enum AttentionTierFeed: String, Equatable, Codable, Sendable {
+    case relay
+    case conversation
+}
+
 public struct RemoteRequestState: Equatable, Codable, Sendable {
-    public let state: TerminalState?
-    public let authorizedOriginAnswer: JSONValue?
-    public let classification: RemoteDeliveryClassification?
-    public let eventSequence: UInt64?
+    public var state: TerminalState?
+    public var authorizedOriginAnswer: JSONValue?
+    public var classification: RemoteDeliveryClassification?
+    public var eventSequence: UInt64?
+    /// Optional fields keep existing schema-2 account state readable.
+    public var attentionTier: AttentionTier?
+    public var attentionTierSequence: UInt64?
+    public var attentionTierFeed: AttentionTierFeed?
+    public var attentionTierOrigin: ExactText?
 
     public init(state: TerminalState? = nil,
                 authorizedOriginAnswer: JSONValue? = nil,
                 classification: RemoteDeliveryClassification? = nil,
-                eventSequence: UInt64? = nil) {
+                eventSequence: UInt64? = nil,
+                attentionTier: AttentionTier? = nil,
+                attentionTierSequence: UInt64? = nil,
+                attentionTierFeed: AttentionTierFeed? = nil,
+                attentionTierOrigin: ExactText? = nil) {
         self.state = state
         self.authorizedOriginAnswer = authorizedOriginAnswer
         self.classification = classification
         self.eventSequence = eventSequence
+        self.attentionTier = attentionTier
+        self.attentionTierSequence = attentionTierSequence
+        self.attentionTierFeed = attentionTierFeed
+        self.attentionTierOrigin = attentionTierOrigin
     }
 
     public var isTerminal: Bool { state != nil }
@@ -223,6 +250,16 @@ public struct StoredRequest: Equatable, Codable, Sendable {
         self.key = key
         self.originalPayload = originalPayload
         self.acceptanceOrder = nil
+    }
+
+    /// Sender-authored creation time, retained in the original message as Unix
+    /// milliseconds. This is display metadata only; inbox order comes from the
+    /// server-assigned acceptance order.
+    public var createdAt: Date? {
+        guard let milliseconds = originalPayload.uniqueValue(named: "created_at")?.integerValue else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
     }
 
     init(key: RequestKey, originalPayload: JSONValue, acceptanceOrder: UInt64) {
@@ -275,26 +312,69 @@ public enum RelayEventBody: Equatable, Codable, Sendable {
     case delivery(StoredRequest, RemoteDeliveryClassification)
     case originReference(RequestKey)
     case terminal(RequestKey, TerminalState, JSONValue?)
+    case attentionTierChange(RequestKey)
 }
 
 public struct RelayEvent: Equatable, Codable, Sendable {
     public let sequence: UInt64
     public let body: RelayEventBody
     public let conversation: RelayConversationMetadata?
+    public let origin: ExactText?
+    public let attentionTier: AttentionTier
+    public let attentionTierWasProvided: Bool
 
-    public init(sequence: UInt64, body: RelayEventBody, conversation: RelayConversationMetadata? = nil) {
+    public init(sequence: UInt64,
+                body: RelayEventBody,
+                conversation: RelayConversationMetadata? = nil,
+                origin: ExactText? = nil,
+                attentionTier: AttentionTier? = nil) {
         self.sequence = sequence
         self.body = body
         self.conversation = conversation
+        self.origin = origin
+        self.attentionTier = attentionTier ?? .middle
+        self.attentionTierWasProvided = attentionTier != nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sequence, body, conversation, origin, attentionTier
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        sequence = try values.decode(UInt64.self, forKey: .sequence)
+        body = try values.decode(RelayEventBody.self, forKey: .body)
+        conversation = try values.decodeIfPresent(RelayConversationMetadata.self, forKey: .conversation)
+        origin = try values.decodeIfPresent(ExactText.self, forKey: .origin)
+        let decodedTier = try values.decodeIfPresent(AttentionTier.self, forKey: .attentionTier)
+        attentionTier = decodedTier ?? .middle
+        attentionTierWasProvided = decodedTier != nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(sequence, forKey: .sequence)
+        try values.encode(body, forKey: .body)
+        try values.encodeIfPresent(conversation, forKey: .conversation)
+        try values.encodeIfPresent(origin, forKey: .origin)
+        if attentionTierWasProvided {
+            try values.encode(attentionTier, forKey: .attentionTier)
+        }
     }
 
     public func hasSameSemanticContent(as other: RelayEvent) -> Bool {
         guard sequence == other.sequence else { return false }
+        let sameOrigin = origin == nil || other.origin == nil || origin == other.origin
+        let sameTier = !attentionTierWasProvided || !other.attentionTierWasProvided ||
+            attentionTier == other.attentionTier
         switch (body, other.body) {
         case let (.delivery(left, _), .delivery(right, _)):
-            return left.key == right.key && left.originalPayload.semanticallyEquals(right.originalPayload)
+            return sameOrigin && sameTier && left.key == right.key &&
+                left.originalPayload.semanticallyEquals(right.originalPayload)
         case let (.originReference(left), .originReference(right)):
-            return left == right
+            return sameOrigin && sameTier && left == right
+        case let (.attentionTierChange(left), .attentionTierChange(right)):
+            return sameOrigin && sameTier && left == right
         case let (.terminal(leftKey, leftState, leftAnswer), .terminal(rightKey, rightState, rightAnswer)):
             return leftKey == rightKey && leftState == rightState && optionalJSONEquals(leftAnswer, rightAnswer)
         default:
@@ -316,17 +396,31 @@ public struct RelayEvent: Equatable, Codable, Sendable {
 public struct InboxSnapshotItem: Equatable, Codable, Sendable {
     public let acceptance: RelayEvent
     public let terminal: RelayEvent?
+    public let attentionTier: AttentionTier
 
-    public init(acceptance: RelayEvent, terminal: RelayEvent? = nil) {
+    public init(acceptance: RelayEvent,
+                terminal: RelayEvent? = nil,
+                attentionTier: AttentionTier = .middle) {
         self.acceptance = acceptance
         self.terminal = terminal
+        self.attentionTier = attentionTier
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case acceptance, terminal, attentionTier
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        acceptance = try values.decode(RelayEvent.self, forKey: .acceptance)
+        terminal = try values.decodeIfPresent(RelayEvent.self, forKey: .terminal)
+        attentionTier = try values.decodeIfPresent(AttentionTier.self, forKey: .attentionTier) ?? .middle
     }
 
     public var key: RequestKey {
         switch acceptance.body {
         case let .delivery(request, _): request.key
-        case let .originReference(key): key
-        case let .terminal(key, _, _): key
+        case let .originReference(key), let .terminal(key, _, _), let .attentionTierChange(key): key
         }
     }
 }
@@ -376,6 +470,8 @@ public struct InboxPagingCheckpoint: Equatable, Codable, Sendable {
     public var highWater: UInt64?
     public var nextCursor: String?
     public var receiptCursor: String?
+    /// Source order of saved page identities; nil for older schema-2 checkpoints.
+    public var sourceOrder: [RequestKey]?
     public var hasInitialPage: Bool
     public var loadedKeys: Set<RequestKey>
     /// Request identities whose lifecycle is known at this checkpoint. This
@@ -395,6 +491,7 @@ public struct InboxPagingCheckpoint: Equatable, Codable, Sendable {
                 highWater: UInt64? = nil,
                 nextCursor: String? = nil,
                 receiptCursor: String? = nil,
+                sourceOrder: [RequestKey]? = nil,
                 hasInitialPage: Bool = false,
                 loadedKeys: Set<RequestKey> = [],
                 freshKeys: Set<RequestKey>? = nil,
@@ -409,6 +506,7 @@ public struct InboxPagingCheckpoint: Equatable, Codable, Sendable {
         self.highWater = highWater
         self.nextCursor = nextCursor
         self.receiptCursor = receiptCursor
+        self.sourceOrder = sourceOrder
         self.hasInitialPage = hasInitialPage
         self.loadedKeys = loadedKeys
         self.freshKeys = freshKeys
@@ -432,11 +530,13 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
     public let listeningSupport: JSONValue?
     public let author: ConversationAuthor?
     public let terminalReason: ExactText?
+    public let retractedAtMilliseconds: UInt64?
     public let files: [ConversationFile]?
 
     public init(revision: UInt64, sessionHandle: ExactText? = nil, eventID: ExactText? = nil,
                 availability: ConversationAvailability? = nil, listeningSupport: JSONValue? = nil,
-                author: ConversationAuthor? = nil, files: [ConversationFile]? = nil, terminalReason: ExactText? = nil) {
+                author: ConversationAuthor? = nil, files: [ConversationFile]? = nil,
+                terminalReason: ExactText? = nil, retractedAtMilliseconds: UInt64? = nil) {
         self.revision = revision
         self.sessionHandle = sessionHandle
         self.eventID = eventID
@@ -444,6 +544,7 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
         self.listeningSupport = listeningSupport
         self.author = author
         self.terminalReason = terminalReason
+        self.retractedAtMilliseconds = retractedAtMilliseconds
         self.files = files
     }
 
@@ -452,7 +553,8 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
         (old.eventID == nil || old.eventID == eventID) && (old.availability == nil || old.availability == availability) &&
         (old.listeningSupport == nil || old.listeningSupport == listeningSupport) &&
         (old.author == nil || old.author == author) && (old.files == nil || old.files == files) &&
-        (old.terminalReason == nil || old.terminalReason == terminalReason)
+        (old.terminalReason == nil || old.terminalReason == terminalReason) &&
+        (old.retractedAtMilliseconds == nil || old.retractedAtMilliseconds == retractedAtMilliseconds)
     }
 }
 
@@ -476,6 +578,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let repairIssues: [StoreRepairIssue]
     public let inboxCheckpoint: InboxPagingCheckpoint?
     public let inboxCandidate: InboxPagingCheckpoint?
+    public let inboxSourceOrder: [RequestKey]?
     /// `nil` before bounded paging is established; an empty set while a new
     /// candidate is being reconciled; otherwise identities current at H plus
     /// subsequently applied live events and allowed page/receipt projections.
@@ -496,6 +599,7 @@ public struct AttentionStoreSnapshot: Sendable {
                 conversationThreads: [RequestKey: ConversationThread] = [:],
                 inboxCheckpoint: InboxPagingCheckpoint? = nil,
                 inboxCandidate: InboxPagingCheckpoint? = nil,
+                inboxSourceOrder: [RequestKey]? = nil,
                 inboxCurrentKeys: Set<RequestKey>? = nil,
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
                 inboxReferences: [RequestKey: RemoteRequestState] = [:]) {
@@ -512,6 +616,7 @@ public struct AttentionStoreSnapshot: Sendable {
         self.repairIssues = repairIssues
         self.inboxCheckpoint = inboxCheckpoint
         self.inboxCandidate = inboxCandidate
+        self.inboxSourceOrder = inboxSourceOrder
         self.inboxCurrentKeys = inboxCurrentKeys
         self.pendingRelayOverlays = pendingRelayOverlays
         self.inboxReferences = inboxReferences
