@@ -773,31 +773,42 @@ final class AttentionClientDuoPrototypeTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("attention-debounced-draft-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let persistence = FileAttentionStatePersistence(directoryURL: directory)
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-a"))
-        let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let firstStore = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
-        let editor = try LivePresentationStore(localFixtureStore: firstStore, context: context)
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let requestKey = RequestKey(accountScope: context.identity.personID,
+                                    senderID: fixture.key.senderID,
+                                    messageID: fixture.key.messageID)
+        func makeRelayStore() throws -> AttentionDomainStore {
+            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            _ = try store.apply(RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: requestKey,
+                                              originalPayload: fixture.originalPayload), .message)),
+                context: context)
+            return store
+        }
+        let firstStore = try makeRelayStore()
+        let editor = try LivePresentationStore(store: firstStore, context: context)
         let longReply = String(repeating: "Near the east entrance; please keep the access path clear. ", count: 8)
 
-        editor.updateText(longReply, input: noteInput.id, action: nil, for: fixture.key)
-        let beforePause = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
-        XCTAssertNotEqual(try beforePause.snapshot(context: context).drafts[fixture.key]?.inputs[noteInput.id]?.text?.rawValue,
+        editor.updateText(longReply, input: noteInput.id, action: nil, for: requestKey)
+        let beforePause = try makeRelayStore()
+        XCTAssertNotEqual(try beforePause.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
                           longReply,
                           "Typing remains in view state until the debounce interval expires.")
 
         try await Task.sleep(for: .milliseconds(600))
-        let afterPause = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
-        XCTAssertEqual(try afterPause.snapshot(context: context).drafts[fixture.key]?.inputs[noteInput.id]?.text?.rawValue,
+        let afterPause = try makeRelayStore()
+        XCTAssertEqual(try afterPause.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
                        longReply,
                        "The paused draft is durable and available after a new store opens.")
 
         let flushedReply = longReply + " Still here."
-        editor.updateText(flushedReply, input: noteInput.id, action: nil, for: fixture.key)
+        editor.updateText(flushedReply, input: noteInput.id, action: nil, for: requestKey)
         editor.flushPendingDrafts()
-        let afterFlush = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
-        XCTAssertEqual(try afterFlush.snapshot(context: context).drafts[fixture.key]?.inputs[noteInput.id]?.text?.rawValue,
+        let afterFlush = try makeRelayStore()
+        XCTAssertEqual(try afterFlush.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
                        flushedReply,
                        "A forced flush durably saves the latest draft without waiting for another pause.")
     }

@@ -15,24 +15,30 @@ final class ReplyDraftUpdateLatencyTests: XCTestCase {
             "reply-draft-latency-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-a"))
-        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        let context = ProfileContext(identity: identity, transportMode: .relay)
         let persistence = FileAttentionStatePersistence(directoryURL: directory)
-        let store = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
-        let editor = try LivePresentationStore(localFixtureStore: store, context: context)
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let requestKey = RequestKey(accountScope: context.identity.personID,
+                                    senderID: fixture.key.senderID,
+                                    messageID: fixture.key.messageID)
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: requestKey, originalPayload: fixture.originalPayload), .message)),
+            context: context)
+        let editor = try LivePresentationStore(store: store, context: context)
 
         var reply = ""
         let started = ProcessInfo.processInfo.systemUptime
         for _ in 0..<256 {
             reply.append("a")
-            editor.updateText(reply, input: input.id, action: nil, for: fixture.key)
+            editor.updateText(reply, input: input.id, action: nil, for: requestKey)
         }
         let elapsedMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1_000
 
         let measurement = """
-        scenario=application reply draft update path
+        scenario=live reply draft update path
         characters=\(reply.count)
         elapsed_ms=\(String(format: "%.2f", elapsedMilliseconds))
         average_ms_per_character=\(String(format: "%.4f", elapsedMilliseconds / Double(reply.count)))
@@ -41,19 +47,5 @@ final class ReplyDraftUpdateLatencyTests: XCTestCase {
         attachment.name = "reply-draft-update-latency"
         attachment.lifetime = .keepAlways
         add(attachment)
-    }
-
-    private func makeStore(fixtures: FixtureSet,
-                           context: ProfileContext,
-                           persistence: any AttentionStatePersistence) throws -> AttentionDomainStore {
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
-        let requests = fixtures.requests.map { request in
-            StoredRequest(key: RequestKey(accountScope: context.identity.personID,
-                                          senderID: request.key.senderID,
-                                          messageID: request.key.messageID),
-                          originalPayload: request.originalPayload)
-        }
-        try store.registerFixtureRequests(requests, context: context)
-        return store
     }
 }

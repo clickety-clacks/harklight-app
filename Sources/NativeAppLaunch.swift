@@ -1299,18 +1299,28 @@ final class LivePresentationStore {
     }
 
     func updateText(_ text: String, input: ExactText, action: ExactText?, for key: RequestKey) {
-        stageDraftText(for: key) { draft in
+        let update: (inout RequestDraft) -> Void = { draft in
             if let action {
                 draft.inputs[input]?.textByActionID[action] = ExactText(text)
             } else {
                 draft.inputs[input]?.text = ExactText(text)
             }
         }
+        if permitsDelivery {
+            stageDraftText(for: key, update)
+        } else {
+            editDraft(for: key, update)
+        }
     }
 
     func updateCompatibilityText(_ text: String, action: ExactText, for key: RequestKey) {
-        stageDraftText(for: key) { draft in
+        let update: (inout RequestDraft) -> Void = { draft in
             draft.compatibility.textByActionID[action] = ExactText(text)
+        }
+        if permitsDelivery {
+            stageDraftText(for: key, update)
+        } else {
+            editDraft(for: key, update)
         }
     }
 
