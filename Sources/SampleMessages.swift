@@ -115,6 +115,7 @@ final class SampleResponse {
         case .completed: .completed
         default: .standard
         }
+        let receiptStatus = InboxRequestRow.responseReceiptStatus(request.intentReceipt)
         return InboxRequestRow(key: request.key,
             title: request.title?.rawValue ?? "Message",
             sender: message.sender,
@@ -126,11 +127,9 @@ final class SampleResponse {
             informationalSeenStatus: request.informationalSeenStatus,
             canNoComment: canDeclineLocally && request.informationalSeenStatus == nil,
             localSeenSelected: localSeenSelected,
-            hasUserAction: finished || request.intentReceipt != nil ||
-                request.lifecycleStatus == .answered ||
-                request.lifecycleStatus == .noComment ||
-                request.informationalSeenStatus == .pending ||
-                request.informationalSeenStatus == .confirmed,
+            hasUserAction: finished || receiptStatus == .pendingOrAccepted ||
+                request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment,
+            hasFailedResponse: receiptStatus == .failed,
             chatUnread: message.hasChat ? message.chatUnread && !chatRead : nil,
             initials: message.initials,
             emphasis: emphasis,

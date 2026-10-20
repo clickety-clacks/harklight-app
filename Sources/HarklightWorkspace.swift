@@ -180,6 +180,11 @@ private struct InboxListRowScrollTarget: Hashable {
     let selection: InboxSelection
 }
 
+enum InboxResponseReceiptStatus: Equatable {
+    case pendingOrAccepted
+    case failed
+}
+
 struct InboxRequestRow: Identifiable {
     let key: RequestKey
     let title: String
@@ -197,14 +202,26 @@ struct InboxRequestRow: Identifiable {
     var noCommentUnavailable = false
     var localSeenSelected = false
     var hasUserAction = false
+    var hasFailedResponse = false
     var chatUnread: Bool? = nil
     var initials: String = ""
     var emphasis: InboxRowEmphasis = .standard
     var tier: InboxAttentionTier = .middle
     var id: RequestKey { key }
 
+    static func responseReceiptStatus(_ receipt: IntentReceipt?) -> InboxResponseReceiptStatus? {
+        guard let state = receipt?.localState else { return nil }
+        return switch state {
+        case .durable, .queuedForRelay, .accepted: .pendingOrAccepted
+        case .refusedByRetraction, .terminalUnconfirmed, .unsupported, .repairRequired: .failed
+        }
+    }
+
     var belongsToReplied: Bool {
-        hasUserAction || localSeenSelected || informationalSeenStatus == .pending ||
+        // A failed delivery returns a response-marked row to Inbox, even if its
+        // previous Seen state was still reported as pending.
+        guard !hasFailedResponse else { return false }
+        return hasUserAction || localSeenSelected || informationalSeenStatus == .pending ||
             informationalSeenStatus == .confirmed
     }
 }
@@ -398,11 +415,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func restoreLastViewedListPosition() {
         let lastViewedItem = lastViewedSelection.flatMap(currentItem(for:))
         guard navigatedBetweenMessages else {
-            if let lastViewedItem {
-                selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
-            } else if let listTabOnMessageEntry {
-                selectedTab = listTabOnMessageEntry
-            }
             listTabOnMessageEntry = nil
             restoreLastViewedOnReturn = false
             UIDiagnostics.shared.record("inbox.restorePosition entryTab tab=\(selectedTab.rawValue)")
@@ -415,7 +427,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             UIDiagnostics.shared.record("inbox.restorePosition missing last=\(UIDiagnostics.describe(lastViewedSelection))")
             return
         }
-        selectedTab = lastViewedItem.belongsToReplied ? .replied : .inbox
         restoreLastViewedOnReturn = true
         UIDiagnostics.shared.record("inbox.restorePosition lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) tab=\(selectedTab.rawValue)")
     }
@@ -610,7 +621,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
             let tabs = TabView(selection: $workspaceTab) {
-                Tab("Inbox", systemImage: "envelope", value: .inbox) {
+                Tab("Inbox", systemImage: "envelope.badge", value: .inbox) {
                     inboxSplitView(for: .inbox, wideChat: wideChat, inlineChat: inlineChat,
                                    geometry: geometry)
                 }
@@ -877,22 +888,26 @@ struct InboxList: View {
         .scrollContentBackground(.hidden)
         .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
         .scrollDismissesKeyboard(.interactively)
-        // On iOS 27, mark-only .largeTitle and .title items hide the native title
-        // and show two detached marks while expanded. Composing Image + Text in
-        // navigationTitle drops the image in the inline state. Keep SwiftUI's native
-        // title and collapse until a stock placement can show the mark beside both.
-        .navigationTitle("Harklight")
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack {
+                HarklightBrand().accessibilityIdentifier("inbox-brand")
+                Spacer(minLength: 16)
+                Button("Settings", systemImage: "gearshape", action: openSettings)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.glass)
+                    .accessibilityIdentifier("inbox-settings")
+            }
+            .frame(height: 52)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color(uiColor: .systemBackground))
+        }
         .toolbar {
             if let triggerNotification {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Open notification", action: triggerNotification)
                         .accessibilityIdentifier("harklight-test-notification")
                 }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Settings", systemImage: "gearshape", action: openSettings)
-                    .labelStyle(.iconOnly)
-                    .accessibilityIdentifier("inbox-settings")
             }
         }
         .onAppear {

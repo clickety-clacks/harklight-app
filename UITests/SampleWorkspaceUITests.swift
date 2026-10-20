@@ -48,12 +48,16 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["request-lifecycle-status"].waitForExistence(timeout: 5),
                       "A saved answer moves only after it is submitted.")
         showList(app)
-        XCTAssertTrue(repliedTab.isSelected,
-                      "Submitting an Inbox result returns to Replied.")
+        XCTAssertTrue(inboxTab.isSelected,
+                      "Submitting an Inbox response keeps the Inbox tab selected.")
+        XCTAssertFalse(original.waitForExistence(timeout: 2),
+                       "A submitted response leaves the Inbox list.")
+        capture("choice-response-leaves-inbox-selected", app)
         repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(original.waitForExistence(timeout: 5),
-                      "A submitted answer appears in Replied.")
+                      "A submitted answer appears in Replied after the user switches tabs.")
+        capture("choice-response-in-replied", app)
         app.buttons["inbox-settings"].tap()
         app.buttons["Add example messages"].tap()
         let row = app.descendants(matching: .any)["sample-approval-0"]
@@ -121,11 +125,18 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(submit.isEnabled, app.debugDescription)
         submit.tap()
         showList(app)
+        XCTAssertTrue(app.tabBars.buttons["Inbox"].isSelected,
+                      "Submitting No comment keeps the Inbox tab selected.")
+        XCTAssertFalse(row.waitForExistence(timeout: 2),
+                       "The submitted No comment leaves the Inbox list.")
+        capture("no-comment-response-leaves-inbox-selected", app)
         XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected,
-                      "After submission, the restored list shows the request in Replied.")
+                      "Only the user's tab change moves from Inbox to Replied.")
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The submitted No comment appears in Replied.")
+        capture("no-comment-response-in-replied", app)
         row.swipeLeft()
         XCTAssertFalse(app.buttons["inbox-no-comment"].exists,
                        "Replied rows have no swipe action.")
@@ -346,6 +357,38 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "The same Seen action on the opposite edge moves the message out of Inbox.")
     }
 
+    func testBodySeenActionKeepsSearchSelectedAndToolbarSeenAvailable() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let bodySeen = app.buttons["request-seen-action"]
+        let toolbarSeen = app.buttons["request-finish-seen"]
+        XCTAssertTrue(bodySeen.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(toolbarSeen.exists, app.debugDescription)
+        XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1)
+        capture("seen-detail-with-body-and-toolbar-actions", app)
+        bodySeen.tap()
+        capture("seen-response-detail", app)
+
+        showList(app)
+        XCTAssertTrue(app.tabBars.buttons["Search"].isSelected,
+                      "The Seen response keeps Search selected on return.")
+        XCTAssertFalse(row.waitForExistence(timeout: 2),
+                       "The Seen response leaves the current Inbox Search results.")
+        capture("seen-response-leaves-search-results", app)
+        app.tabBars.buttons["Replied"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "The Seen response appears in Replied after the user switches tabs.")
+        capture("seen-response-in-replied", app)
+    }
+
     func testReplyChoiceKeepsItsEditorWhenDeselectedAndReopensOnTap() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
@@ -401,6 +444,18 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "Reselecting Reply focuses its editor.")
         capture("reply-editor-reselected", app)
+        app.descendants(matching: .any)["sample-finish"].tap()
+        capture("text-response-submitted", app)
+        showList(app)
+        XCTAssertTrue(app.tabBars.buttons["Search"].isSelected,
+                      "Submitting a Search result keeps Search selected.")
+        XCTAssertFalse(row.waitForExistence(timeout: 2),
+                       "A submitted text reply leaves the current Inbox Search results.")
+        capture("text-response-leaves-search-results", app)
+        repliedTab.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "The text response appears in Replied after the user switches tabs.")
+        capture("text-response-in-replied", app)
     }
 
     func testDesignedControlsAndComponentScreenshots() {
@@ -459,8 +514,9 @@ final class SampleWorkspaceUITests: XCTestCase {
             reveal(row, in: listContainer, app: app)
             row.tap()
             if ["error", "warning", "information", "completed"].contains(kind) {
-                XCTAssertTrue(app.buttons["request-finish-seen"].waitForExistence(timeout: 5))
-                XCTAssertFalse(app.buttons["request-seen-action"].exists)
+                XCTAssertTrue(app.buttons["request-seen-action"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons["request-finish-seen"].exists)
+                XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1)
                 XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1)
             } else {
                 XCTAssertTrue(app.descendants(matching: .any)["sample-finish"].waitForExistence(timeout: 5))

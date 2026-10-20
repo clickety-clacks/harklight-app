@@ -577,6 +577,7 @@ struct LiveRequestDetail: View {
                                              store: store,
                                              readOnly: controlsReadOnly,
                                              localExample: localExample,
+                                             onSeen: submitSeenAction,
                                              canOfferNoComment: canOfferNoComment,
                                              noCommentSelected: noCommentSelected,
                                              noCommentUnavailable: showsNoCommentUnavailable,
@@ -656,11 +657,7 @@ struct LiveRequestDetail: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
-                    if seenActionIsComplete {
-                        finishSeenButton.buttonStyle(.plain)
-                    } else {
-                        finishSeenButton.buttonStyle(.glassProminent)
-                    }
+                    finishSeenButton.buttonStyle(.glass)
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         localExample.finishLocally()
@@ -1242,6 +1239,7 @@ private struct LiveCompatibilityActions: View {
     let store: LivePresentationStore
     let readOnly: Bool
     var localExample: SampleResponse? = nil
+    var onSeen: ((ExactText) -> Void)? = nil
     var canOfferNoComment = false
     var noCommentSelected = false
     var noCommentUnavailable = false
@@ -1252,6 +1250,12 @@ private struct LiveCompatibilityActions: View {
 
     private var selected: ExactText? {
         readOnly ? request.draft.compatibility.selectedActionID : store.draft(for: request.key)?.compatibility.selectedActionID
+    }
+
+    private var seenActionIsComplete: Bool {
+        localExample?.localSeenSelected == true ||
+            request.informationalSeenStatus == .pending ||
+            request.informationalSeenStatus == .confirmed
     }
 
     private var replyEditorSurface: Color {
@@ -1321,7 +1325,28 @@ private struct LiveCompatibilityActions: View {
         if let seenStatus = request.informationalSeenStatus {
             switch seenStatus {
             case .available, .pending, .confirmed:
-                EmptyView()
+                Button {
+                    guard seenStatus == .available, let action = actions.first else { return }
+                    if let onSeen {
+                        onSeen(action.id)
+                    } else {
+                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: seenActionIsComplete ? "checkmark" : "eye")
+                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.blue)
+                        Text(seenActionIsComplete ? "Seen" : (actions.first?.label.rawValue ?? "Seen"))
+                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.primary)
+                    }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                }
+                .buttonStyle(.plain)
+                .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
+                .disabled(readOnly || seenStatus != .available)
+                .opacity(seenActionIsComplete ? 0.76 : (readOnly ? 0.48 : 1))
+                .accessibilityIdentifier("request-seen-action")
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
             }

@@ -7,31 +7,30 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    func testStockNavigationTitleCollapsesAcrossScrollStates() {
+    func testBuildEightHeaderRemainsVisibleAcrossScrollStates() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let navigationBar = app.navigationBars.firstMatch
-        let visibleTitle = navigationBar.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "Harklight")).firstMatch
-        XCTAssertTrue(visibleTitle.waitForExistence(timeout: 10), app.debugDescription)
-        let expandedNavigationBarHeight = navigationBar.frame.height
-        attachScreenshot("Stock title expanded", from: app)
+        let brand = app.descendants(matching: .any)["inbox-brand"]
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("Build 8 header at top", from: app)
 
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
         let dragStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
         let dragEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.68))
         dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
-        XCTAssertTrue(visibleTitle.exists, app.debugDescription)
-        attachScreenshot("Stock title mid-scroll", from: app)
+        XCTAssertTrue(brand.exists, app.debugDescription)
+        XCTAssertTrue(settings.exists, app.debugDescription)
+        attachScreenshot("Build 8 header mid-scroll", from: app)
 
         app.swipeUp()
-        XCTAssertTrue(visibleTitle.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertLessThan(navigationBar.frame.height, expandedNavigationBarHeight,
-                          "The stock navigation bar collapses its large title while scrolling.")
-        attachScreenshot("Stock title collapsed", from: app)
+        XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(settings.exists, app.debugDescription)
+        attachScreenshot("Build 8 header after scrolling", from: app)
     }
 
     func testStockTabsAndSearchKeepInboxAndRepliedResults() {
@@ -170,9 +169,8 @@ final class InboxStockTabsUITests: XCTestCase {
 
     private func assertListHeader(in app: XCUIApplication, file: StaticString = #filePath,
                                   line: UInt = #line) {
-        let title = app.navigationBars.firstMatch.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "Harklight")).firstMatch
-        XCTAssertTrue(title.waitForExistence(timeout: 5), app.debugDescription,
+        let brand = app.descendants(matching: .any)["inbox-brand"]
+        XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription,
                       file: file, line: line)
         XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription,
                       file: file, line: line)

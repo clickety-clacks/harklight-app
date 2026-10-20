@@ -1213,13 +1213,14 @@ final class LivePresentationStore {
 
     var inboxRows: [InboxRequestRow] {
         presentation.requests.map { request in
+            let receiptStatus = InboxRequestRow.responseReceiptStatus(request.intentReceipt)
             var statusParts: [String] = []
             if request.inboxStateIsCurrent {
                 if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
                 let lifecycle = isRetracted(request.key) ? retractionLabel(request.key) :
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
                 statusParts.append(lifecycle)
-                if request.noCommentUnavailable {
+                if request.noCommentUnavailable, receiptStatus != .failed {
                     statusParts.append("No comment not delivered · unsupported by this server")
                 }
                 if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
@@ -1237,17 +1238,21 @@ final class LivePresentationStore {
                 bodyText: request.body?.rawValue,
                 symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
                 isResolved: !request.inboxStateIsCurrent || request.isResolved, createdAt: request.createdAt,
+                localStatus: receiptStatus == .failed
+                    ? (request.noCommentUnavailable
+                        ? "No comment not delivered · unsupported by this server"
+                        : cachedOperationStatus(request.intentReceipt?.localState))
+                    : nil,
                 informationalSeenStatus: request.informationalSeenStatus,
                 canMarkSeen: !isReadOnly && request.inboxStateIsCurrent &&
                     !isRetracted(request.key) && request.lifecycleStatus == .open &&
                     request.intentReceipt == nil && request.informationalSeenStatus == .available,
                 canNoComment: canNoComment(request),
                 noCommentUnavailable: request.noCommentUnavailable,
-                hasUserAction: request.intentReceipt != nil ||
+                hasUserAction: receiptStatus == .pendingOrAccepted ||
                     request.lifecycleStatus == .answered ||
-                    request.lifecycleStatus == .noComment ||
-                    request.informationalSeenStatus == .pending ||
-                    request.informationalSeenStatus == .confirmed,
+                    request.lifecycleStatus == .noComment,
+                hasFailedResponse: receiptStatus == .failed,
                 tier: request.attentionTier.inboxRowStyleTier)
         }
     }
