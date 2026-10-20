@@ -555,7 +555,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 guard workspaceTab != .search else { return }
                 workspaceTab = tab == .replied ? .replied : .inbox
             }
-            .toolbar(horizontalSizeClass == .compact && selection != nil ? .hidden : .visible,
+            .toolbar(horizontalSizeClass == .compact && selection != nil ? .hidden : .automatic,
                      for: .tabBar)
             .sheet(isPresented: $conversationPresented) {
                 conversationPresentation
@@ -725,6 +725,7 @@ struct InboxList: View {
                     InboxRowContent(row: request, selected: isSelected)
                 }
                 .buttonStyle(.plain)
+                .navigationLinkIndicatorVisibility(.hidden)
             } else {
                 InboxRowContent(row: request, selected: isSelected)
             }
@@ -735,6 +736,7 @@ struct InboxList: View {
                         InboxRowContent(row: request, selected: isSelected)
                     }
                     .buttonStyle(.plain)
+                    .navigationLinkIndicatorVisibility(.hidden)
                 } else {
                     InboxRowContent(row: request, selected: isSelected)
                 }
@@ -875,7 +877,8 @@ struct InboxList: View {
                 isUserScrolling = false
                 requestedInGesture = false
             })
-        .toolbar(tab == .search || (horizontalSizeClass == .compact && selected != nil) ? .visible : .hidden,
+        .toolbar(tab == .search ? .automatic :
+                    (horizontalSizeClass == .compact && selected != nil ? .visible : .hidden),
                  for: .navigationBar)
     }
 

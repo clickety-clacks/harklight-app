@@ -37,7 +37,6 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
         attachScreenshot("Inbox search in use", from: app)
 
-        inboxTab.tap()
         approval.tap()
         let keepHere = app.buttons.containing(.staticText, identifier: "Keep here").firstMatch
         XCTAssertTrue(keepHere.waitForExistence(timeout: 5), app.debugDescription)
@@ -49,19 +48,25 @@ final class InboxStockTabsUITests: XCTestCase {
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
-        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(searchTab.isSelected, app.debugDescription)
+        XCTAssertTrue(approval.waitForExistence(timeout: 5),
+                      "The same query finds the answered message in Replied.")
+        attachScreenshot("Replied search in use", from: app)
+
+        repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The submitted local answer appears in Replied.")
         attachScreenshot("Replied tab with answered message", from: app)
 
         searchTab.tap()
-        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-        searchField.tap()
-        searchField.typeText("Archive")
+        let repliedSearchField = app.searchFields.firstMatch
+        XCTAssertTrue(repliedSearchField.waitForExistence(timeout: 5), app.debugDescription)
+        repliedSearchField.tap()
+        repliedSearchField.typeText("Archive")
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered message in Replied.")
-        attachScreenshot("Replied search in use", from: app)
+        attachScreenshot("Replied search for Archive in use", from: app)
     }
 
     private func attachScreenshot(_ name: String, from app: XCUIApplication) {
