@@ -455,6 +455,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             .frame(width: min(360, geometry.size.width * 0.34))
                     }
                 }
+                .toolbar(selection == nil ? .automatic : .visible, for: .navigationBar)
             }
             .navigationSplitViewStyle(.balanced)
             .sheet(isPresented: $conversationPresented) {

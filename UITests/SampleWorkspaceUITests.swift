@@ -48,15 +48,16 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["request-lifecycle-status"].waitForExistence(timeout: 5),
                       "A saved answer moves only after it is submitted.")
         showList(app)
-        XCTAssertFalse(original.exists,
-                       "A submitted answer leaves Inbox.")
-        repliedTab.tap()
+        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(repliedTab.isSelected,
+                      "After submission, the restored list shows the request in Replied.")
         XCTAssertTrue(original.waitForExistence(timeout: 5),
                       "A submitted answer appears in Replied.")
         app.buttons["inbox-settings"].tap()
         app.buttons["Add example messages"].tap()
         let row = app.descendants(matching: .any)["sample-approval-0"]
-        // Both sources remain in this same searchable list.
+        // Examples remain in Inbox, so leave the submitted request's Replied tab first.
+        app.buttons["inbox-tab-inbox"].tap()
         enterSearch("Archive", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         capture("ordinary-inbox-with-examples", app)
@@ -118,9 +119,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(submit.isEnabled, app.debugDescription)
         submit.tap()
         showList(app)
-        XCTAssertFalse(row.waitForExistence(timeout: 3),
-                       "Submitting No comment removes the request from Inbox.")
-        repliedTab.tap()
+        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(repliedTab.isSelected,
+                      "After submission, the restored list shows the request in Replied.")
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The submitted No comment appears in Replied.")
         row.swipeLeft()
@@ -237,6 +238,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("reply-only-no-comment-selected", app)
 
         showList(app)
+        clearSearch(in: app)
         let inboxTab = app.buttons["inbox-tab-inbox"]
         let repliedTab = app.buttons["inbox-tab-replied"]
         XCTAssertTrue(app.descendants(matching: .any)["sample-note-0"].exists,
@@ -355,6 +357,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         editor.typeText("Keep the smaller first step.")
 
         showList(app)
+        clearSearch(in: app)
         let inboxTab = app.buttons["inbox-tab-inbox"]
         let repliedTab = app.buttons["inbox-tab-replied"]
         XCTAssertTrue(row.waitForExistence(timeout: 5),
@@ -419,11 +422,15 @@ final class SampleWorkspaceUITests: XCTestCase {
             if kind == "review" || !found { recordDiagnostics("search-\(kind)", app) }
             XCTAssertTrue(found, app.debugDescription)
             if kind == "value" {
+                clearSearch(in: app)
+                XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
                 XCTAssertTrue(inboxTab.isSelected)
                 repliedTab.tap()
                 XCTAssertFalse(row.waitForExistence(timeout: 1),
                                "A prefilled but unsent reply stays in Inbox.")
                 inboxTab.tap()
+                XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+                enterSearch(query, in: app)
                 XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             }
             let listContainer = app.scrollViews.firstMatch.exists
