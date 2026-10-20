@@ -378,7 +378,8 @@ final class ConversationSampleUITests: XCTestCase {
             if element.frame.midY < scrollView.frame.midY { scrollView.swipeDown() } else { scrollView.swipeUp() }
         }
         if unobscured() { return true }
-        XCTFail("Row stayed outside the unobscured list after scrolling: \(app.debugDescription)")
+        capture("row-outside-list-after-scrolling", app)
+        XCTFail("Row stayed outside the unobscured list after scrolling: frame=\(element.frame), hittable=\(element.isHittable), list=\(scrollView.frame)\n\(app.debugDescription)")
         return false
     }
 }
