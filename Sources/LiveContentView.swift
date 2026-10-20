@@ -713,6 +713,7 @@ struct LiveRequestDetail: View {
                 }
             }
         }
+        .toolbar(.visible, for: .navigationBar)
         .toolbar(focusedReplyActionID == nil ? .visible : .hidden, for: .bottomBar)
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)

@@ -455,7 +455,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             .frame(width: min(360, geometry.size.width * 0.34))
                     }
                 }
-                .toolbar(selection == nil ? .automatic : .visible, for: .navigationBar)
             }
             .navigationSplitViewStyle(.balanced)
             .sheet(isPresented: $conversationPresented) {
@@ -737,7 +736,7 @@ struct InboxList: View {
                     isUserScrolling = false
                     requestedInGesture = false
                 })
-            .toolbar(.hidden, for: .navigationBar)
+            .toolbar(selected == nil ? .hidden : .visible, for: .navigationBar)
             .toolbarBackground(.hidden, for: .bottomBar)
             .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
         }

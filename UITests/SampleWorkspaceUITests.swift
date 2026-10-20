@@ -241,12 +241,19 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         let inboxTab = app.buttons["inbox-tab-inbox"]
         let repliedTab = app.buttons["inbox-tab-replied"]
-        XCTAssertTrue(app.descendants(matching: .any)["sample-note-0"].exists,
-                      "An unsent No comment selection remains in Inbox.")
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inboxTab.isSelected,
+                      "An unsent No comment selection restores to Inbox.")
+        enterSearch("A note for", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        clearSearch(in: app)
         repliedTab.tap()
-        XCTAssertFalse(app.descendants(matching: .any)["sample-note-0"].exists,
+        enterSearch("A note for", in: app)
+        XCTAssertFalse(row.waitForExistence(timeout: 1),
                        "An unsent No comment selection does not appear in Replied.")
+        clearSearch(in: app)
         inboxTab.tap()
+        enterSearch("A note for", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         XCTAssertTrue(app.buttons["request-no-comment"].isSelected,
@@ -256,9 +263,11 @@ final class SampleWorkspaceUITests: XCTestCase {
             .waitForExistence(timeout: 5), app.debugDescription)
         showList(app)
         clearSearch(in: app)
-        repliedTab.tap()
-        XCTAssertTrue(row.waitForExistence(timeout: 5),
-                      "Submitting No comment moves the request to Replied.")
+        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(repliedTab.isSelected,
+                      "After the answer is accepted, the restored list shows Replied.")
+        enterSearch("A note for", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.swipeLeft()
         XCTAssertFalse(app.buttons["inbox-no-comment"].exists,
                        "Replied rows have no swipe action.")
@@ -360,11 +369,21 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         let inboxTab = app.buttons["inbox-tab-inbox"]
         let repliedTab = app.buttons["inbox-tab-replied"]
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inboxTab.isSelected,
+                      "A typed but unsent reply restores to Inbox.")
+        enterSearch("Which approach", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "A typed but unsent reply stays in Inbox.")
+        clearSearch(in: app)
         repliedTab.tap()
-        XCTAssertFalse(row.exists, "A typed but unsent reply does not appear in Replied.")
+        enterSearch("Which approach", in: app)
+        XCTAssertFalse(row.waitForExistence(timeout: 1),
+                       "A typed but unsent reply does not appear in Replied.")
+        clearSearch(in: app)
         inboxTab.tap()
+        enterSearch("Which approach", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         let retainedEditor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
         XCTAssertEqual(retainedEditor.value as? String, "Keep the smaller first step.")
@@ -426,10 +445,11 @@ final class SampleWorkspaceUITests: XCTestCase {
                 XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
                 XCTAssertTrue(inboxTab.isSelected)
                 repliedTab.tap()
+                enterSearch(query, in: app)
                 XCTAssertFalse(row.waitForExistence(timeout: 1),
                                "A prefilled but unsent reply stays in Inbox.")
+                clearSearch(in: app)
                 inboxTab.tap()
-                XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
                 enterSearch(query, in: app)
                 XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             }
