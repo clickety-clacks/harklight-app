@@ -110,7 +110,7 @@ enum InboxMessageTab: String, Hashable {
     case replied
 }
 
-private enum InboxWorkspaceTab: Hashable {
+enum InboxWorkspaceTab: Hashable {
     case inbox
     case replied
     case search
@@ -229,6 +229,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var visibility: NavigationSplitViewVisibility = .all
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
+    @State private var workspaceTab: InboxWorkspaceTab = .inbox
+    @State private var search = ""
     @State private var listTabOnMessageEntry: InboxMessageTab?
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
@@ -362,6 +364,75 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         Binding(get: { selection }, set: { navigate(to: $0) })
     }
 
+    private func inboxSplitView(for tab: InboxWorkspaceTab, wideChat: Bool, inlineChat: Bool,
+                                geometry: GeometryProxy) -> some View {
+        NavigationSplitView(columnVisibility: $visibility) {
+            InboxList(tab: tab, rows: rows, selected: navigationSelection,
+                      selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
+                      lastViewedSelection: lastViewedSelection,
+                      restoreLastViewed: restoreLastViewedOnReturn,
+                      didRestoreLastViewed: { restoreLastViewedOnReturn = false },
+                      showSettings: { settings = true }, markSeen: markSeen,
+                      markNoComment: markNoComment,
+                      fetchOlderInboxPage: fetchOlderInboxPage,
+                      notificationNavigation: notificationNavigation)
+            .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
+        } detail: {
+            HStack(spacing: 0) {
+                Group {
+                    switch selection {
+                    case let .request(key):
+                        requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
+                            canInlineChat: wideChat,
+                            openChat: {
+                                if wideChat {
+                                    chatOpen.toggle()
+                                } else {
+                                    conversationPresented = true
+                                }
+                            }))
+                            .id(key)
+                    case let .sample(id):
+                        if showsLocalExamples,
+                           samples.messages.contains(where: { $0.id == id }),
+                           let response = samples.responses[id] {
+                            SampleCardScreen(response: response,
+                                context: cardContext(for: .sample(id), inlineChat: inlineChat,
+                                    canInlineChat: wideChat,
+                                    openChat: {
+                                        if wideChat {
+                                            chatOpen.toggle()
+                                        } else {
+                                            conversationPresented = true
+                                        }
+                                    }))
+                                .id(id)
+                        }
+                    case nil:
+                        HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                if inlineChat, case let .request(key) = selection, let conversationStore,
+                   let request = conversationStore.request(for: key) {
+                    Divider()
+                    ConversationPanel(store: conversationStore, key: key,
+                        sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                        .frame(width: min(360, geometry.size.width * 0.34))
+                }
+                if inlineChat, case let .sample(id) = selection,
+                   let message = samples.messages.first(where: { $0.id == id }),
+                   let response = samples.responses[id] {
+                    Divider()
+                    SampleChatView(sender: message.sender, title: message.title, response: response)
+                        .frame(width: min(360, geometry.size.width * 0.34))
+                }
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
                              canInlineChat: Bool = false, openChat: (() -> Void)? = nil) -> InboxCardContext {
         let ids = orderedIDs
@@ -420,62 +491,36 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let landscape = windowSize.width > windowSize.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
-            NavigationSplitView(columnVisibility: $visibility) {
-                InboxList(rows: rows, selected: navigationSelection, selectedTab: $selectedTab,
-                          lastViewedSelection: lastViewedSelection,
-                          restoreLastViewed: restoreLastViewedOnReturn,
-                          didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                          showSettings: { settings = true }, markSeen: markSeen,
-                          markNoComment: markNoComment,
-                          fetchOlderInboxPage: fetchOlderInboxPage,
-                          notificationNavigation: notificationNavigation)
-                .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
-            } detail: {
-                    HStack(spacing: 0) {
-                        Group {
-                            switch selection {
-                            case let .request(key):
-                                requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
-                                    canInlineChat: wideChat, openChat: {
-                                        if wideChat { chatOpen.toggle() }
-                                        else { conversationPresented = true }
-                                    }))
-                                    .id(key)
-                            case let .sample(id):
-                                if showsLocalExamples,
-                                   samples.messages.contains(where: { $0.id == id }),
-                                   let response = samples.responses[id] {
-                                    SampleCardScreen(response: response,
-                                        context: cardContext(for: .sample(id), inlineChat: inlineChat,
-                                            canInlineChat: wideChat, openChat: {
-                                                if wideChat { chatOpen.toggle() }
-                                                else { conversationPresented = true }
-                                            }))
-                                        .id(id)
-                                }
-                            case nil:
-                                HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                    if inlineChat, case let .request(key) = selection, let conversationStore,
-                       let request = conversationStore.request(for: key) {
-                        Divider()
-                        ConversationPanel(store: conversationStore, key: key,
-                            sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
-                            .frame(width: min(360, geometry.size.width * 0.34))
-                    }
-                    if inlineChat, case let .sample(id) = selection,
-                       let message = samples.messages.first(where: { $0.id == id }),
-                       let response = samples.responses[id] {
-                        Divider()
-                        SampleChatView(sender: message.sender, title: message.title, response: response)
-                            .frame(width: min(360, geometry.size.width * 0.34))
-                    }
+            TabView(selection: $workspaceTab) {
+                Tab("Inbox", systemImage: "envelope.badge", value: .inbox) {
+                    inboxSplitView(for: .inbox, wideChat: wideChat, inlineChat: inlineChat,
+                                   geometry: geometry)
+                }
+
+                Tab("Replied", systemImage: "envelope.open", value: .replied) {
+                    inboxSplitView(for: .replied, wideChat: wideChat, inlineChat: inlineChat,
+                                   geometry: geometry)
+                }
+
+                Tab(value: .search, role: .search) {
+                    inboxSplitView(for: .search, wideChat: wideChat, inlineChat: inlineChat,
+                                   geometry: geometry)
                 }
             }
-            .navigationSplitViewStyle(.balanced)
+            .searchable(text: $search, prompt: "Search")
+            .onChange(of: workspaceTab) { oldTab, newTab in
+                guard let messageTab = newTab.messageTab else { return }
+                selectedTab = messageTab
+                if oldTab == .search {
+                    search = ""
+                }
+            }
+            .onChange(of: selectedTab) { _, tab in
+                guard workspaceTab != .search else { return }
+                workspaceTab = tab == .replied ? .replied : .inbox
+            }
+            .toolbar(horizontalSizeClass == .compact && selection != nil ? .hidden : .visible,
+                     for: .tabBar)
             .sheet(isPresented: $conversationPresented) {
                 conversationPresentation
                     .presentationDetents([.medium, .large])
@@ -540,9 +585,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
 @MainActor
 struct InboxList: View {
+    let tab: InboxWorkspaceTab
     let rows: [InboxItem]
     @Binding var selected: InboxSelection?
     @Binding var selectedTab: InboxMessageTab
+    @Binding var workspaceTab: InboxWorkspaceTab
+    @Binding var search: String
     let lastViewedSelection: InboxSelection?
     let restoreLastViewed: Bool
     let didRestoreLastViewed: () -> Void
@@ -552,8 +600,6 @@ struct InboxList: View {
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @State private var workspaceTab: InboxWorkspaceTab = .inbox
-    @State private var search = ""
     @State private var scrollMetrics = InboxScrollMetrics.empty
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
@@ -605,14 +651,14 @@ struct InboxList: View {
     }
 
     private var diagnosticSummary: String {
-        let selectedMessageTab = messageTab(for: workspaceTab)
+        let selectedMessageTab = messageTab(for: tab)
         let inTab = rows.filter { $0.belongsToReplied == (selectedMessageTab == .replied) }
-        let filtered = filteredRows(in: workspaceTab).map { row -> String in
+        let filtered = filteredRows(in: tab).map { row -> String in
             let missingRow: Bool = if case let .example(_, response) = row { response.inboxRow == nil } else { false }
             return row.accessibilityID + (missingRow ? ":empty" : "")
         }
         return [
-            "search=\(search) workspaceTab=\(workspaceTab) tab=\(selectedMessageTab.rawValue)",
+            "search=\(search) workspaceTab=\(workspaceTab) listTab=\(tab) tab=\(selectedMessageTab.rawValue)",
             "restoreLastViewed=\(restoreLastViewed) lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) selected=\(UIDiagnostics.describe(selected))",
             "rows=\(rows.count) inTab=\(inTab.count) filtered=\(filtered)",
         ].joined(separator: " | ")
@@ -715,6 +761,14 @@ struct InboxList: View {
             guard workspaceTab == tab else { return }
             restoreLastViewed(using: proxy, in: tab)
         }
+        .onChange(of: workspaceTab) { _, activeTab in
+            guard activeTab == tab else { return }
+            if restoreLastViewed {
+                restoreLastViewed(using: proxy, in: tab)
+            } else {
+                showFirstRow(using: proxy, in: tab)
+            }
+        }
         .onChange(of: restoreLastViewed) { _, shouldRestore in
             if shouldRestore, workspaceTab == tab {
                 restoreLastViewed(using: proxy, in: tab)
@@ -773,36 +827,8 @@ struct InboxList: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            TabView(selection: $workspaceTab) {
-                Tab("Inbox", systemImage: "envelope.badge", value: .inbox) {
-                    listContent(for: .inbox, using: proxy)
-                }
-
-                Tab("Replied", systemImage: "envelope.open", value: .replied) {
-                    listContent(for: .replied, using: proxy)
-                }
-
-                Tab(value: .search, role: .search) {
-                    NavigationStack {
-                        listContent(for: .search, using: proxy)
-                    }
-                }
-            }
-            .searchable(text: $search, prompt: "Search")
-            .onChange(of: workspaceTab) { oldTab, newTab in
-                guard let messageTab = newTab.messageTab else {
-                    return
-                }
-                selectedTab = messageTab
-                if oldTab == .search {
-                    search = ""
-                }
-            }
-            .onChange(of: selectedTab) { _, tab in
-                guard workspaceTab != .search else { return }
-                workspaceTab = tab == .replied ? .replied : .inbox
-            }
-            .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+            listContent(for: tab, using: proxy)
+                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
         }
     }
 }
