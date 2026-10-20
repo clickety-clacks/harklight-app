@@ -1,5 +1,5 @@
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 import AttentionDomain
 
 final class ReplyDraftUpdateLatencyTests: XCTestCase {

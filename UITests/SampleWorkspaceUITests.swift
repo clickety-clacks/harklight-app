@@ -172,6 +172,26 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "Replied rows have no swipe action.")
     }
 
+    func testUnsupportedNoCommentControlStaysVisibleAndUnavailable() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--test-no-comment-unsupported"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+
+        enterSearch("A note for", in: app)
+        let row = app.descendants(matching: .any)["sample-note-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let noComment = app.buttons["request-no-comment"]
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(noComment.isEnabled, app.debugDescription)
+        let explanation = app.descendants(matching: .any)["request-no-comment-unavailable"]
+        XCTAssertTrue(explanation.waitForExistence(timeout: 5), app.debugDescription)
+        capture("reply-only-no-comment-unavailable", app)
+    }
+
     func testSeenActionFromEitherSwipeEdgeMovesTheMessageToReplied() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]

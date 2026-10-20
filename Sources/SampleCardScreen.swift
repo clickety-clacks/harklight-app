@@ -13,7 +13,10 @@ struct SampleCardScreen: View {
             LiveRequestDetail(request: request,
                               store: response.viewModel,
                               context: context,
-                              localExample: response)
+                              localExample: response,
+                              noCommentUnavailableOverride:
+                                ProcessInfo.processInfo.arguments.contains("--test-no-comment-unsupported")
+                                  ? true : nil)
         } else {
             ContentUnavailableView("Example unavailable", systemImage: "questionmark.folder")
         }

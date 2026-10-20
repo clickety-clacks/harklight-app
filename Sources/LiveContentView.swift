@@ -341,6 +341,10 @@ struct LiveRequestDetail: View {
     var context: InboxCardContext = .standalone
     var localExample: SampleResponse? = nil
     var fixtureStore: PrototypeStore? = nil
+    var noCommentUnavailableOverride: Bool? = nil
+    private var showsNoCommentUnavailable: Bool {
+        noCommentUnavailableOverride ?? request.noCommentUnavailable
+    }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var deferred = false
     @State private var chatPresented = false
@@ -540,14 +544,14 @@ struct LiveRequestDetail: View {
                                            suggested: false)
                     }
                     .buttonStyle(.plain)
-                    .disabled(request.noCommentUnavailable)
-                    .opacity(request.noCommentUnavailable ? 0.48 : 1)
-                    .accessibilityHint(request.noCommentUnavailable
+                    .disabled(showsNoCommentUnavailable)
+                    .opacity(showsNoCommentUnavailable ? 0.48 : 1)
+                    .accessibilityHint(showsNoCommentUnavailable
                         ? "No comment was not delivered because this server does not support it."
                         : "Send a final No comment answer to the sender.")
                     .accessibilityIdentifier("request-no-comment")
                 }
-                if request.noCommentUnavailable {
+                if showsNoCommentUnavailable {
                     Text("No comment was not delivered because this server does not support it. You can still answer this request.")
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-no-comment-unavailable")
