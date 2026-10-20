@@ -142,7 +142,9 @@ final class HarklightUITests: XCTestCase {
                        "An unconfirmed closure must keep the neutral sender scene.")
 
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
-        showList(app)
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
         let inbox = app.tabBars.buttons["Inbox"]
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
