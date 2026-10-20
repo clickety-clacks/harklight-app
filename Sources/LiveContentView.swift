@@ -4,6 +4,7 @@ import UIKit
 
 @MainActor
 struct LiveContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     let store: LivePresentationStore
     let samples: SampleLibrary
     let launch: NativeAppLaunch?
@@ -46,6 +47,7 @@ struct LiveContentView: View {
                     return row
                 }, samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { markSeen($0) },
+                markNoCommentRequest: { store.submitNoCommentFromUser($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
                         LiveRequestDetail(request: request, store: store, context: context,
@@ -84,6 +86,9 @@ struct LiveContentView: View {
             }
             .onChange(of: store.presentation.revision) { _, _ in
                 fixtureStore?.refreshFromDurableStore()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { store.flushPendingDrafts() }
             }
         }
     }
@@ -336,12 +341,17 @@ struct LiveRequestDetail: View {
     var context: InboxCardContext = .standalone
     var localExample: SampleResponse? = nil
     var fixtureStore: PrototypeStore? = nil
+    var noCommentUnavailableOverride: Bool? = nil
+    private var showsNoCommentUnavailable: Bool {
+        noCommentUnavailableOverride ?? request.noCommentUnavailable
+    }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var deferred = false
     @State private var chatPresented = false
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
+    @FocusState private var focusedReplyActionID: String?
 
     private var controlsReadOnly: Bool {
         if let localExample {
@@ -367,6 +377,57 @@ struct LiveRequestDetail: View {
         guard request.informationalSeenStatus == .available,
               case let .compatibility(actions) = request.projection else { return nil }
         return actions.first?.id
+    }
+
+    private var canFinishSeenAction: Bool {
+        guard request.informationalSeenStatus == .available else { return false }
+        if let localExample {
+            return localExample.canFinishLocally
+        }
+        return availableSeenAction != nil
+    }
+
+    private func finishSeenAction() {
+        if let localExample { localExample.finishLocally() }
+        else if let availableSeenAction { submitSeenAction(availableSeenAction) }
+    }
+
+    private var seenActionIsComplete: Bool {
+        localExample?.localSeenSelected == true ||
+            request.informationalSeenStatus == .pending ||
+            request.informationalSeenStatus == .confirmed
+    }
+
+    private var noCommentSelected: Bool {
+        localExample?.noCommentSelected ?? store.draft(for: request.key)?.noCommentSelected ?? false
+    }
+
+    private var canSubmitCurrentAnswer: Bool {
+        if noCommentSelected {
+            return canOfferNoComment && !showsNoCommentUnavailable
+        }
+        return canAnswer
+    }
+
+    private var canOfferNoComment: Bool {
+        guard request.informationalSeenStatus == nil else { return false }
+        if let localExample { return localExample.canDeclineLocally }
+        if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
+        guard request.inboxStateIsCurrent, !store.isReadOnly,
+              !store.isRetracted(request.key), request.lifecycleStatus == .open,
+              request.intentReceipt == nil else { return false }
+        return true
+    }
+
+    private var noCommentChoice: some View {
+        NoCommentChoiceRow(selected: noCommentSelected,
+                           unavailable: showsNoCommentUnavailable,
+                           onSelect: selectNoCommentAction)
+    }
+
+    private func selectNoCommentAction() {
+        focusedReplyActionID = nil
+        store.selectNoComment(for: request.key)
     }
 
     private func submitSeenAction(_ action: ExactText) {
@@ -426,11 +487,16 @@ struct LiveRequestDetail: View {
                         LocalSampleContext(response: localExample)
                     }
                     if localExample.finished {
-                        Label(request.informationalSeenStatus == nil
-                              ? "Answered locally · nothing sent"
-                              : "Seen selected locally · nothing sent",
+                        Label(localExample.noCommentSelected
+                              ? "No comment selected locally · nothing sent"
+                              : request.informationalSeenStatus == nil
+                                  ? "Answered locally · nothing sent"
+                                  : "Seen selected locally · nothing sent",
                               systemImage: "checkmark.circle")
                             .font(.subheadline).foregroundStyle(.secondary)
+                            .accessibilityIdentifier(localExample.noCommentSelected
+                                ? "request-local-no-comment-status"
+                                : "request-local-answer-status")
                     } else if localExample.deferred {
                         HStack {
                             Label("Deferred locally", systemImage: "clock")
@@ -474,23 +540,40 @@ struct LiveRequestDetail: View {
                 }
                 switch request.projection {
                 case let .sender(sender):
-                    LiveProjectedSceneView(request: request,
-                                           sender: sender,
-                                           node: sender.scene,
-                                           store: store,
-                                           readOnly: controlsReadOnly,
-                                           localExample: localExample,
-                                           enlargePicture: { enlargedPicture = $0 })
+                    VStack(alignment: .leading, spacing: 10) {
+                        LiveProjectedSceneView(request: request,
+                                               sender: sender,
+                                               node: sender.scene,
+                                               store: store,
+                                               readOnly: controlsReadOnly,
+                                               focusedReplyActionID: $focusedReplyActionID,
+                                               localExample: localExample,
+                                               enlargePicture: { enlargedPicture = $0 })
+                        if canOfferNoComment { noCommentChoice }
+                    }
                 case let .compatibility(actions):
                     LiveCompatibilityActions(request: request,
                                              actions: actions,
                                              store: store,
                                              readOnly: controlsReadOnly,
                                              localExample: localExample,
-                                             onSeen: submitSeenAction)
+                                             onSeen: submitSeenAction,
+                                             canOfferNoComment: canOfferNoComment,
+                                             noCommentSelected: noCommentSelected,
+                                             noCommentUnavailable: showsNoCommentUnavailable,
+                                             onSelectNoComment: selectNoCommentAction,
+                                             focusedReplyActionID: $focusedReplyActionID)
                 case .unsupported:
-                    Text("This request uses an unsupported answer format.")
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("This request uses an unsupported answer format.")
+                            .foregroundStyle(.secondary)
+                        if canOfferNoComment { noCommentChoice }
+                    }
+                }
+                if showsNoCommentUnavailable {
+                    Text("No comment was not delivered because this server does not support it. You can still answer this request.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("request-no-comment-unavailable")
                 }
                 if request.inboxStateIsCurrent {
                     if request.lifecycleStatus != .open || store.isRetracted(request.key) {
@@ -553,20 +636,26 @@ struct LiveRequestDetail: View {
         }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                if let availableSeenAction {
-                    Button("Seen", systemImage: "checkmark") {
-                        submitSeenAction(availableSeenAction)
+                if request.informationalSeenStatus != nil {
+                    Button(action: finishSeenAction) {
+                        if seenActionIsComplete {
+                            Label("Seen", systemImage: "checkmark")
+                                .labelStyle(.titleAndIcon)
+                                .foregroundStyle(Color.green)
+                                .font(.headline)
+                        } else {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(Color.white)
+                                .font(.headline)
+                        }
                     }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.glassProminent)
-                    .disabled(controlsReadOnly)
+                    .buttonStyle(.glass)
+                    .tint(seenActionIsComplete ? .green : .blue)
+                    .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
+                    .disabled(controlsReadOnly || !canFinishSeenAction || seenActionIsComplete)
+                    .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
+                    .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
                     .accessibilityIdentifier("request-finish-seen")
-                } else if request.informationalSeenStatus != nil {
-                    Button("No answer to submit", systemImage: "checkmark") {}
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.glass)
-                        .disabled(true)
-                        .accessibilityIdentifier("request-finish-unavailable")
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         localExample.finishLocally()
@@ -578,7 +667,10 @@ struct LiveRequestDetail: View {
                 } else if request.informationalSeenStatus == nil {
                     Button(submitLabel, systemImage: "checkmark") {
                         if let fixtureStore {
-                            guard fixtureStore.sendSelectedAnswer(for: request.key) else { return }
+                            let sent = store.draft(for: request.key)?.noCommentSelected == true
+                                ? fixtureStore.sendNoCommentLocally(for: request.key)
+                                : fixtureStore.sendSelectedAnswer(for: request.key)
+                            guard sent else { return }
                             try? store.refreshFromDurableStore()
                         } else {
                             store.submitFromUser(request.key)
@@ -586,7 +678,7 @@ struct LiveRequestDetail: View {
                     }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.glassProminent)
-                        .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canAnswer)
+                        .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
             }
@@ -631,6 +723,7 @@ struct LiveRequestDetail: View {
                 }
             }
         }
+        .toolbar(focusedReplyActionID == nil ? .visible : .hidden, for: .bottomBar)
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)
         }
@@ -770,6 +863,7 @@ struct LiveRequestDetail: View {
         case .accepted: "Answer accepted · terminal status pending"
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .unsupported: "No comment is unsupported by this server"
         case .repairRequired: "Answer needs recovery"
         }
     }
@@ -780,6 +874,7 @@ struct HistoricalAnswerDraftView: View {
     let request: PresentedRequest
     let store: LivePresentationStore
     var retracted = false
+    @FocusState private var focusedReplyActionID: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(request.title?.rawValue ?? "Earlier question").font(.headline)
@@ -788,9 +883,13 @@ struct HistoricalAnswerDraftView: View {
                 .font(.caption).foregroundStyle(.secondary)
             switch request.projection {
             case let .sender(sender):
-                LiveProjectedSceneView(request: request, sender: sender, node: sender.scene, store: store, readOnly: true)
+                LiveProjectedSceneView(request: request, sender: sender, node: sender.scene,
+                                       store: store, readOnly: true,
+                                       focusedReplyActionID: $focusedReplyActionID)
             case let .compatibility(actions):
-                LiveCompatibilityActions(request: request, actions: actions, store: store, readOnly: true)
+                LiveCompatibilityActions(request: request, actions: actions, store: store,
+                                         readOnly: true,
+                                         focusedReplyActionID: $focusedReplyActionID)
             case .unsupported:
                 Text("This saved answer format cannot be displayed.").font(.caption)
             }
@@ -805,6 +904,7 @@ private struct LiveProjectedSceneView: View {
     let node: ProjectedSceneNode
     let store: LivePresentationStore
     let readOnly: Bool
+    @FocusState.Binding var focusedReplyActionID: String?
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
 
@@ -841,7 +941,8 @@ private struct LiveProjectedSceneView: View {
                                        store: store,
                                        readOnly: readOnly,
                                        localExample: localExample,
-                                       enlargePicture: enlargePicture)
+                                       enlargePicture: enlargePicture,
+                                       focusedReplyActionID: $focusedReplyActionID)
             }
         case let .resultPoint(illustrationID, label, point):
             if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
@@ -861,6 +962,7 @@ private struct LiveProjectedSceneView: View {
     private func childView(_ child: ProjectedSceneNode) -> some View {
         LiveProjectedSceneView(request: request, sender: sender,
                                node: child, store: store, readOnly: readOnly,
+                               focusedReplyActionID: $focusedReplyActionID,
                                localExample: localExample, enlargePicture: enlargePicture)
     }
 }
@@ -876,21 +978,95 @@ private struct LiveProjectedInputView: View {
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
     @State private var pointGestureCapture = PointGestureCapture()
+    @State private var typedInputText: String?
+    @State private var replyEditorTexts: [ExactText: String] = [:]
     @GestureState private var pointGestureActive = false
+    @FocusState.Binding var focusedReplyActionID: String?
+    @Environment(\.colorScheme) private var colorScheme
 
     private var draft: InputDraft? {
-        readOnly ? request.draft.inputs[input.id] : store.request(for: request.key)?.draft.inputs[input.id]
+        readOnly ? request.draft.inputs[input.id] : store.draft(for: request.key)?.inputs[input.id]
     }
 
     private var textEditor: some View {
         TextEditor(text: Binding(
-            get: { draft?.text?.rawValue ?? "" },
-            set: { store.updateText($0, input: input.id, action: nil, for: request.key) }
+            get: { typedInputText ?? draft?.text?.rawValue ?? "" },
+            set: {
+                typedInputText = $0
+                store.stageText($0, input: input.id, action: nil, for: request.key)
+            }
         ))
         .frame(minHeight: 120)
         .accessibilityLabel(input.label.rawValue)
         .accessibilityIdentifier("request-input-" + input.id.rawValue)
         .disabled(readOnly)
+    }
+
+    private var replyEditorSurface: Color {
+        colorScheme == .dark
+            ? Color(uiColor: .secondarySystemBackground)
+            : Color(red: 0.96, green: 0.975, blue: 1)
+    }
+
+    private func activate(_ action: ProjectedAction) {
+        withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
+            if let localExample, action.id.rawValue == "own" {
+                if localExample.message.kind == .multipleChoice {
+                    localExample.choices = []
+                }
+                localExample.ownAnswer = true
+            } else {
+                store.selectAction(action.id, input: input.id, for: request.key)
+            }
+        } completion: {
+            focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
+        }
+    }
+
+    @ViewBuilder
+    private func inlineReplyAction(_ action: ProjectedAction,
+                                   selected: Bool,
+                                   text: String) -> some View {
+        let detail = localExample != nil && action.id.rawValue == "own"
+            ? "Write it here, or say why none of these fit."
+            : ""
+        let cardShape = RoundedRectangle(cornerRadius: 16)
+        let card = VStack(spacing: 0) {
+            MessageChoiceLabel(title: action.label.rawValue, detail: detail,
+                               selected: selected, multiple: false, suggested: false,
+                               ownAnswer: action.id.rawValue == "own", drawsSurface: false)
+            TextEditor(text: Binding(
+                get: { replyEditorTexts[action.id] ?? draft?.textByActionID[action.id]?.rawValue ?? text },
+                set: {
+                    replyEditorTexts[action.id] = $0
+                    store.stageText($0, input: input.id, action: action.id, for: request.key)
+                }
+            ))
+            .font(.body)
+            .foregroundStyle(.primary)
+            .scrollContentBackground(.hidden)
+            .frame(minHeight: 120)
+            .padding(8)
+            .background(replyEditorSurface)
+            .focused($focusedReplyActionID, equals: action.id.rawValue)
+            .accessibilityLabel(action.label.rawValue)
+            .accessibilityIdentifier("request-input-" + input.id.rawValue + "-response")
+            .disabled(readOnly || !selected)
+        }
+        .background(selected ? Color.blue : Color(uiColor: .systemBackground), in: cardShape)
+        .overlay(cardShape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
+        .clipShape(cardShape)
+        .opacity(selected ? 1 : 0.55)
+        .animation(.smooth(duration: 0.25), value: selected)
+
+        if selected {
+            card
+        } else {
+            Button { activate(action) } label: { card }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(.isButton)
+                .disabled(readOnly)
+        }
     }
 
     var body: some View {
@@ -924,18 +1100,6 @@ private struct LiveProjectedInputView: View {
                             !(localExample?.message.kind == .multipleChoice &&
                               input.id.rawValue == "answer" && action.id.rawValue == "options")
                         }, id: \.id) { action in actionButton(action) }
-                    }
-                    if let selected = draft?.selectedActionID,
-                       let action = actions.first(where: { $0.id == selected }),
-                       action.kind == .text {
-                        TextEditor(text: Binding(
-                            get: { draft?.textByActionID[selected]?.rawValue ?? "" },
-                            set: { store.updateText($0, input: input.id, action: selected, for: request.key) }
-                        ))
-                        .frame(minHeight: 120)
-                        .accessibilityLabel(action.label.rawValue)
-                        .accessibilityIdentifier("request-input-" + input.id.rawValue + "-response")
-                        .disabled(readOnly)
                     }
                 }
             }
@@ -1023,7 +1187,10 @@ private struct LiveProjectedInputView: View {
     @ViewBuilder
     private func actionButton(_ action: ProjectedAction) -> some View {
         let selected = draft?.selectedActionID == action.id
-        if let localExample,
+        let replyText = draft?.textByActionID[action.id]?.rawValue ?? ""
+        if action.kind == .text && (selected || !replyText.isEmpty) {
+            inlineReplyAction(action, selected: selected, text: replyText)
+        } else if let localExample,
            let option = localExample.message.options.first(where: { $0.id == action.id.rawValue }) {
             SampleChoiceRow(option: option, selected: selected,
                             multiple: false,
@@ -1034,14 +1201,7 @@ private struct LiveProjectedInputView: View {
             .disabled(readOnly)
         } else {
             Button {
-                if let localExample, action.id.rawValue == "own" {
-                    if localExample.message.kind == .multipleChoice {
-                        localExample.choices = []
-                    }
-                    localExample.ownAnswer = true
-                } else {
-                    store.selectAction(action.id, input: input.id, for: request.key)
-                }
+                activate(action)
             } label: {
                 VStack(alignment: .leading, spacing: 8) {
                     if let artID = action.illustrationID,
@@ -1073,76 +1233,171 @@ private struct LiveCompatibilityActions: View {
     let readOnly: Bool
     var localExample: SampleResponse? = nil
     var onSeen: ((ExactText) -> Void)? = nil
+    var canOfferNoComment = false
+    var noCommentSelected = false
+    var noCommentUnavailable = false
+    var onSelectNoComment: () -> Void = {}
+    @State private var replyTextByActionID: [ExactText: String] = [:]
+    @FocusState.Binding var focusedReplyActionID: String?
+    @Environment(\.colorScheme) private var colorScheme
 
     private var selected: ExactText? {
-        readOnly ? request.draft.compatibility.selectedActionID : store.request(for: request.key)?.draft.compatibility.selectedActionID
+        readOnly ? request.draft.compatibility.selectedActionID : store.draft(for: request.key)?.compatibility.selectedActionID
+    }
+
+    private var seenActionIsComplete: Bool {
+        localExample?.localSeenSelected == true ||
+            request.informationalSeenStatus == .pending ||
+            request.informationalSeenStatus == .confirmed
+    }
+
+    private var replyEditorSurface: Color {
+        colorScheme == .dark
+            ? Color(uiColor: .secondarySystemBackground)
+            : Color(red: 0.96, green: 0.975, blue: 1)
+    }
+
+    private func activate(_ action: ProjectedAction) {
+        withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
+            store.selectAction(action.id, input: nil, for: request.key)
+        } completion: {
+            focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
+        }
+    }
+
+    @ViewBuilder
+    private func compatibilityChoice(_ action: ProjectedAction,
+                                     selected: Bool,
+                                     detail: String,
+                                     text: String) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 16)
+        let card = VStack(spacing: 0) {
+            MessageChoiceLabel(title: action.label.rawValue, detail: detail,
+                               selected: selected, multiple: false, suggested: false,
+                               drawsSurface: false)
+            TextEditor(text: Binding(
+                get: {
+                    replyTextByActionID[action.id] ??
+                        (readOnly ? request.draft.compatibility : store.draft(for: request.key)?.compatibility)?
+                            .textByActionID[action.id]?.rawValue ?? text
+                },
+                set: {
+                    replyTextByActionID[action.id] = $0
+                    store.stageCompatibilityText($0, action: action.id, for: request.key)
+                }
+            ))
+            .font(.body)
+            .foregroundStyle(.primary)
+            .scrollContentBackground(.hidden)
+            .frame(minHeight: 120)
+            .padding(8)
+            .background(replyEditorSurface)
+            .focused($focusedReplyActionID, equals: action.id.rawValue)
+            .accessibilityLabel(action.label.rawValue)
+            .accessibilityIdentifier("request-compatibility-" + action.id.rawValue + "-response")
+            .disabled(readOnly || !selected)
+        }
+        .background(selected ? Color.blue : Color(uiColor: .systemBackground), in: shape)
+        .overlay(shape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
+        .clipShape(shape)
+        .opacity(selected ? 1 : 0.55)
+        .animation(.smooth(duration: 0.25), value: selected)
+
+        if selected {
+            card
+        } else {
+            Button { activate(action) } label: { card }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(.isButton)
+                .disabled(readOnly)
+        }
     }
 
     @ViewBuilder
     var body: some View {
         if let seenStatus = request.informationalSeenStatus {
             switch seenStatus {
-            case .available:
-                if let action = actions.first {
-                    Button {
-                        if let onSeen {
-                            onSeen(action.id)
-                        } else {
-                            store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
-                        }
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "eye")
-                                .foregroundStyle(Color.blue)
-                            Text(action.label.rawValue)
-                                .foregroundStyle(.primary)
-                        }
-                        .font(.headline)
-                        .frame(maxWidth: .infinity, minHeight: 50)
+            case .available, .pending, .confirmed:
+                Button {
+                    guard seenStatus == .available, let action = actions.first else { return }
+                    if let onSeen {
+                        onSeen(action.id)
+                    } else {
+                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
                     }
-                    .buttonStyle(.plain)
-                    .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
-                    .disabled(readOnly)
-                    .accessibilityIdentifier("request-seen-action")
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: seenActionIsComplete ? "checkmark" : "eye")
+                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.blue)
+                        Text(seenActionIsComplete ? "Seen" : (actions.first?.label.rawValue ?? "Seen"))
+                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.primary)
+                    }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 50)
                 }
-            case .pending:
-                Label("Seen pending confirmation", systemImage: "clock")
-            case .confirmed:
-                Label("Seen confirmed", systemImage: "checkmark.circle.fill")
+                .buttonStyle(.plain)
+                .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
+                .disabled(readOnly || seenStatus != .available)
+                .opacity(seenActionIsComplete ? 0.76 : (readOnly ? 0.48 : 1))
+                .accessibilityIdentifier("request-seen-action")
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
             }
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(actions, id: \.id) { action in
-                    Button {
-                        store.selectAction(action.id, input: nil, for: request.key)
-                    } label: {
                     let option = localExample?.message.options.first { $0.id == action.id.rawValue }
-                    MessageChoiceLabel(title: action.label.rawValue,
-                            detail: option?.detail ?? "",
-                            selected: selected == action.id, multiple: false,
-                            suggested: option.map { if case .suggested = $0.role { true } else { false } } ?? false,
-                            selectionColor: option.map { if case .destructive = $0.role { .red } else { .blue } } ?? .blue)
+                    let isSelected = selected == action.id
+                    let replyText = replyTextByActionID[action.id] ??
+                        (readOnly ? request.draft.compatibility : store.draft(for: request.key)?.compatibility)?
+                            .textByActionID[action.id]?.rawValue ?? ""
+                    if action.kind == .text && (isSelected || !replyText.isEmpty) {
+                        compatibilityChoice(action, selected: isSelected, detail: option?.detail ?? "",
+                                            text: replyText)
+                    } else {
+                        Button { activate(action) } label: {
+                            MessageChoiceLabel(title: action.label.rawValue,
+                                    detail: option?.detail ?? "",
+                                    selected: isSelected, multiple: false,
+                                    suggested: option.map { if case .suggested = $0.role { true } else { false } } ?? false,
+                                    selectionColor: option.map { if case .destructive = $0.role { .red } else { .blue } } ?? .blue)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
+                        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+                        .disabled(readOnly)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(selected == action.id ? .isSelected : [])
-                    .accessibilityValue(selected == action.id ? "Selected" : "Not selected")
-                    .disabled(readOnly)
                 }
-                if let selected,
-                   let action = actions.first(where: { $0.id == selected }),
-                   action.kind == .text {
-                    TextEditor(text: Binding(
-                        get: { (readOnly ? request.draft.compatibility : store.request(for: request.key)?.draft.compatibility)?.textByActionID[selected]?.rawValue ?? "" },
-                        set: { store.updateCompatibilityText($0, action: selected, for: request.key) }
-                    ))
-                    .frame(minHeight: 120)
-                    .accessibilityLabel(action.label.rawValue)
-                    .disabled(readOnly)
+                if canOfferNoComment {
+                    NoCommentChoiceRow(selected: noCommentSelected,
+                                       unavailable: noCommentUnavailable,
+                                       onSelect: onSelectNoComment)
                 }
             }
         }
+    }
+}
+
+private struct NoCommentChoiceRow: View {
+    let selected: Bool
+    let unavailable: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            MessageChoiceLabel(title: "No comment", detail: "",
+                               selected: selected, multiple: false,
+                               suggested: false)
+        }
+        .buttonStyle(.plain)
+        .disabled(unavailable)
+        .opacity(unavailable ? 0.48 : 1)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(selected ? "Selected" : "Not selected")
+        .accessibilityHint(unavailable
+            ? "No comment was not delivered because this server does not support it."
+            : "Select No comment as your answer, then send it with the checkmark.")
+        .accessibilityIdentifier("request-no-comment")
     }
 }
 
@@ -1154,6 +1409,7 @@ struct LiveLifecycleTitle {
         case .open: label = "Open"
         case .pending: label = "Pending"
         case .answered: label = "Answered"
+        case .noComment: label = "No comment"
         case .cleared: label = "Cleared"
         case .expired: label = "Expired"
         case .superseded: label = "Superseded"

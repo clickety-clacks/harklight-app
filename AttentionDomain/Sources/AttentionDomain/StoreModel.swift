@@ -49,10 +49,26 @@ public struct CompatibilityDraft: Equatable, Codable, Sendable {
 public struct RequestDraft: Equatable, Codable, Sendable {
     public var inputs: [ExactText: InputDraft]
     public var compatibility: CompatibilityDraft
+    public var noCommentSelected: Bool
 
-    public init(inputs: [ExactText: InputDraft], compatibility: CompatibilityDraft = CompatibilityDraft()) {
+    private enum CodingKeys: String, CodingKey {
+        case inputs, compatibility, noCommentSelected
+    }
+
+    public init(inputs: [ExactText: InputDraft],
+                compatibility: CompatibilityDraft = CompatibilityDraft(),
+                noCommentSelected: Bool = false) {
         self.inputs = inputs
         self.compatibility = compatibility
+        self.noCommentSelected = noCommentSelected
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        inputs = try container.decodeIfPresent([ExactText: InputDraft].self, forKey: .inputs) ?? [:]
+        compatibility = try container.decodeIfPresent(CompatibilityDraft.self, forKey: .compatibility)
+            ?? CompatibilityDraft()
+        noCommentSelected = try container.decodeIfPresent(Bool.self, forKey: .noCommentSelected) ?? false
     }
 
     public init(interface: RequestInterface) {
@@ -63,10 +79,11 @@ public struct RequestDraft: Equatable, Codable, Sendable {
             inputs = [:]
         }
         compatibility = CompatibilityDraft()
+        noCommentSelected = false
     }
 
     public var hasEdits: Bool {
-        compatibility.hasEdits || inputs.values.contains { draft in
+        noCommentSelected || compatibility.hasEdits || inputs.values.contains { draft in
             draft.selectedActionID != nil || draft.point != nil ||
                 draft.textByActionID.values.contains(where: { !$0.rawValue.isEmpty }) ||
                 (draft.text.map { !$0.rawValue.isEmpty } ?? false) ||
@@ -97,12 +114,20 @@ public enum TypedSubmission: Equatable, Codable, Sendable {
     case compatibility(actionID: ExactText, text: ExactText?)
 }
 
+/// Distinguishes a deliberate No comment answer from an ordinary answer whose
+/// exact JSON value happens to be null or empty.
+public enum SubmissionAnswerKind: String, Equatable, Codable, Sendable {
+    case answer
+    case noComment
+}
+
 public enum IntentDisposition: Equatable, Codable, Sendable {
     case pending
     case accepted(sequence: UInt64?)
     case lost
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
+    case unsupported
     case repairRequired
 }
 
@@ -110,6 +135,8 @@ public struct Submission: Equatable, Codable, Sendable {
     public let requestRevision: UInt64?
     public let requestKey: RequestKey
     public let answer: JSONValue
+    /// Missing values decode existing schema-2 answer receipts unchanged.
+    public let answerKind: SubmissionAnswerKind?
     public let intentID: UUID
     public let operationID: UUID
     public let operation: JSONValue
@@ -120,12 +147,15 @@ public struct Submission: Equatable, Codable, Sendable {
     public let contentFingerprint: String
     public var disposition: IntentDisposition
 
+    public var isNoComment: Bool { answerKind == .noComment }
+
     public var wireFrame: Data {
         Data((operation.jsonString + "\n").utf8)
     }
 
     public init(requestKey: RequestKey,
                 answer: JSONValue,
+                answerKind: SubmissionAnswerKind? = nil,
                 intentID: UUID,
                 operationID: UUID,
                 operation: JSONValue,
@@ -139,6 +169,7 @@ public struct Submission: Equatable, Codable, Sendable {
         self.requestRevision = requestRevision
         self.requestKey = requestKey
         self.answer = answer
+        self.answerKind = answerKind
         self.intentID = intentID
         self.operationID = operationID
         self.operation = operation

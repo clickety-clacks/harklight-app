@@ -58,7 +58,8 @@ public struct RelayWire: Sendable {
                               conversation: conversation, origin: ExactText(origin), attentionTier: attentionTier)
         case "lifecycle":
             guard let state = TerminalState(rawValue: try text(value, "state")),
-                  (isOrigin || value.uniqueValue(named: "answer") == nil) else {
+                  (isOrigin || value.uniqueValue(named: "answer") == nil),
+                  (state != .noComment || value.uniqueValue(named: "answer") == nil) else {
                 throw RelayWireError.invalidFrame
             }
             // A present JSON null is distinct from an absent answer in the wire.

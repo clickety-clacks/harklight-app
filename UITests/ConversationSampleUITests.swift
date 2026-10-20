@@ -8,7 +8,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
         enterSearch("Thursday", in: app)
-        let row = app.buttons["request-row-sample-information-0"]
+        let row = app.descendants(matching: .any)["request-row-sample-information-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         app.buttons["Chat"].tap()
@@ -37,7 +37,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Archive", in: app)
-        let row = app.buttons["request-row-sample-approval-2"]
+        let row = app.descendants(matching: .any)["request-row-sample-approval-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         XCTAssertTrue(row.label.contains("Updated"))
         row.tap()
@@ -62,7 +62,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("welcome", in: app)
-        let row = app.buttons["request-row-sample-review-0"]
+        let row = app.descendants(matching: .any)["request-row-sample-review-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -84,7 +84,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("welcome", in: app)
-        let row = app.buttons["request-row-sample-review-2"]
+        let row = app.descendants(matching: .any)["request-row-sample-review-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -96,7 +96,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Closing chat alone does not leave its message")
         app.buttons["Close"].tap()
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5))
@@ -116,7 +116,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("welcome", in: app)
-        let row = app.buttons["request-row-sample-review-2"]
+        let row = app.descendants(matching: .any)["request-row-sample-review-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -130,9 +130,9 @@ final class ConversationSampleUITests: XCTestCase {
         capture("upload-before-message-departure", app)
         app.buttons["Close"].tap()
         showInbox(app)
-        let other = app.buttons["request-row-sample-review-0"]
+        let other = app.descendants(matching: .any)["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
-        guard reveal(other, in: app.scrollViews.firstMatch, app: app) else { return }
+        guard reveal(other, in: listContainer(app), app: app) else { return }
         other.tap()
         // In a regular-width split view the sidebar rows expose these titles too,
         // so only the detail card can show that the selection changed.
@@ -141,7 +141,7 @@ final class ConversationSampleUITests: XCTestCase {
         recordDiagnostics("after-departure", app)
         XCTAssertTrue(departed, "Selecting another row must change the detail identity before cleanup is assessed")
         showInbox(app)
-        guard reveal(row, in: app.scrollViews.firstMatch, app: app) else { return }
+        guard reveal(row, in: listContainer(app), app: app) else { return }
         row.tap()
         let returned = detail.staticTexts["Review the library welcome text"].waitForExistence(timeout: 5)
         recordDiagnostics("after-return", app)
@@ -169,12 +169,12 @@ final class ConversationSampleUITests: XCTestCase {
         app.launchArguments = ["--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let list = app.scrollViews.firstMatch
+        let list = listContainer(app)
         // The information, warning, error and note examples are short cards, so a pull past
         // their end moves between them. Open the first one while the last one is out of view.
-        let opened = app.buttons["request-row-sample-information-1"]
-        let lastViewed = app.buttons["request-row-sample-note-1"]
-        XCTAssertTrue(app.buttons["request-row-sample-information-2"].waitForExistence(timeout: 10), app.debugDescription)
+        let opened = app.descendants(matching: .any)["request-row-sample-information-1"]
+        let lastViewed = app.descendants(matching: .any)["request-row-sample-note-1"]
+        XCTAssertTrue(app.descendants(matching: .any)["request-row-sample-information-2"].waitForExistence(timeout: 10), app.debugDescription)
         for _ in 0..<30 where !unobscured(opened, in: list, app: app) {
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
             start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -150)),
@@ -194,7 +194,7 @@ final class ConversationSampleUITests: XCTestCase {
         recordDiagnostics("after-switching", app)
         let probe = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
         XCTAssertTrue(probe.label.contains("lastViewed=request:sample-note-1 "), probe.label)
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         let shown = NSPredicate { _, _ in lastViewed.exists && self.unobscured(lastViewed, in: list, app: app) }
@@ -208,8 +208,9 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        app.buttons["inbox-tab-inbox"].tap()
         enterSearch("Archive", in: app)
-        let row = app.buttons["request-row-sample-approval-1"]
+        let row = app.descendants(matching: .any)["request-row-sample-approval-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         XCTAssertTrue(app.staticTexts["Retracted"].waitForExistence(timeout: 5))
@@ -237,7 +238,7 @@ final class ConversationSampleUITests: XCTestCase {
             app.launch()
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
             enterSearch(search, in: app)
-            let row = app.buttons["request-row-" + id]
+            let row = app.descendants(matching: .any)["request-row-" + id]
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             row.tap()
             app.buttons["Chat"].tap()
@@ -308,7 +309,7 @@ final class ConversationSampleUITests: XCTestCase {
         let searchButton = app.buttons["inbox-search-button"]
         let searchField = app.textFields["inbox-search-field"]
         guard !searchButton.exists && !searchField.exists else { return }
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
             back.tap()
         } else {
@@ -317,6 +318,17 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(searchButton.waitForExistence(timeout: 5) || searchField.waitForExistence(timeout: 5),
                       app.debugDescription)
+    }
+
+    private func listContainer(_ app: XCUIApplication) -> XCUIElement {
+        // In split view, the detail card is also a scroll view but it cannot scroll the list.
+        let collectionView = app.collectionViews.firstMatch
+        if collectionView.exists { return collectionView }
+        let table = app.tables.firstMatch
+        if table.exists { return table }
+        let listScrollViews = app.scrollViews.matching(NSPredicate(format: "identifier != %@", "message-card-scroll"))
+        let scrollView = listScrollViews.firstMatch
+        return scrollView
     }
 
     /// Pulls past the end of the open message until the next one opens.
@@ -338,34 +350,42 @@ final class ConversationSampleUITests: XCTestCase {
     /// Whether the whole row is inside the list, above its bottom tab and search controls.
     private func unobscured(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.exists else { return false }
-        let controls = [app.textFields["inbox-search-field"], app.otherElements["inbox-message-tabs"],
-                        app.buttons["inbox-search-button"]].filter(\.exists).map(\.frame.minY)
+        let controls = [app.textFields["inbox-search-field"], app.buttons["inbox-tab-inbox"],
+                        app.buttons["inbox-tab-replied"], app.buttons["inbox-search-button"]]
+            .filter(\.exists).map(\.frame.minY)
         let bottom = controls.min() ?? app.windows.firstMatch.frame.maxY
         let frame = element.frame
         return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
     }
 
-    /// Scrolls until the whole row is inside the visible list. Returns false after
-    /// a recorded failure so the caller does not tap a row the controls cover.
+    /// Scrolls until the whole row is below the navigation bar and above the
+    /// bottom controls. Returns false with a screenshot if it remains blocked.
     private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.waitForExistence(timeout: 5) else {
             XCTFail("Row does not exist: \(app.debugDescription)")
             return false
         }
-        // A row partly under the bottom search controls can be hittable while its
-        // tap point lands on them, so require the whole row inside the visible list.
         func unobscured() -> Bool {
             let search = app.textFields["inbox-search-field"]
             let bottom = search.exists ? search.frame.minY : app.windows.firstMatch.frame.maxY
+            let navigationBar = app.navigationBars.firstMatch
+            let top = max(scrollView.frame.minY,
+                          navigationBar.exists ? navigationBar.frame.maxY : scrollView.frame.minY)
             let frame = element.frame
-            return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
+            return element.isHittable && frame.minY >= top && frame.maxY <= bottom
         }
         for _ in 0..<8 {
             if unobscured() { return true }
-            if element.frame.midY < scrollView.frame.midY { scrollView.swipeDown() } else { scrollView.swipeUp() }
+            let direction: CGFloat = element.frame.midY < scrollView.frame.midY ? 180 : -180
+            let start = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.1,
+                        thenDragTo: start.withOffset(CGVector(dx: 0, dy: direction)),
+                        withVelocity: .slow,
+                        thenHoldForDuration: 0.3)
         }
         if unobscured() { return true }
-        XCTFail("Row stayed outside the unobscured list after scrolling: \(app.debugDescription)")
+        capture("row-outside-list-after-scrolling", app)
+        XCTFail("Row stayed outside the unobscured list after scrolling: frame=\(element.frame), hittable=\(element.isHittable), list=\(scrollView.frame)\n\(app.debugDescription)")
         return false
     }
 }

@@ -99,9 +99,11 @@ final class SampleResponse {
         }
         let localStatus: String?
         if finished {
-            localStatus = request.informationalSeenStatus == nil
-                ? "Answered locally · nothing sent"
-                : "Seen selected locally · nothing sent"
+            localStatus = noCommentSelected
+                ? "No comment selected locally · nothing sent"
+                : request.informationalSeenStatus == nil
+                    ? "Answered locally · nothing sent"
+                    : "Seen selected locally · nothing sent"
         } else if deferred {
             localStatus = "Deferred locally"
         } else {
@@ -122,7 +124,13 @@ final class SampleResponse {
             isResolved: request.isResolved, createdAt: request.createdAt,
             isLocalExample: true, localStatus: localStatus,
             informationalSeenStatus: request.informationalSeenStatus,
+            canNoComment: canDeclineLocally && request.informationalSeenStatus == nil,
             localSeenSelected: localSeenSelected,
+            hasUserAction: finished || request.intentReceipt != nil ||
+                request.lifecycleStatus == .answered ||
+                request.lifecycleStatus == .noComment ||
+                request.informationalSeenStatus == .pending ||
+                request.informationalSeenStatus == .confirmed,
             chatUnread: message.hasChat ? message.chatUnread && !chatRead : nil,
             initials: message.initials,
             emphasis: emphasis,
@@ -130,8 +138,28 @@ final class SampleResponse {
     }
 
     var localSeenSelected: Bool {
-        guard finished, let request = viewModel.request(for: key) else { return false }
+        guard finished, !noCommentSelected,
+              let request = viewModel.request(for: key) else { return false }
         return request.informationalSeenStatus == .available
+    }
+
+    var canDeclineLocally: Bool {
+        guard !finished, !deferred, !viewModel.isReadOnly,
+              let request = viewModel.request(for: key),
+              request.inboxStateIsCurrent, !viewModel.isRetracted(key), request.lifecycleStatus == .open,
+              request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
+        return true
+    }
+
+    var noCommentSelected: Bool {
+        viewModel.draft(for: key)?.noCommentSelected ?? false
+    }
+
+    func declineLocally() {
+        guard canDeclineLocally else { return }
+        viewModel.selectNoComment(for: key)
+        finished = true
+        deferred = false
     }
 
     var canMarkSeenLocally: Bool {
@@ -148,6 +176,7 @@ final class SampleResponse {
               !viewModel.isRetracted(key),
               request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
+        if request.draft.noCommentSelected { return true }
         if request.informationalSeenStatus != nil || message.kind == .instructions { return true }
         if message.kind == .multipleChoice {
             if ownAnswer {
@@ -282,7 +311,7 @@ final class SampleResponse {
     }
     var finished = false {
         didSet {
-            if finished && message.kind == .instructions {
+            if finished && !noCommentSelected && message.kind == .instructions {
                 viewModel.selectAction(ExactText("done"), input: ExactText("answer"), for: key)
             }
         }

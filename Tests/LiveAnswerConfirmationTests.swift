@@ -19,6 +19,19 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         return (context, store, try LivePresentationStore(store: store, context: context), key)
     }
 
+    private func setupReplyOnly() throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("reply-only"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Reply-only request"}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        return (context, store, try LivePresentationStore(store: store, context: context), key)
+    }
+
     private func commitAnswer(_ store: AttentionDomainStore, key: RequestKey) throws -> IntentReceipt {
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
@@ -58,6 +71,73 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         try live.refreshFromDurableStore()
         XCTAssertNil(live.actionError)
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
+    }
+
+    func testNoCommentUsesItsOwnPayloadFreeFrameAndUnsupportedLeavesTheRequestOpen() throws {
+        let (context, store, live, key) = try setup()
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key)
+            .requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+
+        XCTAssertEqual(receipt.answerKind, .noComment)
+        XCTAssertEqual(receipt.inputs, [])
+        XCTAssertEqual(receipt.exactAnswer, .null,
+                       "The local null placeholder is distinguished by answerKind and is never the wire frame.")
+        let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
+                       #"{"type":"answer_no_comment","request_id":"sample"}"# + "\n")
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
+
+        try store.recordNoCommentUnsupported(receipt.intentID, operationID: receipt.opID, context: context)
+        try live.refreshFromDurableStore()
+        let reopened = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(reopened.lifecycleStatus, .open)
+        XCTAssertTrue(reopened.noCommentUnavailable)
+        XCTAssertNil(reopened.intentReceipt)
+        let unavailableRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertFalse(unavailableRow.belongsToReplied,
+                       "Unsupported No comment was not accepted, so the request stays in Inbox.")
+        XCTAssertTrue(unavailableRow.status.contains("No comment not delivered"))
+        XCTAssertTrue(LiveRequestDetail(request: reopened, store: live).canAnswer,
+                      "The app leaves ordinary answer choices to an explicit user action.")
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+    }
+
+    func testServerNoCommentTerminalStaysDistinctAndAppearsInReplied() throws {
+        let (context, store, live, key) = try setup()
+        let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"other-installation","state":"no_comment","at":2}"#.utf8)
+        let event = try RelayWire(profile: context).decodeEvent(terminal)
+        _ = try store.apply(event, context: context)
+        try live.refreshFromDurableStore()
+
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(request.lifecycleStatus, .noComment)
+        XCTAssertEqual(request.receiptFacts?.evidenceLabel, "The sender recorded your No comment answer.")
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
+    }
+
+    func testNoCommentKeepsTypedDraftSavedWithoutPuttingItInTheFrame() throws {
+        let (context, store, live, key) = try setupReplyOnly()
+        live.updateCompatibilityText("Keep this as an unsent draft.", action: ExactText("reply"), for: key)
+        live.flushPendingDraft(for: key)
+        live.selectNoComment(for: key)
+
+        XCTAssertTrue(live.request(for: key)?.draft.noCommentSelected == true)
+        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
+                       "Selecting No comment is still an unsent draft.")
+        live.submitFromUser(key)
+
+        let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
+                       #"{"type":"answer_no_comment","request_id":"reply-only"}"# + "\n")
+        let savedDraft = try store.snapshot(context: context).drafts[key]
+        XCTAssertEqual(savedDraft?.compatibility
+            .textByActionID[ExactText("reply")], ExactText("Keep this as an unsent draft."))
+        XCTAssertTrue(savedDraft?.noCommentSelected == true)
+        XCTAssertEqual(submitted.answerKind, .noComment)
     }
 
     func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {

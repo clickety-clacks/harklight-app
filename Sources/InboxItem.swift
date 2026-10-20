@@ -20,10 +20,10 @@ enum InboxItem: Identifiable {
         }
     }
 
-    @MainActor var belongsToSeenTab: Bool {
+    @MainActor var belongsToReplied: Bool {
         switch self {
-        case let .request(row): row.belongsToSeenTab
-        case let .example(_, response): response.localSeenSelected
+        case let .request(row): row.belongsToReplied
+        case let .example(_, response): response.inboxRow?.belongsToReplied ?? response.finished
         }
     }
 
@@ -31,6 +31,20 @@ enum InboxItem: Identifiable {
         switch self {
         case let .request(row): row.canMarkSeen
         case let .example(_, response): response.canMarkSeenLocally
+        }
+    }
+
+    @MainActor var canNoComment: Bool {
+        switch self {
+        case let .request(row): row.canNoComment
+        case let .example(_, response): response.inboxRow?.canNoComment == true
+        }
+    }
+
+    @MainActor var noCommentUnavailable: Bool {
+        switch self {
+        case let .request(row): row.noCommentUnavailable
+        case .example: false
         }
     }
 

@@ -56,6 +56,23 @@ final class AttentionTierClientTests: XCTestCase {
         }
     }
 
+    func testNoCommentTerminalIsDistinctAndHasNoAnswerPayload() throws {
+        let wire = try RelayWire(profile: context())
+        let frame = #"{"v":1,"type":"lifecycle","seq":4,"sender_id":"sender","message_id":"request","origin":"other-installation","state":"no_comment","at":4}"#
+        let event = try wire.decodeEvent(data(frame))
+        guard case let .terminal(key, state, answer) = event.body else {
+            return XCTFail("Expected a final lifecycle event")
+        }
+        XCTAssertEqual(key.messageID, ExactText("request"))
+        XCTAssertEqual(state, .noComment)
+        XCTAssertNil(answer)
+
+        let invalid = data(frame.replacingOccurrences(of: #""at":4"#,
+                                                       with: #""at":4,"answer":null"#))
+        XCTAssertThrowsError(try wire.decodeEvent(invalid),
+                             "No comment is not an empty answer payload.")
+    }
+
     func testPreviouslyStoredDeliveryCanGainItsFirstExplicitTierOnReplay() throws {
         let profile = context()
         let persistence = MemoryAttentionStatePersistence()

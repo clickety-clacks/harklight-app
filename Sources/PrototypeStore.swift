@@ -85,9 +85,7 @@ final class PrototypeStore {
             createdPort = AttentionDomainPort(store: store)
             createdPresentation = try LivePresentationStore(
                 localFixtureStore: store,
-                context: profile,
-                captureFixtureRequestsAsSeen: ProcessInfo.processInfo.arguments.contains(
-                    "--harklight-preexisting-seen-fixture"))
+                context: profile)
             initialSnapshot = try store.snapshot(context: profile)
         } catch {
             initializationError = error.localizedDescription
@@ -279,8 +277,11 @@ final class PrototypeStore {
     }
 
     func canSend(for key: RequestKey) -> Bool {
-        guard let session = sessions[key], case .open = session.lifecycle,
-              let port, let records = typedRecords(for: key, draft: session.draft),
+        guard let session = sessions[key], case .open = session.lifecycle else { return false }
+        if session.draft.noCommentSelected {
+            return canSendNoCommentLocally(for: key)
+        }
+        guard let port, let records = typedRecords(for: key, draft: session.draft),
               let selector = try? boundSelector(for: key),
               let answer = try? port.preview(context: port.context, selector: selector, inputs: records) else {
             return false
@@ -288,12 +289,43 @@ final class PrototypeStore {
         return answer.jsonString.utf8.count <= captureLimitBytes
     }
 
+    func canSendNoCommentLocally(for key: RequestKey) -> Bool {
+        guard let presentationStore, !presentationStore.isReadOnly,
+              let request = presentationStore.request(for: key),
+              request.inboxStateIsCurrent, !presentationStore.isRetracted(key),
+              request.lifecycleStatus == .open, request.intentReceipt == nil,
+              request.informationalSeenStatus == nil,
+              !request.noCommentUnavailable else { return false }
+        return true
+    }
+
+    @discardableResult
+    func sendNoCommentLocally(for key: RequestKey) -> Bool {
+        guard canSendNoCommentLocally(for: key), let port,
+              let selector = try? boundSelector(for: key) else { return false }
+        guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
+        refreshSnapshot()
+        do {
+            _ = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+            refreshSnapshot()
+            persistenceError = nil
+            return true
+        } catch {
+            persistenceError = error.localizedDescription
+            return false
+        }
+    }
+
     @discardableResult
     func sendSelectedAnswer(for key: RequestKey,
                             explicitCompatibilityAction: ExactText? = nil) -> Bool {
+        guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
         refreshSnapshot()
-        guard let session = sessions[key], case .open = session.lifecycle,
-              let port, let records = typedRecords(for: key, draft: session.draft,
+        guard let session = sessions[key], case .open = session.lifecycle else { return false }
+        if session.draft.noCommentSelected {
+            return sendNoCommentLocally(for: key)
+        }
+        guard let port, let records = typedRecords(for: key, draft: session.draft,
                                                    explicitCompatibilityAction: explicitCompatibilityAction),
               let selector = try? boundSelector(for: key) else { return false }
         do {

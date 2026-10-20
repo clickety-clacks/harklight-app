@@ -1149,6 +1149,7 @@ final class NativeRelayLifecycle {
         case .lost: "locally_lost_unconfirmed"
         case let .terminal(state, sequence, _): "terminal_\(state.rawValue)_sequence_\(sequence)"
         case let .refusedByRetraction(retractedAt): "refused_retracted_at_\(retractedAt)"
+        case .unsupported: "unsupported"
         case .repairRequired: "repair_required"
         }
     }
@@ -1157,6 +1158,7 @@ final class NativeRelayLifecycle {
                                      remoteStates: [RequestKey: RemoteRequestState]) -> Bool {
         guard remoteStates[submission.requestKey]?.isTerminal != true else { return false }
         if case .terminal = submission.disposition { return false }
+        if case .unsupported = submission.disposition { return false }
         return true
     }
 

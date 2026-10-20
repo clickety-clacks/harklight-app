@@ -142,6 +142,7 @@ public struct ResultMember: Equatable, Sendable {
 
 public enum TerminalState: String, CaseIterable, Equatable, Codable, Sendable {
     case answered
+    case noComment = "no_comment"
     case cleared
     case expired
     case superseded

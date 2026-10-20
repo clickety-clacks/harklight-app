@@ -35,6 +35,7 @@ struct MessageCardSurface<Content: View>: View {
     var backgroundColor: Color = Color(red: 0.89, green: 0.94, blue: 1)
     @ViewBuilder let content: () -> Content
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.colorScheme) private var colorScheme
     @State private var pull: CGFloat = 0
     @State private var armedDirection = 0
     @State private var contentHeight: CGFloat = 0
@@ -70,7 +71,10 @@ struct MessageCardSurface<Content: View>: View {
                 }
             }
             .background {
-                (horizontalSizeClass == .compact ? backgroundColor : Color(uiColor: .systemBackground))
+                let detailBackground = colorScheme == .dark
+                    ? Color(uiColor: .systemBackground)
+                    : backgroundColor
+                (horizontalSizeClass == .compact ? detailBackground : Color(uiColor: .systemBackground))
                     .ignoresSafeArea()
             }
             .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
@@ -146,6 +150,7 @@ struct MessageChoiceLabel: View {
     let suggested: Bool
     var selectionColor: Color = .blue
     var ownAnswer = false
+    var drawsSurface = true
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -182,12 +187,20 @@ struct MessageChoiceLabel: View {
         }
         .foregroundStyle(selected ? Color.white : Color.primary)
         .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-        .background(selected ? selectionColor : Color(uiColor: .systemBackground),
-                    in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 14)
-            .strokeBorder(selected ? Color.clear : Color(uiColor: .separator).opacity(ownAnswer ? 0.6 : 0),
-                          style: StrokeStyle(lineWidth: ownAnswer ? 1.5 : 0,
-                                             dash: ownAnswer ? [5, 4] : [])))
+        .background {
+            if drawsSurface {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(selected ? selectionColor : Color(uiColor: .systemBackground))
+            }
+        }
+        .overlay {
+            if drawsSurface {
+                RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(selected ? Color.clear : Color(uiColor: .separator).opacity(ownAnswer ? 0.6 : 0),
+                                  style: StrokeStyle(lineWidth: ownAnswer ? 1.5 : 0,
+                                                     dash: ownAnswer ? [5, 4] : []))
+            }
+        }
         .contentShape(RoundedRectangle(cornerRadius: 14))
     }
 }

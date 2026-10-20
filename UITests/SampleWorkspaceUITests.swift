@@ -14,9 +14,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture"]
         app.launch()
-        let realRows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
+        let realRows = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
         XCTAssertTrue(realRows.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
-        let original = app.buttons["request-row-review-01"]
+        let original = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
         let originalID = original.identifier
         capture("ordinary-inbox-before-shake", app)
@@ -28,10 +29,35 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(originalChoice.isSelected)
         capture("ordinary-request-card", app)
         showList(app)
+        let inboxTab = app.buttons["inbox-tab-inbox"]
+        let repliedTab = app.buttons["inbox-tab-replied"]
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(original.exists,
+                      "An unsent choice remains in Inbox.")
+        repliedTab.tap()
+        XCTAssertFalse(original.waitForExistence(timeout: 1),
+                       "An unsent choice does not appear in Replied.")
+        inboxTab.tap()
+        original.tap()
+        XCTAssertTrue(app.buttons["Cover A"].isSelected,
+                      "The unsent choice survives leaving the detail.")
+        let finish = app.buttons["request-finish"]
+        XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(finish.isEnabled, app.debugDescription)
+        finish.tap()
+        XCTAssertTrue(app.staticTexts["request-lifecycle-status"].waitForExistence(timeout: 5),
+                      "A saved answer moves only after it is submitted.")
+        showList(app)
+        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(repliedTab.isSelected,
+                      "After submission, the restored list shows the request in Replied.")
+        XCTAssertTrue(original.waitForExistence(timeout: 5),
+                      "A submitted answer appears in Replied.")
         app.buttons["inbox-settings"].tap()
         app.buttons["Add example messages"].tap()
-        let row = app.buttons["sample-approval-0"]
-        // Both sources remain in this same searchable list.
+        let row = app.descendants(matching: .any)["sample-approval-0"]
+        // Examples remain in Inbox, so leave the submitted request's Replied tab first.
+        app.buttons["inbox-tab-inbox"].tap()
         enterSearch("Archive", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         capture("ordinary-inbox-with-examples", app)
@@ -39,16 +65,69 @@ final class SampleWorkspaceUITests: XCTestCase {
         let keep = app.buttons.containing(.staticText, identifier: "Keep here").firstMatch
         XCTAssertTrue(keep.waitForExistence(timeout: 5))
         keep.tap()
-        app.buttons["sample-finish"].tap()
+        app.descendants(matching: .any)["sample-finish"].tap()
         XCTAssertTrue(app.staticTexts["Answered locally · nothing sent"].waitForExistence(timeout: 5))
         capture("ordinary-example-card", app)
         showList(app)
         clearSearch(in: app)
-        XCTAssertTrue(app.buttons[originalID].exists, app.debugDescription)
-        app.buttons[originalID].tap()
+        repliedTab.tap()
+        XCTAssertTrue(original.exists, app.debugDescription)
+        original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Cover A"].isSelected, "An ordinary draft survives local example actions")
         capture("ordinary-request-after-example", app)
+    }
+
+    func testNoCommentIsAnUnsentLastChoiceOnMultipleChoiceRequest() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+
+        let row = app.descendants(matching: .any)["request-row-review-01"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        let answerScroll = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(answerScroll.waitForExistence(timeout: 5), app.debugDescription)
+        let noComment = app.buttons["request-no-comment"]
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        answerScroll.swipeUp()
+        let lastOrdinaryChoice = app.buttons["Send a note"]
+        XCTAssertTrue(lastOrdinaryChoice.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertGreaterThan(noComment.frame.minY, lastOrdinaryChoice.frame.maxY,
+                             "No comment follows every ordinary multiple-choice answer.")
+        capture("multiple-choice-no-comment-last", app)
+
+        noComment.tap()
+        XCTAssertTrue(noComment.isSelected, "No comment is selected as an ordinary answer.")
+        XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
+                       "Selecting No comment does not send it.")
+        capture("multiple-choice-no-comment-selected-unsent", app)
+        showList(app)
+        XCTAssertTrue(app.buttons["inbox-tab-inbox"].isSelected)
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "The unsent No comment selection remains in Inbox.")
+        let repliedTab = app.buttons["inbox-tab-replied"]
+        repliedTab.tap()
+        XCTAssertFalse(row.waitForExistence(timeout: 1),
+                       "The unsent No comment selection does not appear in Replied.")
+        app.buttons["inbox-tab-inbox"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        XCTAssertTrue(app.buttons["request-no-comment"].isSelected,
+                      "The No comment selection survives leaving the detail.")
+        let submit = app.buttons["request-finish"]
+        XCTAssertTrue(submit.isEnabled, app.debugDescription)
+        submit.tap()
+        showList(app)
+        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(repliedTab.isSelected,
+                      "After submission, the restored list shows the request in Replied.")
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "The submitted No comment appears in Replied.")
+        row.swipeLeft()
+        XCTAssertFalse(app.buttons["inbox-no-comment"].exists,
+                       "Replied rows have no swipe action.")
     }
 
     private func showList(_ app: XCUIApplication) {
@@ -56,7 +135,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         guard card.exists else { return }
         let searchButton = app.buttons["inbox-search-button"]
         let searchField = app.textFields["inbox-search-field"]
-        let back = app.buttons["harklight-detail-back"]
+        let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
             back.tap()
         } else {
@@ -86,26 +165,143 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func seenSwipeAction(in app: XCUIApplication) -> XCUIElement? {
-        app.buttons.allElementsBoundByIndex
-            .first { $0.label == "Seen, Seen" }
+        let action = app.buttons["inbox-mark-seen"]
+        return action.exists ? action : nil
     }
 
-    func testSwipeSeenMovesOnlyAnInformationalMessageToSeen() {
+    func testAnswerRequestSwipeOffersNoComment() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
 
-        // A message that asks for an answer offers no Seen swipe.
         enterSearch("Archive", in: app)
-        let ordinary = app.buttons["sample-approval-0"]
+        let ordinary = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(ordinary.waitForExistence(timeout: 5), app.debugDescription)
         ordinary.swipeLeft()
-        XCTAssertNil(seenSwipeAction(in: app), app.debugDescription)
+        let noComment = app.buttons["inbox-no-comment"]
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(noComment.label, "No comment")
+        capture("inbox-swipe-no-comment-revealed", app)
+        noComment.tap()
+        XCTAssertFalse(ordinary.waitForExistence(timeout: 5),
+                       "The row action sends No comment and removes the request from Inbox.")
+
         clearSearch(in: app)
+        enterSearch("Which approach", in: app)
+        let replyOnly = app.descendants(matching: .any)["sample-textChoice-0"]
+        XCTAssertTrue(replyOnly.waitForExistence(timeout: 5), app.debugDescription)
+        replyOnly.swipeRight()
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5),
+                      "The same No comment action is available from the opposite swipe edge.")
+        XCTAssertEqual(noComment.label, "No comment")
+        capture("inbox-swipe-no-comment-opposite-edge", app)
+    }
+
+    func testNoCommentIsAvailableForReplyOnlyRequests() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+
+        enterSearch("A note for", in: app)
+        let row = app.descendants(matching: .any)["sample-note-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        let noComment = app.buttons["request-no-comment"]
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(noComment.isEnabled, app.debugDescription)
+        XCTAssertFalse(noComment.isSelected, app.debugDescription)
+        let replyChoice = app.buttons["Reply"]
+        XCTAssertTrue(replyChoice.exists, "A text-only request offers its Reply choice.")
+        XCTAssertGreaterThan(noComment.frame.minY, replyChoice.frame.maxY,
+                             "No comment is listed after the Reply choice.")
+        replyChoice.tap()
+        let replyEditor = app.textViews.firstMatch
+        XCTAssertTrue(replyEditor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Selecting a text-only Reply focuses its embedded editor.")
+        replyEditor.typeText("Draft stays saved.")
+        XCTAssertEqual(replyEditor.value as? String, "Draft stays saved.")
+        XCTAssertGreaterThan(noComment.frame.minY, replyEditor.frame.maxY,
+                             "No comment stays after the expanded Reply editor.")
+        XCTAssertTrue(noComment.isHittable,
+                      "The keyboard does not obscure the No comment action.")
+        capture("reply-only-no-comment-available", app)
+
+        noComment.tap()
+        XCTAssertTrue(noComment.isSelected, "No comment is selected as an answer.")
+        XCTAssertEqual(noComment.value as? String, "Selected")
+        XCTAssertFalse(app.descendants(matching: .any)["request-local-no-comment-status"].exists,
+                       "Selecting No comment does not submit it.")
+        XCTAssertEqual(replyEditor.value as? String, "Draft stays saved.",
+                       "The typed draft remains saved and unsent.")
+        capture("reply-only-no-comment-selected", app)
+
+        showList(app)
+        clearSearch(in: app)
+        let inboxTab = app.buttons["inbox-tab-inbox"]
+        let repliedTab = app.buttons["inbox-tab-replied"]
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inboxTab.isSelected,
+                      "An unsent No comment selection restores to Inbox.")
+        enterSearch("A note for", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        clearSearch(in: app)
+        repliedTab.tap()
+        enterSearch("A note for", in: app)
+        XCTAssertFalse(row.waitForExistence(timeout: 1),
+                       "An unsent No comment selection does not appear in Replied.")
+        clearSearch(in: app)
+        inboxTab.tap()
+        enterSearch("A note for", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        XCTAssertTrue(app.buttons["request-no-comment"].isSelected,
+                      "The selected No comment answer survives leaving the detail.")
+        app.buttons["sample-finish"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["request-local-no-comment-status"]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        showList(app)
+        clearSearch(in: app)
+        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(repliedTab.isSelected,
+                      "After the answer is accepted, the restored list shows Replied.")
+        enterSearch("A note for", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.swipeLeft()
+        XCTAssertFalse(app.buttons["inbox-no-comment"].exists,
+                       "Replied rows have no swipe action.")
+    }
+
+    func testUnsupportedNoCommentControlStaysVisibleAndUnavailable() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--test-no-comment-unsupported"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+
+        enterSearch("A note for", in: app)
+        let row = app.descendants(matching: .any)["sample-note-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let noComment = app.buttons["request-no-comment"]
+        XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(noComment.isEnabled, app.debugDescription)
+        let explanation = app.descendants(matching: .any)["request-no-comment-unavailable"]
+        XCTAssertTrue(explanation.waitForExistence(timeout: 5), app.debugDescription)
+        capture("reply-only-no-comment-unavailable", app)
+    }
+
+    func testSeenActionFromEitherSwipeEdgeMovesTheMessageToReplied() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
 
         enterSearch("Thursday", in: app)
-        let informational = app.buttons["sample-information-0"]
+        let informational = app.descendants(matching: .any)["sample-information-0"]
         XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
         informational.swipeLeft()
         let seenActionAppeared = NSPredicate { _, _ in
@@ -117,33 +313,112 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTFail(app.debugDescription)
             return
         }
-        XCTAssertEqual(markSeen.label, "Seen, Seen")
+        XCTAssertEqual(markSeen.label, "Seen")
         capture("inbox-swipe-seen-revealed", app)
         // Revealing the action does not mark the message.
-        XCTAssertTrue(informational.exists, "Swiping alone keeps the message in Unseen")
+        XCTAssertTrue(informational.exists, "Swiping alone leaves the message in Inbox")
         markSeen.tap()
-        let leftUnseen = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: informational)
-        wait(for: [leftUnseen], timeout: 5)
+        let leftInbox = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: informational)
+        wait(for: [leftInbox], timeout: 5)
         clearSearch(in: app)
 
-        let seenTab = app.buttons.matching(NSPredicate(
-            format: "identifier == %@ AND label == %@", "inbox-message-tabs", "Seen")).firstMatch
-        XCTAssertTrue(seenTab.waitForExistence(timeout: 5), app.debugDescription)
-        seenTab.tap()
+        let repliedTab = app.buttons["inbox-tab-replied"]
+        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+        repliedTab.tap()
         XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(informational.label.contains("Seen selected locally"), informational.label)
-        XCTAssertFalse(app.buttons["sample-approval-0"].exists, "Only Seen messages are in the Seen tab")
-        capture("inbox-swipe-seen-in-seen-tab", app)
+        informational.swipeLeft()
+        XCTAssertFalse(app.buttons["inbox-mark-seen"].exists,
+                       "Replied rows have no Seen swipe action.")
+        XCTAssertFalse(app.descendants(matching: .any)["sample-approval-0"].exists, "An untouched request remains in Inbox")
+        capture("seen-message-in-replied-tab", app)
+
+        app.buttons["inbox-tab-inbox"].tap()
+        enterSearch("nearly full", in: app)
+        let warning = app.descendants(matching: .any)["sample-warning-0"]
+        XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
+        warning.swipeRight()
+        let rightEdgeSeen = NSPredicate { _, _ in self.seenSwipeAction(in: app) != nil }
+        XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: rightEdgeSeen, object: nil)],
+                                        timeout: 5), .completed, app.debugDescription)
+        XCTAssertEqual(seenSwipeAction(in: app)?.label, "Seen")
+        seenSwipeAction(in: app)?.tap()
+        XCTAssertFalse(warning.waitForExistence(timeout: 5),
+                       "The same Seen action on the opposite edge moves the message out of Inbox.")
+    }
+
+    func testReplyChoiceKeepsItsEditorWhenDeselectedAndReopensOnTap() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        enterSearch("Which approach", in: app)
+        let row = app.descendants(matching: .any)["sample-textChoice-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let replyChoice = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
+        XCTAssertTrue(replyChoice.waitForExistence(timeout: 5), app.debugDescription)
+        replyChoice.tap()
+        let editor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Selecting Reply focuses its editor.")
+        editor.typeText("Keep the smaller first step.")
+
+        showList(app)
+        clearSearch(in: app)
+        let inboxTab = app.buttons["inbox-tab-inbox"]
+        let repliedTab = app.buttons["inbox-tab-replied"]
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inboxTab.isSelected,
+                      "A typed but unsent reply restores to Inbox.")
+        enterSearch("Which approach", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "A typed but unsent reply stays in Inbox.")
+        clearSearch(in: app)
+        repliedTab.tap()
+        enterSearch("Which approach", in: app)
+        XCTAssertFalse(row.waitForExistence(timeout: 1),
+                       "A typed but unsent reply does not appear in Replied.")
+        clearSearch(in: app)
+        inboxTab.tap()
+        enterSearch("Which approach", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        let retainedEditor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
+        XCTAssertEqual(retainedEditor.value as? String, "Keep the smaller first step.")
+
+        let otherChoice = app.buttons.containing(.staticText, identifier: "Start small").firstMatch
+        XCTAssertTrue(otherChoice.waitForExistence(timeout: 5), app.debugDescription)
+        otherChoice.tap()
+        let ghostedReply = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
+        XCTAssertTrue(ghostedReply.waitForExistence(timeout: 5), app.debugDescription)
+        capture("reply-editor-deselected-with-draft", app)
+
+        ghostedReply.tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(editor.isEnabled, "Tapping the Reply card reselects it.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Reselecting Reply focuses its editor.")
+        capture("reply-editor-reselected", app)
     }
 
     func testDesignedControlsAndComponentScreenshots() {
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let kinds = ["textChoice", "pictureChoice", "instructions", "review", "multipleChoice", "value", "point", "colorChoice", "soundChoice", "error", "warning", "information", "completed"]
         for kind in kinds {
             showList(app)
+            clearSearch(in: app)
+            let inboxTab = app.buttons["inbox-tab-inbox"]
+            let repliedTab = app.buttons["inbox-tab-replied"]
+            XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(repliedTab.exists, app.debugDescription)
+            if !inboxTab.isSelected { inboxTab.tap() }
             // Search the fictional sender/title so the selected type is reachable
             // through normal navigation without a test-only destination.
             let query: String = switch kind {
@@ -162,17 +437,33 @@ final class SampleWorkspaceUITests: XCTestCase {
             default: "journal is ready"
             }
             enterSearch(query, in: app)
-            let row = app.buttons["sample-\(kind)-0"]
+            let row = app.descendants(matching: .any)["sample-\(kind)-0"]
             let found = row.waitForExistence(timeout: 5)
             if kind == "review" || !found { recordDiagnostics("search-\(kind)", app) }
             XCTAssertTrue(found, app.debugDescription)
-            reveal(row, in: app.scrollViews.firstMatch, app: app)
+            if kind == "value" {
+                clearSearch(in: app)
+                XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+                XCTAssertTrue(inboxTab.isSelected)
+                repliedTab.tap()
+                enterSearch(query, in: app)
+                XCTAssertFalse(row.waitForExistence(timeout: 1),
+                               "A prefilled but unsent reply stays in Inbox.")
+                clearSearch(in: app)
+                inboxTab.tap()
+                enterSearch(query, in: app)
+                XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+            }
+            let listContainer = app.scrollViews.firstMatch.exists
+                ? app.scrollViews.firstMatch : app.collectionViews.firstMatch
+            XCTAssertTrue(listContainer.exists, app.debugDescription)
+            reveal(row, in: listContainer, app: app)
             row.tap()
             if ["error", "warning", "information", "completed"].contains(kind) {
                 XCTAssertTrue(app.buttons["request-finish-seen"].waitForExistence(timeout: 5))
                 XCTAssertTrue(app.buttons["request-seen-action"].exists)
             } else {
-                XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.descendants(matching: .any)["sample-finish"].waitForExistence(timeout: 5))
             }
             capture("component-\(kind)", app)
             if ["textChoice", "review", "multipleChoice", "colorChoice", "soundChoice"].contains(kind) {
@@ -184,14 +475,14 @@ final class SampleWorkspaceUITests: XCTestCase {
                 reveal(answer, in: app.scrollViews["message-card-scroll"], app: app)
                 answer.tap(); answer.typeText("Leave room for a quiet corner.")
                 capture("component-own-answer", app)
-                app.buttons["sample-finish"].tap()
+                app.descendants(matching: .any)["sample-finish"].tap()
             }
             if kind == "pictureChoice" {
                 let card = app.scrollViews["message-card-scroll"]
                 let start = card.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.7))
                 let end = card.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
                 start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
-                XCTAssertTrue(app.buttons["sample-finish"].exists, "Ordinary scrolling retains this card")
+                XCTAssertTrue(app.descendants(matching: .any)["sample-finish"].exists, "Ordinary scrolling retains this card")
                 let picture = app.buttons.containing(.staticText, identifier: "Night sky").firstMatch
                 picture.tap(); picture.tap()
                 XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
@@ -268,7 +559,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Thursday", in: app)
-        app.buttons["sample-information-0"].tap()
+        app.descendants(matching: .any)["sample-information-0"].tap()
         app.buttons["Chat"].tap()
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
@@ -310,9 +601,9 @@ final class SampleWorkspaceUITests: XCTestCase {
             let landscape = orientation == .landscapeLeft || orientation == .landscapeRight
             XCTAssertEqual(app.frame.width > app.frame.height, landscape, app.debugDescription)
             enterSearch("Archive", in: app)
-            XCTAssertTrue(app.buttons["sample-approval-0"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.descendants(matching: .any)["sample-approval-0"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-list", app)
-            app.buttons["sample-approval-0"].tap()
+            app.descendants(matching: .any)["sample-approval-0"].tap()
             XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-card", app)
             app.buttons["Chat"].tap()
@@ -339,7 +630,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Thursday", in: app)
-        app.buttons["sample-information-0"].tap()
+        app.descendants(matching: .any)["sample-information-0"].tap()
         let card = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))

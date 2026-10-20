@@ -68,6 +68,7 @@ public enum LocalIntentState: Equatable, Sendable {
     case accepted(sequence: UInt64?)
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case terminalUnconfirmed
+    case unsupported
     case repairRequired
 }
 
@@ -76,6 +77,7 @@ public enum RelayOutcome: Equatable, Sendable {
     case accepted(sequence: UInt64?)
     case terminal(state: TerminalState, authorizedAnswer: JSONValue?, sequence: UInt64?)
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
+    case unsupported
 }
 
 public struct IntentReceipt: Equatable, Sendable {
@@ -85,6 +87,7 @@ public struct IntentReceipt: Equatable, Sendable {
     public let opID: UUID
     public let inputs: [TypedInputRecord]
     public let exactAnswer: JSONValue
+    public let answerKind: SubmissionAnswerKind?
     public let localState: LocalIntentState
     public let relayOutcome: RelayOutcome?
 
@@ -97,6 +100,7 @@ public struct IntentReceipt: Equatable, Sendable {
                 opID: UUID,
                 inputs: [TypedInputRecord],
                 exactAnswer: JSONValue,
+                answerKind: SubmissionAnswerKind? = nil,
                 localState: LocalIntentState,
                 relayOutcome: RelayOutcome?) {
         self.context = context
@@ -105,6 +109,7 @@ public struct IntentReceipt: Equatable, Sendable {
         self.opID = opID
         self.inputs = inputs
         self.exactAnswer = exactAnswer
+        self.answerKind = answerKind
         self.localState = localState
         self.relayOutcome = relayOutcome
     }
@@ -123,6 +128,7 @@ public enum AppLifecycleStatus: String, Equatable, Codable, Sendable {
     case open
     case pending
     case answered
+    case noComment = "no_comment"
     case cleared
     case expired
     case superseded
@@ -249,6 +255,8 @@ public struct PresentedRequest: Equatable, Sendable {
     public let projection: AdmittedRequestProjection
     public let informationalSeenStatus: InformationalSeenStatus?
     public let attentionTier: AttentionTier
+    /// The relay explicitly rejected No comment; other answer methods remain usable.
+    public let noCommentUnavailable: Bool
     /// Whether lifecycle and Seen state were established by the accepted
     /// bounded snapshot, a receipt, or later contiguous relay activity.
     public let inboxStateIsCurrent: Bool
@@ -271,6 +279,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 projection: AdmittedRequestProjection,
                 informationalSeenStatus: InformationalSeenStatus? = nil,
                 attentionTier: AttentionTier = .middle,
+                noCommentUnavailable: Bool = false,
                 inboxStateIsCurrent: Bool = true) {
         self.key = key
         self.acceptanceOrder = acceptanceOrder
@@ -286,6 +295,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.projection = projection
         self.informationalSeenStatus = informationalSeenStatus
         self.attentionTier = attentionTier
+        self.noCommentUnavailable = noCommentUnavailable
         self.inboxStateIsCurrent = inboxStateIsCurrent
     }
 }
@@ -435,6 +445,17 @@ public final class AttentionDomainPort: @unchecked Sendable {
         return receipt(stored, context: context)
     }
 
+    @discardableResult
+    public func submitNoComment(context suppliedContext: PortContext,
+                                selector: BoundDocumentSelector,
+                                intentID: UUID) throws -> IntentReceipt {
+        try validate(suppliedContext)
+        let stored = try store.submitNoComment(intentID: intentID,
+                                               selector: selector,
+                                               context: profileContext)
+        return receipt(stored, context: context)
+    }
+
     public func lookupIntent(context suppliedContext: PortContext, intentID: UUID) throws -> IntentReceipt? {
         try validate(suppliedContext)
         guard let stored = try store.lookupIntent(intentID, context: profileContext) else { return nil }
@@ -514,6 +535,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
         case let .refusedByRetraction(retractedAtMilliseconds):
             localState = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
             relayOutcome = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
+        case .unsupported:
+            localState = .unsupported
+            relayOutcome = .unsupported
         case .repairRequired:
             localState = .repairRequired
             relayOutcome = .unknown
@@ -524,6 +548,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                              opID: stored.operationID,
                              inputs: stored.typedInputs,
                              exactAnswer: stored.answer,
+                             answerKind: stored.answerKind,
                              localState: localState,
                              relayOutcome: relayOutcome)
     }
@@ -608,7 +633,16 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 guard let conversationRevision else { return candidate.requestRevision == nil }
                 return candidate.requestRevision == conversationRevision
             }
-            let submission = snapshot.intents.values.first(where: matchesCurrentRevision)
+            let currentIntents = snapshot.intents.values.filter(matchesCurrentRevision)
+            let noCommentUnavailable = currentIntents.contains { candidate in
+                guard candidate.isNoComment else { return false }
+                if case .unsupported = candidate.disposition { return true }
+                return false
+            }
+            let submission = currentIntents.first { candidate in
+                if candidate.isNoComment, case .unsupported = candidate.disposition { return false }
+                return true
+            }
                 ?? session?.lifecycle.submissionValue.flatMap { value in
                     matchesCurrentRevision(value) ? value : nil
                 }
@@ -619,6 +653,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         remote: snapshot.remoteStates[item.request.key],
                         submission: submission,
                         selector: selectors?[item.request.key],
+                        noCommentUnavailable: noCommentUnavailable,
                         inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
                             $0.contains(item.request.key)
                         } ?? true)
@@ -666,6 +701,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          remote: RemoteRequestState?,
                          submission: Submission?,
                          selector: BoundDocumentSelector?,
+                         noCommentUnavailable: Bool = false,
                          inboxStateIsCurrent: Bool = true) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
@@ -696,7 +732,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
                     if case .accepted = value.disposition { return true }
                     return false
                 } ?? false
-                receiptFacts = ReceiptPresentationFacts(evidenceLabel: "Relay lifecycle evidence is recorded; original operation outcome is shown separately.",
+                let evidenceLabel = terminal == .noComment
+                    ? "The sender recorded your No comment answer."
+                    : "Relay lifecycle evidence is recorded; original operation outcome is shown separately."
+                receiptFacts = ReceiptPresentationFacts(evidenceLabel: evidenceLabel,
                                                         ownOutcome: hasAcceptedIntent ? .accepted : .unconfirmed,
                                                         originalOperationUncertainty: !hasAcceptedIntent)
             } else if let submission {
@@ -733,7 +772,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             } else if let remoteState = remote?.state {
                 if let originAnswer = remote?.authorizedOriginAnswer {
                     authorizedAnswer = originAnswer
-                } else if let submission, case .accepted = submission.disposition {
+                } else if let submission, !submission.isNoComment, case .accepted = submission.disposition {
                     authorizedAnswer = submission.answer
                 } else {
                     authorizedAnswer = nil
@@ -803,6 +842,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 informationalSeenStatus: informationalSeenStatus(for: request,
                                     status: status, remote: remote, submission: submission),
                                 attentionTier: remote?.attentionTier ?? .middle,
+                                noCommentUnavailable: noCommentUnavailable,
                                 inboxStateIsCurrent: inboxStateIsCurrent)
     }
 
@@ -818,6 +858,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                        submission: submission, seenValue: seenValue) {
             return .confirmed
         }
+        if submission?.isNoComment == true { return .resolvedWithoutSeen }
         if status == .open || status == .pending {
             return submission?.answer.semanticallyEquals(seenValue) == true ? .pending : .available
         }

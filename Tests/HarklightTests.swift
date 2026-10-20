@@ -3,6 +3,25 @@ import XCTest
 import AttentionDomain
 
 final class HarklightTests: XCTestCase {
+    func testNoCommentDraftSelectionRoundTripsAndLegacyDraftsDefaultToUnselected() throws {
+        struct LegacyDraft: Encodable {
+            let inputs: [ExactText: InputDraft]
+            let compatibility: CompatibilityDraft
+        }
+
+        let legacyData = try JSONEncoder().encode(
+            LegacyDraft(inputs: [:], compatibility: CompatibilityDraft()))
+        let legacyDraft = try JSONDecoder().decode(RequestDraft.self, from: legacyData)
+        XCTAssertFalse(legacyDraft.noCommentSelected)
+
+        var selected = RequestDraft(inputs: [:])
+        selected.noCommentSelected = true
+        XCTAssertTrue(selected.hasEdits)
+        let roundTripped = try JSONDecoder().decode(RequestDraft.self,
+                                                    from: JSONEncoder().encode(selected))
+        XCTAssertEqual(roundTripped, selected)
+    }
+
     @MainActor
     func testNativeLaunchKeepsFictionalFixtureBehindExplicitTestArgument() {
         let ordinary = NativeAppLaunch(arguments: ["Harklight"])
@@ -56,9 +75,9 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
-    func testPreexistingOpenRequestAppearsInSeenAndRemainsAnswerable() throws {
+    func testOnlyRequestsWithAUserActionAppearInReplied() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-                                       personID: ExactText("seen-baseline-\(UUID().uuidString)"),
+                                       personID: ExactText("inbox-replied-\(UUID().uuidString)"),
                                        deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let store = try AttentionDomainStore(context: context,
@@ -85,12 +104,14 @@ final class HarklightTests: XCTestCase {
 
         let visible = try LivePresentationStore(store: store, context: context)
         let existingRow = try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey })
-        XCTAssertTrue(existingRow.belongsToSeenTab)
-        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == resolvedKey }).belongsToSeenTab)
+        XCTAssertFalse(existingRow.belongsToReplied,
+                       "An untouched open request remains in Inbox even if it was present at launch.")
+        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == resolvedKey }).belongsToReplied,
+                      "An answered request belongs to Replied.")
         let existingRequest = try XCTUnwrap(visible.presentation.requests.first { $0.key == existingKey })
         XCTAssertTrue(LiveRequestDetail(request: existingRequest, store: visible).canAnswer)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "Local Seen placement must not create a relay operation.")
+                      "Classifying Inbox and Replied must not create a relay operation.")
 
         let newKey = RequestKey(accountScope: identity.personID,
                                 senderID: ExactText("app:test"),
@@ -103,12 +124,19 @@ final class HarklightTests: XCTestCase {
         try visible.refreshFromDurableStore()
 
         let newRow = try XCTUnwrap(visible.inboxRows.first { $0.key == newKey })
-        XCTAssertFalse(newRow.belongsToSeenTab)
-        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToSeenTab)
-        XCTAssertTrue(LiveRequestDetail(request: try XCTUnwrap(visible.presentation.requests.first { $0.key == existingKey }),
-                                        store: visible).canAnswer)
+        XCTAssertFalse(newRow.belongsToReplied,
+                       "A message received after launch remains in Inbox until an action is taken.")
+        XCTAssertFalse(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToReplied)
+        let existingProjection = try XCTUnwrap(visible.presentation.requests.first { $0.key == existingKey })
+        guard case let .compatibility(actions) = existingProjection.projection,
+              let reply = actions.first else {
+            return XCTFail("The open request should expose its reply action.")
+        }
+        visible.selectAction(reply.id, input: nil, for: existingKey)
+        XCTAssertFalse(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToReplied,
+                       "Selecting Reply keeps the request in Inbox until submission.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "Capturing Seen placement must not answer the request.")
+                      "Choosing Reply must remain a draft until the user submits it.")
     }
 
     @MainActor
@@ -754,6 +782,56 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).outbox.count, 1)
     }
 
+    @MainActor
+    func testReplyDraftIsSavedAfterTypingPauseAndSurvivesStoreRestart() async throws {
+        let fixtures = try loadFixtures()
+        let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
+        guard case let .sender(document) = fixture.interface else { return XCTFail("Expected the facilities sender document.") }
+        let noteInput = try XCTUnwrap(document.inputs.first(where: { if case .text = $0.kind { return true }; return false }))
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("attention-debounced-draft-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FileAttentionStatePersistence(directoryURL: directory)
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: fixtures.accountScope,
+                                       deviceID: ExactText("device-a"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let requestKey = RequestKey(accountScope: context.identity.personID,
+                                    senderID: fixture.key.senderID,
+                                    messageID: fixture.key.messageID)
+        func makeRelayStore() throws -> AttentionDomainStore {
+            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            _ = try store.apply(RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: requestKey,
+                                              originalPayload: fixture.originalPayload), .message)),
+                context: context)
+            return store
+        }
+        let firstStore = try makeRelayStore()
+        let editor = try LivePresentationStore(store: firstStore, context: context)
+        let longReply = String(repeating: "Near the east entrance; please keep the access path clear. ", count: 8)
+
+        editor.updateText(longReply, input: noteInput.id, action: nil, for: requestKey)
+        let beforePause = try makeRelayStore()
+        XCTAssertNotEqual(try beforePause.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
+                          longReply,
+                          "Typing remains in view state until the debounce interval expires.")
+
+        try await Task.sleep(for: .milliseconds(600))
+        let afterPause = try makeRelayStore()
+        XCTAssertEqual(try afterPause.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
+                       longReply,
+                       "The paused draft is durable and available after a new store opens.")
+
+        let flushedReply = longReply + " Still here."
+        editor.updateText(flushedReply, input: noteInput.id, action: nil, for: requestKey)
+        editor.flushPendingDrafts()
+        let afterFlush = try makeRelayStore()
+        XCTAssertEqual(try afterFlush.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
+                       flushedReply,
+                       "A forced flush durably saves the latest draft without waiting for another pause.")
+    }
+
     func testDurableFenceRejectsLateOriginalSubmitAfterRestartAndChangedDraft() throws {
         let fixtures = try loadFixtures()
         let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
@@ -768,7 +846,6 @@ final class HarklightTests: XCTestCase {
         let context = ProfileContext(identity: identity, transportMode: .fixture)
         let store = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
         let port = AttentionDomainPort(store: store)
-        let selector = try XCTUnwrap(port.inspect(context: port.context, request: fixture.key).requests.first?.selector)
         let originalID = UUID()
         let original: [TypedInputRecord] = [
             .point(input: point.id, point: PointValue(x: 240, y: 610)),
