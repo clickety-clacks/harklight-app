@@ -425,6 +425,49 @@ struct NativeEnrollmentStore {
         return binding
     }
 
+    /// Opens a new durable registration only when the authenticated server
+    /// status still names this accepted Production binding and reports the
+    /// existing configuration-blocked state. Older installations persist the
+    /// binding ID in `notificationBindings`; records without that association
+    /// can still match by their accepted revision and current Production build.
+    func pendingBlockedConfigurationRegistration(
+        address: String,
+        for deviceID: String,
+        status: PushBindingStatus,
+        profile: PushRegistrationProfile
+    ) throws -> NativePushBinding? {
+        guard profile == .production,
+              status.profile == profile,
+              status.isBlockedByConfiguration,
+              address.count == 64,
+              address.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              var record = try load(),
+              record.isApproved,
+              record.deviceID == deviceID,
+              let existing = record.pushBinding,
+              existing.accepted,
+              existing.address == address,
+              existing.revision == status.revision else { return nil }
+
+        let associations = (record.notificationBindings ?? []).filter {
+            $0.operationID == existing.operationID && $0.revision == existing.revision
+        }
+        guard associations.count <= 1,
+              associations.first?.bindingID.rawValue == nil ||
+                associations.first?.bindingID.rawValue == status.bindingID else { return nil }
+        guard existing.revision < UInt64(Int64.max) - 1 else {
+            throw NativeEnrollmentError.invalidServerResponse
+        }
+
+        let binding = NativePushBinding(address: existing.address,
+                                        operationID: UUID(),
+                                        revision: existing.revision + 1,
+                                        accepted: false)
+        record.pushBinding = binding
+        try save(record)
+        return binding
+    }
+
     /// Persist routing metadata and acceptance together, guarded by the exact
     /// preexisting trusted enrollment and durable registration operation.
     func markPushAccepted(_ binding: NativePushBinding, bindingID: String,

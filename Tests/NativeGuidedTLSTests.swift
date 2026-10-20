@@ -376,10 +376,12 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try store.pendingPushRegistration(address: original.address, for: record.deviceID), original)
         XCTAssertEqual(try store.pendingPushRegistration(address: original.address, for: record.deviceID), original,
                        "A lost reply keeps the original registration operation and revision")
-        let good = try JSONValue.parse(Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":7,\"binding_id\":\"\(notificationBindingID)\"}".utf8))
+        let good = try JSONValue.parse(Data("{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":7,\"binding_id\":\"\(notificationBindingID)\",\"profile_id\":\"harklight-sandbox\"}".utf8))
         XCTAssertThrowsError(try PushBindingReply.registration(good, revision: 8))
         XCTAssertNil(try store.load()?.notificationBindings)
         let id = try PushBindingReply.registration(good, revision: 7)
+        XCTAssertThrowsError(try PushBindingReply.registration(good, revision: 7, profile: .production),
+                             "A registration reply for another profile cannot be accepted.")
         try store.markPushAccepted(original, bindingID: id, expected: record)
         let saved = try XCTUnwrap(store.load())
         XCTAssertTrue(saved.pushBinding?.accepted == true)
@@ -420,6 +422,109 @@ final class NativeGuidedTLSTests: XCTestCase {
         #else
         XCTAssertEqual(PushRegistrationProfile.current, .production)
         #endif
+    }
+
+    func testBuild6AcceptedProductionBindingSurvivesUpgradeAndAdvancesOnlyWhenBlocked() throws {
+        let service = "Harklight.build6-upgrade." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+
+        // Build 6 persisted this synthesized Codable shape under the unchanged
+        // Keychain service/account. Newer optional fields are absent.
+        let address = String(repeating: "a", count: 64)
+        let operationID = "11111111-1111-4111-8111-111111111111"
+        let bindingID = "22222222-2222-4222-8222-222222222222"
+        let profileGeneration = "33333333-3333-4333-8333-333333333333"
+        let build6Record = Data("""
+        {"host":"relay.example.test","enrollmentPort":18444,"relayPort":18443,"trustedRootDER":"AQID","identityLabel":"saved-device","deviceID":"saved-device-id","approvalCode":"ABCDEFGH","statusSecret":"\(String(repeating: "b", count: 64))","expiresAt":1,"statusExpiresAt":2,"personID":"saved-person","pushBinding":{"address":"\(address)","operationID":"\(operationID)","revision":2,"accepted":true},"notificationProfileGeneration":"\(profileGeneration)","notificationBindings":[{"bindingID":{"rawValue":"\(bindingID)"},"operationID":"\(operationID)","revision":2}]}
+        """.utf8)
+        let add: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                   kSecAttrService as String: service,
+                   kSecAttrAccount as String: "current-installation",
+                   kSecValueData as String: build6Record,
+                   kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        XCTAssertEqual(SecItemAdd(add as CFDictionary, nil), errSecSuccess)
+
+        let store = NativeEnrollmentStore(service: service)
+        let upgraded = try XCTUnwrap(store.load())
+        let savedBinding = try XCTUnwrap(upgraded.pushBinding)
+        XCTAssertTrue(savedBinding.accepted)
+        XCTAssertEqual(savedBinding.address, address)
+        XCTAssertEqual(savedBinding.revision, 2)
+        XCTAssertEqual(upgraded.notificationBindings?.first?.bindingID.rawValue, bindingID)
+
+        let blocked = try JSONValue.parse(Data("""
+        {"v":1,"type":"ok","ref":"native-push-status","push":{"revision":2,"state":"blocked_configuration","attempt_count":1,"binding_id":"\(bindingID)","profile_id":"harklight-production"}}
+        """.utf8))
+        let status = try XCTUnwrap(PushBindingReply.activeStatus(blocked))
+        let wrongRevision = try JSONValue.parse(Data("""
+        {"v":1,"type":"ok","ref":"native-push-status","push":{"revision":3,"state":"blocked_configuration","attempt_count":1,"binding_id":"\(bindingID)","profile_id":"harklight-production"}}
+        """.utf8))
+        XCTAssertNil(try store.pendingBlockedConfigurationRegistration(
+            address: address, for: upgraded.deviceID,
+            status: try XCTUnwrap(PushBindingReply.activeStatus(wrongRevision)), profile: .production))
+        let wrongBinding = try JSONValue.parse(Data("""
+        {"v":1,"type":"ok","ref":"native-push-status","push":{"revision":2,"state":"blocked_configuration","attempt_count":1,"binding_id":"44444444-4444-4444-8444-444444444444","profile_id":"harklight-production"}}
+        """.utf8))
+        XCTAssertNil(try store.pendingBlockedConfigurationRegistration(
+            address: address, for: upgraded.deviceID,
+            status: try XCTUnwrap(PushBindingReply.activeStatus(wrongBinding)), profile: .production))
+        let wrongProfile = try JSONValue.parse(Data("""
+        {"v":1,"type":"ok","ref":"native-push-status","push":{"revision":2,"state":"blocked_configuration","attempt_count":1,"binding_id":"\(bindingID)","profile_id":"harklight-sandbox"}}
+        """.utf8))
+        XCTAssertNil(try store.pendingBlockedConfigurationRegistration(
+            address: address, for: upgraded.deviceID,
+            status: try XCTUnwrap(PushBindingReply.activeStatus(wrongProfile)), profile: .production))
+        XCTAssertEqual(try store.load()?.pushBinding, savedBinding,
+                       "A remote profile or binding mismatch must not change local registration state.")
+
+        let replacement = try XCTUnwrap(store.pendingBlockedConfigurationRegistration(
+            address: address, for: upgraded.deviceID, status: status, profile: .production))
+        XCTAssertEqual(replacement.address, savedBinding.address)
+        XCTAssertEqual(replacement.revision, 3)
+        XCTAssertNotEqual(replacement.operationID, savedBinding.operationID)
+        XCTAssertEqual(String(replacement.operationID.uuidString.split(separator: "-")[2].prefix(1)), "4",
+                       "Each new logical registration uses a UUIDv4 operation ID.")
+        XCTAssertFalse(replacement.accepted)
+
+        XCTAssertEqual(try store.load()?.pushBinding, replacement)
+        XCTAssertEqual(try store.pendingPushRegistration(address: address, for: upgraded.deviceID), replacement,
+                       "An ambiguous retry reuses the saved operation and revision.")
+        XCTAssertNil(try store.pendingBlockedConfigurationRegistration(
+            address: address, for: upgraded.deviceID, status: status, profile: .production),
+            "The same blocked status cannot mint a second revision while one is pending.")
+
+        let ready = try JSONValue.parse(Data("""
+        {"v":1,"type":"ok","ref":"native-push-status","push":{"revision":2,"state":"ready","attempt_count":1,"binding_id":"\(bindingID)","profile_id":"harklight-production"}}
+        """.utf8))
+        XCTAssertNil(try store.pendingBlockedConfigurationRegistration(
+            address: address, for: upgraded.deviceID,
+            status: try XCTUnwrap(PushBindingReply.activeStatus(ready)), profile: .production))
+    }
+
+    @MainActor
+    func testForegroundActivationRequestsBlockedPushStatusOnce() async throws {
+        let namespace = "Harklight.activation-push-status." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: namespace) }
+        let record = notificationRecord()
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
+                                     transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let presentation = try LivePresentationStore(store: domain, context: context)
+        var checks: [Bool] = []
+        let app = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: namespace),
+            joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
+            initialState: .live(presentation), initialEnrollmentRecord: record,
+            refreshOperation: { checkBlockedPush in
+                checks.append(checkBlockedPush)
+                return .unavailable
+            })
+
+        await app.refreshForForegroundActivation()
+        await app.refreshLive()
+        await app.refreshLive()
+
+        XCTAssertEqual(checks, [true, false, false],
+                       "Periodic foreground refreshes must not repeat the activation-only status check.")
     }
 
     func testLegacyAcceptedPushBindingStatusRecoveryAddsOnlyAuthenticatedAssociation() throws {
@@ -494,7 +599,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let app = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: namespace),
             joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
             initialState: .live(live), initialEnrollmentRecord: record, notificationRouter: router,
-            refreshOperation: {
+            refreshOperation: { _ in
                 refreshes += 1
                 try! domain.apply(RelayEvent(sequence: 3, body: .terminal(key, .answered, nil)), context: context)
                 try! live.refreshFromDurableStore()
@@ -570,7 +675,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let app = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: namespace),
             joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
             initialState: .live(live), initialEnrollmentRecord: record, notificationRouter: router,
-            refreshOperation: { .unavailable })
+            refreshOperation: { _ in .unavailable })
         let before = try persistence.load(identity: context.identity)
         router.receive(try notificationPayload(), opened: true)
         await app.handleNotification()
@@ -769,7 +874,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                     let frame = try? JSONValue.parse(Data(text.utf8))
                     XCTAssertEqual(frame?.uniqueValue(named: "profile_id")?.stringValue?.rawValue,
                                    PushRegistrationProfile.current.rawValue)
-                    return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":1,\"binding_id\":\"\(bindingID)\"}\n"]
+                    return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":1,\"binding_id\":\"\(bindingID)\",\"profile_id\":\"\(PushRegistrationProfile.current.rawValue)\"}\n"]
                 }
                 if text.contains("\"answer\"") {
                     return ["{\"v\":1,\"type\":\"ok\",\"seq\":2}\n"]

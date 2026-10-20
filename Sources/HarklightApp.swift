@@ -70,8 +70,14 @@ struct HarklightApp: App {
             .task(id: scenePhase) {
                 launch.guidedJoin.invalidateApprovalObservation()
                 guard scenePhase == .active else { return }
+                var isActivationRefresh = true
                 while !Task.isCancelled {
-                    await launch.refreshLive()
+                    if isActivationRefresh {
+                        await launch.refreshForForegroundActivation()
+                        isActivationRefresh = false
+                    } else {
+                        await launch.refreshLive()
+                    }
                     await launch.guidedJoin.retryAutomaticallyIfNeeded(
                         foregroundOutcome: launch.foregroundConnectProgress?.outcome)
                     try? await Task.sleep(for: .seconds(15))
