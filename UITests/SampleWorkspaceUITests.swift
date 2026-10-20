@@ -48,8 +48,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["request-lifecycle-status"].waitForExistence(timeout: 5),
                       "A saved answer moves only after it is submitted.")
         showList(app)
-        XCTAssertTrue(app.tabBars.buttons["Inbox"].isSelected,
-                      "Returning from an Inbox result restores the Inbox tab.")
+        XCTAssertTrue(repliedTab.isSelected,
+                      "Submitting an Inbox result returns to Replied.")
         repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(original.waitForExistence(timeout: 5),
