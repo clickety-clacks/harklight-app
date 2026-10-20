@@ -627,14 +627,13 @@ struct LiveRequestDetail: View {
                     Button {
                         if let availableSeenAction { submitSeenAction(availableSeenAction) }
                     } label: {
-                        HStack(spacing: 6) {
+                        if seenActionIsComplete {
+                            Label("Seen", systemImage: "checkmark")
+                                .labelStyle(.titleAndIcon)
+                                .foregroundStyle(Color.green)
+                        } else {
                             Image(systemName: "checkmark")
-                                .foregroundStyle(seenActionIsComplete ? Color.green : Color.white)
-                                .accessibilityHidden(true)
-                            if seenActionIsComplete {
-                                Text("Seen")
-                                    .foregroundStyle(Color.green)
-                            }
+                                .foregroundStyle(Color.white)
                         }
                         .font(.headline)
                     }
