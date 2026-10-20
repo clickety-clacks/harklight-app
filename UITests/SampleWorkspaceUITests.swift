@@ -29,8 +29,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(originalChoice.isSelected)
         capture("ordinary-request-card", app)
         showList(app)
-        let inboxTab = app.buttons["inbox-tab-inbox"]
-        let repliedTab = app.buttons["inbox-tab-replied"]
+        let inboxTab = app.buttons["Inbox"]
+        let repliedTab = app.buttons["Replied"]
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(original.exists,
                       "An unsent choice remains in Inbox.")
@@ -57,7 +57,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.buttons["Add example messages"].tap()
         let row = app.descendants(matching: .any)["sample-approval-0"]
         // Examples remain in Inbox, so leave the submitted request's Replied tab first.
-        app.buttons["inbox-tab-inbox"].tap()
+        app.buttons["Inbox"].tap()
         enterSearch("Archive", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         capture("ordinary-inbox-with-examples", app)
@@ -104,14 +104,14 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "Selecting No comment does not send it.")
         capture("multiple-choice-no-comment-selected-unsent", app)
         showList(app)
-        XCTAssertTrue(app.buttons["inbox-tab-inbox"].isSelected)
+        XCTAssertTrue(app.buttons["Inbox"].isSelected)
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The unsent No comment selection remains in Inbox.")
-        let repliedTab = app.buttons["inbox-tab-replied"]
+        let repliedTab = app.buttons["Replied"]
         repliedTab.tap()
         XCTAssertFalse(row.waitForExistence(timeout: 1),
                        "The unsent No comment selection does not appear in Replied.")
-        app.buttons["inbox-tab-inbox"].tap()
+        app.buttons["Inbox"].tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         XCTAssertTrue(app.buttons["request-no-comment"].isSelected,
@@ -133,8 +133,8 @@ final class SampleWorkspaceUITests: XCTestCase {
     private func showList(_ app: XCUIApplication) {
         let card = app.scrollViews["message-card-scroll"]
         guard card.exists else { return }
-        let searchButton = app.buttons["inbox-search-button"]
-        let searchField = app.textFields["inbox-search-field"]
+        let searchButton = app.buttons["Search"]
+        let searchField = app.searchFields.firstMatch
         let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
             back.tap()
@@ -148,8 +148,8 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
         clearSearch(in: app)
-        let searchButton = app.buttons["inbox-search-button"]
-        let field = app.textFields["inbox-search-field"]
+        let searchButton = app.buttons["Search"]
+        let field = app.searchFields.firstMatch
         if !field.exists {
             XCTAssertTrue(searchButton.waitForExistence(timeout: 5), app.debugDescription)
             searchButton.tap()
@@ -160,8 +160,8 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func clearSearch(in app: XCUIApplication) {
-        let dismiss = app.buttons["inbox-search-dismiss"]
-        if dismiss.exists && dismiss.isHittable { dismiss.tap() }
+        let clearText = app.searchFields.firstMatch.buttons["Clear text"]
+        if clearText.exists && clearText.isHittable { clearText.tap() }
     }
 
     private func seenSwipeAction(in app: XCUIApplication) -> XCUIElement? {
@@ -240,8 +240,8 @@ final class SampleWorkspaceUITests: XCTestCase {
 
         showList(app)
         clearSearch(in: app)
-        let inboxTab = app.buttons["inbox-tab-inbox"]
-        let repliedTab = app.buttons["inbox-tab-replied"]
+        let inboxTab = app.buttons["Inbox"]
+        let repliedTab = app.buttons["Replied"]
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected,
                       "An unsent No comment selection restores to Inbox.")
@@ -322,7 +322,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         wait(for: [leftInbox], timeout: 5)
         clearSearch(in: app)
 
-        let repliedTab = app.buttons["inbox-tab-replied"]
+        let repliedTab = app.buttons["Replied"]
         XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
         repliedTab.tap()
         XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
@@ -333,7 +333,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["sample-approval-0"].exists, "An untouched request remains in Inbox")
         capture("seen-message-in-replied-tab", app)
 
-        app.buttons["inbox-tab-inbox"].tap()
+        app.buttons["Inbox"].tap()
         enterSearch("nearly full", in: app)
         let warning = app.descendants(matching: .any)["sample-warning-0"]
         XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
@@ -368,8 +368,8 @@ final class SampleWorkspaceUITests: XCTestCase {
 
         showList(app)
         clearSearch(in: app)
-        let inboxTab = app.buttons["inbox-tab-inbox"]
-        let repliedTab = app.buttons["inbox-tab-replied"]
+        let inboxTab = app.buttons["Inbox"]
+        let repliedTab = app.buttons["Replied"]
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected,
                       "A typed but unsent reply restores to Inbox.")
@@ -414,8 +414,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         for kind in kinds {
             showList(app)
             clearSearch(in: app)
-            let inboxTab = app.buttons["inbox-tab-inbox"]
-            let repliedTab = app.buttons["inbox-tab-replied"]
+            let inboxTab = app.buttons["Inbox"]
+            let repliedTab = app.buttons["Replied"]
             XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(repliedTab.exists, app.debugDescription)
             if !inboxTab.isSelected { inboxTab.tap() }

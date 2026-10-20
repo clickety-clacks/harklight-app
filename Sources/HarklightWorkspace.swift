@@ -521,7 +521,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let landscape = windowSize.width > windowSize.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
-            TabView(selection: $workspaceTab) {
+            let tabs = TabView(selection: $workspaceTab) {
                 Tab("Inbox", systemImage: "envelope.badge", value: .inbox) {
                     inboxSplitView(for: .inbox, wideChat: wideChat, inlineChat: inlineChat,
                                    geometry: geometry)
@@ -548,6 +548,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: selectedTab) { _, tab in
                 guard workspaceTab != .search else { return }
                 workspaceTab = tab == .replied ? .replied : .inbox
+            }
+            Group {
+                if horizontalSizeClass == .compact && selection != nil {
+                    tabs.toolbar(.hidden, for: .tabBar)
+                } else {
+                    tabs
+                }
             }
             .sheet(isPresented: $conversationPresented) {
                 conversationPresentation
