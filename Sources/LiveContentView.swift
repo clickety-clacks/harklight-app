@@ -398,6 +398,26 @@ struct LiveRequestDetail: View {
             request.informationalSeenStatus == .confirmed
     }
 
+    private var finishSeenButton: some View {
+        Button(action: finishSeenAction) {
+            if seenActionIsComplete {
+                Label("Seen", systemImage: "checkmark")
+                    .labelStyle(.titleAndIcon)
+                    .foregroundStyle(Color.green)
+                    .font(.headline)
+            } else {
+                Image(systemName: "checkmark")
+                    .font(.headline)
+            }
+        }
+        .tint(seenActionIsComplete ? .green : .blue)
+        .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
+        .disabled(controlsReadOnly || !canFinishSeenAction || seenActionIsComplete)
+        .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
+        .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
+        .accessibilityIdentifier("request-finish-seen")
+    }
+
     private var noCommentSelected: Bool {
         localExample?.noCommentSelected ?? store.draft(for: request.key)?.noCommentSelected ?? false
     }
@@ -557,7 +577,6 @@ struct LiveRequestDetail: View {
                                              store: store,
                                              readOnly: controlsReadOnly,
                                              localExample: localExample,
-                                             onSeen: submitSeenAction,
                                              canOfferNoComment: canOfferNoComment,
                                              noCommentSelected: noCommentSelected,
                                              noCommentUnavailable: showsNoCommentUnavailable,
@@ -637,25 +656,11 @@ struct LiveRequestDetail: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
-                    Button(action: finishSeenAction) {
-                        if seenActionIsComplete {
-                            Label("Seen", systemImage: "checkmark")
-                                .labelStyle(.titleAndIcon)
-                                .foregroundStyle(Color.green)
-                                .font(.headline)
-                        } else {
-                            Image(systemName: "checkmark")
-                                .foregroundStyle(Color.white)
-                                .font(.headline)
-                        }
+                    if seenActionIsComplete {
+                        finishSeenButton.buttonStyle(.plain)
+                    } else {
+                        finishSeenButton.buttonStyle(.glassProminent)
                     }
-                    .buttonStyle(.glass)
-                    .tint(seenActionIsComplete ? .green : .blue)
-                    .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
-                    .disabled(controlsReadOnly || !canFinishSeenAction || seenActionIsComplete)
-                    .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
-                    .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
-                    .accessibilityIdentifier("request-finish-seen")
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         localExample.finishLocally()
@@ -988,18 +993,23 @@ private struct LiveProjectedInputView: View {
         readOnly ? request.draft.inputs[input.id] : store.draft(for: request.key)?.inputs[input.id]
     }
 
-    private var textEditor: some View {
-        TextEditor(text: Binding(
+    private var textBinding: Binding<String> {
+        Binding(
             get: { typedInputText ?? draft?.text?.rawValue ?? "" },
             set: {
                 typedInputText = $0
                 store.stageText($0, input: input.id, action: nil, for: request.key)
             }
-        ))
-        .frame(minHeight: 120)
-        .accessibilityLabel(input.label.rawValue)
-        .accessibilityIdentifier("request-input-" + input.id.rawValue)
-        .disabled(readOnly)
+        )
+    }
+
+    private var textEditor: some View {
+        TextField(input.label.rawValue, text: textBinding, axis: .vertical)
+            .lineLimit(4...8)
+            .textFieldStyle(.roundedBorder)
+            .accessibilityLabel(input.label.rawValue)
+            .accessibilityIdentifier("request-input-" + input.id.rawValue)
+            .disabled(readOnly)
     }
 
     private var replyEditorSurface: Color {
@@ -1232,7 +1242,6 @@ private struct LiveCompatibilityActions: View {
     let store: LivePresentationStore
     let readOnly: Bool
     var localExample: SampleResponse? = nil
-    var onSeen: ((ExactText) -> Void)? = nil
     var canOfferNoComment = false
     var noCommentSelected = false
     var noCommentUnavailable = false
@@ -1243,12 +1252,6 @@ private struct LiveCompatibilityActions: View {
 
     private var selected: ExactText? {
         readOnly ? request.draft.compatibility.selectedActionID : store.draft(for: request.key)?.compatibility.selectedActionID
-    }
-
-    private var seenActionIsComplete: Bool {
-        localExample?.localSeenSelected == true ||
-            request.informationalSeenStatus == .pending ||
-            request.informationalSeenStatus == .confirmed
     }
 
     private var replyEditorSurface: Color {
@@ -1318,28 +1321,7 @@ private struct LiveCompatibilityActions: View {
         if let seenStatus = request.informationalSeenStatus {
             switch seenStatus {
             case .available, .pending, .confirmed:
-                Button {
-                    guard seenStatus == .available, let action = actions.first else { return }
-                    if let onSeen {
-                        onSeen(action.id)
-                    } else {
-                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: seenActionIsComplete ? "checkmark" : "eye")
-                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.blue)
-                        Text(seenActionIsComplete ? "Seen" : (actions.first?.label.rawValue ?? "Seen"))
-                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.primary)
-                    }
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 50)
-                }
-                .buttonStyle(.plain)
-                .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
-                .disabled(readOnly || seenStatus != .available)
-                .opacity(seenActionIsComplete ? 0.76 : (readOnly ? 0.48 : 1))
-                .accessibilityIdentifier("request-seen-action")
+                EmptyView()
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
             }

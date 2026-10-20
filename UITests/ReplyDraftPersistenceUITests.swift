@@ -11,7 +11,7 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
-        let editor = app.textViews["request-input-note"]
+        let editor = app.textFields["request-input-note"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         reveal(editor, in: app)
         editor.tap()
@@ -34,7 +34,7 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         }
         XCTAssertTrue(reopenedRow.waitForExistence(timeout: 5), app.debugDescription)
         reopenedRow.tap()
-        let reopenedEditor = app.textViews["request-input-note"]
+        let reopenedEditor = app.textFields["request-input-note"]
         XCTAssertTrue(reopenedEditor.waitForExistence(timeout: 5), app.debugDescription)
         reveal(reopenedEditor, in: app)
         XCTAssertEqual(reopenedEditor.value as? String, longReply,
