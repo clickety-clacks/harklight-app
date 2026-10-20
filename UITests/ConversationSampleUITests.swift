@@ -321,8 +321,14 @@ final class ConversationSampleUITests: XCTestCase {
     }
 
     private func listContainer(_ app: XCUIApplication) -> XCUIElement {
-        let scrollView = app.scrollViews.firstMatch
-        return scrollView.exists ? scrollView : app.collectionViews.firstMatch
+        // In split view, the detail card is also a scroll view but it cannot scroll the list.
+        let collectionView = app.collectionViews.firstMatch
+        if collectionView.exists { return collectionView }
+        let table = app.tables.firstMatch
+        if table.exists { return table }
+        let listScrollViews = app.scrollViews.matching(NSPredicate(format: "identifier != %@", "message-card-scroll"))
+        let scrollView = listScrollViews.firstMatch
+        return scrollView
     }
 
     /// Pulls past the end of the open message until the next one opens.
