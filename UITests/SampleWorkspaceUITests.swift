@@ -245,7 +245,6 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["sample-note-0"].exists,
                        "An unsent No comment selection does not appear in Replied.")
         inboxTab.tap()
-        let row = app.descendants(matching: .any)["sample-note-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         XCTAssertTrue(app.buttons["request-no-comment"].isSelected,
