@@ -1545,7 +1545,8 @@ final class NativeRelayLifecycle {
 }
 
 /// Normal foreground/push wakes share a flight. A newly stored APNs address
-/// must be checked *after* the current flight, even when it arrived during it.
+/// or activation-specific check must run after the current flight if it arrives
+/// during one.
 @MainActor
 final class RelayRefreshFlights<Output: Sendable> {
     private let inactive: Output

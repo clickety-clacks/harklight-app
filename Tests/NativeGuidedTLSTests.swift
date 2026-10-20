@@ -380,6 +380,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertThrowsError(try PushBindingReply.registration(good, revision: 8))
         XCTAssertNil(try store.load()?.notificationBindings)
         let id = try PushBindingReply.registration(good, revision: 7)
+        XCTAssertThrowsError(try PushBindingReply.registration(good, revision: 7, profile: .production),
+                             "A registration reply for another profile cannot be accepted.")
         try store.markPushAccepted(original, bindingID: id, expected: record)
         let saved = try XCTUnwrap(store.load())
         XCTAssertTrue(saved.pushBinding?.accepted == true)
@@ -480,6 +482,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(replacement.address, savedBinding.address)
         XCTAssertEqual(replacement.revision, 3)
         XCTAssertNotEqual(replacement.operationID, savedBinding.operationID)
+        XCTAssertEqual(String(replacement.operationID.uuidString.split(separator: "-")[2].prefix(1)), "4",
+                       "Each new logical registration uses a UUIDv4 operation ID.")
         XCTAssertFalse(replacement.accepted)
 
         XCTAssertEqual(try store.load()?.pushBinding, replacement)
