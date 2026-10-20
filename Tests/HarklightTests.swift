@@ -3,6 +3,60 @@ import XCTest
 import AttentionDomain
 
 final class HarklightTests: XCTestCase {
+    @MainActor
+    func testSearchProjectionUsesOnlyMatchingRowsInTheSelectedMessageTab() {
+        let inboxMatch = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                            messageID: ExactText("inbox-match")),
+            title: "Archive this collection", sender: "Planning assistant", status: "Pending",
+            bodyText: "Keep a copy of the sketches.")
+        let inboxOther = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                            messageID: ExactText("inbox-other")),
+            title: "Choose a date", sender: "Planning assistant", status: "Pending",
+            bodyText: "Pick a time.")
+        let repliedMatch = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                            messageID: ExactText("replied-match")),
+            title: "Archive the old draft", sender: "Planning assistant", status: "Answered",
+            bodyText: "This one is already resolved.", hasUserAction: true)
+        let rows: [InboxItem] = [.request(inboxMatch), .request(inboxOther), .request(repliedMatch)]
+
+        let inboxResults = InboxListProjection.filteredRows(
+            rows, in: .search, selectedTab: .inbox, search: " archive ")
+        XCTAssertEqual(inboxResults.map(\.id), [.request(inboxMatch.key)])
+
+        let repliedResults = InboxListProjection.filteredRows(
+            rows, in: .search, selectedTab: .replied, search: "archive")
+        XCTAssertEqual(repliedResults.map(\.id), [.request(repliedMatch.key)])
+    }
+
+    func testSearchCardMoveReplacesItsCurrentNavigationDestination() {
+        let current = InboxSelection.sample("sample-approval-0")
+        let next = InboxSelection.sample("sample-approval-1")
+        XCTAssertEqual(InboxSearchNavigation.replacingDestination(in: [current], with: next), [next])
+        XCTAssertEqual(InboxSearchNavigation.replacingDestination(in: [current], with: nil), [])
+        XCTAssertEqual(InboxSearchNavigation.replacingDestination(in: [], with: next), [])
+    }
+
+    @MainActor
+    func testNotificationDestinationLeavesSearchAndSelectsTheRequestTab() {
+        let replied = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                            messageID: ExactText("answered")),
+            title: "Answered request", sender: "Planning assistant", status: "Answered",
+            hasUserAction: true)
+        let destination = InboxNotificationDestination(
+            route: NativeInboxNavigation(serial: 1, request: replied.key),
+            rows: [.request(replied)])
+
+        XCTAssertEqual(destination.selection, .request(replied.key))
+        XCTAssertEqual(destination.selectedTab, .replied)
+        XCTAssertEqual(destination.workspaceTab, .replied)
+        XCTAssertEqual(destination.search, "")
+        XCTAssertEqual(destination.searchPath, [])
+    }
+
     func testNoCommentDraftSelectionRoundTripsAndLegacyDraftsDefaultToUnselected() throws {
         struct LegacyDraft: Encodable {
             let inputs: [ExactText: InputDraft]

@@ -110,6 +110,76 @@ enum InboxMessageTab: String, Hashable {
     case replied
 }
 
+enum InboxWorkspaceTab: Hashable {
+    case inbox
+    case replied
+    case search
+
+    var messageTab: InboxMessageTab? {
+        switch self {
+        case .inbox: .inbox
+        case .replied: .replied
+        case .search: nil
+        }
+    }
+}
+
+@MainActor
+enum InboxListProjection {
+    static func filteredRows(_ rows: [InboxItem], in tab: InboxWorkspaceTab,
+                             selectedTab: InboxMessageTab, search: String) -> [InboxItem] {
+        let messageTab = tab.messageTab ?? selectedTab
+        let inTab = rows.filter { $0.belongsToReplied == (messageTab == .replied) }
+        guard tab == .search else { return inTab }
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return inTab }
+        return inTab.filter {
+            $0.preview.title.localizedCaseInsensitiveContains(query) ||
+            $0.preview.sender.localizedCaseInsensitiveContains(query) ||
+            $0.preview.body.localizedCaseInsensitiveContains(query)
+        }
+    }
+}
+
+enum InboxSearchNavigation {
+    static func replacingDestination(in path: [InboxSelection],
+                                     with selection: InboxSelection?) -> [InboxSelection] {
+        guard !path.isEmpty else { return path }
+        guard let selection else { return [] }
+        return Array(path.dropLast()) + [selection]
+    }
+}
+
+@MainActor
+struct InboxNotificationDestination: Equatable {
+    let selection: InboxSelection?
+    let selectedTab: InboxMessageTab
+    let workspaceTab: InboxWorkspaceTab
+    let search = ""
+    let searchPath: [InboxSelection] = []
+
+    init(route: NativeInboxNavigation, rows: [InboxItem]) {
+        guard let key = route.request else {
+            selection = nil
+            selectedTab = .inbox
+            workspaceTab = .inbox
+            return
+        }
+
+        let selection = InboxSelection.request(key)
+        let isReplied = rows.first(where: { $0.id == selection })?.belongsToReplied == true
+        let messageTab: InboxMessageTab = isReplied ? .replied : .inbox
+        self.selection = selection
+        selectedTab = messageTab
+        workspaceTab = isReplied ? .replied : .inbox
+    }
+}
+
+private struct InboxListRowScrollTarget: Hashable {
+    let tab: InboxWorkspaceTab
+    let selection: InboxSelection
+}
+
 struct InboxRequestRow: Identifiable {
     let key: RequestKey
     let title: String
@@ -210,6 +280,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var visibility: NavigationSplitViewVisibility = .all
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
+    @State private var workspaceTab: InboxWorkspaceTab = .inbox
+    @State private var search = ""
+    @State private var searchPath: [InboxSelection] = []
+    @State private var testNotificationNavigation: NativeInboxNavigation?
     @State private var listTabOnMessageEntry: InboxMessageTab?
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
@@ -222,6 +296,24 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
     }
     private var orderedIDs: [InboxSelection] { rows.map(\.id) }
+    private var cardNavigationIDs: [InboxSelection] {
+        guard workspaceTab == .search else { return orderedIDs }
+        return InboxListProjection.filteredRows(rows, in: .search,
+            selectedTab: selectedTab, search: search).map(\.id)
+    }
+    private var activeNotificationNavigation: NativeInboxNavigation? {
+        notificationNavigation ?? testNotificationNavigation
+    }
+    private var exposesNotificationTestAction: Bool {
+        ProcessInfo.processInfo.arguments.contains("--harklight-test-notification-navigation")
+    }
+
+    private func triggerNotificationTestAction() {
+        guard exposesNotificationTestAction, let key = requests.first?.key else { return }
+        let serial = max(notificationNavigation?.serial ?? 0,
+                         testNotificationNavigation?.serial ?? 0) &+ 1
+        testNotificationNavigation = NativeInboxNavigation(serial: serial, request: key)
+    }
 
     private func preview(for id: InboxSelection) -> InboxCardPreview? {
         rows.first { $0.id == id }?.preview
@@ -256,6 +348,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         // Keep departure cleanup bound to the explicit identity transition;
         // split-view adaptation changes columns without leaving this message.
         selectionDidChange(from: previous, to: next)
+        if workspaceTab == .search {
+            let path = InboxSearchNavigation.replacingDestination(in: searchPath, with: next)
+            if path != searchPath { searchPath = path }
+        }
         if previous != nil, next == nil {
             restoreLastViewedListPosition()
             chatOpen = false
@@ -343,18 +439,132 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         Binding(get: { selection }, set: { navigate(to: $0) })
     }
 
+    @ViewBuilder
+    private func detailContent(for item: InboxSelection?, wideChat: Bool, inlineChat: Bool,
+                               geometry: GeometryProxy) -> some View {
+        HStack(spacing: 0) {
+            Group {
+                switch item {
+                case let .request(key)?:
+                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
+                        canInlineChat: wideChat,
+                        openChat: {
+                            if wideChat {
+                                chatOpen.toggle()
+                            } else {
+                                conversationPresented = true
+                            }
+                        }))
+                        .id(key)
+                case let .sample(id)?:
+                    if showsLocalExamples,
+                       samples.messages.contains(where: { $0.id == id }),
+                       let response = samples.responses[id] {
+                        SampleCardScreen(response: response,
+                            context: cardContext(for: .sample(id), inlineChat: inlineChat,
+                                canInlineChat: wideChat,
+                                openChat: {
+                                    if wideChat {
+                                        chatOpen.toggle()
+                                    } else {
+                                        conversationPresented = true
+                                    }
+                                }))
+                            .id(id)
+                    }
+                case nil:
+                    HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            if inlineChat, case let .request(key)? = item, let conversationStore,
+               let request = conversationStore.request(for: key) {
+                Divider()
+                ConversationPanel(store: conversationStore, key: key,
+                    sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                    .frame(width: min(360, geometry.size.width * 0.34))
+            }
+            if inlineChat, case let .sample(id)? = item,
+               let message = samples.messages.first(where: { $0.id == id }),
+               let response = samples.responses[id] {
+                Divider()
+                SampleChatView(sender: message.sender, title: message.title, response: response)
+                    .frame(width: min(360, geometry.size.width * 0.34))
+            }
+        }
+        .toolbar(horizontalSizeClass == .compact && item != nil ? .hidden : .automatic,
+                 for: .tabBar)
+    }
+
+    private func inboxSplitView(for tab: InboxWorkspaceTab, wideChat: Bool, inlineChat: Bool,
+                                geometry: GeometryProxy) -> some View {
+        NavigationSplitView(columnVisibility: $visibility) {
+            InboxList(tab: tab, rows: rows, selected: navigationSelection,
+                      selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
+                      lastViewedSelection: lastViewedSelection,
+                      restoreLastViewed: restoreLastViewedOnReturn,
+                      didRestoreLastViewed: { restoreLastViewedOnReturn = false },
+                      showSettings: { settings = true }, markSeen: markSeen,
+                      markNoComment: markNoComment,
+                      fetchOlderInboxPage: fetchOlderInboxPage,
+                      notificationNavigation: activeNotificationNavigation,
+                      triggerNotification: nil)
+            .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
+        } detail: {
+            detailContent(for: selection, wideChat: wideChat, inlineChat: inlineChat,
+                          geometry: geometry)
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    private func searchStack(wideChat: Bool, inlineChat: Bool,
+                             geometry: GeometryProxy) -> some View {
+        NavigationStack(path: $searchPath) {
+            InboxList(tab: .search, rows: rows, selected: navigationSelection,
+                      selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
+                      lastViewedSelection: lastViewedSelection,
+                      restoreLastViewed: restoreLastViewedOnReturn,
+                      didRestoreLastViewed: { restoreLastViewedOnReturn = false },
+                      showSettings: { settings = true }, markSeen: markSeen,
+                      markNoComment: markNoComment,
+                      fetchOlderInboxPage: fetchOlderInboxPage,
+                      notificationNavigation: activeNotificationNavigation,
+                      triggerNotification: exposesNotificationTestAction
+                          ? { triggerNotificationTestAction() } : nil)
+                .navigationDestination(for: InboxSelection.self) { destination in
+                    detailContent(for: destination, wideChat: wideChat,
+                                  inlineChat: inlineChat, geometry: geometry)
+                }
+        }
+        .searchable(text: $search,
+                    placement: .navigationBarDrawer(displayMode: .always),
+                    prompt: "Search")
+        .onChange(of: searchPath) { _, path in
+            guard workspaceTab == .search else { return }
+            navigate(to: path.last)
+        }
+    }
+
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
                              canInlineChat: Bool = false, openChat: (() -> Void)? = nil) -> InboxCardContext {
-        let ids = orderedIDs
-        let index = ids.firstIndex(of: id) ?? 0
-        return InboxCardContext(position: index + 1, total: ids.count,
-            previous: index > 0 ? preview(for: ids[index - 1]) : nil,
-            next: index + 1 < ids.count ? preview(for: ids[index + 1]) : nil,
+        let ids = cardNavigationIDs
+        let index = ids.firstIndex(of: id)
+        let previous = index.flatMap { position in
+            position > 0 ? preview(for: ids[position - 1]) : nil
+        }
+        let next = index.flatMap { position in
+            position + 1 < ids.count ? preview(for: ids[position + 1]) : nil
+        }
+        return InboxCardContext(position: (index ?? 0) + 1, total: ids.count,
+            previous: previous,
+            next: next,
             inlineChat: inlineChat, canInlineChat: canInlineChat, openChat: openChat) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
-                guard let current = orderedIDs.firstIndex(of: id),
-                      orderedIDs.indices.contains(current + direction) else { return }
-                let next = orderedIDs[current + direction]
+                let currentIDs = cardNavigationIDs
+                guard let current = currentIDs.firstIndex(of: id),
+                      currentIDs.indices.contains(current + direction) else { return }
+                let next = currentIDs[current + direction]
                 navigatedBetweenMessages = true
                 navigate(to: next)
             }
@@ -401,80 +611,58 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let landscape = windowSize.width > windowSize.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
-            NavigationSplitView(columnVisibility: $visibility) {
-                InboxList(rows: rows, selected: navigationSelection, selectedTab: $selectedTab,
-                          lastViewedSelection: lastViewedSelection,
-                          restoreLastViewed: restoreLastViewedOnReturn,
-                          didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                          showSettings: { settings = true }, markSeen: markSeen,
-                          markNoComment: markNoComment,
-                          fetchOlderInboxPage: fetchOlderInboxPage,
-                          notificationNavigation: notificationNavigation)
-                .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
-            } detail: {
-                    HStack(spacing: 0) {
-                        Group {
-                            switch selection {
-                            case let .request(key):
-                                requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
-                                    canInlineChat: wideChat, openChat: {
-                                        if wideChat { chatOpen.toggle() }
-                                        else { conversationPresented = true }
-                                    }))
-                                    .id(key)
-                            case let .sample(id):
-                                if showsLocalExamples,
-                                   samples.messages.contains(where: { $0.id == id }),
-                                   let response = samples.responses[id] {
-                                    SampleCardScreen(response: response,
-                                        context: cardContext(for: .sample(id), inlineChat: inlineChat,
-                                            canInlineChat: wideChat, openChat: {
-                                                if wideChat { chatOpen.toggle() }
-                                                else { conversationPresented = true }
-                                            }))
-                                        .id(id)
-                                }
-                            case nil:
-                                HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                    if inlineChat, case let .request(key) = selection, let conversationStore,
-                       let request = conversationStore.request(for: key) {
-                        Divider()
-                        ConversationPanel(store: conversationStore, key: key,
-                            sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
-                            .frame(width: min(360, geometry.size.width * 0.34))
-                    }
-                    if inlineChat, case let .sample(id) = selection,
-                       let message = samples.messages.first(where: { $0.id == id }),
-                       let response = samples.responses[id] {
-                        Divider()
-                        SampleChatView(sender: message.sender, title: message.title, response: response)
-                            .frame(width: min(360, geometry.size.width * 0.34))
-                    }
+            let tabs = TabView(selection: $workspaceTab) {
+                Tab("Inbox", systemImage: "envelope.badge", value: .inbox) {
+                    inboxSplitView(for: .inbox, wideChat: wideChat, inlineChat: inlineChat,
+                                   geometry: geometry)
+                }
+
+                Tab("Replied", systemImage: "envelope.open", value: .replied) {
+                    inboxSplitView(for: .replied, wideChat: wideChat, inlineChat: inlineChat,
+                                   geometry: geometry)
+                }
+
+                Tab(value: .search, role: .search) {
+                    searchStack(wideChat: wideChat, inlineChat: inlineChat,
+                                geometry: geometry)
                 }
             }
-            .navigationSplitViewStyle(.balanced)
+            .searchPresentationToolbarBehavior(.avoidHidingContent)
+            .onChange(of: workspaceTab) { oldTab, newTab in
+                guard let messageTab = newTab.messageTab else { return }
+                selectedTab = messageTab
+                if oldTab == .search {
+                    search = ""
+                    searchPath = []
+                }
+            }
+            .onChange(of: selectedTab) { _, tab in
+                guard workspaceTab != .search else { return }
+                workspaceTab = tab == .replied ? .replied : .inbox
+            }
+            tabs
             .sheet(isPresented: $conversationPresented) {
                 conversationPresentation
                     .presentationDetents([.medium, .large])
             }
-            .onChange(of: notificationNavigation, initial: true) { _, route in
+            .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route else { return }
                 settings = false
                 chatOpen = false
                 conversationPresented = false
-                // Notification navigation changes selection only. The ordinary
-                // navigate helper also schedules abandoned-upload cleanup.
-                // A tap must not turn that into a domain mutation.
-                selection = route.request.map(InboxSelection.request)
+                // Notification routing changes presentation only. Keep it out
+                // of ordinary navigation cleanup so a tap cannot mutate the domain.
+                let destination = InboxNotificationDestination(route: route, rows: rows)
+                workspaceTab = destination.workspaceTab
+                selectedTab = destination.selectedTab
+                search = destination.search
+                searchPath = destination.searchPath
+                selection = destination.selection
                 if let key = route.request {
                     lastViewedSelection = .request(key)
                     selectRequest(key)
                 }
-                visibility = route.request == nil ? .all : .detailOnly
+                visibility = destination.selection == nil ? .all : .detailOnly
             }
             .onChange(of: samples.selectedID) { _, id in
                 UIDiagnostics.shared.record("inbox.samplesSelectedChanged \(id ?? "nil") selection=\(UIDiagnostics.describe(selection))")
@@ -521,9 +709,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
 @MainActor
 struct InboxList: View {
+    let tab: InboxWorkspaceTab
     let rows: [InboxItem]
     @Binding var selected: InboxSelection?
     @Binding var selectedTab: InboxMessageTab
+    @Binding var workspaceTab: InboxWorkspaceTab
+    @Binding var search: String
     let lastViewedSelection: InboxSelection?
     let restoreLastViewed: Bool
     let didRestoreLastViewed: () -> Void
@@ -532,64 +723,57 @@ struct InboxList: View {
     let markNoComment: (InboxSelection) -> Void
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @State private var search = ""
-    @State private var searchPresented = false
-    @FocusState private var searchFocused: Bool
+    let triggerNotification: (() -> Void)?
     @State private var scrollMetrics = InboxScrollMetrics.empty
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
 
-    private var filteredRows: [InboxItem] {
-        let inTab = rows.filter { $0.belongsToReplied == (selectedTab == .replied) }
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return inTab }
-        let filtered = inTab.filter {
-            $0.preview.title.localizedCaseInsensitiveContains(query) ||
-            $0.preview.sender.localizedCaseInsensitiveContains(query) ||
-            $0.preview.body.localizedCaseInsensitiveContains(query)
-        }
-        return filtered
+    private func messageTab(for tab: InboxWorkspaceTab) -> InboxMessageTab {
+        tab.messageTab ?? selectedTab
     }
 
-    private func restoreLastViewed(using proxy: ScrollViewProxy) {
+    private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
+        InboxListProjection.filteredRows(rows, in: tab, selectedTab: selectedTab, search: search)
+    }
+
+    private func restoreLastViewed(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
         guard restoreLastViewed else { return }
         guard let lastViewedSelection,
               rows.contains(where: { $0.id == lastViewedSelection }) else {
             didRestoreLastViewed()
             return
         }
-        if !filteredRows.contains(where: { $0.id == lastViewedSelection }) {
+        if !filteredRows(in: tab).contains(where: { $0.id == lastViewedSelection }) {
             UIDiagnostics.shared.record("list.restoreClearsSearch search=\(search) last=\(UIDiagnostics.describe(lastViewedSelection))")
             search = ""
             return
         }
-        proxy.scrollTo(lastViewedSelection, anchor: .center)
+        proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: lastViewedSelection), anchor: .center)
         didRestoreLastViewed()
     }
 
     /// When a filter shrinks the list while it is scrolled down, the lazy stack
     /// can keep its old visible range and draw none of the matching rows, so a
     /// filter change starts the list again at its first row.
-    private func showFirstRow(using proxy: ScrollViewProxy) {
-        guard let first = filteredRows.first else { return }
-        proxy.scrollTo(first.id, anchor: .top)
+    private func showFirstRow(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
+        guard let first = filteredRows(in: tab).first else { return }
+        proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: first.id), anchor: .top)
     }
 
     private func openSettings() {
-        searchFocused = false
         showSettings()
     }
 
     private var diagnosticSummary: String {
-        let inTab = rows.filter { $0.belongsToReplied == (selectedTab == .replied) }
-        let filtered = filteredRows.map { row -> String in
+        let selectedMessageTab = messageTab(for: tab)
+        let inTab = rows.filter { $0.belongsToReplied == (selectedMessageTab == .replied) }
+        let filtered = filteredRows(in: tab).map { row -> String in
             let missingRow: Bool = if case let .example(_, response) = row { response.inboxRow == nil } else { false }
             return row.accessibilityID + (missingRow ? ":empty" : "")
         }
         return [
-            "search=\(search) presented=\(searchPresented) focused=\(searchFocused) tab=\(selectedTab.rawValue)",
+            "search=\(search) workspaceTab=\(workspaceTab) listTab=\(tab) tab=\(selectedMessageTab.rawValue)",
             "restoreLastViewed=\(restoreLastViewed) lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) selected=\(UIDiagnostics.describe(selected))",
             "rows=\(rows.count) inTab=\(inTab.count) filtered=\(filtered)",
         ].joined(separator: " | ")
@@ -606,234 +790,179 @@ struct InboxList: View {
         }
     }
 
+    private var listSelection: Binding<InboxSelection?>? {
+        tab == .search ? nil : $selected
+    }
+
+    @ViewBuilder
+    private func rowContent(for row: InboxItem) -> some View {
+        let isSelected = selected == row.id || lastViewedSelection == row.id
+        switch row {
+        case let .request(request):
+            if tab == .search {
+                NavigationLink(value: row.id) {
+                    InboxRowContent(row: request, selected: isSelected)
+                }
+                .buttonStyle(.plain)
+                .navigationLinkIndicatorVisibility(.hidden)
+            } else {
+                InboxRowContent(row: request, selected: isSelected)
+            }
+        case let .example(_, response):
+            if let request = response.inboxRow {
+                if tab == .search {
+                    NavigationLink(value: row.id) {
+                        InboxRowContent(row: request, selected: isSelected)
+                    }
+                    .buttonStyle(.plain)
+                    .navigationLinkIndicatorVisibility(.hidden)
+                } else {
+                    InboxRowContent(row: request, selected: isSelected)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func listContent(for tab: InboxWorkspaceTab,
+                             using proxy: ScrollViewProxy) -> some View {
+        let messageTab = messageTab(for: tab)
+        List(selection: listSelection) {
+            ForEach(filteredRows(in: tab)) { row in
+                rowContent(for: row)
+                .tag(row.id)
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
+                        Button { markSeen(row.id) } label: {
+                            Label("Seen", systemImage: "checkmark")
+                        }
+                        .tint(.blue)
+                        .accessibilityIdentifier("inbox-mark-seen")
+                    } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
+                        Button { markNoComment(row.id) } label: {
+                            Label("No comment", systemImage: "hand.raised")
+                        }
+                        .tint(.gray)
+                        .disabled(row.noCommentUnavailable)
+                        .accessibilityIdentifier("inbox-no-comment")
+                    }
+                }
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
+                        Button { markSeen(row.id) } label: {
+                            Label("Seen", systemImage: "checkmark")
+                        }
+                        .tint(.blue)
+                        .accessibilityIdentifier("inbox-mark-seen")
+                    } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
+                        Button { markNoComment(row.id) } label: {
+                            Label("No comment", systemImage: "hand.raised")
+                        }
+                        .tint(.gray)
+                        .disabled(row.noCommentUnavailable)
+                        .accessibilityIdentifier("inbox-no-comment")
+                    }
+                }
+                .id(InboxListRowScrollTarget(tab: tab, selection: row.id))
+                .accessibilityIdentifier(row.accessibilityID)
+                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+            }
+            if isFetchingOlderPage {
+                ProgressView().frame(maxWidth: .infinity).padding()
+                    .listRowSeparator(.hidden)
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle("Harklight")
+        .toolbar {
+            if let triggerNotification {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Open notification", action: triggerNotification)
+                        .accessibilityIdentifier("harklight-test-notification")
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Settings", systemImage: "gearshape", action: openSettings)
+                    .labelStyle(.iconOnly)
+                    .accessibilityIdentifier("inbox-settings")
+            }
+        }
+        .onAppear {
+            guard workspaceTab == tab else { return }
+            restoreLastViewed(using: proxy, in: tab)
+        }
+        .onChange(of: workspaceTab) { _, activeTab in
+            guard activeTab == tab else { return }
+            if restoreLastViewed {
+                restoreLastViewed(using: proxy, in: tab)
+            } else {
+                showFirstRow(using: proxy, in: tab)
+            }
+        }
+        .onChange(of: restoreLastViewed) { _, shouldRestore in
+            if shouldRestore, workspaceTab == tab {
+                restoreLastViewed(using: proxy, in: tab)
+            }
+        }
+        .onChange(of: notificationNavigation) { _, route in
+            guard route != nil, workspaceTab == tab else { return }
+            search = ""
+        }
+        .onChange(of: search) { _, _ in
+            guard workspaceTab == tab else { return }
+            if restoreLastViewed {
+                restoreLastViewed(using: proxy, in: tab)
+            } else {
+                showFirstRow(using: proxy, in: tab)
+            }
+        }
+        .onChange(of: selectedTab) { _, _ in
+            guard workspaceTab == tab, !restoreLastViewed else { return }
+            showFirstRow(using: proxy, in: tab)
+        }
+        .onScrollGeometryChange(for: InboxScrollMetrics.self) { geometry in
+            let top = geometry.contentOffset.y + geometry.contentInsets.top
+            let extent = max(0, geometry.contentSize.height - geometry.containerSize.height +
+                geometry.contentInsets.top + geometry.contentInsets.bottom)
+            return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
+                distanceToBottom: max(0, extent - top), contentFits: extent == 0)
+        } action: { oldMetrics, newMetrics in
+            scrollMetrics = newMetrics
+            guard isUserScrolling,
+                  newMetrics.offsetY > oldMetrics.offsetY + 1,
+                  newMetrics.distanceToBottom <= 80 else { return }
+            requestOlderPage()
+        }
+        .onScrollPhaseChange { oldPhase, newPhase in
+            let scrolling = newPhase == .interacting || newPhase == .decelerating
+            if scrolling && !isUserScrolling { requestedInGesture = false }
+            isUserScrolling = scrolling
+            if oldPhase == .interacting && !scrolling { requestedInGesture = false }
+        }
+        .simultaneousGesture(DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                guard value.translation.height < -12 else { return }
+                isUserScrolling = true
+                if scrollMetrics.contentFits || scrollMetrics.distanceToBottom <= 80 {
+                    requestOlderPage()
+                }
+            }
+            .onEnded { _ in
+                isUserScrolling = false
+                requestedInGesture = false
+            })
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
-            List(selection: $selected) {
-                ForEach(filteredRows) { row in
-                    Group {
-                        switch row {
-                        case let .request(request):
-                            InboxRowContent(row: request,
-                                            selected: selected == row.id || lastViewedSelection == row.id)
-                        case let .example(_, response):
-                            if let request = response.inboxRow {
-                                InboxRowContent(row: request,
-                                                selected: selected == row.id || lastViewedSelection == row.id)
-                            } else {
-                                EmptyView()
-                            }
-                        }
-                    }
-                    .tag(row.id)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        if selectedTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
-                            Button { markSeen(row.id) } label: {
-                                Label("Seen", systemImage: "checkmark")
-                            }
-                            .tint(.blue)
-                            .accessibilityIdentifier("inbox-mark-seen")
-                        } else if selectedTab == .inbox, !row.belongsToReplied, row.canNoComment {
-                            Button { markNoComment(row.id) } label: {
-                                Label("No comment", systemImage: "hand.raised")
-                            }
-                            .tint(.gray)
-                            .disabled(row.noCommentUnavailable)
-                            .accessibilityIdentifier("inbox-no-comment")
-                        }
-                    }
-                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                        if selectedTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
-                            Button { markSeen(row.id) } label: {
-                                Label("Seen", systemImage: "checkmark")
-                            }
-                            .tint(.blue)
-                            .accessibilityIdentifier("inbox-mark-seen")
-                        } else if selectedTab == .inbox, !row.belongsToReplied, row.canNoComment {
-                            Button { markNoComment(row.id) } label: {
-                                Label("No comment", systemImage: "hand.raised")
-                            }
-                            .tint(.gray)
-                            .disabled(row.noCommentUnavailable)
-                            .accessibilityIdentifier("inbox-no-comment")
-                        }
-                    }
-                    .id(row.id)
-                    .accessibilityIdentifier(row.accessibilityID)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                }
-                if isFetchingOlderPage {
-                    ProgressView().frame(maxWidth: .infinity).padding()
-                        .listRowSeparator(.hidden)
-                }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
-            .scrollDismissesKeyboard(.interactively)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                InboxBottomControls(selectedTab: $selectedTab, search: $search,
-                    isSearchPresented: $searchPresented, searchFocused: $searchFocused)
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                HStack {
-                    HarklightBrand()
-                    Spacer(minLength: 16)
-                    Button("Settings", systemImage: "gearshape", action: openSettings)
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.glass)
-                        .accessibilityIdentifier("inbox-settings")
-                }
-                .frame(height: 52)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color(uiColor: .systemBackground))
-            }
-            .onAppear { restoreLastViewed(using: proxy) }
-            .onChange(of: restoreLastViewed) { _, shouldRestore in
-                if shouldRestore { restoreLastViewed(using: proxy) }
-            }
-            .onChange(of: notificationNavigation) { _, route in
-                guard route != nil else { return }
-                search = ""
-                searchFocused = false
-            }
-            .onChange(of: selected) { _, _ in searchFocused = false }
-            .onChange(of: search) { _, _ in
-                if restoreLastViewed { restoreLastViewed(using: proxy) } else { showFirstRow(using: proxy) }
-            }
-            .onChange(of: selectedTab) { _, _ in
-                if !restoreLastViewed { showFirstRow(using: proxy) }
-            }
-            .onScrollGeometryChange(for: InboxScrollMetrics.self) { geometry in
-                let top = geometry.contentOffset.y + geometry.contentInsets.top
-                let extent = max(0, geometry.contentSize.height - geometry.containerSize.height +
-                    geometry.contentInsets.top + geometry.contentInsets.bottom)
-                return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
-                    distanceToBottom: max(0, extent - top), contentFits: extent == 0)
-            } action: { oldMetrics, newMetrics in
-                scrollMetrics = newMetrics
-                guard isUserScrolling,
-                      newMetrics.offsetY > oldMetrics.offsetY + 1,
-                      newMetrics.distanceToBottom <= 80 else { return }
-                requestOlderPage()
-            }
-            .onScrollPhaseChange { oldPhase, newPhase in
-                let scrolling = newPhase == .interacting || newPhase == .decelerating
-                if scrolling && !isUserScrolling { requestedInGesture = false }
-                isUserScrolling = scrolling
-                if oldPhase == .interacting && !scrolling { requestedInGesture = false }
-            }
-            .simultaneousGesture(DragGesture(minimumDistance: 10)
-                .onChanged { value in
-                    guard value.translation.height < -12 else { return }
-                    isUserScrolling = true
-                    if scrollMetrics.contentFits || scrollMetrics.distanceToBottom <= 80 {
-                        requestOlderPage()
-                    }
-                }
-                .onEnded { _ in
-                    isUserScrolling = false
-                    requestedInGesture = false
-                })
-            .toolbar(horizontalSizeClass == .compact && selected != nil ? .visible : .hidden,
-                     for: .navigationBar)
-            .toolbarBackground(.hidden, for: .bottomBar)
-            .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+            listContent(for: tab, using: proxy)
+                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
         }
-    }
-}
-
-struct InboxBottomControls: View {
-    @Binding var selectedTab: InboxMessageTab
-    @Binding var search: String
-    @Binding var isSearchPresented: Bool
-    @FocusState.Binding var searchFocused: Bool
-    @Namespace private var glassNamespace
-    private let controlHeight: CGFloat = 56
-
-    var body: some View {
-        GlassEffectContainer(spacing: 10) {
-            HStack(spacing: 10) {
-                if isSearchPresented {
-                    HStack(spacing: 10) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(.primary)
-                        TextField("Search", text: $search)
-                            .textFieldStyle(.plain)
-                            .focused($searchFocused)
-                            .submitLabel(.search)
-                            .accessibilityIdentifier("inbox-search-field")
-                            .onSubmit { searchFocused = false }
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: controlHeight)
-                    .background(.thickMaterial, in: Capsule())
-                    .glassEffect(.regular, in: Capsule())
-                    .glassEffectID("search", in: glassNamespace)
-                    Button("Close search", systemImage: "xmark") {
-                        searchFocused = false
-                        search = ""
-                        withAnimation(.smooth(duration: 0.35)) { isSearchPresented = false }
-                    }
-                    .labelStyle(.iconOnly)
-                    .font(.system(size: 19, weight: .medium))
-                    .frame(width: controlHeight, height: controlHeight)
-                    .glassEffect(.regular.interactive(), in: Circle())
-                    .accessibilityIdentifier("inbox-search-dismiss")
-                } else {
-                    HStack(spacing: 0) {
-                        tab(.inbox, symbol: "envelope.badge", label: "Inbox")
-                        tab(.replied, symbol: "envelope.open", label: "Replied")
-                    }
-                    .frame(height: controlHeight)
-                    .glassEffect(.regular, in: Capsule())
-                    Spacer(minLength: 8)
-                    Button("Search", systemImage: "magnifyingglass") {
-                        withAnimation(.smooth(duration: 0.35)) { isSearchPresented = true }
-                    }
-                    .labelStyle(.iconOnly)
-                    .font(.system(size: 20, weight: .medium))
-                    .frame(width: controlHeight, height: controlHeight)
-                    .glassEffect(.regular.interactive(), in: Circle())
-                    .glassEffectID("search", in: glassNamespace)
-                    .accessibilityIdentifier("inbox-search-button")
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
-        .onChange(of: isSearchPresented) { _, isPresented in
-            searchFocused = isPresented
-        }
-    }
-
-    private func tab(_ tab: InboxMessageTab, symbol: String, label: String) -> some View {
-        Button {
-            withAnimation(.smooth(duration: 0.25)) { selectedTab = tab }
-        } label: {
-            VStack(spacing: 1) {
-                Image(systemName: symbol)
-                    .font(.system(size: 21, weight: .semibold))
-                Text(label)
-                    .font(.system(size: 11, weight: .semibold))
-            }
-                .foregroundStyle(selectedTab == tab ? .blue : .primary)
-                .frame(width: 68, height: 48)
-                .background {
-                    if selectedTab == tab {
-                        Capsule().fill(.primary.opacity(0.08))
-                    }
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
-        .accessibilityIdentifier("inbox-tab-" + tab.rawValue)
     }
 }
 

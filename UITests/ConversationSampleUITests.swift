@@ -208,7 +208,7 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        app.buttons["inbox-tab-inbox"].tap()
+        app.tabBars.buttons["Inbox"].tap()
         enterSearch("Archive", in: app)
         let row = app.descendants(matching: .any)["request-row-sample-approval-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
@@ -292,23 +292,20 @@ final class ConversationSampleUITests: XCTestCase {
     }
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
-        let dismiss = app.buttons["inbox-search-dismiss"]
-        if dismiss.exists && dismiss.isHittable { dismiss.tap() }
-        let field = app.textFields["inbox-search-field"]
-        if !field.exists {
-            let button = app.buttons["inbox-search-button"]
-            XCTAssertTrue(button.waitForExistence(timeout: 5), app.debugDescription)
-            button.tap()
-        }
+        let field = app.searchFields.firstMatch
+        let searchTab = app.tabBars.buttons["Search"]
+        if searchTab.exists && !searchTab.isSelected { searchTab.tap() }
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        let clearText = field.buttons["Clear text"]
+        if clearText.exists && clearText.isHittable { clearText.tap() }
         field.tap()
         field.typeText(query + "\n")
     }
 
     private func showInbox(_ app: XCUIApplication) {
-        let searchButton = app.buttons["inbox-search-button"]
-        let searchField = app.textFields["inbox-search-field"]
-        guard !searchButton.exists && !searchField.exists else { return }
+        guard app.scrollViews["message-card-scroll"].exists else { return }
+        let searchTab = app.tabBars.buttons["Search"]
+        let searchField = app.searchFields.firstMatch
         let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
             back.tap()
@@ -316,8 +313,10 @@ final class ConversationSampleUITests: XCTestCase {
             let sidebar = app.buttons["Show Sidebar"]
             if sidebar.exists && sidebar.isHittable { sidebar.tap() }
         }
-        XCTAssertTrue(searchButton.waitForExistence(timeout: 5) || searchField.waitForExistence(timeout: 5),
-                      app.debugDescription)
+        XCTAssertTrue(app.tabBars.buttons["Inbox"].waitForExistence(timeout: 5) ||
+                      app.tabBars.buttons["Replied"].waitForExistence(timeout: 5) ||
+                      searchTab.waitForExistence(timeout: 5) ||
+                      searchField.waitForExistence(timeout: 5), app.debugDescription)
     }
 
     private func listContainer(_ app: XCUIApplication) -> XCUIElement {
@@ -350,10 +349,7 @@ final class ConversationSampleUITests: XCTestCase {
     /// Whether the whole row is inside the list, above its bottom tab and search controls.
     private func unobscured(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.exists else { return false }
-        let controls = [app.textFields["inbox-search-field"], app.buttons["inbox-tab-inbox"],
-                        app.buttons["inbox-tab-replied"], app.buttons["inbox-search-button"]]
-            .filter(\.exists).map(\.frame.minY)
-        let bottom = controls.min() ?? app.windows.firstMatch.frame.maxY
+        let bottom = bottomControlsTop(app)
         let frame = element.frame
         return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
     }
@@ -366,8 +362,7 @@ final class ConversationSampleUITests: XCTestCase {
             return false
         }
         func unobscured() -> Bool {
-            let search = app.textFields["inbox-search-field"]
-            let bottom = search.exists ? search.frame.minY : app.windows.firstMatch.frame.maxY
+            let bottom = bottomControlsTop(app)
             let navigationBar = app.navigationBars.firstMatch
             let top = max(scrollView.frame.minY,
                           navigationBar.exists ? navigationBar.frame.maxY : scrollView.frame.minY)
@@ -387,5 +382,13 @@ final class ConversationSampleUITests: XCTestCase {
         capture("row-outside-list-after-scrolling", app)
         XCTFail("Row stayed outside the unobscured list after scrolling: frame=\(element.frame), hittable=\(element.isHittable), list=\(scrollView.frame)\n\(app.debugDescription)")
         return false
+    }
+
+    private func bottomControlsTop(_ app: XCUIApplication) -> CGFloat {
+        let tabButtons = [app.tabBars.buttons["Inbox"], app.tabBars.buttons["Replied"], app.tabBars.buttons["Search"]]
+            .filter(\.exists)
+        if let tabTop = tabButtons.map(\.frame.minY).min() { return tabTop }
+        let searchField = app.searchFields.firstMatch
+        return searchField.exists ? searchField.frame.minY : app.windows.firstMatch.frame.maxY
     }
 }

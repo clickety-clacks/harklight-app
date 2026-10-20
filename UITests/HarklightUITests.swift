@@ -86,8 +86,8 @@ final class HarklightUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
 
-        let inboxTab = app.buttons["inbox-tab-inbox"]
-        let repliedTab = app.buttons["inbox-tab-replied"]
+        let inboxTab = app.tabBars.buttons["Inbox"]
+        let repliedTab = app.tabBars.buttons["Replied"]
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected)
@@ -180,7 +180,7 @@ final class HarklightUITests: XCTestCase {
                        "Detail uses the native navigation back control.")
         back.tap()
         XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.buttons["inbox-tab-inbox"].isSelected)
+        XCTAssertTrue(app.tabBars.buttons["Inbox"].isSelected)
         XCTAssertTrue(facilities.exists, "An untouched request stays in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
         let kept = NSPredicate { _, _ in abs(top.frame.minY - scrolledTop) <= 1 }
@@ -247,21 +247,22 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
 
-        let search = app.buttons["inbox-search-button"]
+        let search = app.tabBars.buttons["Search"]
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.tap()
         for frame in 0..<5 {
             attachScreenshot("Search transition frame \(frame)", from: app)
         }
-        XCTAssertTrue(app.textFields["inbox-search-field"].waitForExistence(timeout: 5))
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "Search should expand directly above the keyboard.")
         XCTAssertTrue(settings.isHittable, "Header settings must remain visible during search.")
-        XCTAssertLessThan(settings.frame.maxY, app.textFields["inbox-search-field"].frame.minY,
+        XCTAssertLessThan(settings.frame.maxY, field.frame.minY,
                           "Settings belong in the header, not beside expanded search.")
         attachScreenshot("Expanded search above keyboard", from: app)
 
-        let field = app.textFields["inbox-search-field"]
         field.typeText("preview could not\n")
         let notice = app.descendants(matching: .any)["sample-error-0"]
         XCTAssertTrue(notice.waitForExistence(timeout: 5), app.debugDescription)
@@ -309,11 +310,12 @@ final class HarklightUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
-        let search = app.buttons["inbox-search-button"]
+        let search = app.tabBars.buttons["Search"]
         XCTAssertTrue(search.waitForExistence(timeout: 10))
         search.tap()
-        let field = app.textFields["inbox-search-field"]
+        let field = app.searchFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
         field.typeText("Which approach\n")
         let row = app.descendants(matching: .any)["sample-textChoice-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -361,7 +363,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
 
-        let replied = app.buttons["inbox-tab-replied"]
+        let replied = app.tabBars.buttons["Replied"]
         XCTAssertTrue(replied.waitForExistence(timeout: 5), app.debugDescription)
         let diagnostics = app.descendants(matching: .any)["inbox-ui-diagnostics"]
         XCTAssertTrue(replied.isSelected,
@@ -370,7 +372,7 @@ final class HarklightUITests: XCTestCase {
                       "An answered request returns in Replied.\n\(app.debugDescription)")
         attachScreenshot("Answered request in Replied", from: app)
 
-        app.buttons["inbox-tab-inbox"].tap()
+        app.tabBars.buttons["Inbox"].tap()
         XCTAssertFalse(facilities.waitForExistence(timeout: 2),
                        "The answered request no longer appears in Inbox.")
     }
