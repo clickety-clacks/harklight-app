@@ -133,8 +133,8 @@ final class HarklightTests: XCTestCase {
             return XCTFail("The open request should expose its reply action.")
         }
         visible.selectAction(reply.id, input: nil, for: existingKey)
-        XCTAssertTrue(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToReplied,
-                      "Selecting Reply moves the request to Replied before submission.")
+        XCTAssertFalse(try XCTUnwrap(visible.inboxRows.first { $0.key == existingKey }).belongsToReplied,
+                       "Selecting Reply keeps the request in Inbox until submission.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
                       "Choosing Reply must remain a draft until the user submits it.")
     }

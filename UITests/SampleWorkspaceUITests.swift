@@ -396,9 +396,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             let repliedTab = app.buttons["inbox-tab-replied"]
             XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(repliedTab.exists, app.debugDescription)
-            // The value example starts with a prefilled reply draft, so it belongs in Replied.
-            let destinationTab = kind == "value" ? repliedTab : inboxTab
-            if !destinationTab.isSelected { destinationTab.tap() }
+            if !inboxTab.isSelected { inboxTab.tap() }
             // Search the fictional sender/title so the selected type is reachable
             // through normal navigation without a test-only destination.
             let query: String = switch kind {
@@ -421,6 +419,14 @@ final class SampleWorkspaceUITests: XCTestCase {
             let found = row.waitForExistence(timeout: 5)
             if kind == "review" || !found { recordDiagnostics("search-\(kind)", app) }
             XCTAssertTrue(found, app.debugDescription)
+            if kind == "value" {
+                XCTAssertTrue(inboxTab.isSelected)
+                repliedTab.tap()
+                XCTAssertFalse(row.waitForExistence(timeout: 1),
+                               "A prefilled but unsent reply stays in Inbox.")
+                inboxTab.tap()
+                XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+            }
             let listContainer = app.scrollViews.firstMatch.exists
                 ? app.scrollViews.firstMatch : app.collectionViews.firstMatch
             XCTAssertTrue(listContainer.exists, app.debugDescription)
