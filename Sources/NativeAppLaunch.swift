@@ -1213,7 +1213,8 @@ final class LivePresentationStore {
 
     var inboxRows: [InboxRequestRow] {
         presentation.requests.map { request in
-            let receiptStatus = InboxRequestRow.responseReceiptStatus(request.intentReceipt)
+            let receiptStatus = InboxRequestRow.responseReceiptStatus(
+                request.intentReceipt, hasUnconfirmedOutcome: request.receiptFacts?.ownOutcome == .unconfirmed)
             var statusParts: [String] = []
             if request.inboxStateIsCurrent {
                 if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
@@ -1241,7 +1242,9 @@ final class LivePresentationStore {
                 localStatus: receiptStatus == .failed
                     ? (request.noCommentUnavailable
                         ? "No comment not delivered · unsupported by this server"
-                        : cachedOperationStatus(request.intentReceipt?.localState))
+                        : request.receiptFacts?.ownOutcome == .unconfirmed
+                            ? "Answer outcome awaits reconciliation"
+                            : cachedOperationStatus(request.intentReceipt?.localState))
                     : nil,
                 informationalSeenStatus: request.informationalSeenStatus,
                 canMarkSeen: !isReadOnly && request.inboxStateIsCurrent &&

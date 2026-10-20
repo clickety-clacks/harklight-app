@@ -209,7 +209,9 @@ struct InboxRequestRow: Identifiable {
     var tier: InboxAttentionTier = .middle
     var id: RequestKey { key }
 
-    static func responseReceiptStatus(_ receipt: IntentReceipt?) -> InboxResponseReceiptStatus? {
+    static func responseReceiptStatus(_ receipt: IntentReceipt?,
+                                      hasUnconfirmedOutcome: Bool = false) -> InboxResponseReceiptStatus? {
+        if hasUnconfirmedOutcome { return .failed }
         guard let state = receipt?.localState else { return nil }
         return switch state {
         case .durable, .queuedForRelay, .accepted: .pendingOrAccepted

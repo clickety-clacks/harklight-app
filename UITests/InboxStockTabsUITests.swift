@@ -106,9 +106,9 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         XCTAssertTrue(searchTab.isSelected, app.debugDescription)
-        XCTAssertTrue(approval.waitForExistence(timeout: 5),
-                      "The same query finds the answered message in Replied.")
-        attachScreenshot("Replied search in use", from: app)
+        XCTAssertFalse(approval.waitForExistence(timeout: 2),
+                       "Search remains scoped to Inbox after the response moves out of Inbox.")
+        attachScreenshot("Answered request leaves Inbox search", from: app)
 
         repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
