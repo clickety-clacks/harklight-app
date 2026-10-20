@@ -63,6 +63,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The submitted local answer appears in Replied.")
+        assertListHeader(in: app)
         attachScreenshot("Replied tab with answered message", from: app)
 
         searchTab.tap()
