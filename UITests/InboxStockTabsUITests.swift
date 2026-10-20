@@ -7,6 +7,27 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testBrandMarkStaysBesideExpandedAndInlineTitle() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let title = app.navigationBars["Harklight"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertEqual(app.navigationBars.matching(identifier: "Harklight").count, 1,
+                       "The expanded state has one branded navigation title.")
+        let expandedNavigationBarHeight = title.frame.height
+        attachScreenshot("Brand with expanded title", from: app)
+
+        app.swipeUp()
+        XCTAssertTrue(title.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertLessThan(title.frame.height, expandedNavigationBarHeight,
+                          "Scrolling collapses the large title into the inline title.")
+        XCTAssertEqual(app.navigationBars.matching(identifier: "Harklight").count, 1,
+                       "The inline state has one branded navigation title.")
+        attachScreenshot("Brand with inline title", from: app)
+    }
+
     func testStockTabsAndSearchKeepInboxAndRepliedResults() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
@@ -122,7 +143,7 @@ final class InboxStockTabsUITests: XCTestCase {
 
     private func assertListHeader(in app: XCUIApplication, file: StaticString = #filePath,
                                   line: UInt = #line) {
-        XCTAssertTrue(app.navigationBars.staticTexts["Harklight"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.navigationBars["Harklight"].waitForExistence(timeout: 5),
                       app.debugDescription, file: file, line: line)
         XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription,
                       file: file, line: line)
