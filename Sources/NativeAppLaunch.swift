@@ -791,7 +791,7 @@ final class NativeAppLaunch {
         selectedArchivedPresentation = nil
         isShowingDisconnectedArchive = false
         notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: nil)
-        notificationNavigationMessage = intent.locator == nil ? nil : "Opening notification: checking the current message state."
+        notificationNavigationMessage = intent.locator == nil ? nil : "Checking this notification."
         if case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample {
             presentation.selectRequest(nil)
             if let record = try? enrollment.load(),
@@ -814,7 +814,7 @@ final class NativeAppLaunch {
         let record: NativeEnrollmentRecord?
         do { record = try enrollment.load() }
         catch {
-            notificationNavigationMessage = "The notification's account could not be checked. Showing the current inbox."
+            notificationNavigationMessage = "Could not check this notification's account."
             return
         }
         if let key = notificationRouter.resolve(records: record.map { [$0] } ?? [],
@@ -827,8 +827,8 @@ final class NativeAppLaunch {
         } else if notificationRouter.intent?.locator != nil {
             presentation.selectRequest(nil)
             notificationNavigationMessage = notificationSynchronized
-                ? "The notification's exact message is not loaded. Showing the current inbox; it can open when normally loaded."
-                : "The notification's current state is not confirmed. Showing the inbox while connection recovery is pending."
+                ? "This notification's message has not loaded yet."
+                : "Could not verify notification. Checking again while open."
         } else {
             presentation.selectRequest(nil)
             notificationNavigationMessage = nil
@@ -1213,12 +1213,12 @@ final class LivePresentationStore {
 
     var inboxRows: [InboxRequestRow] {
         presentation.requests.map { request in
-            let hasSuccessfulTerminalResponse = request.lifecycleStatus == .answered ||
-                request.lifecycleStatus == .noComment
+            let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
+                request.receiptFacts?.ownOutcome == .unconfirmed &&
+                request.lifecycleStatus != .pending
             let receiptStatus = InboxRequestRow.responseReceiptStatus(
                 request.intentReceipt,
-                hasUnconfirmedOutcome: request.receiptFacts?.ownOutcome == .unconfirmed &&
-                    !hasSuccessfulTerminalResponse)
+                hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission)
             var statusParts: [String] = []
             if request.inboxStateIsCurrent {
                 if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
@@ -1242,7 +1242,8 @@ final class LivePresentationStore {
                 status: statusParts.joined(separator: " · "),
                 bodyText: request.body?.rawValue,
                 symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: !request.inboxStateIsCurrent || request.isResolved, createdAt: request.createdAt,
+                isResolved: receiptStatus == .failed ? false :
+                    !request.inboxStateIsCurrent || request.isResolved, createdAt: request.createdAt,
                 localStatus: receiptStatus == .failed
                     ? (request.noCommentUnavailable
                         ? "No comment not delivered · unsupported by this server"
@@ -1474,7 +1475,11 @@ final class LivePresentationStore {
     }
 
     func submitNoCommentFromUser(_ key: RequestKey) {
-        guard permitsDelivery, !isReadOnly else { return }
+        guard permitsDelivery, !isReadOnly,
+              let request = request(for: key), request.inboxStateIsCurrent,
+              !isRetracted(key), request.lifecycleStatus == .open,
+              request.intentReceipt == nil, request.informationalSeenStatus == nil else { return }
+        selectNoComment(for: key)
         guard flushPendingDraft(for: key) else { return }
         do {
             _ = try submitNoComment(key)
@@ -1505,7 +1510,6 @@ final class LivePresentationStore {
         guard !isRetracted(key), request.inboxStateIsCurrent,
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil,
-              !request.noCommentUnavailable,
               let selector = request.selector,
               canSubmitNoComment(request) else { throw LiveReplyError.notOpen }
         let receipt = try port.submitNoComment(context: port.context,

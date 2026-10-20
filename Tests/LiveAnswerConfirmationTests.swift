@@ -106,6 +106,66 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(LiveRequestDetail(request: reopened, store: live).canAnswer,
                       "The app leaves ordinary answer choices to an explicit user action.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+
+        live.submitNoCommentFromUser(key)
+        XCTAssertTrue(live.draft(for: key)?.noCommentSelected == true,
+                      "A swipe submission persists the explicit No comment choice for retry.")
+        let retry = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        XCTAssertEqual(retry.answerKind, .noComment)
+        XCTAssertEqual(String(decoding: retry.wireFrame, as: UTF8.self),
+                       #"{"type":"answer_no_comment","request_id":"sample","request_revision":1}"# + "\n")
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertFalse(live.request(for: key)?.noCommentUnavailable ?? true,
+                       "A newly queued attempt replaces the prior unsupported result in the current status.")
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
+                      "A retried No comment response moves to Replied while it is pending.")
+    }
+
+    func testAcceptedNoCommentIsFinalAndCannotBeResubmitted() throws {
+        let (context, store, live, key) = try setupReplyOnly()
+        live.selectNoComment(for: key)
+        live.submitFromUser(key)
+        let receipt = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                          terminalSequence: 2, context: context)
+        try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .noComment, nil)), context: context)
+        try live.refreshFromDurableStore()
+
+        let accepted = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(accepted.lifecycleStatus, .noComment)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
+        XCTAssertFalse(LiveRequestDetail(request: accepted, store: live).canAnswer)
+        let intentCount = try store.snapshot(context: context).intents.count
+        live.submitNoCommentFromUser(key)
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, intentCount,
+                       "An accepted final No comment answer cannot be submitted a second time.")
+    }
+
+    func testSwipeNoCommentAcceptanceIsFinalAndCannotBeResubmitted() throws {
+        let (context, store, live, key) = try setupReplyOnly()
+        live.submitNoCommentFromUser(key)
+
+        let receipt = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        let pending = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertEqual(receipt.answerKind, .noComment)
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertTrue(pending.belongsToReplied,
+                      "The swipe records the chosen response locally while server confirmation is pending.")
+
+        try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                          terminalSequence: 2, context: context)
+        try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .noComment, nil)), context: context)
+        try live.refreshFromDurableStore()
+
+        let accepted = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(accepted.lifecycleStatus, .noComment)
+        XCTAssertEqual(accepted.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
+        XCTAssertFalse(LiveRequestDetail(request: accepted, store: live).canAnswer)
+        let intentCount = try store.snapshot(context: context).intents.count
+        live.submitNoCommentFromUser(key)
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, intentCount,
+                       "An accepted swipe choice cannot create another answer.")
     }
 
     func testServerNoCommentTerminalStaysDistinctAndAppearsInReplied() throws {
@@ -289,6 +349,12 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .unconfirmed)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertNil(live.actionError)
+        let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertFalse(row.belongsToReplied,
+                       "A terminal update that cannot be matched to this device's answer stays in Inbox.")
+        XCTAssertTrue(row.hasFailedResponse)
+        XCTAssertFalse(row.isResolved)
+        XCTAssertEqual(row.localStatus, "Answer outcome awaits reconciliation")
     }
 
     func testFailedTerminalReplayDoesNotEraseAcceptedAnswerOrResendItOnReconnect() async throws {

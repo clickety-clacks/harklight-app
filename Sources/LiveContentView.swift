@@ -23,6 +23,15 @@ struct LiveContentView: View {
         self.fixtureStore = fixtureStore
     }
 
+#if DEBUG
+    private var recoveryStatusFixture: String? {
+        ProcessInfo.processInfo.arguments.contains("--harklight-test-recovery-status")
+            ? "Could not verify notification. Checking again while open." : nil
+    }
+#else
+    private var recoveryStatusFixture: String? { nil }
+#endif
+
     var body: some View {
         let progress = launch?.foregroundConnectProgress
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
@@ -62,7 +71,8 @@ struct LiveContentView: View {
                 warnings: [launch?.notificationNavigationMessage, store.observationError, store.notificationWarning,
                            store.pushRegistrationWarning, launch?.archiveCatalogWarning,
                            launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage,
-                           fixtureStore?.persistenceError]
+                           fixtureStore?.persistenceError,
+                           recoveryStatusFixture]
                     .compactMap { $0 },
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
@@ -423,9 +433,7 @@ struct LiveRequestDetail: View {
     }
 
     private var canSubmitCurrentAnswer: Bool {
-        if noCommentSelected {
-            return canOfferNoComment && !showsNoCommentUnavailable
-        }
+        if noCommentSelected { return canOfferNoComment }
         return canAnswer
     }
 
@@ -473,6 +481,7 @@ struct LiveRequestDetail: View {
     }
 
     private var submitLabel: String {
+        if noCommentSelected && showsNoCommentUnavailable { return "Retry No comment" }
         if case let .sender(sender) = request.projection { return sender.submissionLabel.rawValue }
         return "Send answer"
     }
@@ -591,7 +600,7 @@ struct LiveRequestDetail: View {
                     }
                 }
                 if showsNoCommentUnavailable {
-                    Text("No comment was not delivered because this server does not support it. You can still answer this request.")
+                    Text("No comment was not delivered: this server does not support it. Tap the checkmark to retry.")
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-no-comment-unavailable")
                 }
@@ -1397,12 +1406,10 @@ private struct NoCommentChoiceRow: View {
                                suggested: false)
         }
         .buttonStyle(.plain)
-        .disabled(unavailable)
-        .opacity(unavailable ? 0.48 : 1)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityValue(selected ? "Selected" : "Not selected")
         .accessibilityHint(unavailable
-            ? "No comment was not delivered because this server does not support it."
+            ? "This server did not accept No comment. Use the checkmark to retry, or choose another answer."
             : "Select No comment as your answer, then send it with the checkmark.")
         .accessibilityIdentifier("request-no-comment")
     }

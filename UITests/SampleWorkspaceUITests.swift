@@ -306,7 +306,27 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "Replied rows have no swipe action.")
     }
 
-    func testUnsupportedNoCommentControlStaysVisibleAndUnavailable() {
+    func testRecoveryStatusSitsBelowNavigationControlsAndKeepsInboxRowsVisible() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-test-recovery-status"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+
+        let status = app.descendants(matching: .any)["inbox-status-message"]
+        let row = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'")).firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(status.label.contains("Could not verify notification"), status.label)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Existing Inbox content remains visible.")
+        XCTAssertGreaterThanOrEqual(status.frame.minY, app.buttons["inbox-settings"].frame.maxY,
+                                    "Recovery status must sit below the brand/Settings header.")
+        XCTAssertGreaterThanOrEqual(row.frame.minY, status.frame.maxY,
+                                    "The status must reserve space instead of covering Inbox rows.")
+        capture("inbox-recovery-status", app)
+    }
+
+    func testUnsupportedNoCommentControlStaysVisibleAndCanBeRetried() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "--test-no-comment-unsupported"]
@@ -320,10 +340,12 @@ final class SampleWorkspaceUITests: XCTestCase {
 
         let noComment = app.buttons["request-no-comment"]
         XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(noComment.isEnabled, app.debugDescription)
+        XCTAssertTrue(noComment.isEnabled,
+                      "An explicit No comment failure must leave the same choice available for retry.")
         let explanation = app.descendants(matching: .any)["request-no-comment-unavailable"]
         XCTAssertTrue(explanation.waitForExistence(timeout: 5), app.debugDescription)
-        capture("reply-only-no-comment-unavailable", app)
+        XCTAssertTrue(explanation.label.contains("retry"), explanation.label)
+        capture("reply-only-no-comment-retry", app)
     }
 
     func testSeenActionFromEitherSwipeEdgeMovesTheMessageToReplied() {
