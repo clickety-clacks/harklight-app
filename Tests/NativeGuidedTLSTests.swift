@@ -435,7 +435,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let bindingID = "22222222-2222-4222-8222-222222222222"
         let profileGeneration = "33333333-3333-4333-8333-333333333333"
         let build6Record = Data("""
-        {"host":"relay.example.test","enrollmentPort":18444,"relayPort":18443,"trustedRootDER":"AQID","identityLabel":"saved-device","deviceID":"saved-device-id","approvalCode":"ABCDEFGH","statusSecret":"\(String(repeating: "b", count: 64))","expiresAt":1,"statusExpiresAt":2,"personID":"saved-person","pushBinding":{"address":"\(address)","operationID":"\(operationID)","revision":2,"accepted":true},"notificationProfileGeneration":"\(profileGeneration)","notificationBindings":[{"bindingID":"\(bindingID)","operationID":"\(operationID)","revision":2}]}
+        {"host":"relay.example.test","enrollmentPort":18444,"relayPort":18443,"trustedRootDER":"AQID","identityLabel":"saved-device","deviceID":"saved-device-id","approvalCode":"ABCDEFGH","statusSecret":"\(String(repeating: "b", count: 64))","expiresAt":1,"statusExpiresAt":2,"personID":"saved-person","pushBinding":{"address":"\(address)","operationID":"\(operationID)","revision":2,"accepted":true},"notificationProfileGeneration":"\(profileGeneration)","notificationBindings":[{"bindingID":{"rawValue":"\(bindingID)"},"operationID":"\(operationID)","revision":2}]}
         """.utf8)
         let add: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                    kSecAttrService as String: service,
@@ -874,7 +874,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                     let frame = try? JSONValue.parse(Data(text.utf8))
                     XCTAssertEqual(frame?.uniqueValue(named: "profile_id")?.stringValue?.rawValue,
                                    PushRegistrationProfile.current.rawValue)
-                    return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":1,\"binding_id\":\"\(bindingID)\"}\n"]
+                    return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-push\",\"revision\":1,\"binding_id\":\"\(bindingID)\",\"profile_id\":\"\(PushRegistrationProfile.current.rawValue)\"}\n"]
                 }
                 if text.contains("\"answer\"") {
                     return ["{\"v\":1,\"type\":\"ok\",\"seq\":2}\n"]
