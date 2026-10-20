@@ -268,8 +268,17 @@ final class HarklightUITests: XCTestCase {
         XCTAssertFalse(app.buttons["request-later-action"].exists,
                        "The bottom glass clock is the only Later action in card mode.")
         let finishSeen = app.buttons["request-finish-seen"]
-        XCTAssertTrue(finishSeen.exists && finishSeen.isEnabled,
-                      "The top check must perform the same Seen action as the card control.")
+        if !finishSeen.exists || !finishSeen.isEnabled {
+            attachScreenshot("Seen toolbar before action", from: app)
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "Seen toolbar accessibility hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(finishSeen.exists,
+                      "The top check must be present.\n\(app.debugDescription)")
+        XCTAssertTrue(finishSeen.isEnabled,
+                      "The top check must perform the same Seen action as the card control.\n\(app.debugDescription)")
         XCTAssertFalse(app.staticTexts["Seen available"].exists)
         attachScreenshot("Notice card with Seen action", from: app)
         finishSeen.tap()

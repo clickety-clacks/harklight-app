@@ -379,6 +379,19 @@ struct LiveRequestDetail: View {
         return actions.first?.id
     }
 
+    private var canFinishSeenAction: Bool {
+        guard request.informationalSeenStatus == .available else { return false }
+        if let localExample {
+            return localExample.canFinishLocally
+        }
+        return availableSeenAction != nil
+    }
+
+    private func finishSeenAction() {
+        if let localExample { localExample.finishLocally() }
+        else if let availableSeenAction { submitSeenAction(availableSeenAction) }
+    }
+
     private var seenActionIsComplete: Bool {
         localExample?.localSeenSelected == true ||
             request.informationalSeenStatus == .pending ||
@@ -624,9 +637,7 @@ struct LiveRequestDetail: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
-                    Button {
-                        if let availableSeenAction { submitSeenAction(availableSeenAction) }
-                    } label: {
+                    Button(action: finishSeenAction) {
                         if seenActionIsComplete {
                             Label("Seen", systemImage: "checkmark")
                                 .labelStyle(.titleAndIcon)
@@ -641,8 +652,7 @@ struct LiveRequestDetail: View {
                     .buttonStyle(.glass)
                     .tint(seenActionIsComplete ? .green : .blue)
                     .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
-                    .disabled(controlsReadOnly || availableSeenAction == nil || seenActionIsComplete)
-                    .accessibilityElement(children: .ignore)
+                    .disabled(controlsReadOnly || !canFinishSeenAction || seenActionIsComplete)
                     .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
                     .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
                     .accessibilityIdentifier("request-finish-seen")
