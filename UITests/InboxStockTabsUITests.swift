@@ -44,6 +44,10 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("Inbox search in use", from: app)
 
         approval.tap()
+        let searchPosition = app.staticTexts.matching(
+            NSPredicate(format: "label MATCHES '[0-9]+ of 3'")).firstMatch
+        XCTAssertTrue(searchPosition.waitForExistence(timeout: 5),
+                      "Search card position counts only the three matching Archive results.\n\(app.debugDescription)")
         let keepHere = app.buttons.containing(.staticText, identifier: "Keep here").firstMatch
         XCTAssertTrue(keepHere.waitForExistence(timeout: 5), app.debugDescription)
         keepHere.tap()
@@ -75,6 +79,45 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered message in Replied.")
         attachScreenshot("Replied search for Archive in use", from: app)
+    }
+
+    func testNotificationRouteLeavesSearchAndOpensTheTargetRequest() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation"]
+        app.launch()
+
+        let inboxTab = app.tabBars.buttons["Inbox"]
+        let searchTab = app.tabBars.buttons["Search"]
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
+        searchTab.tap()
+
+        let searchField = app.searchFields.firstMatch
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.tap()
+        searchField.typeText("no-matching-request\n")
+        let routeNotification = app.buttons["harklight-test-notification"]
+        XCTAssertTrue(routeNotification.waitForExistence(timeout: 5), app.debugDescription)
+        routeNotification.tap()
+
+        let targetHeading = app.buttons["request-heading"]
+        XCTAssertTrue(targetHeading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(targetHeading.isHittable, app.debugDescription)
+        XCTAssertTrue(targetHeading.label.contains("Unfamiliar interface"),
+                      "The notification target is presented in the visible detail: \(targetHeading.label)")
+
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inboxTab.isSelected,
+                      "Returning from a notification opened in Search returns to its Inbox tab.")
+        searchTab.tap()
+        XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["request-row-facilities-01"]
+            .waitForExistence(timeout: 5),
+                      "Returning to Search shows its cleared path and query.")
+        XCTAssertFalse(app.scrollViews["message-card-scroll"].exists,
+                       "The previous notification detail is not left on the Search stack.")
     }
 
     private func assertListHeader(in app: XCUIApplication, file: StaticString = #filePath,

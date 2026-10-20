@@ -124,6 +124,57 @@ enum InboxWorkspaceTab: Hashable {
     }
 }
 
+@MainActor
+enum InboxListProjection {
+    static func filteredRows(_ rows: [InboxItem], in tab: InboxWorkspaceTab,
+                             selectedTab: InboxMessageTab, search: String) -> [InboxItem] {
+        let messageTab = tab.messageTab ?? selectedTab
+        let inTab = rows.filter { $0.belongsToReplied == (messageTab == .replied) }
+        guard tab == .search else { return inTab }
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return inTab }
+        return inTab.filter {
+            $0.preview.title.localizedCaseInsensitiveContains(query) ||
+            $0.preview.sender.localizedCaseInsensitiveContains(query) ||
+            $0.preview.body.localizedCaseInsensitiveContains(query)
+        }
+    }
+}
+
+enum InboxSearchNavigation {
+    static func replacingDestination(in path: [InboxSelection],
+                                     with selection: InboxSelection?) -> [InboxSelection] {
+        guard !path.isEmpty else { return path }
+        guard let selection else { return [] }
+        return Array(path.dropLast()) + [selection]
+    }
+}
+
+@MainActor
+struct InboxNotificationDestination: Equatable {
+    let selection: InboxSelection?
+    let selectedTab: InboxMessageTab
+    let workspaceTab: InboxWorkspaceTab
+    let search = ""
+    let searchPath: [InboxSelection] = []
+
+    init(route: NativeInboxNavigation, rows: [InboxItem]) {
+        guard let key = route.request else {
+            selection = nil
+            selectedTab = .inbox
+            workspaceTab = .inbox
+            return
+        }
+
+        let selection = InboxSelection.request(key)
+        let isReplied = rows.first(where: { $0.id == selection })?.belongsToReplied == true
+        let messageTab: InboxMessageTab = isReplied ? .replied : .inbox
+        self.selection = selection
+        selectedTab = messageTab
+        workspaceTab = isReplied ? .replied : .inbox
+    }
+}
+
 private struct InboxListRowScrollTarget: Hashable {
     let tab: InboxWorkspaceTab
     let selection: InboxSelection
@@ -232,6 +283,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
     @State private var searchPath: [InboxSelection] = []
+    @State private var testNotificationNavigation: NativeInboxNavigation?
     @State private var listTabOnMessageEntry: InboxMessageTab?
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
@@ -244,6 +296,24 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
     }
     private var orderedIDs: [InboxSelection] { rows.map(\.id) }
+    private var cardNavigationIDs: [InboxSelection] {
+        guard workspaceTab == .search else { return orderedIDs }
+        return InboxListProjection.filteredRows(rows, in: .search,
+            selectedTab: selectedTab, search: search).map(\.id)
+    }
+    private var activeNotificationNavigation: NativeInboxNavigation? {
+        notificationNavigation ?? testNotificationNavigation
+    }
+    private var exposesNotificationTestAction: Bool {
+        ProcessInfo.processInfo.arguments.contains("--harklight-test-notification-navigation")
+    }
+
+    private func triggerNotificationTestAction() {
+        guard exposesNotificationTestAction, let key = requests.first?.key else { return }
+        let serial = max(notificationNavigation?.serial ?? 0,
+                         testNotificationNavigation?.serial ?? 0) &+ 1
+        testNotificationNavigation = NativeInboxNavigation(serial: serial, request: key)
+    }
 
     private func preview(for id: InboxSelection) -> InboxCardPreview? {
         rows.first { $0.id == id }?.preview
@@ -278,6 +348,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         // Keep departure cleanup bound to the explicit identity transition;
         // split-view adaptation changes columns without leaving this message.
         selectionDidChange(from: previous, to: next)
+        if workspaceTab == .search {
+            let path = InboxSearchNavigation.replacingDestination(in: searchPath, with: next)
+            if path != searchPath { searchPath = path }
+        }
         if previous != nil, next == nil {
             restoreLastViewedListPosition()
             chatOpen = false
@@ -434,7 +508,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       showSettings: { settings = true }, markSeen: markSeen,
                       markNoComment: markNoComment,
                       fetchOlderInboxPage: fetchOlderInboxPage,
-                      notificationNavigation: notificationNavigation)
+                      notificationNavigation: activeNotificationNavigation,
+                      triggerNotification: nil)
             .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
         } detail: {
             detailContent(for: selection, wideChat: wideChat, inlineChat: inlineChat,
@@ -454,7 +529,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       showSettings: { settings = true }, markSeen: markSeen,
                       markNoComment: markNoComment,
                       fetchOlderInboxPage: fetchOlderInboxPage,
-                      notificationNavigation: notificationNavigation)
+                      notificationNavigation: activeNotificationNavigation,
+                      triggerNotification: exposesNotificationTestAction
+                          ? { triggerNotificationTestAction() } : nil)
                 .navigationDestination(for: InboxSelection.self) { destination in
                     detailContent(for: destination, wideChat: wideChat,
                                   inlineChat: inlineChat, geometry: geometry)
@@ -464,22 +541,30 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "Search")
         .onChange(of: searchPath) { _, path in
+            guard workspaceTab == .search else { return }
             navigate(to: path.last)
         }
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
                              canInlineChat: Bool = false, openChat: (() -> Void)? = nil) -> InboxCardContext {
-        let ids = orderedIDs
-        let index = ids.firstIndex(of: id) ?? 0
-        return InboxCardContext(position: index + 1, total: ids.count,
-            previous: index > 0 ? preview(for: ids[index - 1]) : nil,
-            next: index + 1 < ids.count ? preview(for: ids[index + 1]) : nil,
+        let ids = cardNavigationIDs
+        let index = ids.firstIndex(of: id)
+        let previous = index.flatMap { position in
+            position > 0 ? preview(for: ids[position - 1]) : nil
+        }
+        let next = index.flatMap { position in
+            position + 1 < ids.count ? preview(for: ids[position + 1]) : nil
+        }
+        return InboxCardContext(position: (index ?? 0) + 1, total: ids.count,
+            previous: previous,
+            next: next,
             inlineChat: inlineChat, canInlineChat: canInlineChat, openChat: openChat) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
-                guard let current = orderedIDs.firstIndex(of: id),
-                      orderedIDs.indices.contains(current + direction) else { return }
-                let next = orderedIDs[current + direction]
+                let currentIDs = cardNavigationIDs
+                guard let current = currentIDs.firstIndex(of: id),
+                      currentIDs.indices.contains(current + direction) else { return }
+                let next = currentIDs[current + direction]
                 navigatedBetweenMessages = true
                 navigate(to: next)
             }
@@ -548,6 +633,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 selectedTab = messageTab
                 if oldTab == .search {
                     search = ""
+                    searchPath = []
                 }
             }
             .onChange(of: selectedTab) { _, tab in
@@ -559,20 +645,24 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 conversationPresentation
                     .presentationDetents([.medium, .large])
             }
-            .onChange(of: notificationNavigation, initial: true) { _, route in
+            .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route else { return }
                 settings = false
                 chatOpen = false
                 conversationPresented = false
-                // Notification navigation changes selection only. The ordinary
-                // navigate helper also schedules abandoned-upload cleanup.
-                // A tap must not turn that into a domain mutation.
-                selection = route.request.map(InboxSelection.request)
+                // Notification routing changes presentation only. Keep it out
+                // of ordinary navigation cleanup so a tap cannot mutate the domain.
+                let destination = InboxNotificationDestination(route: route, rows: rows)
+                workspaceTab = destination.workspaceTab
+                selectedTab = destination.selectedTab
+                search = destination.search
+                searchPath = destination.searchPath
+                selection = destination.selection
                 if let key = route.request {
                     lastViewedSelection = .request(key)
                     selectRequest(key)
                 }
-                visibility = route.request == nil ? .all : .detailOnly
+                visibility = destination.selection == nil ? .all : .detailOnly
             }
             .onChange(of: samples.selectedID) { _, id in
                 UIDiagnostics.shared.record("inbox.samplesSelectedChanged \(id ?? "nil") selection=\(UIDiagnostics.describe(selection))")
@@ -633,6 +723,7 @@ struct InboxList: View {
     let markNoComment: (InboxSelection) -> Void
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
+    let triggerNotification: (() -> Void)?
     @State private var scrollMetrics = InboxScrollMetrics.empty
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
@@ -643,16 +734,7 @@ struct InboxList: View {
     }
 
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
-        let messageTab = messageTab(for: tab)
-        let inTab = rows.filter { $0.belongsToReplied == (messageTab == .replied) }
-        guard tab == .search else { return inTab }
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return inTab }
-        return inTab.filter {
-            $0.preview.title.localizedCaseInsensitiveContains(query) ||
-            $0.preview.sender.localizedCaseInsensitiveContains(query) ||
-            $0.preview.body.localizedCaseInsensitiveContains(query)
-        }
+        InboxListProjection.filteredRows(rows, in: tab, selectedTab: selectedTab, search: search)
     }
 
     private func restoreLastViewed(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
@@ -798,6 +880,12 @@ struct InboxList: View {
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle("Harklight")
         .toolbar {
+            if let triggerNotification {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Open notification", action: triggerNotification)
+                        .accessibilityIdentifier("harklight-test-notification")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Settings", systemImage: "gearshape", action: openSettings)
                     .labelStyle(.iconOnly)

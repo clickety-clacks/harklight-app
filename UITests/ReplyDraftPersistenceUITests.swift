@@ -7,7 +7,7 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
-        XCTAssertTrue(app.buttons["inbox-search-button"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.tabBars.buttons["Inbox"].waitForExistence(timeout: 10), app.debugDescription)
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
@@ -25,12 +25,13 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["--attention-fixture"]
         app.launch()
-        XCTAssertTrue(app.buttons["inbox-search-button"].waitForExistence(timeout: 10), app.debugDescription)
-        let repliedTab = app.buttons["inbox-tab-replied"]
+        XCTAssertTrue(app.tabBars.buttons["Inbox"].waitForExistence(timeout: 10), app.debugDescription)
+        let repliedTab = app.tabBars.buttons["Replied"]
         if repliedTab.exists { repliedTab.tap() }
         let reopenedRow = app.descendants(matching: .any)["request-row-facilities-01"]
-        if !reopenedRow.waitForExistence(timeout: 3), app.buttons["inbox-tab-inbox"].exists {
-            app.buttons["inbox-tab-inbox"].tap()
+        let inboxTab = app.tabBars.buttons["Inbox"]
+        if !reopenedRow.waitForExistence(timeout: 3), inboxTab.exists {
+            inboxTab.tap()
         }
         XCTAssertTrue(reopenedRow.waitForExistence(timeout: 5), app.debugDescription)
         reopenedRow.tap()
