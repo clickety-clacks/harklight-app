@@ -549,13 +549,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 guard workspaceTab != .search else { return }
                 workspaceTab = tab == .replied ? .replied : .inbox
             }
-            Group {
-                if horizontalSizeClass == .compact && selection != nil {
-                    tabs.toolbar(.hidden, for: .tabBar)
-                } else {
-                    tabs
-                }
-            }
+            .toolbar(horizontalSizeClass == .compact && selection != nil ? .hidden : .automatic,
+                     for: .tabBar)
             .sheet(isPresented: $conversationPresented) {
                 conversationPresentation
                     .presentationDetents([.medium, .large])

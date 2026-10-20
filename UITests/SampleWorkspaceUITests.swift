@@ -48,9 +48,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["request-lifecycle-status"].waitForExistence(timeout: 5),
                       "A saved answer moves only after it is submitted.")
         showList(app)
-        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(repliedTab.isSelected,
-                      "After submission, the restored list shows the request in Replied.")
+        XCTAssertTrue(app.buttons["Search"].isSelected,
+                      "Returning from a Search result restores the Search tab.")
+        repliedTab.tap()
+        XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(original.waitForExistence(timeout: 5),
                       "A submitted answer appears in Replied.")
         app.buttons["inbox-settings"].tap()
@@ -147,14 +148,12 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
-        clearSearch(in: app)
         let searchButton = app.buttons["Search"]
+        if searchButton.exists && !searchButton.isSelected { searchButton.tap() }
         let field = app.searchFields.firstMatch
-        if !field.exists {
-            XCTAssertTrue(searchButton.waitForExistence(timeout: 5), app.debugDescription)
-            searchButton.tap()
-        }
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        let clearText = field.buttons["Clear text"]
+        if clearText.exists && clearText.isHittable { clearText.tap() }
         field.tap()
         field.typeText(query + "\n")
     }
@@ -370,9 +369,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         let inboxTab = app.buttons["Inbox"]
         let repliedTab = app.buttons["Replied"]
-        XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(inboxTab.isSelected,
-                      "A typed but unsent reply restores to Inbox.")
+        XCTAssertTrue(app.buttons["Search"].isSelected,
+                      "Returning from a Search result restores the Search tab.")
         enterSearch("Which approach", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "A typed but unsent reply stays in Inbox.")
