@@ -554,6 +554,7 @@ struct InboxList: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
+    @State private var searchPresented = false
     @State private var scrollMetrics = InboxScrollMetrics.empty
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
@@ -789,11 +790,17 @@ struct InboxList: View {
                 }
                 .accessibilityIdentifier("inbox-search-button")
             }
-            .searchable(text: $search, prompt: "Search")
+            .searchable(text: $search, isPresented: $searchPresented, prompt: "Search")
             .onChange(of: workspaceTab) { oldTab, newTab in
-                guard let messageTab = newTab.messageTab else { return }
+                guard let messageTab = newTab.messageTab else {
+                    searchPresented = true
+                    return
+                }
                 selectedTab = messageTab
-                if oldTab == .search { search = "" }
+                if oldTab == .search {
+                    searchPresented = false
+                    search = ""
+                }
             }
             .onChange(of: selectedTab) { _, tab in
                 guard workspaceTab != .search else { return }
