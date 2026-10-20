@@ -437,7 +437,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let build6Record = Data("""
         {"host":"relay.example.test","enrollmentPort":18444,"relayPort":18443,"trustedRootDER":"AQID","identityLabel":"saved-device","deviceID":"saved-device-id","approvalCode":"ABCDEFGH","statusSecret":"\(String(repeating: "b", count: 64))","expiresAt":1,"statusExpiresAt":2,"personID":"saved-person","pushBinding":{"address":"\(address)","operationID":"\(operationID)","revision":2,"accepted":true},"notificationProfileGeneration":"\(profileGeneration)","notificationBindings":[{"bindingID":"\(bindingID)","operationID":"\(operationID)","revision":2}]}
         """.utf8)
-        let add = [kSecClass as String: kSecClassGenericPassword,
+        let add: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                    kSecAttrService as String: service,
                    kSecAttrAccount as String: "current-installation",
                    kSecValueData as String: build6Record,
