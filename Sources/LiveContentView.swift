@@ -631,11 +631,12 @@ struct LiveRequestDetail: View {
                             Label("Seen", systemImage: "checkmark")
                                 .labelStyle(.titleAndIcon)
                                 .foregroundStyle(Color.green)
+                                .font(.headline)
                         } else {
                             Image(systemName: "checkmark")
                                 .foregroundStyle(Color.white)
+                                .font(.headline)
                         }
-                        .font(.headline)
                     }
                     .buttonStyle(.glass)
                     .tint(seenActionIsComplete ? .green : .blue)
