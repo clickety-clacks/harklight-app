@@ -71,6 +71,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(repliedSearchField.waitForExistence(timeout: 5), app.debugDescription)
         repliedSearchField.tap()
         repliedSearchField.typeText("Archive\n")
+        XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription)
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered message in Replied.")
         attachScreenshot("Replied search for Archive in use", from: app)

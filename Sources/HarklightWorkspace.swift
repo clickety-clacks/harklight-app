@@ -463,7 +463,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         .searchable(text: $search,
                     placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "Search")
-        .searchPresentationToolbarBehavior(.avoidHidingContent)
         .onChange(of: searchPath) { _, path in
             navigate(to: path.last)
         }
@@ -543,6 +542,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 geometry: geometry)
                 }
             }
+            .searchPresentationToolbarBehavior(.avoidHidingContent)
             .onChange(of: workspaceTab) { oldTab, newTab in
                 guard let messageTab = newTab.messageTab else { return }
                 selectedTab = messageTab
