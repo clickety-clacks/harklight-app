@@ -102,6 +102,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(noComment.isSelected, "No comment is selected as an ordinary answer.")
         XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
                        "Selecting No comment does not send it.")
+        capture("multiple-choice-no-comment-selected-unsent", app)
         showList(app)
         XCTAssertTrue(app.buttons["inbox-tab-inbox"].isSelected)
         XCTAssertTrue(row.waitForExistence(timeout: 5),

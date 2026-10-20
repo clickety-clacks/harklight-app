@@ -194,13 +194,16 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         facilities.tap()
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        attachScreenshot("Selected detail in portrait before split adaptation", from: app)
 
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
                       "Changing to the wide split view must keep the selected message.")
+        attachScreenshot("Selected detail after landscape split adaptation", from: app)
         XCUIDevice.shared.orientation = .portrait
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
                       "Adapting back to compact layout must not count as leaving the message.")
+        attachScreenshot("Selected detail after compact split adaptation", from: app)
 
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
