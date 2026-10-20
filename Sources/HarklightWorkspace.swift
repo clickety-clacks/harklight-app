@@ -532,6 +532,7 @@ struct InboxList: View {
     let markNoComment: (InboxSelection) -> Void
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var search = ""
     @State private var searchPresented = false
     @FocusState private var searchFocused: Bool
@@ -736,7 +737,8 @@ struct InboxList: View {
                     isUserScrolling = false
                     requestedInGesture = false
                 })
-            .toolbar(selected == nil ? .hidden : .visible, for: .navigationBar)
+            .toolbar(horizontalSizeClass == .compact && selected != nil ? .visible : .hidden,
+                     for: .navigationBar)
             .toolbarBackground(.hidden, for: .bottomBar)
             .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
         }

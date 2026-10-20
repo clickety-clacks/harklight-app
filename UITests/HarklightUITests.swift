@@ -235,7 +235,8 @@ final class HarklightUITests: XCTestCase {
 
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.25))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.25))
-        start.press(forDuration: 0.05, thenDragTo: end)
+        start.press(forDuration: 0.1, thenDragTo: end,
+                    withVelocity: .slow, thenHoldForDuration: 0.3)
         let returnedToInbox = facilities.waitForExistence(timeout: 5)
         if !returnedToInbox { attachScreenshot("Detail after native edge swipe", from: app) }
         XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
