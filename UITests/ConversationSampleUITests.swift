@@ -358,26 +358,30 @@ final class ConversationSampleUITests: XCTestCase {
         return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
     }
 
-    /// Scrolls until a hittable part of the row is inside the list and above the
-    /// bottom controls. Returns false with a screenshot if the row remains blocked.
+    /// Scrolls until the whole row is below the navigation bar and above the
+    /// bottom controls. Returns false with a screenshot if it remains blocked.
     private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.waitForExistence(timeout: 5) else {
             XCTFail("Row does not exist: \(app.debugDescription)")
             return false
         }
-        // Split-view reconstruction can clip a row at the list's top edge. If
-        // XCTest still reports it hittable, keep the navigation test on that row.
         func unobscured() -> Bool {
             let search = app.textFields["inbox-search-field"]
             let bottom = search.exists ? search.frame.minY : app.windows.firstMatch.frame.maxY
+            let navigationBar = app.navigationBars.firstMatch
+            let top = max(scrollView.frame.minY,
+                          navigationBar.exists ? navigationBar.frame.maxY : scrollView.frame.minY)
             let frame = element.frame
-            let intersectsList = frame.maxY > scrollView.frame.minY &&
-                frame.minY < scrollView.frame.maxY
-            return element.isHittable && intersectsList && frame.maxY <= bottom
+            return element.isHittable && frame.minY >= top && frame.maxY <= bottom
         }
         for _ in 0..<8 {
             if unobscured() { return true }
-            if element.frame.midY < scrollView.frame.midY { scrollView.swipeDown() } else { scrollView.swipeUp() }
+            let direction: CGFloat = element.frame.midY < scrollView.frame.midY ? 180 : -180
+            let start = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.1,
+                        thenDragTo: start.withOffset(CGVector(dx: 0, dy: direction)),
+                        withVelocity: .slow,
+                        thenHoldForDuration: 0.3)
         }
         if unobscured() { return true }
         capture("row-outside-list-after-scrolling", app)
