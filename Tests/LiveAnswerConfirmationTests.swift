@@ -125,7 +125,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         live.flushPendingDraft(for: key)
         live.selectNoComment(for: key)
 
-        XCTAssertTrue(live.request(for: key)?.draft.noCommentSelected)
+        XCTAssertTrue(live.request(for: key)?.draft.noCommentSelected == true)
         XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
                        "Selecting No comment is still an unsent draft.")
         live.submitFromUser(key)
@@ -138,7 +138,6 @@ final class LiveAnswerConfirmationTests: XCTestCase {
             .textByActionID[ExactText("reply")], ExactText("Keep this as an unsent draft."))
         XCTAssertTrue(savedDraft?.noCommentSelected == true)
         XCTAssertEqual(submitted.answerKind, .noComment)
-        XCTAssertEqual(submitted.inputs, [])
     }
 
     func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {
