@@ -12,9 +12,9 @@ final class InboxStockTabsUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let inboxTab = app.buttons["inbox-tab-inbox"]
-        let repliedTab = app.buttons["inbox-tab-replied"]
-        let searchTab = app.buttons["inbox-search-button"]
+        let inboxTab = app.buttons["Inbox"]
+        let repliedTab = app.buttons["Replied"]
+        let searchTab = app.buttons["Search"]
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(searchTab.exists, app.debugDescription)

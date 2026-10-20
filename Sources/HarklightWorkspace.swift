@@ -778,17 +778,14 @@ struct InboxList: View {
                 Tab("Inbox", systemImage: "envelope.badge", value: .inbox) {
                     listContent(for: .inbox, using: proxy)
                 }
-                .accessibilityIdentifier("inbox-tab-inbox")
 
                 Tab("Replied", systemImage: "envelope.open", value: .replied) {
                     listContent(for: .replied, using: proxy)
                 }
-                .accessibilityIdentifier("inbox-tab-replied")
 
                 Tab(value: .search, role: .search) {
                     listContent(for: .search, using: proxy)
                 }
-                .accessibilityIdentifier("inbox-search-button")
             }
             .searchable(text: $search, isPresented: $searchPresented, prompt: "Search")
             .onChange(of: workspaceTab) { oldTab, newTab in
