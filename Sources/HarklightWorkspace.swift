@@ -875,7 +875,7 @@ struct InboxList: View {
                 isUserScrolling = false
                 requestedInGesture = false
             })
-        .toolbar(horizontalSizeClass == .compact && selected != nil ? .visible : .hidden,
+        .toolbar(tab == .search || (horizontalSizeClass == .compact && selected != nil) ? .visible : .hidden,
                  for: .navigationBar)
     }
 
