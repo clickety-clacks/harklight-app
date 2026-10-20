@@ -231,6 +231,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
+    @State private var searchPath: [InboxSelection] = []
     @State private var listTabOnMessageEntry: InboxMessageTab?
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
@@ -442,7 +443,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func searchStack(wideChat: Bool, inlineChat: Bool,
                              geometry: GeometryProxy) -> some View {
-        NavigationStack {
+        NavigationStack(path: $searchPath) {
             InboxList(tab: .search, rows: rows, selected: navigationSelection,
                       selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
                       lastViewedSelection: lastViewedSelection,
@@ -453,19 +454,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       fetchOlderInboxPage: fetchOlderInboxPage,
                       notificationNavigation: notificationNavigation)
                 .navigationDestination(for: InboxSelection.self) { destination in
-                    detailContent(for: selection ?? destination, wideChat: wideChat,
+                    detailContent(for: destination, wideChat: wideChat,
                                   inlineChat: inlineChat, geometry: geometry)
-                        .onAppear {
-                            if selection != destination {
-                                navigate(to: destination)
-                            }
-                        }
-                        .onDisappear {
-                            if selection != nil {
-                                navigate(to: nil)
-                            }
-                        }
                 }
+        }
+        .onChange(of: searchPath) { _, path in
+            navigate(to: path.last)
         }
     }
 
@@ -555,8 +549,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 guard workspaceTab != .search else { return }
                 workspaceTab = tab == .replied ? .replied : .inbox
             }
-            .toolbar(horizontalSizeClass == .compact && selection != nil ? .hidden : .automatic,
-                     for: .tabBar)
             .sheet(isPresented: $conversationPresented) {
                 conversationPresentation
                     .presentationDetents([.medium, .large])
@@ -711,8 +703,8 @@ struct InboxList: View {
         }
     }
 
-    private var listSelection: Binding<InboxSelection?> {
-        tab == .search ? Binding<InboxSelection?>.constant(nil) : $selected
+    private var listSelection: Binding<InboxSelection?>? {
+        tab == .search ? nil : $selected
     }
 
     @ViewBuilder
@@ -877,15 +869,20 @@ struct InboxList: View {
                 isUserScrolling = false
                 requestedInGesture = false
             })
-        .toolbar(tab == .search ? .automatic :
-                    (horizontalSizeClass == .compact && selected != nil ? .visible : .hidden),
-                 for: .navigationBar)
     }
 
     var body: some View {
         ScrollViewReader { proxy in
-            listContent(for: tab, using: proxy)
-                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+            Group {
+                if tab == .search {
+                    listContent(for: tab, using: proxy)
+                } else {
+                    listContent(for: tab, using: proxy)
+                        .toolbar(horizontalSizeClass == .compact && selected != nil ? .visible : .hidden,
+                                 for: .navigationBar)
+                }
+            }
+            .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
         }
     }
 }

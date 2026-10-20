@@ -31,7 +31,7 @@ final class InboxStockTabsUITests: XCTestCase {
         let searchField = app.searchFields.firstMatch
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
         searchField.tap()
-        searchField.typeText("Archive")
+        searchField.typeText("Archive\n")
         attachScreenshot("Search results for Archive", from: app)
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
@@ -63,7 +63,7 @@ final class InboxStockTabsUITests: XCTestCase {
         let repliedSearchField = app.searchFields.firstMatch
         XCTAssertTrue(repliedSearchField.waitForExistence(timeout: 5), app.debugDescription)
         repliedSearchField.tap()
-        repliedSearchField.typeText("Archive")
+        repliedSearchField.typeText("Archive\n")
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered message in Replied.")
         attachScreenshot("Replied search for Archive in use", from: app)
