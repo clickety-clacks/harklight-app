@@ -419,6 +419,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     .frame(width: min(360, geometry.size.width * 0.34))
             }
         }
+        .toolbar(horizontalSizeClass == .compact && item != nil ? .hidden : .automatic,
+                 for: .tabBar)
     }
 
     private func inboxSplitView(for tab: InboxWorkspaceTab, wideChat: Bool, inlineChat: Bool,
@@ -550,8 +552,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 workspaceTab = tab == .replied ? .replied : .inbox
             }
             tabs
-            .toolbar(horizontalSizeClass == .compact && selection != nil ? .hidden : .automatic,
-                     for: .tabBar)
             .sheet(isPresented: $conversationPresented) {
                 conversationPresentation
                     .presentationDetents([.medium, .large])
