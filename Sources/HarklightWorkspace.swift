@@ -460,6 +460,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                   inlineChat: inlineChat, geometry: geometry)
                 }
         }
+        .searchable(text: $search,
+                    placement: .navigationBarDrawer(displayMode: .always),
+                    prompt: "Search")
+        .searchPresentationToolbarBehavior(.avoidHidingContent)
         .onChange(of: searchPath) { _, path in
             navigate(to: path.last)
         }
@@ -539,7 +543,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 geometry: geometry)
                 }
             }
-            .searchable(text: $search, prompt: "Search")
             .onChange(of: workspaceTab) { oldTab, newTab in
                 guard let messageTab = newTab.messageTab else { return }
                 selectedTab = messageTab
@@ -630,7 +633,6 @@ struct InboxList: View {
     let markNoComment: (InboxSelection) -> Void
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var scrollMetrics = InboxScrollMetrics.empty
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
@@ -794,19 +796,13 @@ struct InboxList: View {
         .scrollContentBackground(.hidden)
         .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
         .scrollDismissesKeyboard(.interactively)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            HStack {
-                HarklightBrand()
-                Spacer(minLength: 16)
+        .navigationTitle("Harklight")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
                 Button("Settings", systemImage: "gearshape", action: openSettings)
                     .labelStyle(.iconOnly)
-                    .buttonStyle(.glass)
                     .accessibilityIdentifier("inbox-settings")
             }
-            .frame(height: 52)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color(uiColor: .systemBackground))
         }
         .onAppear {
             guard workspaceTab == tab else { return }
@@ -876,16 +872,8 @@ struct InboxList: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            Group {
-                if tab == .search {
-                    listContent(for: tab, using: proxy)
-                } else {
-                    listContent(for: tab, using: proxy)
-                        .toolbar(horizontalSizeClass == .compact && selected != nil ? .visible : .hidden,
-                                 for: .navigationBar)
-                }
-            }
-            .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+            listContent(for: tab, using: proxy)
+                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
         }
     }
 }

@@ -19,19 +19,25 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(searchTab.exists, app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+        XCTAssertFalse(app.searchFields.firstMatch.exists, app.debugDescription)
+        assertListHeader(in: app)
         attachScreenshot("Inbox tab", from: app)
 
         repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
+        XCTAssertFalse(app.searchFields.firstMatch.exists, app.debugDescription)
+        assertListHeader(in: app)
         attachScreenshot("Replied tab", from: app)
 
         inboxTab.tap()
         searchTab.tap()
+        assertListHeader(in: app)
         attachScreenshot("Search tab selected", from: app)
         let searchField = app.searchFields.firstMatch
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
         searchField.tap()
         searchField.typeText("Archive\n")
+        XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription)
         attachScreenshot("Search results for Archive", from: app)
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
@@ -67,6 +73,14 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered message in Replied.")
         attachScreenshot("Replied search for Archive in use", from: app)
+    }
+
+    private func assertListHeader(in app: XCUIApplication, file: StaticString = #filePath,
+                                  line: UInt = #line) {
+        XCTAssertTrue(app.navigationBars.staticTexts["Harklight"].waitForExistence(timeout: 5),
+                      app.debugDescription, file: file, line: line)
+        XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription,
+                      file: file, line: line)
     }
 
     private func attachScreenshot(_ name: String, from app: XCUIApplication) {
