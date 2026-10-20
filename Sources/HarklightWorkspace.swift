@@ -612,7 +612,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
             let tabs = TabView(selection: $workspaceTab) {
-                Tab("Inbox", systemImage: "envelope.badge", value: .inbox) {
+                Tab("Inbox", systemImage: "envelope", value: .inbox) {
                     inboxSplitView(for: .inbox, wideChat: wideChat, inlineChat: inlineChat,
                                    geometry: geometry)
                 }
@@ -880,6 +880,12 @@ struct InboxList: View {
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle("Harklight")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                LighthouseMark()
+                    .fill(.primary)
+                    .frame(width: 16, height: 20)
+                    .accessibilityHidden(true)
+            }
             if let triggerNotification {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Open notification", action: triggerNotification)
