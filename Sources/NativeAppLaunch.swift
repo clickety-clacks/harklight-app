@@ -1213,8 +1213,12 @@ final class LivePresentationStore {
 
     var inboxRows: [InboxRequestRow] {
         presentation.requests.map { request in
+            let hasSuccessfulTerminalResponse = request.lifecycleStatus == .answered ||
+                request.lifecycleStatus == .noComment
             let receiptStatus = InboxRequestRow.responseReceiptStatus(
-                request.intentReceipt, hasUnconfirmedOutcome: request.receiptFacts?.ownOutcome == .unconfirmed)
+                request.intentReceipt,
+                hasUnconfirmedOutcome: request.receiptFacts?.ownOutcome == .unconfirmed &&
+                    !hasSuccessfulTerminalResponse)
             var statusParts: [String] = []
             if request.inboxStateIsCurrent {
                 if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }

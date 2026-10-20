@@ -321,8 +321,8 @@ final class HarklightUITests: XCTestCase {
                       "The body Seen action remains alongside the toolbar check.")
         XCTAssertFalse(seenAction.isEnabled,
                        "The completed body Seen action cannot be tapped again.")
-        XCTAssertFalse(seenAction.exists,
-                       "The body must not add a second Seen control after completion.")
+        XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1,
+                       "The restored body Seen control remains singular after completion.")
         XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1,
                        "The completed toolbar Seen control stays in place by itself.")
         attachScreenshot("Notice detail Seen completed", from: app)

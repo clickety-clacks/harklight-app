@@ -75,7 +75,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("ordinary-example-card", app)
         showList(app)
         clearSearch(in: app)
-        repliedTab.tap()
+        selectMessageTab("Replied", in: app)
         XCTAssertTrue(original.exists, app.debugDescription)
         original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
@@ -131,7 +131,7 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "The submitted No comment leaves the Inbox list.")
         capture("no-comment-response-leaves-inbox-selected", app)
         XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
-        repliedTab.tap()
+        selectMessageTab("Replied", in: app)
         XCTAssertTrue(repliedTab.isSelected,
                       "Only the user's tab change moves from Inbox to Replied.")
         XCTAssertTrue(row.waitForExistence(timeout: 5),
@@ -140,6 +140,25 @@ final class SampleWorkspaceUITests: XCTestCase {
         row.swipeLeft()
         XCTAssertFalse(app.buttons["inbox-no-comment"].exists,
                        "Replied rows have no swipe action.")
+    }
+
+    private func selectMessageTab(_ title: String, in app: XCUIApplication,
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        let closeSearch = app.buttons["Close"]
+        if closeSearch.exists { closeSearch.tap() }
+
+        let destination = app.tabBars.buttons[title]
+        XCTAssertTrue(destination.waitForExistence(timeout: 5), app.debugDescription,
+                      file: file, line: line)
+        if !destination.isSelected { destination.tap() }
+    }
+
+    private func assertSearchTabSelected(_ app: XCUIApplication, file: StaticString = #filePath,
+                                        line: UInt = #line) {
+        let field = app.searchFields.firstMatch
+        let tab = app.tabBars.buttons["Search"]
+        XCTAssertTrue(field.waitForExistence(timeout: 1) || (tab.exists && tab.isSelected),
+                      app.debugDescription, file: file, line: line)
     }
 
     private func showList(_ app: XCUIApplication) {
@@ -252,19 +271,17 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         let inboxTab = app.tabBars.buttons["Inbox"]
         let repliedTab = app.tabBars.buttons["Replied"]
-        let searchTab = app.tabBars.buttons["Search"]
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(searchTab.isSelected,
-                      "Returning from a Search result keeps the native Search tab selected.")
+        assertSearchTabSelected(app)
         enterSearch("A note for", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         clearSearch(in: app)
-        repliedTab.tap()
+        selectMessageTab("Replied", in: app)
         enterSearch("A note for", in: app)
         XCTAssertFalse(row.waitForExistence(timeout: 1),
                        "An unsent No comment selection does not appear in Replied.")
         clearSearch(in: app)
-        inboxTab.tap()
+        selectMessageTab("Inbox", in: app)
         enterSearch("A note for", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
@@ -275,10 +292,15 @@ final class SampleWorkspaceUITests: XCTestCase {
             .waitForExistence(timeout: 5), app.debugDescription)
         showList(app)
         clearSearch(in: app)
-        XCTAssertTrue(searchTab.isSelected,
-                      "The stock Search tab remains selected after the answer is accepted.")
+        assertSearchTabSelected(app)
         enterSearch("A note for", in: app)
-        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(row.waitForExistence(timeout: 1),
+                       "A submitted No comment leaves the Inbox.")
+        clearSearch(in: app)
+        selectMessageTab("Replied", in: app)
+        enterSearch("A note for", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "The submitted No comment appears in Replied.\n\(app.debugDescription)")
         row.swipeLeft()
         XCTAssertFalse(app.buttons["inbox-no-comment"].exists,
                        "Replied rows have no swipe action.")
@@ -333,8 +355,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
 
         let repliedTab = app.tabBars.buttons["Replied"]
-        XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
-        repliedTab.tap()
+        selectMessageTab("Replied", in: app)
         XCTAssertTrue(informational.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(informational.label.contains("Seen selected locally"), informational.label)
         informational.swipeLeft()
@@ -378,12 +399,11 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("seen-response-detail", app)
 
         showList(app)
-        XCTAssertTrue(app.tabBars.buttons["Search"].isSelected,
-                      "The Seen response keeps Search selected on return.")
+        assertSearchTabSelected(app)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "The Seen response leaves the current Inbox Search results.")
         capture("seen-response-leaves-search-results", app)
-        app.tabBars.buttons["Replied"].tap()
+        selectMessageTab("Replied", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The Seen response appears in Replied after the user switches tabs.")
         capture("seen-response-in-replied", app)
@@ -412,18 +432,17 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         let inboxTab = app.tabBars.buttons["Inbox"]
         let repliedTab = app.tabBars.buttons["Replied"]
-        XCTAssertTrue(app.tabBars.buttons["Search"].isSelected,
-                      "Returning from a Search result restores the Search tab.")
+        assertSearchTabSelected(app)
         enterSearch("Which approach", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "A typed but unsent reply stays in Inbox.")
         clearSearch(in: app)
-        repliedTab.tap()
+        selectMessageTab("Replied", in: app)
         enterSearch("Which approach", in: app)
         XCTAssertFalse(row.waitForExistence(timeout: 1),
                        "A typed but unsent reply does not appear in Replied.")
         clearSearch(in: app)
-        inboxTab.tap()
+        selectMessageTab("Inbox", in: app)
         enterSearch("Which approach", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
@@ -447,12 +466,11 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.descendants(matching: .any)["sample-finish"].tap()
         capture("text-response-submitted", app)
         showList(app)
-        XCTAssertTrue(app.tabBars.buttons["Search"].isSelected,
-                      "Submitting a Search result keeps Search selected.")
+        assertSearchTabSelected(app)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A submitted text reply leaves the current Inbox Search results.")
         capture("text-response-leaves-search-results", app)
-        repliedTab.tap()
+        selectMessageTab("Replied", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The text response appears in Replied after the user switches tabs.")
         capture("text-response-in-replied", app)

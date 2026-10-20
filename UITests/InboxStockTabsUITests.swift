@@ -110,7 +110,7 @@ final class InboxStockTabsUITests: XCTestCase {
                        "Search remains scoped to Inbox after the response moves out of Inbox.")
         attachScreenshot("Answered request leaves Inbox search", from: app)
 
-        repliedTab.tap()
+        selectMessageTab("Replied", in: app)
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The submitted local answer appears in Replied.")
@@ -165,6 +165,17 @@ final class InboxStockTabsUITests: XCTestCase {
                       "Returning to Search shows its cleared path and query.")
         XCTAssertFalse(app.scrollViews["message-card-scroll"].exists,
                        "The previous notification detail is not left on the Search stack.")
+    }
+
+    private func selectMessageTab(_ title: String, in app: XCUIApplication,
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        let closeSearch = app.buttons["Close"]
+        if closeSearch.exists { closeSearch.tap() }
+
+        let destination = app.tabBars.buttons[title]
+        XCTAssertTrue(destination.waitForExistence(timeout: 5), app.debugDescription,
+                      file: file, line: line)
+        if !destination.isSelected { destination.tap() }
     }
 
     private func assertListHeader(in app: XCUIApplication, file: StaticString = #filePath,

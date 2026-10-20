@@ -211,8 +211,9 @@ struct InboxRequestRow: Identifiable {
 
     static func responseReceiptStatus(_ receipt: IntentReceipt?,
                                       hasUnconfirmedOutcome: Bool = false) -> InboxResponseReceiptStatus? {
-        if hasUnconfirmedOutcome { return .failed }
-        guard let state = receipt?.localState else { return nil }
+        guard let state = receipt?.localState else {
+            return hasUnconfirmedOutcome ? .failed : nil
+        }
         return switch state {
         case .durable, .queuedForRelay, .accepted: .pendingOrAccepted
         case .refusedByRetraction, .terminalUnconfirmed, .unsupported, .repairRequired: .failed
