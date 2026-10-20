@@ -503,8 +503,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
 
                 Tab(value: .search, role: .search) {
-                    inboxSplitView(for: .search, wideChat: wideChat, inlineChat: inlineChat,
-                                   geometry: geometry)
+                    NavigationStack {
+                        inboxSplitView(for: .search, wideChat: wideChat, inlineChat: inlineChat,
+                                       geometry: geometry)
+                    }
                 }
             }
             .searchable(text: $search, prompt: "Search")
