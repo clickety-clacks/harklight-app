@@ -32,6 +32,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
         searchField.tap()
         searchField.typeText("Archive")
+        attachScreenshot("Search results for Archive", from: app)
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
         attachScreenshot("Inbox search in use", from: app)

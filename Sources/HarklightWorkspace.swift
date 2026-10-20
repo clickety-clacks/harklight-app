@@ -364,6 +364,62 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         Binding(get: { selection }, set: { navigate(to: $0) })
     }
 
+    @ViewBuilder
+    private func detailContent(for item: InboxSelection?, wideChat: Bool, inlineChat: Bool,
+                               geometry: GeometryProxy) -> some View {
+        HStack(spacing: 0) {
+            Group {
+                switch item {
+                case let .request(key)?:
+                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
+                        canInlineChat: wideChat,
+                        openChat: {
+                            if wideChat {
+                                chatOpen.toggle()
+                            } else {
+                                conversationPresented = true
+                            }
+                        }))
+                        .id(key)
+                case let .sample(id)?:
+                    if showsLocalExamples,
+                       samples.messages.contains(where: { $0.id == id }),
+                       let response = samples.responses[id] {
+                        SampleCardScreen(response: response,
+                            context: cardContext(for: .sample(id), inlineChat: inlineChat,
+                                canInlineChat: wideChat,
+                                openChat: {
+                                    if wideChat {
+                                        chatOpen.toggle()
+                                    } else {
+                                        conversationPresented = true
+                                    }
+                                }))
+                            .id(id)
+                    }
+                case nil:
+                    HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            if inlineChat, case let .request(key)? = item, let conversationStore,
+               let request = conversationStore.request(for: key) {
+                Divider()
+                ConversationPanel(store: conversationStore, key: key,
+                    sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                    .frame(width: min(360, geometry.size.width * 0.34))
+            }
+            if inlineChat, case let .sample(id)? = item,
+               let message = samples.messages.first(where: { $0.id == id }),
+               let response = samples.responses[id] {
+                Divider()
+                SampleChatView(sender: message.sender, title: message.title, response: response)
+                    .frame(width: min(360, geometry.size.width * 0.34))
+            }
+        }
+    }
+
     private func inboxSplitView(for tab: InboxWorkspaceTab, wideChat: Bool, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(columnVisibility: $visibility) {
@@ -378,59 +434,39 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       notificationNavigation: notificationNavigation)
             .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
         } detail: {
-            HStack(spacing: 0) {
-                Group {
-                    switch selection {
-                    case let .request(key):
-                        requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
-                            canInlineChat: wideChat,
-                            openChat: {
-                                if wideChat {
-                                    chatOpen.toggle()
-                                } else {
-                                    conversationPresented = true
-                                }
-                            }))
-                            .id(key)
-                    case let .sample(id):
-                        if showsLocalExamples,
-                           samples.messages.contains(where: { $0.id == id }),
-                           let response = samples.responses[id] {
-                            SampleCardScreen(response: response,
-                                context: cardContext(for: .sample(id), inlineChat: inlineChat,
-                                    canInlineChat: wideChat,
-                                    openChat: {
-                                        if wideChat {
-                                            chatOpen.toggle()
-                                        } else {
-                                            conversationPresented = true
-                                        }
-                                    }))
-                                .id(id)
-                        }
-                    case nil:
-                        HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                if inlineChat, case let .request(key) = selection, let conversationStore,
-                   let request = conversationStore.request(for: key) {
-                    Divider()
-                    ConversationPanel(store: conversationStore, key: key,
-                        sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
-                        .frame(width: min(360, geometry.size.width * 0.34))
-                }
-                if inlineChat, case let .sample(id) = selection,
-                   let message = samples.messages.first(where: { $0.id == id }),
-                   let response = samples.responses[id] {
-                    Divider()
-                    SampleChatView(sender: message.sender, title: message.title, response: response)
-                        .frame(width: min(360, geometry.size.width * 0.34))
-                }
-            }
+            detailContent(for: selection, wideChat: wideChat, inlineChat: inlineChat,
+                          geometry: geometry)
         }
         .navigationSplitViewStyle(.balanced)
+    }
+
+    private func searchStack(wideChat: Bool, inlineChat: Bool,
+                             geometry: GeometryProxy) -> some View {
+        NavigationStack {
+            InboxList(tab: .search, rows: rows, selected: navigationSelection,
+                      selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
+                      lastViewedSelection: lastViewedSelection,
+                      restoreLastViewed: restoreLastViewedOnReturn,
+                      didRestoreLastViewed: { restoreLastViewedOnReturn = false },
+                      showSettings: { settings = true }, markSeen: markSeen,
+                      markNoComment: markNoComment,
+                      fetchOlderInboxPage: fetchOlderInboxPage,
+                      notificationNavigation: notificationNavigation)
+                .navigationDestination(for: InboxSelection.self) { destination in
+                    detailContent(for: selection ?? destination, wideChat: wideChat,
+                                  inlineChat: inlineChat, geometry: geometry)
+                        .onAppear {
+                            if selection != destination {
+                                navigate(to: destination)
+                            }
+                        }
+                        .onDisappear {
+                            if selection != nil {
+                                navigate(to: nil)
+                            }
+                        }
+                }
+        }
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
@@ -503,10 +539,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
 
                 Tab(value: .search, role: .search) {
-                    NavigationStack {
-                        inboxSplitView(for: .search, wideChat: wideChat, inlineChat: inlineChat,
-                                       geometry: geometry)
-                    }
+                    searchStack(wideChat: wideChat, inlineChat: inlineChat,
+                                geometry: geometry)
                 }
             }
             .searchable(text: $search, prompt: "Search")
@@ -677,26 +711,44 @@ struct InboxList: View {
         }
     }
 
+    private var listSelection: Binding<InboxSelection?> {
+        tab == .search ? Binding<InboxSelection?>.constant(nil) : $selected
+    }
+
+    @ViewBuilder
+    private func rowContent(for row: InboxItem) -> some View {
+        let isSelected = selected == row.id || lastViewedSelection == row.id
+        switch row {
+        case let .request(request):
+            if tab == .search {
+                NavigationLink(value: row.id) {
+                    InboxRowContent(row: request, selected: isSelected)
+                }
+                .buttonStyle(.plain)
+            } else {
+                InboxRowContent(row: request, selected: isSelected)
+            }
+        case let .example(_, response):
+            if let request = response.inboxRow {
+                if tab == .search {
+                    NavigationLink(value: row.id) {
+                        InboxRowContent(row: request, selected: isSelected)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    InboxRowContent(row: request, selected: isSelected)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let messageTab = messageTab(for: tab)
-        List(selection: $selected) {
+        List(selection: listSelection) {
             ForEach(filteredRows(in: tab)) { row in
-                Group {
-                    switch row {
-                    case let .request(request):
-                        InboxRowContent(row: request,
-                                        selected: selected == row.id || lastViewedSelection == row.id)
-                    case let .example(_, response):
-                        if let request = response.inboxRow {
-                            InboxRowContent(row: request,
-                                            selected: selected == row.id || lastViewedSelection == row.id)
-                        } else {
-                            EmptyView()
-                        }
-                    }
-                }
+                rowContent(for: row)
                 .tag(row.id)
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
