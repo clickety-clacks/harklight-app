@@ -443,7 +443,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let attempted = try await core.sendPendingOriginalOperations()
         XCTAssertEqual(attempted, 1)
         XCTAssertEqual(String(decoding: try XCTUnwrap(session.sent.first?.0), as: UTF8.self),
-                       #"{"type":"answer_no_comment","request_id":"no-comment"}"# + "\n")
+                       #"{"type":"answer_no_comment","request_id":"no-comment","request_revision":1}"# + "\n")
 
         let request = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
         XCTAssertEqual(request.lifecycleStatus, .open)

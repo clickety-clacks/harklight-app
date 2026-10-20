@@ -86,7 +86,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "The local null placeholder is distinguished by answerKind and is never the wire frame.")
         let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
-                       #"{"type":"answer_no_comment","request_id":"sample"}"# + "\n")
+                       #"{"type":"answer_no_comment","request_id":"sample","request_revision":1}"# + "\n")
         try live.refreshFromDurableStore()
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
@@ -132,12 +132,65 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
         let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
-                       #"{"type":"answer_no_comment","request_id":"reply-only"}"# + "\n")
+                       #"{"type":"answer_no_comment","request_id":"reply-only","request_revision":1}"# + "\n")
         let savedDraft = try store.snapshot(context: context).drafts[key]
         XCTAssertEqual(savedDraft?.compatibility
             .textByActionID[ExactText("reply")], ExactText("Keep this as an unsent draft."))
         XCTAssertTrue(savedDraft?.noCommentSelected == true)
         XCTAssertEqual(submitted.answerKind, .noComment)
+    }
+
+    func testNoCommentUsesDisplayedRevisionAndStaleTapKeepsCurrentQuestionOpen() throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("conversation"))
+        let first = JSONValue.object([JSONMember("title", .string(ExactText("First wording")))])
+        let second = JSONValue.object([JSONMember("title", .string(ExactText("Second wording")))])
+        let third = JSONValue.object([JSONMember("title", .string(ExactText("Current wording")))])
+        let firstBinding = ConversationBinding(request: key, revision: 1)
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: first), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("origin"))),
+            context: context)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: firstBinding,
+            fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
+
+        let secondBinding = ConversationBinding(request: key, revision: 2)
+        let secondRevision = ConversationTurn(id: ExactText("revision-2"), binding: secondBinding,
+            author: .origin, sessionHandle: ExactText("origin"), text: ExactText("Second wording"),
+            kind: .revision)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: secondBinding,
+            fact: .revision(secondRevision, payload: second)), context: context)
+
+        let live = try LivePresentationStore(store: store, context: context)
+        XCTAssertEqual(live.request(for: key)?.title, ExactText("Second wording"))
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        let staleSubmission = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        XCTAssertEqual(staleSubmission.requestRevision, 2)
+        XCTAssertEqual(String(decoding: staleSubmission.wireFrame, as: UTF8.self),
+                       #"{"type":"answer_no_comment","request_id":"conversation","request_revision":2}"# + "\n")
+
+        // A stale refusal stays unconfirmed; replay supplies the newer open revision.
+        let thirdBinding = ConversationBinding(request: key, revision: 3)
+        let thirdRevision = ConversationTurn(id: ExactText("revision-3"), binding: thirdBinding,
+            author: .origin, sessionHandle: ExactText("origin"), text: ExactText("Current wording"),
+            kind: .revision)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: thirdBinding,
+            fact: .revision(thirdRevision, payload: third)), context: context)
+        try live.refreshFromDurableStore()
+
+        let current = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(current.title, ExactText("Current wording"))
+        XCTAssertEqual(current.lifecycleStatus, .open)
+        XCTAssertNil(current.intentReceipt)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 3)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .lost)
     }
 
     func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {

@@ -936,7 +936,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
         let operationID = UUID()
         let result = try await session.sendOriginalOperation(
-            Data(#"{"type":"answer_no_comment","request_id":"request"}"#.utf8) + Data([0x0A]),
+            Data(#"{"type":"answer_no_comment","request_id":"request","request_revision":1}"#.utf8) + Data([0x0A]),
             operationID: operationID)
         XCTAssertEqual(result, .unsupported(operationID: operationID),
                        "An older relay's version-first rejection leaves No comment unavailable, never a text fallback.")
