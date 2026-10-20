@@ -269,8 +269,8 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("Sample row in shared list renderer", from: app)
         notice.tap()
         let seenAction = app.buttons["request-seen-action"]
-        XCTAssertTrue(seenAction.waitForExistence(timeout: 5),
-                      "The notice card must present its Seen action.")
+        XCTAssertFalse(seenAction.exists,
+                       "The toolbar check is the only Seen control in notice detail.")
         XCTAssertFalse(app.buttons["request-later-action"].exists,
                        "The bottom glass clock is the only Later action in card mode.")
         let finishSeen = app.buttons["request-finish-seen"]
@@ -284,9 +284,11 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(finishSeen.exists,
                       "The top check must be present.\n\(app.debugDescription)")
         XCTAssertTrue(finishSeen.isEnabled,
-                      "The top check must perform the same Seen action as the card control.\n\(app.debugDescription)")
+                      "The top check must perform the Seen action.\n\(app.debugDescription)")
+        XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1,
+                       "Notice detail must contain one Seen control.")
         XCTAssertFalse(app.staticTexts["Seen available"].exists)
-        attachScreenshot("Notice card with Seen action", from: app)
+        attachScreenshot("Notice detail Seen available", from: app)
         finishSeen.tap()
         XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"].waitForExistence(timeout: 5))
         XCTAssertTrue(finishSeen.exists,
@@ -296,10 +298,11 @@ final class HarklightUITests: XCTestCase {
         XCTAssertEqual(finishSeen.value as? String, "Completed")
         XCTAssertFalse(finishSeen.isEnabled,
                        "The completed Seen button is ghosted and cannot be tapped again.")
-        XCTAssertTrue(seenAction.label.contains("Seen"), seenAction.label)
-        XCTAssertFalse(seenAction.isEnabled,
-                       "The completed card action stays in place as a disabled Seen button.")
-        attachScreenshot("Seen button remains after action", from: app)
+        XCTAssertFalse(seenAction.exists,
+                       "The body must not add a second Seen control after completion.")
+        XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1,
+                       "The completed toolbar Seen control stays in place by itself.")
+        attachScreenshot("Notice detail Seen completed", from: app)
     }
 
     func testTextChoiceCardMatchesReferenceCapture() throws {
