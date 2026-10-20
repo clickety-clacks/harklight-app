@@ -27,6 +27,7 @@ final class InboxStockTabsUITests: XCTestCase {
 
         inboxTab.tap()
         searchTab.tap()
+        attachScreenshot("Search tab selected", from: app)
         let searchField = app.searchFields.firstMatch
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
         searchField.tap()

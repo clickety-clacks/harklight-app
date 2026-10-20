@@ -783,7 +783,9 @@ struct InboxList: View {
                 }
 
                 Tab(value: .search, role: .search) {
-                    listContent(for: .search, using: proxy)
+                    NavigationStack {
+                        listContent(for: .search, using: proxy)
+                    }
                 }
             }
             .searchable(text: $search, prompt: "Search")
