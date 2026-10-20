@@ -247,21 +247,22 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
 
-        let search = app.buttons["inbox-search-button"]
+        let search = app.tabBars.buttons["Search"]
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.tap()
         for frame in 0..<5 {
             attachScreenshot("Search transition frame \(frame)", from: app)
         }
-        XCTAssertTrue(app.textFields["inbox-search-field"].waitForExistence(timeout: 5))
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "Search should expand directly above the keyboard.")
         XCTAssertTrue(settings.isHittable, "Header settings must remain visible during search.")
-        XCTAssertLessThan(settings.frame.maxY, app.textFields["inbox-search-field"].frame.minY,
+        XCTAssertLessThan(settings.frame.maxY, field.frame.minY,
                           "Settings belong in the header, not beside expanded search.")
         attachScreenshot("Expanded search above keyboard", from: app)
 
-        let field = app.textFields["inbox-search-field"]
         field.typeText("preview could not\n")
         let notice = app.descendants(matching: .any)["sample-error-0"]
         XCTAssertTrue(notice.waitForExistence(timeout: 5), app.debugDescription)
