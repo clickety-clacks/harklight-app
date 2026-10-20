@@ -385,6 +385,17 @@ struct LiveRequestDetail: View {
             request.informationalSeenStatus == .confirmed
     }
 
+    private var noCommentSelected: Bool {
+        localExample?.noCommentSelected ?? store.draft(for: request.key)?.noCommentSelected ?? false
+    }
+
+    private var canSubmitCurrentAnswer: Bool {
+        if noCommentSelected {
+            return canOfferNoComment && !showsNoCommentUnavailable
+        }
+        return canAnswer
+    }
+
     private var canOfferNoComment: Bool {
         guard request.informationalSeenStatus == nil else { return false }
         if let localExample { return localExample.canDeclineLocally }
@@ -395,16 +406,15 @@ struct LiveRequestDetail: View {
         return true
     }
 
-    private func submitNoCommentAction() {
+    private var noCommentChoice: some View {
+        NoCommentChoiceRow(selected: noCommentSelected,
+                           unavailable: showsNoCommentUnavailable,
+                           onSelect: selectNoCommentAction)
+    }
+
+    private func selectNoCommentAction() {
         focusedReplyActionID = nil
-        if let localExample {
-            localExample.declineLocally()
-        } else if let fixtureStore {
-            guard fixtureStore.sendNoCommentLocally(for: request.key) else { return }
-            try? store.refreshFromDurableStore()
-        } else {
-            store.submitNoCommentFromUser(request.key)
-        }
+        store.selectNoComment(for: request.key)
     }
 
     private func submitSeenAction(_ action: ExactText) {
@@ -517,14 +527,17 @@ struct LiveRequestDetail: View {
                 }
                 switch request.projection {
                 case let .sender(sender):
-                    LiveProjectedSceneView(request: request,
-                                           sender: sender,
-                                           node: sender.scene,
-                                           store: store,
-                                           readOnly: controlsReadOnly,
-                                           focusedReplyActionID: $focusedReplyActionID,
-                                           localExample: localExample,
-                                           enlargePicture: { enlargedPicture = $0 })
+                    VStack(alignment: .leading, spacing: 10) {
+                        LiveProjectedSceneView(request: request,
+                                               sender: sender,
+                                               node: sender.scene,
+                                               store: store,
+                                               readOnly: controlsReadOnly,
+                                               focusedReplyActionID: $focusedReplyActionID,
+                                               localExample: localExample,
+                                               enlargePicture: { enlargedPicture = $0 })
+                        if canOfferNoComment { noCommentChoice }
+                    }
                 case let .compatibility(actions):
                     LiveCompatibilityActions(request: request,
                                              actions: actions,
@@ -532,24 +545,17 @@ struct LiveRequestDetail: View {
                                              readOnly: controlsReadOnly,
                                              localExample: localExample,
                                              onSeen: submitSeenAction,
+                                             canOfferNoComment: canOfferNoComment,
+                                             noCommentSelected: noCommentSelected,
+                                             noCommentUnavailable: showsNoCommentUnavailable,
+                                             onSelectNoComment: selectNoCommentAction,
                                              focusedReplyActionID: $focusedReplyActionID)
                 case .unsupported:
-                    Text("This request uses an unsupported answer format.")
-                        .foregroundStyle(.secondary)
-                }
-                if canOfferNoComment {
-                    Button(action: submitNoCommentAction) {
-                        MessageChoiceLabel(title: "No comment", detail: "",
-                                           selected: false, multiple: false,
-                                           suggested: false)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("This request uses an unsupported answer format.")
+                            .foregroundStyle(.secondary)
+                        if canOfferNoComment { noCommentChoice }
                     }
-                    .buttonStyle(.plain)
-                    .disabled(showsNoCommentUnavailable)
-                    .opacity(showsNoCommentUnavailable ? 0.48 : 1)
-                    .accessibilityHint(showsNoCommentUnavailable
-                        ? "No comment was not delivered because this server does not support it."
-                        : "Send a final No comment answer to the sender.")
-                    .accessibilityIdentifier("request-no-comment")
                 }
                 if showsNoCommentUnavailable {
                     Text("No comment was not delivered because this server does not support it. You can still answer this request.")
@@ -621,17 +627,24 @@ struct LiveRequestDetail: View {
                     Button {
                         if let availableSeenAction { submitSeenAction(availableSeenAction) }
                     } label: {
-                        Label {
-                            Text("Seen")
-                        } icon: {
+                        HStack(spacing: 6) {
                             Image(systemName: "checkmark")
                                 .foregroundStyle(seenActionIsComplete ? Color.green : Color.white)
+                                .accessibilityHidden(true)
+                            if seenActionIsComplete {
+                                Text("Seen")
+                                    .foregroundStyle(Color.green)
+                            }
                         }
+                        .font(.headline)
                     }
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(.glass)
                     .tint(seenActionIsComplete ? .green : .blue)
                     .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
-                    .disabled(controlsReadOnly || availableSeenAction == nil)
+                    .disabled(controlsReadOnly || availableSeenAction == nil || seenActionIsComplete)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
+                    .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
                     .accessibilityIdentifier("request-finish-seen")
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
@@ -644,7 +657,10 @@ struct LiveRequestDetail: View {
                 } else if request.informationalSeenStatus == nil {
                     Button(submitLabel, systemImage: "checkmark") {
                         if let fixtureStore {
-                            guard fixtureStore.sendSelectedAnswer(for: request.key) else { return }
+                            let sent = store.draft(for: request.key)?.noCommentSelected == true
+                                ? fixtureStore.sendNoCommentLocally(for: request.key)
+                                : fixtureStore.sendSelectedAnswer(for: request.key)
+                            guard sent else { return }
                             try? store.refreshFromDurableStore()
                         } else {
                             store.submitFromUser(request.key)
@@ -652,7 +668,7 @@ struct LiveRequestDetail: View {
                     }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.glassProminent)
-                        .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canAnswer)
+                        .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
             }
@@ -1207,6 +1223,10 @@ private struct LiveCompatibilityActions: View {
     let readOnly: Bool
     var localExample: SampleResponse? = nil
     var onSeen: ((ExactText) -> Void)? = nil
+    var canOfferNoComment = false
+    var noCommentSelected = false
+    var noCommentUnavailable = false
+    var onSelectNoComment: () -> Void = {}
     @State private var replyTextByActionID: [ExactText: String] = [:]
     @FocusState.Binding var focusedReplyActionID: String?
     @Environment(\.colorScheme) private var colorScheme
@@ -1338,8 +1358,36 @@ private struct LiveCompatibilityActions: View {
                         .disabled(readOnly)
                     }
                 }
+                if canOfferNoComment {
+                    NoCommentChoiceRow(selected: noCommentSelected,
+                                       unavailable: noCommentUnavailable,
+                                       onSelect: onSelectNoComment)
+                }
             }
         }
+    }
+}
+
+private struct NoCommentChoiceRow: View {
+    let selected: Bool
+    let unavailable: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            MessageChoiceLabel(title: "No comment", detail: "",
+                               selected: selected, multiple: false,
+                               suggested: false)
+        }
+        .buttonStyle(.plain)
+        .disabled(unavailable)
+        .opacity(unavailable ? 0.48 : 1)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(selected ? "Selected" : "Not selected")
+        .accessibilityHint(unavailable
+            ? "No comment was not delivered because this server does not support it."
+            : "Select No comment as your answer, then send it with the checkmark.")
+        .accessibilityIdentifier("request-no-comment")
     }
 }
 

@@ -3,6 +3,25 @@ import XCTest
 import AttentionDomain
 
 final class HarklightTests: XCTestCase {
+    func testNoCommentDraftSelectionRoundTripsAndLegacyDraftsDefaultToUnselected() throws {
+        struct LegacyDraft: Encodable {
+            let inputs: [ExactText: InputDraft]
+            let compatibility: CompatibilityDraft
+        }
+
+        let legacyData = try JSONEncoder().encode(
+            LegacyDraft(inputs: [:], compatibility: CompatibilityDraft()))
+        let legacyDraft = try JSONDecoder().decode(RequestDraft.self, from: legacyData)
+        XCTAssertFalse(legacyDraft.noCommentSelected)
+
+        var selected = RequestDraft(inputs: [:])
+        selected.noCommentSelected = true
+        XCTAssertTrue(selected.hasEdits)
+        let roundTripped = try JSONDecoder().decode(RequestDraft.self,
+                                                    from: JSONEncoder().encode(selected))
+        XCTAssertEqual(roundTripped, selected)
+    }
+
     @MainActor
     func testNativeLaunchKeepsFictionalFixtureBehindExplicitTestArgument() {
         let ordinary = NativeAppLaunch(arguments: ["Harklight"])

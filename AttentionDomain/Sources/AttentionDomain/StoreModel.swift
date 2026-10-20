@@ -49,10 +49,26 @@ public struct CompatibilityDraft: Equatable, Codable, Sendable {
 public struct RequestDraft: Equatable, Codable, Sendable {
     public var inputs: [ExactText: InputDraft]
     public var compatibility: CompatibilityDraft
+    public var noCommentSelected: Bool
 
-    public init(inputs: [ExactText: InputDraft], compatibility: CompatibilityDraft = CompatibilityDraft()) {
+    private enum CodingKeys: String, CodingKey {
+        case inputs, compatibility, noCommentSelected
+    }
+
+    public init(inputs: [ExactText: InputDraft],
+                compatibility: CompatibilityDraft = CompatibilityDraft(),
+                noCommentSelected: Bool = false) {
         self.inputs = inputs
         self.compatibility = compatibility
+        self.noCommentSelected = noCommentSelected
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        inputs = try container.decodeIfPresent([ExactText: InputDraft].self, forKey: .inputs) ?? [:]
+        compatibility = try container.decodeIfPresent(CompatibilityDraft.self, forKey: .compatibility)
+            ?? CompatibilityDraft()
+        noCommentSelected = try container.decodeIfPresent(Bool.self, forKey: .noCommentSelected) ?? false
     }
 
     public init(interface: RequestInterface) {
@@ -63,10 +79,11 @@ public struct RequestDraft: Equatable, Codable, Sendable {
             inputs = [:]
         }
         compatibility = CompatibilityDraft()
+        noCommentSelected = false
     }
 
     public var hasEdits: Bool {
-        compatibility.hasEdits || inputs.values.contains { draft in
+        noCommentSelected || compatibility.hasEdits || inputs.values.contains { draft in
             draft.selectedActionID != nil || draft.point != nil ||
                 draft.textByActionID.values.contains(where: { !$0.rawValue.isEmpty }) ||
                 (draft.text.map { !$0.rawValue.isEmpty } ?? false) ||

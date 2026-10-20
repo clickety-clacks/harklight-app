@@ -23,6 +23,7 @@ enum NativeDraftJSON {
         }
         return .object([
             JSONMember("inputs", .array(inputs)),
+            JSONMember("noCommentSelected", .bool(draft.noCommentSelected)),
             JSONMember("compatibility", .object([
                 JSONMember("selectedAction", optional(draft.compatibility.selectedActionID)),
                 JSONMember("textByAction", .array(draft.compatibility.textByActionID.map { action, text in

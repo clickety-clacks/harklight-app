@@ -277,8 +277,11 @@ final class PrototypeStore {
     }
 
     func canSend(for key: RequestKey) -> Bool {
-        guard let session = sessions[key], case .open = session.lifecycle,
-              let port, let records = typedRecords(for: key, draft: session.draft),
+        guard let session = sessions[key], case .open = session.lifecycle else { return false }
+        if session.draft.noCommentSelected {
+            return canSendNoCommentLocally(for: key)
+        }
+        guard let port, let records = typedRecords(for: key, draft: session.draft),
               let selector = try? boundSelector(for: key),
               let answer = try? port.preview(context: port.context, selector: selector, inputs: records) else {
             return false
@@ -318,8 +321,11 @@ final class PrototypeStore {
                             explicitCompatibilityAction: ExactText? = nil) -> Bool {
         guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
         refreshSnapshot()
-        guard let session = sessions[key], case .open = session.lifecycle,
-              let port, let records = typedRecords(for: key, draft: session.draft,
+        guard let session = sessions[key], case .open = session.lifecycle else { return false }
+        if session.draft.noCommentSelected {
+            return sendNoCommentLocally(for: key)
+        }
+        guard let port, let records = typedRecords(for: key, draft: session.draft,
                                                    explicitCompatibilityAction: explicitCompatibilityAction),
               let selector = try? boundSelector(for: key) else { return false }
         do {

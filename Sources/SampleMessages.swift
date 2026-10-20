@@ -126,7 +126,7 @@ final class SampleResponse {
             informationalSeenStatus: request.informationalSeenStatus,
             canNoComment: canDeclineLocally && request.informationalSeenStatus == nil,
             localSeenSelected: localSeenSelected,
-            hasUserAction: finished || request.intentReceipt != nil || request.draft.hasEdits ||
+            hasUserAction: finished || request.intentReceipt != nil ||
                 request.lifecycleStatus == .answered ||
                 request.lifecycleStatus == .noComment ||
                 request.informationalSeenStatus == .pending ||
@@ -151,12 +151,20 @@ final class SampleResponse {
         return true
     }
 
-    var noCommentSelected = false
+    var noCommentSelected: Bool {
+        viewModel.draft(for: key)?.noCommentSelected ?? false
+    }
 
     func declineLocally() {
         guard canDeclineLocally else { return }
-        noCommentSelected = true
+        viewModel.selectNoComment(for: key)
         finished = true
+        deferred = false
+    }
+
+    func selectNoCommentLocally() {
+        guard canDeclineLocally else { return }
+        viewModel.selectNoComment(for: key)
         deferred = false
     }
 
@@ -174,6 +182,7 @@ final class SampleResponse {
               !viewModel.isRetracted(key),
               request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
+        if request.draft.noCommentSelected { return true }
         if request.informationalSeenStatus != nil || message.kind == .instructions { return true }
         if message.kind == .multipleChoice {
             if ownAnswer {

@@ -1226,10 +1226,9 @@ final class LivePresentationStore {
                     request.intentReceipt == nil && request.informationalSeenStatus == .available,
                 canNoComment: canNoComment(request),
                 noCommentUnavailable: request.noCommentUnavailable,
-                hasUserAction: request.intentReceipt != nil || request.draft.hasEdits ||
+                hasUserAction: request.intentReceipt != nil ||
                     request.lifecycleStatus == .answered ||
                     request.lifecycleStatus == .noComment ||
-                    request.noCommentUnavailable ||
                     request.informationalSeenStatus == .pending ||
                     request.informationalSeenStatus == .confirmed,
                 tier: request.attentionTier.inboxRowStyleTier)
@@ -1295,6 +1294,7 @@ final class LivePresentationStore {
 
     func selectAction(_ action: ExactText, input: ExactText?, for key: RequestKey) {
         editDraft(for: key) { draft in
+            draft.noCommentSelected = false
             if let input {
                 draft.inputs[input]?.selectedActionID = action
             } else {
@@ -1303,8 +1303,19 @@ final class LivePresentationStore {
         }
     }
 
+    func selectNoComment(for key: RequestKey) {
+        editDraft(for: key) { draft in
+            draft.noCommentSelected = true
+            draft.compatibility.selectedActionID = nil
+            for inputID in Array(draft.inputs.keys) {
+                draft.inputs[inputID]?.selectedActionID = nil
+            }
+        }
+    }
+
     func updateText(_ text: String, input: ExactText, action: ExactText?, for key: RequestKey) {
         let update: (inout RequestDraft) -> Void = { draft in
+            draft.noCommentSelected = false
             if let action {
                 draft.inputs[input]?.textByActionID[action] = ExactText(text)
             } else {
@@ -1331,6 +1342,7 @@ final class LivePresentationStore {
 
     func updateCompatibilityText(_ text: String, action: ExactText, for key: RequestKey) {
         let update: (inout RequestDraft) -> Void = { draft in
+            draft.noCommentSelected = false
             draft.compatibility.textByActionID[action] = ExactText(text)
         }
         if permitsDelivery {
@@ -1348,6 +1360,7 @@ final class LivePresentationStore {
 
     func setPoint(_ point: PointValue, input: ExactText, for key: RequestKey) {
         editDraft(for: key) { draft in
+            draft.noCommentSelected = false
             draft.inputs[input]?.point = point
             draft.inputs[input]?.horizontalText = ExactText(String(point.x))
             draft.inputs[input]?.verticalText = ExactText(String(point.y))
@@ -1358,6 +1371,7 @@ final class LivePresentationStore {
         guard !permitsDelivery, !isReadOnly else { return }
         let input = ExactText("point")
         editDraft(for: key) { draft in
+            draft.noCommentSelected = false
             draft.inputs[ExactText("annotation")]?.text = ExactText(text)
             draft.inputs[input]?.point = point
             draft.inputs[input]?.horizontalText = point.map { ExactText(String($0.x)) }
@@ -1378,6 +1392,9 @@ final class LivePresentationStore {
               let selector = request.selector else {
             throw LiveReplyError.notOpen
         }
+        if request.draft.noCommentSelected {
+            return try submitNoComment(key)
+        }
         let records = try typedInputs(for: request, explicitCompatibilityAction: explicitCompatibilityAction)
         let receipt = try port.submit(SubmitIntent(context: port.context,
                                                    selector: selector,
@@ -1391,6 +1408,10 @@ final class LivePresentationStore {
 
     func submitFromUser(_ key: RequestKey, explicitCompatibilityAction: ExactText? = nil) {
         guard permitsDelivery, !isReadOnly else { return }
+        if draft(for: key)?.noCommentSelected == true {
+            submitNoCommentFromUser(key)
+            return
+        }
         do {
             _ = try submit(key, explicitCompatibilityAction: explicitCompatibilityAction)
             retryPendingDelivery()
@@ -1521,6 +1542,7 @@ final class LivePresentationStore {
               request.intentReceipt == nil else { return }
         var draft = pendingDrafts[key] ?? request.draft
         change(&draft)
+        draft.noCommentSelected = false
         pendingDrafts[key] = draft
         clearActionError()
         scheduleDraftPersistence(for: key)
@@ -1681,6 +1703,7 @@ final class LivePresentationStore {
     }
 
     private func clearActionError() {
+        guard actionError != nil || actionErrorRequest != nil else { return }
         actionError = nil
         actionErrorRequest = nil
     }

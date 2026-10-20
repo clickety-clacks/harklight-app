@@ -277,6 +277,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(finishSeen.exists,
                       "The Seen button stays in place after the action.")
         XCTAssertTrue(finishSeen.label.contains("Seen"), finishSeen.label)
+        XCTAssertTrue(finishSeen.label.contains("green checkmark"), finishSeen.label)
+        XCTAssertEqual(finishSeen.value as? String, "Completed")
         XCTAssertFalse(finishSeen.isEnabled,
                        "The completed Seen button is ghosted and cannot be tapped again.")
         XCTAssertTrue(seenAction.label.contains("Seen"), seenAction.label)

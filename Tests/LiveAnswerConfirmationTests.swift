@@ -98,8 +98,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(reopened.noCommentUnavailable)
         XCTAssertNil(reopened.intentReceipt)
         let unavailableRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
-        XCTAssertTrue(unavailableRow.belongsToReplied,
-                      "The attempted No comment action stays in Replied without becoming an accepted answer.")
+        XCTAssertFalse(unavailableRow.belongsToReplied,
+                       "Unsupported No comment was not accepted, so the request stays in Inbox.")
         XCTAssertTrue(unavailableRow.status.contains("No comment not delivered"))
         XCTAssertTrue(LiveRequestDetail(request: reopened, store: live).canAnswer,
                       "The app leaves ordinary answer choices to an explicit user action.")
@@ -123,11 +123,12 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let (context, store, live, key) = try setupReplyOnly()
         live.updateCompatibilityText("Keep this as an unsent draft.", action: ExactText("reply"), for: key)
         live.flushPendingDraft(for: key)
+        live.selectNoComment(for: key)
 
-        let port = AttentionDomainPort(store: store)
-        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key)
-            .requests.first?.selector)
-        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        XCTAssertTrue(live.request(for: key)?.draft.noCommentSelected)
+        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
+                       "Selecting No comment is still an unsent draft.")
+        live.submitFromUser(key)
 
         let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
@@ -135,8 +136,9 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let savedDraft = try store.snapshot(context: context).drafts[key]
         XCTAssertEqual(savedDraft?.compatibility
             .textByActionID[ExactText("reply")], ExactText("Keep this as an unsent draft."))
-        XCTAssertEqual(receipt.answerKind, .noComment)
-        XCTAssertEqual(receipt.inputs, [])
+        XCTAssertTrue(savedDraft?.noCommentSelected == true)
+        XCTAssertEqual(submitted.answerKind, .noComment)
+        XCTAssertEqual(submitted.inputs, [])
     }
 
     func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {
