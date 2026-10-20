@@ -162,12 +162,6 @@ final class SampleResponse {
         deferred = false
     }
 
-    func selectNoCommentLocally() {
-        guard canDeclineLocally else { return }
-        viewModel.selectNoComment(for: key)
-        deferred = false
-    }
-
     var canMarkSeenLocally: Bool {
         guard let request = viewModel.request(for: key),
               !viewModel.isRetracted(key),
