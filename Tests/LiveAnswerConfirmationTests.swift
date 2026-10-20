@@ -85,6 +85,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(receipt.exactAnswer, .null,
                        "The local null placeholder is distinguished by answerKind and is never the wire frame.")
         let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        XCTAssertNil(submitted.requestRevision,
+                     "Ordinary requests have no server-supplied request revision.")
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"sample","request_revision":1}"# + "\n")
         try live.refreshFromDurableStore()
