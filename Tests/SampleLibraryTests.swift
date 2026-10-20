@@ -1,7 +1,7 @@
 import XCTest
 import SwiftUI
 import AttentionDomain
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 @MainActor
 final class SampleLibraryTests: XCTestCase {

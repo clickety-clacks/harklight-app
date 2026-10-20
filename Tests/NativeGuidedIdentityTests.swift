@@ -2,7 +2,7 @@ import Foundation
 import HarklightNativeRelay
 import Security
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 final class NativeGuidedIdentityTests: XCTestCase {
     func testJoinCreatesACertificateForThePrivateKeyRetainedOnThisDevice() throws {

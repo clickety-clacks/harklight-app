@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 final class DevelopmentAPNsAddressStoreTests: XCTestCase {
     func testProtectedAddressStoreRejectsEmptyAndClearsStaleAddress() throws {

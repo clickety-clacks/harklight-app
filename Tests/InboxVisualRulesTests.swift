@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 import AttentionDomain
 
 final class InboxVisualRulesTests: XCTestCase {

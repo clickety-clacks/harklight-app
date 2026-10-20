@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import AttentionClientDuoPrototype
+@testable import Harklight
 
 @MainActor
 private final class PushRefreshScenario {

@@ -3,7 +3,7 @@ import UIKit
 
 @main
 @MainActor
-struct AttentionClientDuoPrototypeApp: App {
+struct HarklightApp: App {
     @UIApplicationDelegateAdaptor(DevelopmentPushRegistration.self) private var pushRegistration
     @Environment(\.scenePhase) private var scenePhase
     @State private var launch: NativeAppLaunch

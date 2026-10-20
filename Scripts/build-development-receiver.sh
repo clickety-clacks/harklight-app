@@ -8,8 +8,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 xcodegen generate
 exec xcodebuild \
-    -project AttentionClientDuoPrototype.xcodeproj \
-    -scheme AttentionClientDuoPrototype \
+    -project Harklight.xcodeproj \
+    -scheme Harklight \
     -configuration Debug \
     -destination "platform=iOS,id=$HARKLIGHT_PHYSICAL_DEVICE_ID" \
     -derivedDataPath "$ROOT/DerivedData-ReceiverDevelopment" \
