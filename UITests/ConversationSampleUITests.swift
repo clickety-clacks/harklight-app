@@ -358,20 +358,22 @@ final class ConversationSampleUITests: XCTestCase {
         return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
     }
 
-    /// Scrolls until the whole row is inside the visible list. Returns false after
-    /// a recorded failure so the caller does not tap a row the controls cover.
+    /// Scrolls until a hittable part of the row is inside the list and above the
+    /// bottom controls. Returns false with a screenshot if the row remains blocked.
     private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.waitForExistence(timeout: 5) else {
             XCTFail("Row does not exist: \(app.debugDescription)")
             return false
         }
-        // A row partly under the bottom search controls can be hittable while its
-        // tap point lands on them, so require the whole row inside the visible list.
+        // Split-view reconstruction can clip a row at the list's top edge. If
+        // XCTest still reports it hittable, keep the navigation test on that row.
         func unobscured() -> Bool {
             let search = app.textFields["inbox-search-field"]
             let bottom = search.exists ? search.frame.minY : app.windows.firstMatch.frame.maxY
             let frame = element.frame
-            return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
+            let intersectsList = frame.maxY > scrollView.frame.minY &&
+                frame.minY < scrollView.frame.maxY
+            return element.isHittable && intersectsList && frame.maxY <= bottom
         }
         for _ in 0..<8 {
             if unobscured() { return true }

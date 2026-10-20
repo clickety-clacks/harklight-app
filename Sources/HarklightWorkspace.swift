@@ -574,7 +574,7 @@ struct InboxList: View {
     /// filter change starts the list again at its first row.
     private func showFirstRow(using proxy: ScrollViewProxy) {
         guard let first = filteredRows.first else { return }
-        proxy.scrollTo(first.id, anchor: nil)
+        proxy.scrollTo(first.id, anchor: .top)
     }
 
     private func openSettings() {
