@@ -943,6 +943,40 @@ final class NativeGuidedTLSTests: XCTestCase {
         await session.close()
     }
 
+    func testStaleNoCommentRevisionRefusalStaysUnresolvedForConversationReplay() async throws {
+        let namespace = "Harklight.no-comment-stale-revision-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard text.contains("\"type\":\"answer_no_comment\"") else { return [] }
+            guard text.contains("\"request_revision\":2") else {
+                return ["{\"v\":1,\"type\":\"error\",\"reason\":\"unsupported_version\"}\n"]
+            }
+            return ["{\"v\":1,\"type\":\"error\",\"reason\":\"stale_revision\",\"current_revision\":3}\n"]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(
+            profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let operationID = UUID()
+        let result = try await session.sendOriginalOperation(
+            Data(#"{"type":"answer_no_comment","request_id":"request","request_revision":2}"#.utf8)
+                + Data([0x0A]),
+            operationID: operationID)
+        XCTAssertEqual(result, .unresolved,
+                       "A stale revision is not acceptance; conversation replay supplies the current question.")
+        await session.close()
+    }
+
     func testUnavailableChatMessageIsLocalToConversationAndDoesNotHideConnectionWarning() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
