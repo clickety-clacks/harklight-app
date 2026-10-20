@@ -988,18 +988,32 @@ private struct LiveProjectedInputView: View {
         readOnly ? request.draft.inputs[input.id] : store.draft(for: request.key)?.inputs[input.id]
     }
 
-    private var textEditor: some View {
-        TextEditor(text: Binding(
+    private var textBinding: Binding<String> {
+        Binding(
             get: { typedInputText ?? draft?.text?.rawValue ?? "" },
             set: {
                 typedInputText = $0
                 store.stageText($0, input: input.id, action: nil, for: request.key)
             }
-        ))
-        .frame(minHeight: 120)
-        .accessibilityLabel(input.label.rawValue)
-        .accessibilityIdentifier("request-input-" + input.id.rawValue)
-        .disabled(readOnly)
+        )
+    }
+
+    @ViewBuilder
+    private var textEditor: some View {
+        if input.id.rawValue == "note" {
+            TextField("Write a note", text: textBinding, axis: .vertical)
+                .lineLimit(4...8)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel(input.label.rawValue)
+                .accessibilityIdentifier("request-input-" + input.id.rawValue)
+                .disabled(readOnly)
+        } else {
+            TextEditor(text: textBinding)
+                .frame(minHeight: 120)
+                .accessibilityLabel(input.label.rawValue)
+                .accessibilityIdentifier("request-input-" + input.id.rawValue)
+                .disabled(readOnly)
+        }
     }
 
     private var replyEditorSurface: Color {

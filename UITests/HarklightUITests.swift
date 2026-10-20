@@ -34,6 +34,10 @@ final class HarklightUITests: XCTestCase {
         let app = launchFreshApp()
 
         selectFacilitiesRequest(in: app)
+        let note = app.textFields["request-input-note"]
+        revealInCard(note, in: app)
+        XCTAssertTrue(note.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("Sender scene note field", from: app)
         XCTAssertTrue(app.staticTexts["Select the location on the floor plan and add a note."]
             .waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
@@ -59,8 +63,6 @@ final class HarklightUITests: XCTestCase {
                        "Inspecting request details must preserve the active point draft.")
 
         let submittedPoint = setFacilitiesPoint(in: app, x: 240, y: 500)
-        let note = app.textViews["request-input-note"]
-        revealInCard(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
         XCTAssertEqual(note.value as? String, "Near the east entrance",
@@ -485,7 +487,7 @@ final class HarklightUITests: XCTestCase {
 
     private func answerSelectedFacilitiesRequest(in app: XCUIApplication, x: Int, y: Int) -> PointValue {
         let selectedPoint = setFacilitiesPoint(in: app, x: x, y: y)
-        let note = app.textViews["request-input-note"]
+        let note = app.textFields["request-input-note"]
         revealInCard(note, in: app)
         note.tap()
         note.typeText("Near the east entrance")
