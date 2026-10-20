@@ -452,6 +452,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         ]
         let requestRevision = state.conversation?.threads[request.key]?.currentRevision
         if let requestRevision { fingerprintParts += ["request_revision", String(requestRevision)] }
+        let wireRevision = requestRevision ?? 1
         let contentFingerprint = fingerprint(fingerprintParts.joined(separator: "\u{0}"))
 
         if let existing = state.intents[intentID] {
@@ -478,7 +479,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let operationID = UUID()
         let operation = JSONValue.object([
             JSONMember("type", .string(ExactText("answer_no_comment"))),
-            JSONMember("request_id", .string(request.key.messageID))
+            JSONMember("request_id", .string(request.key.messageID)),
+            JSONMember("request_revision", .number(JSONNumber(lexeme: String(wireRevision))))
         ])
         let frame = Data((operation.jsonString + "\n").utf8)
         guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
