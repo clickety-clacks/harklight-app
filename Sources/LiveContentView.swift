@@ -459,7 +459,7 @@ struct LiveRequestDetail: View {
 
     var body: some View {
         MessageCardSurface(context: context,
-            backgroundColor: Color(red: 0.89, green: 0.94, blue: 1)) {
+            backgroundColor: Color(uiColor: .systemBackground)) {
             VStack(alignment: .leading, spacing: 12) {
                 Button {
                     requestDetailsPresented = true
@@ -1053,7 +1053,7 @@ private struct LiveProjectedInputView: View {
             .accessibilityIdentifier("request-input-" + input.id.rawValue + "-response")
             .disabled(readOnly || !selected)
         }
-        .background(selected ? Color.blue : Color(uiColor: .systemBackground), in: cardShape)
+        .background(selected ? Color.blue : Color(uiColor: .secondarySystemBackground), in: cardShape)
         .overlay(cardShape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
         .clipShape(cardShape)
         .opacity(selected ? 1 : 0.55)
@@ -1297,7 +1297,7 @@ private struct LiveCompatibilityActions: View {
             .accessibilityIdentifier("request-compatibility-" + action.id.rawValue + "-response")
             .disabled(readOnly || !selected)
         }
-        .background(selected ? Color.blue : Color(uiColor: .systemBackground), in: shape)
+        .background(selected ? Color.blue : Color(uiColor: .secondarySystemBackground), in: shape)
         .overlay(shape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
         .clipShape(shape)
         .opacity(selected ? 1 : 0.55)
