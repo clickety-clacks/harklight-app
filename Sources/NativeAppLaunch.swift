@@ -75,7 +75,8 @@ final class NativeAppLaunch {
     @ObservationIgnored private var notificationRefreshFinished = false
     @ObservationIgnored private var handledNotificationSerial: UInt64?
     @ObservationIgnored private var didFinishRestoring = false
-    @ObservationIgnored private let refreshOperation: @MainActor () async -> NativeRelayRefreshResult
+    @ObservationIgnored private var foregroundActivationPushCheckPending = false
+    @ObservationIgnored private let refreshOperation: @MainActor (Bool) async -> NativeRelayRefreshResult
 
     private var dismissedForegroundConnectFailure: NativeForegroundConnectFailureKey?
 
@@ -92,8 +93,9 @@ final class NativeAppLaunch {
          initialEnrollmentRecord: NativeEnrollmentRecord? = nil,
          initialArchivedDepartures: [NativeAccountDeparture] = [],
          notificationRouter: NativeNotificationRouter = .shared,
-         refreshOperation: @escaping @MainActor () async -> NativeRelayRefreshResult = {
-             await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
+         refreshOperation: @escaping @MainActor (Bool) async -> NativeRelayRefreshResult = { checkBlockedPush in
+             await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay(
+                checkBlockedPush: checkBlockedPush)
          }) {
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
         let diagnostics = NativeClientDiagnosticJournal()
@@ -128,7 +130,9 @@ final class NativeAppLaunch {
             self.activeEnrollmentRecord = record
             try await self.activate(material)
             let epoch = self.activationGeneration
-            let connect = await NativeRelayLifecycle.shared.confirmForegroundProgress(for: material.context) { [weak self] progress in
+            let checkBlockedPush = self.takeForegroundActivationPushCheck()
+            let connect = await NativeRelayLifecycle.shared.confirmForegroundProgress(
+                for: material.context, checkBlockedPush: checkBlockedPush) { [weak self] progress in
                 guard let self else { return }
                 self.recordForegroundConnectProgress(
                     progress,
@@ -711,6 +715,7 @@ final class NativeAppLaunch {
 
     func deactivate() async {
         activationGeneration = UUID()
+        foregroundActivationPushCheckPending = false
         isEnrollmentExpired = false
         if case let .live(previous) = state { previous.stopObserving() }
         state = .enrollmentRequired
@@ -752,16 +757,28 @@ final class NativeAppLaunch {
             progress: progress, operationSnapshot: operationSnapshot)
     }
 
+    func refreshForForegroundActivation() async {
+        foregroundActivationPushCheckPending = true
+        await refreshLive()
+    }
+
     func refreshLive() async {
         guard case let .live(presentation) = state, !presentation.isLocalExample else { return }
+        let checkBlockedPush = takeForegroundActivationPushCheck()
         notificationSynchronized = false
         notificationRefreshFinished = false
-        let result = await refreshOperation()
+        let result = await refreshOperation(checkBlockedPush)
         guard case let .live(current) = state, current === presentation else { return }
         presentation.applyRefreshResult(result)
         notificationRefreshFinished = true
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
         resolveNotificationNavigation()
+    }
+
+    private func takeForegroundActivationPushCheck() -> Bool {
+        let shouldCheck = foregroundActivationPushCheckPending
+        foregroundActivationPushCheckPending = false
+        return shouldCheck
     }
 
     func handleNotification() async {

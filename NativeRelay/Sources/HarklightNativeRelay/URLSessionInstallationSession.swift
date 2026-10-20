@@ -514,7 +514,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 let value = try JSONValue.parse(try await receive())
                 switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
                 case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-push":
-                    return try PushBindingReply.registration(value, revision: revision)
+                    return try PushBindingReply.registration(value, revision: revision,
+                                                              profile: PushRegistrationProfile.current)
                 case "delivery", "lifecycle", "conversation":
                     continue
                 case "error":
@@ -546,6 +547,31 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 case "error": throw InstallationTransportError.serverRejected
                 default: return try PushBindingReply.status(value, revision: revision,
                                                              profile: .current)
+                }
+            }
+        } catch {
+            close()
+            throw error
+        }
+    }
+
+    /// Reads the server's existing active binding state on this authenticated
+    /// relay session. The caller decides whether the state matches its saved
+    /// registration before it may advance the durable revision.
+    public func currentPushBindingStatus() async throws -> PushBindingStatus? {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
+        do {
+            try await send(Data("{\"v\":1,\"type\":\"push_status\",\"ref\":\"native-push-status\"}\n".utf8))
+            while true {
+                let value = try JSONValue.parse(try await receive())
+                switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+                case "delivery", "lifecycle", "conversation": continue
+                case "error": throw InstallationTransportError.serverRejected
+                case "ok" where value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-push-status":
+                    return try PushBindingReply.activeStatus(value)
+                default:
+                    throw InstallationTransportError.unexpectedServerFrame
                 }
             }
         } catch {

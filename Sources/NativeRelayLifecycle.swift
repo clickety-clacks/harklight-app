@@ -943,8 +943,15 @@ final class NativeRelayLifecycle {
         return await refreshResultFromTrustedRelay().relayConfirmed
     }
 
-    func refreshResultFromTrustedRelay() async -> NativeRelayRefreshResult {
+    func refreshResultFromTrustedRelay(checkBlockedPush: Bool = false) async -> NativeRelayRefreshResult {
         guard !requiresExplicitForegroundRetry else { return .unavailable }
+        if checkBlockedPush {
+            return await refreshFlights.afterCurrent { [weak self] in
+                guard let self else { return .unavailable }
+                return await self.performRefresh(generation: self.refreshGeneration,
+                                                 checkBlockedPush: true)
+            }
+        }
         return await refreshFlights.coalesced()
     }
 
@@ -998,6 +1005,7 @@ final class NativeRelayLifecycle {
     /// push-register failure must not hide a working foreground connection.
     func confirmForegroundProgress(for expected: ProfileContext,
                                    deadline: Duration = .seconds(30),
+                                   checkBlockedPush: Bool = false,
                                    onProgress: @escaping @MainActor (NativeForegroundConnectProgress) -> Void = { _ in }) async -> NativeForegroundConnectProgress {
         guard context == expected else {
             let failed = foregroundDeadline.finishWithoutAttempt(
@@ -1047,7 +1055,8 @@ final class NativeRelayLifecycle {
         let epoch = refreshGeneration
         var result = await foregroundDeadline.run(deadline: deadline, operation: { [weak self] in
             guard let self else { return false }
-            let refresh = await self.refreshResultFromTrustedRelay()
+            let refresh = await self.refreshResultFromTrustedRelay(
+                checkBlockedPush: checkBlockedPush)
             let relayConfirmed = refresh.relayConfirmed
             let generationMatches = self.refreshGeneration == epoch
             let profileMatches = self.context == expected
@@ -1236,13 +1245,15 @@ final class NativeRelayLifecycle {
         guard context == expected else { throw NativeRelayCoreError.inactive }
     }
 
-    private func performRefresh(generation: UUID) async -> NativeRelayRefreshResult {
+    private func performRefresh(generation: UUID,
+                                checkBlockedPush: Bool = false) async -> NativeRelayRefreshResult {
         guard refreshGeneration == generation, !requiresExplicitForegroundRetry else { return .unavailable }
         // A past replay is not proof that this connection attempt worked.
         confirmedRelayContext = nil
         recordDiagnostic(.relay, .projectionRefresh, .began, attemptID: activeTransportAttemptID)
         do {
-            let result = try await refreshOnce(generation: generation)
+            let result = try await refreshOnce(generation: generation,
+                                               checkBlockedPush: checkBlockedPush)
             recordDiagnostic(.relay, .projectionRefresh,
                              result.relayConfirmed ? .completed : .unresolved,
                              attemptID: activeTransportAttemptID)
@@ -1257,7 +1268,8 @@ final class NativeRelayLifecycle {
             do {
                 try await reconnect(generation: generation)
                 guard refreshGeneration == generation else { return .unavailable }
-                let result = try await refreshOnce(generation: generation)
+                let result = try await refreshOnce(generation: generation,
+                                                   checkBlockedPush: checkBlockedPush)
                 recordDiagnostic(.relay, .projectionRefresh,
                                  result.relayConfirmed ? .completed : .unresolved,
                                  attemptID: activeTransportAttemptID)
@@ -1272,7 +1284,8 @@ final class NativeRelayLifecycle {
         }
     }
 
-    private func refreshOnce(generation: UUID) async throws -> NativeRelayRefreshResult {
+    private func refreshOnce(generation: UUID,
+                             checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
         _ = try await core.resyncAndDrainOutbox()
@@ -1298,8 +1311,9 @@ final class NativeRelayLifecycle {
             self?.recordDiagnostic(.notifications, .pushRegistration, .failed,
                                    error: error, attemptID: self?.activeTransportAttemptID)
         }) {
-            if let address = try DevelopmentPushRegistration.addressStore().load(),
-               let binding = try enrollment.pendingPushRegistration(address: address,
+            let currentAddress = try DevelopmentPushRegistration.addressStore().load()
+            if let currentAddress,
+               let binding = try enrollment.pendingPushRegistration(address: currentAddress,
                                                                      for: context.identity.deviceID.rawValue) {
                 guard let expected = try enrollment.load(), expected.matchesNotificationIdentity(context.identity) else {
                     throw NativeJoinError.superseded
@@ -1313,11 +1327,53 @@ final class NativeRelayLifecycle {
                 try enrollment.markPushAccepted(binding, bindingID: bindingID, expected: expected)
                 return .confirmed
             }
-            if let expected = try enrollment.load(), expected.matchesNotificationIdentity(context.identity),
-               let binding = expected.pushBinding, binding.accepted,
-               !(expected.notificationBindings ?? []).contains(where: {
-                   $0.operationID == binding.operationID && $0.revision == binding.revision
-               }), let bindingID = try await transport.currentPushBindingID(revision: binding.revision) {
+            guard let expected = try enrollment.load(),
+                  expected.matchesNotificationIdentity(context.identity),
+                  let binding = expected.pushBinding, binding.accepted else { return .notAttempted }
+
+            if checkBlockedPush && PushRegistrationProfile.current == .production {
+                guard let status = try await transport.currentPushBindingStatus(),
+                      self.refreshGeneration == generation, self.context == context,
+                      status.profile == .production, status.revision == binding.revision else {
+                    return .notAttempted
+                }
+                let associations = (expected.notificationBindings ?? []).filter {
+                    $0.operationID == binding.operationID && $0.revision == binding.revision
+                }
+                guard associations.count <= 1,
+                      associations.first?.bindingID.rawValue == nil ||
+                        associations.first?.bindingID.rawValue == status.bindingID else {
+                    return .notAttempted
+                }
+
+                if status.isBlockedByConfiguration {
+                    guard let replacement = try enrollment.pendingBlockedConfigurationRegistration(
+                        address: binding.address,
+                        for: context.identity.deviceID.rawValue,
+                        status: status,
+                        profile: .production),
+                          let current = try enrollment.load(),
+                          current.matchesNotificationIdentity(context.identity),
+                          current.pushBinding == replacement else { return .notAttempted }
+                    let bindingID = try await transport.registerPush(address: replacement.address,
+                        operationID: replacement.operationID, revision: replacement.revision)
+                    guard self.refreshGeneration == generation, self.context == context else {
+                        throw NativeRelayCoreError.inactive
+                    }
+                    try enrollment.markPushAccepted(replacement, bindingID: bindingID, expected: current)
+                    return .confirmed
+                }
+
+                if associations.isEmpty {
+                    try enrollment.markPushAccepted(binding, bindingID: status.bindingID, expected: expected)
+                    return .confirmed
+                }
+                return .notAttempted
+            }
+
+            if !(expected.notificationBindings ?? []).contains(where: {
+                $0.operationID == binding.operationID && $0.revision == binding.revision
+            }), let bindingID = try await transport.currentPushBindingID(revision: binding.revision) {
                 guard self.refreshGeneration == generation, self.context == context else {
                     throw NativeRelayCoreError.inactive
                 }
@@ -1505,11 +1561,11 @@ final class RelayRefreshFlights<Output: Sendable> {
 
     func coalesced() async -> Output {
         if let latest { return await latest.value }
-        return await start(after: nil)
+        return await start(after: nil, operation: operation)
     }
 
-    func afterCurrent() async -> Output {
-        await start(after: latest)
+    func afterCurrent(operation: (@MainActor () async -> Output)? = nil) async -> Output {
+        await start(after: latest, operation: operation ?? self.operation)
     }
 
     func reset() {
@@ -1518,7 +1574,8 @@ final class RelayRefreshFlights<Output: Sendable> {
         latestID = nil
     }
 
-    private func start(after previous: Task<Output, Never>?) async -> Output {
+    private func start(after previous: Task<Output, Never>?,
+                       operation: @escaping @MainActor () async -> Output) async -> Output {
         let requestedGeneration = generation
         let id = UUID()
         let task = Task { @MainActor in

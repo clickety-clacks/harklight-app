@@ -48,4 +48,33 @@ final class NativePushRefreshTests: XCTestCase {
         XCTAssertEqual(scenario.registrations, 1,
                        "A stored token must be registered without waiting for another wake.")
     }
+
+    @MainActor
+    func testActivationStatusCheckRunsAfterAnExistingRefreshInsteadOfJoiningIt() async {
+        let (firstStarted, firstStartedSignal) = AsyncStream<Void>.makeStream()
+        let (releaseFirst, releaseFirstSignal) = AsyncStream<Void>.makeStream()
+        var refreshes: [String] = []
+        let flights = RelayRefreshFlights(inactive: false) {
+            refreshes.append("ordinary")
+            firstStartedSignal.yield()
+            for await _ in releaseFirst { break }
+            return false
+        }
+
+        let ordinary = Task { await flights.coalesced() }
+        for await _ in firstStarted { break }
+        let activation = Task {
+            await flights.afterCurrent {
+                refreshes.append("activation-status")
+                return true
+            }
+        }
+        releaseFirstSignal.yield()
+
+        let ordinaryResult = await ordinary.value
+        let activationResult = await activation.value
+        XCTAssertFalse(ordinaryResult)
+        XCTAssertTrue(activationResult)
+        XCTAssertEqual(refreshes, ["ordinary", "activation-status"])
+    }
 }
