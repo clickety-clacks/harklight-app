@@ -957,13 +957,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 thread.terminal = next.remoteStates[request.key]?.state
             }
             if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
-            if let reported = metadata.retractedAtMilliseconds {
-                guard thread.terminal == nil || thread.terminal == .cleared,
-                      [thread.retraction?.retractedAtMilliseconds, thread.reportedRetractedAtMilliseconds]
-                        .allSatisfy({ $0 == nil || $0 == reported }) else { throw ConversationError.conflict }
-                thread.terminal = .cleared
-                thread.reportedRetractedAtMilliseconds = reported
-            }
+            if let reported = metadata.retractedAtMilliseconds { try thread.recordReportedRetraction(at: reported) }
             if let id = metadata.eventID, !thread.turns.contains(where: { $0.id == id }) {
                 try validateConversationFiles(metadata.files ?? [])
                 thread.turns.append(ConversationTurn(id: id, binding: ConversationBinding(request: request.key, revision: 1),
@@ -980,17 +974,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
             if let eventID = event.conversation?.eventID {
                 guard thread.terminalTurn == nil || thread.terminalTurn == eventID else { throw ConversationError.conflict }
                 thread.terminalTurn = eventID
-                if let author = event.conversation?.author, !thread.turns.contains(where: { $0.id == eventID }) {
+                if let author = event.conversation?.author, let revision = event.conversation?.revision,
+                   !thread.turns.contains(where: { $0.id == eventID }) {
                     thread.turns.append(ConversationTurn(id: eventID,
-                        binding: ConversationBinding(request: key, revision: event.conversation!.revision), author: author,
+                        binding: ConversationBinding(request: key, revision: revision), author: author,
                         sessionHandle: thread.sessionHandle, text: ExactText(""), files: event.conversation?.files ?? [], kind: .terminal))
                     thread.facts[eventID, default: ConversationTurnFacts()] = thread.facts[eventID] ?? ConversationTurnFacts()
                     thread.orderTurns()
                 }
             }
             if event.conversation?.terminalReason == ExactText("retracted") {
-                guard terminal == .cleared, event.conversation?.author == .origin,
-                      let id = event.conversation?.eventID, let revision = event.conversation?.revision,
+                guard terminal == .cleared,
                       let retractedAtMilliseconds = event.conversation?.retractedAtMilliseconds else {
                     throw ConversationError.invalidBinding
                 }
@@ -999,8 +993,15 @@ public final class AttentionDomainStore: @unchecked Sendable {
                    refusedAt != retractedAtMilliseconds {
                     throw ConversationError.conflict
                 }
-                try thread.recordRetraction(turn: id, sequence: event.sequence, revision: revision,
-                    retractedAtMilliseconds: retractedAtMilliseconds)
+                if event.conversation?.revision == nil {
+                    // An inbox snapshot terminal carries the time; the conversation stream carries the retraction turn.
+                    try thread.recordReportedRetraction(at: retractedAtMilliseconds)
+                } else {
+                    guard event.conversation?.author == .origin, let id = event.conversation?.eventID,
+                          let revision = event.conversation?.revision else { throw ConversationError.invalidBinding }
+                    try thread.recordRetraction(turn: id, sequence: event.sequence, revision: revision,
+                        retractedAtMilliseconds: retractedAtMilliseconds)
+                }
                 if let saved = next.drafts[key] {
                     var archived = thread.answerDrafts ?? [:]
                     archived[thread.currentRevision] = saved
