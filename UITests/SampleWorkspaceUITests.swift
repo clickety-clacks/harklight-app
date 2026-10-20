@@ -461,7 +461,8 @@ final class SampleWorkspaceUITests: XCTestCase {
             row.tap()
             if ["error", "warning", "information", "completed"].contains(kind) {
                 XCTAssertTrue(app.buttons["request-finish-seen"].waitForExistence(timeout: 5))
-                XCTAssertTrue(app.buttons["request-seen-action"].exists)
+                XCTAssertFalse(app.buttons["request-seen-action"].exists)
+                XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1)
             } else {
                 XCTAssertTrue(app.descendants(matching: .any)["sample-finish"].waitForExistence(timeout: 5))
             }
