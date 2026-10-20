@@ -7,25 +7,31 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    func testBrandMarkStaysBesideExpandedAndInlineTitle() {
+    func testStockNavigationTitleCollapsesAcrossScrollStates() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let title = app.navigationBars["Harklight"]
-        XCTAssertTrue(title.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertEqual(app.navigationBars.matching(identifier: "Harklight").count, 1,
-                       "The expanded state has one branded navigation title.")
-        let expandedNavigationBarHeight = title.frame.height
-        attachScreenshot("Brand with expanded title", from: app)
+        let navigationBar = app.navigationBars.firstMatch
+        let visibleTitle = navigationBar.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Harklight")).firstMatch
+        XCTAssertTrue(visibleTitle.waitForExistence(timeout: 10), app.debugDescription)
+        let expandedNavigationBarHeight = navigationBar.frame.height
+        attachScreenshot("Stock title expanded", from: app)
+
+        let list = app.collectionViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        let dragStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
+        let dragEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.68))
+        dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
+        XCTAssertTrue(visibleTitle.exists, app.debugDescription)
+        attachScreenshot("Stock title mid-scroll", from: app)
 
         app.swipeUp()
-        XCTAssertTrue(title.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertLessThan(title.frame.height, expandedNavigationBarHeight,
-                          "Scrolling collapses the large title into the inline title.")
-        XCTAssertEqual(app.navigationBars.matching(identifier: "Harklight").count, 1,
-                       "The inline state has one branded navigation title.")
-        attachScreenshot("Brand with inline title", from: app)
+        XCTAssertTrue(visibleTitle.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertLessThan(navigationBar.frame.height, expandedNavigationBarHeight,
+                          "The stock navigation bar collapses its large title while scrolling.")
+        attachScreenshot("Stock title collapsed", from: app)
     }
 
     func testStockTabsAndSearchKeepInboxAndRepliedResults() {
@@ -56,8 +62,29 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("Search tab selected", from: app)
         let searchField = app.searchFields.firstMatch
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(searchField.isHittable, app.debugDescription)
+        XCTAssertLessThanOrEqual(searchField.frame.maxY, keyboard.frame.minY + 1,
+                                 "The Search field sits above the keyboard.")
+
+        searchField.typeText(" \n")
+        let keyboardDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: keyboard)
+        XCTAssertEqual(XCTWaiter.wait(for: [keyboardDismissed], timeout: 5), .completed,
+                       "Submitting a whitespace-only query with the stock Search key dismisses the keyboard.")
+        XCTAssertGreaterThan(searchField.frame.midY, app.frame.height * 0.65,
+                             "The idle Search tab field returns to the bottom area.")
+        attachScreenshot("Search idle", from: app)
+
         searchField.tap()
-        searchField.typeText("Archive\n")
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertLessThanOrEqual(searchField.frame.maxY, keyboard.frame.minY + 1,
+                                 "The Search field sits above the keyboard while typing.")
+        attachScreenshot("Search keyboard up", from: app)
+        searchField.typeText("Archive")
+        attachScreenshot("Search keyboard with Archive", from: app)
+        searchField.typeText("\n")
         XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription)
         attachScreenshot("Search results for Archive", from: app)
         let approval = app.descendants(matching: .any)["sample-approval-0"]
@@ -143,8 +170,10 @@ final class InboxStockTabsUITests: XCTestCase {
 
     private func assertListHeader(in app: XCUIApplication, file: StaticString = #filePath,
                                   line: UInt = #line) {
-        XCTAssertTrue(app.navigationBars["Harklight"].waitForExistence(timeout: 5),
-                      app.debugDescription, file: file, line: line)
+        let title = app.navigationBars.firstMatch.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Harklight")).firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), app.debugDescription,
+                      file: file, line: line)
         XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription,
                       file: file, line: line)
     }

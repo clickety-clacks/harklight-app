@@ -100,22 +100,6 @@ struct LighthouseMark: Shape {
     }
 }
 
-private struct HarklightNavigationTitle: View {
-    let large: Bool
-
-    var body: some View {
-        HStack(spacing: large ? 10 : 6) {
-            LighthouseMark()
-                .fill(.primary)
-                .frame(width: large ? 25 : 16, height: large ? 30 : 20)
-                .accessibilityHidden(true)
-            Text("Harklight")
-                .font(large ? .largeTitle.bold() : .headline)
-        }
-        .foregroundStyle(.primary)
-    }
-}
-
 enum InboxSelection: Hashable {
     case request(RequestKey)
     case sample(String)
@@ -553,9 +537,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                   inlineChat: inlineChat, geometry: geometry)
                 }
         }
-        .searchable(text: $search,
-                    placement: .navigationBarDrawer(displayMode: .always),
-                    prompt: "Search")
+        .searchable(text: $search, prompt: "Search")
         .onChange(of: searchPath) { _, path in
             guard workspaceTab == .search else { return }
             navigate(to: path.last)
@@ -643,6 +625,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 geometry: geometry)
                 }
             }
+            .tabViewSearchActivation(.searchTabSelection)
             .searchPresentationToolbarBehavior(.avoidHidingContent)
             .onChange(of: workspaceTab) { oldTab, newTab in
                 guard let messageTab = newTab.messageTab else { return }
@@ -742,7 +725,6 @@ struct InboxList: View {
     let triggerNotification: (() -> Void)?
     @State private var scrollMetrics = InboxScrollMetrics.empty
     @State private var isUserScrolling = false
-    @State private var titleIsExpanded = true
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
 
@@ -895,22 +877,12 @@ struct InboxList: View {
         .scrollContentBackground(.hidden)
         .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
         .scrollDismissesKeyboard(.interactively)
-        .onScrollGeometryChange(for: Bool.self) { geometry in
-            geometry.contentOffset.y < geometry.contentInsets.top
-        } action: { _, isAtTop in
-            titleIsExpanded = isAtTop
-        }
+        // On iOS 27, mark-only .largeTitle and .title items hide the native title
+        // and show two detached marks while expanded. Composing Image + Text in
+        // navigationTitle drops the image in the inline state. Keep SwiftUI's native
+        // title and collapse until a stock placement can show the mark beside both.
         .navigationTitle("Harklight")
         .toolbar {
-            if titleIsExpanded {
-                ToolbarItem(placement: .largeTitle) {
-                    HarklightNavigationTitle(large: true)
-                }
-            } else {
-                ToolbarItem(placement: .title) {
-                    HarklightNavigationTitle(large: false)
-                }
-            }
             if let triggerNotification {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Open notification", action: triggerNotification)
