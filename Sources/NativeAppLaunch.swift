@@ -1421,17 +1421,36 @@ final class LivePresentationStore {
     func submit(_ key: RequestKey, explicitCompatibilityAction: ExactText? = nil) throws -> IntentReceipt {
         guard !isReadOnly else { throw LiveReplyError.disconnected }
         guard permitsDelivery else { throw LiveReplyError.localExample }
+        let inspected = try inspectedRequest(key)
+        let answerDraft = draft(for: key) ?? inspected.draft
+        guard !isRetracted(key), inspected.lifecycleStatus == .open,
+              inspected.intentReceipt == nil,
+              let selector = inspected.selector else {
+            throw LiveReplyError.notOpen
+        }
+        if answerDraft.noCommentSelected {
+            try persistPendingDraft(for: key)
+            return try submitNoComment(key)
+        }
+
+        let records = try typedInputs(for: inspected, draft: answerDraft,
+                                      explicitCompatibilityAction: explicitCompatibilityAction)
+        let hasAnswerContent = records.contains { record in
+            switch record {
+            case let .responseText(_, _, text), let .text(_, text), let .compatibilityText(_, text):
+                return !text.rawValue.isEmpty
+            case .responseValue, .point, .compatibilityValue:
+                return true
+            }
+        }
+        guard hasAnswerContent else { throw LiveReplyError.incomplete }
+
         try persistPendingDraft(for: key)
         let request = try inspectedRequest(key)
         guard !isRetracted(key), request.lifecycleStatus == .open,
-              request.intentReceipt == nil,
-              let selector = request.selector else {
+              request.intentReceipt == nil else {
             throw LiveReplyError.notOpen
         }
-        if request.draft.noCommentSelected {
-            return try submitNoComment(key)
-        }
-        let records = try typedInputs(for: request, explicitCompatibilityAction: explicitCompatibilityAction)
         let receipt = try port.submit(SubmitIntent(context: port.context,
                                                    selector: selector,
                                                    intentID: UUID(),
@@ -1657,11 +1676,12 @@ final class LivePresentationStore {
     }
 
     private func typedInputs(for request: PresentedRequest,
+                             draft answerDraft: RequestDraft,
                              explicitCompatibilityAction: ExactText? = nil) throws -> [TypedInputRecord] {
         switch request.projection {
         case let .sender(sender):
             return try sender.inputs.map { input in
-                guard let draft = request.draft.inputs[input.id] else { throw LiveReplyError.incomplete }
+                guard let draft = answerDraft.inputs[input.id] else { throw LiveReplyError.incomplete }
                 switch input.kind {
                 case let .response(actions):
                     guard let selected = draft.selectedActionID,
@@ -1696,7 +1716,7 @@ final class LivePresentationStore {
                 }
                 return [.compatibilityValue(action: explicitCompatibilityAction)]
             }
-            guard let selected = request.draft.compatibility.selectedActionID,
+            guard let selected = answerDraft.compatibility.selectedActionID,
                   let action = actions.first(where: { $0.id == selected }) else {
                 throw LiveReplyError.incomplete
             }
@@ -1705,7 +1725,7 @@ final class LivePresentationStore {
                 return [.compatibilityValue(action: selected)]
             case .text:
                 return [.compatibilityText(action: selected,
-                                           text: request.draft.compatibility.textByActionID[selected] ?? ExactText(""))]
+                                           text: answerDraft.compatibility.textByActionID[selected] ?? ExactText(""))]
             }
         case .unsupported:
             throw LiveReplyError.unsupported

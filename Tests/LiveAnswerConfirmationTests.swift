@@ -32,6 +32,19 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         return (context, store, try LivePresentationStore(store: store, context: context), key)
     }
 
+    private func setupTextReplyOnly() throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("text-reply-only"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Text reply request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        return (context, store, try LivePresentationStore(store: store, context: context), key)
+    }
+
     private func commitAnswer(_ store: AttentionDomainStore, key: RequestKey) throws -> IntentReceipt {
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
@@ -85,6 +98,40 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         try live.refreshFromDurableStore()
         XCTAssertNil(live.actionError)
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
+    }
+
+    func testRejectedNoCommentThenBlankReplyShowsValidationWithoutSendingText() throws {
+        let (context, store, live, key) = try setupTextReplyOnly()
+        live.selectNoComment(for: key)
+        live.submitFromUser(key)
+        let noComment = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        try store.recordNoCommentUnsupported(noComment.intentID,
+                                             operationID: noComment.opID,
+                                             context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertTrue(live.request(for: key)?.noCommentUnavailable == true)
+        XCTAssertTrue(LiveRequestDetail(request: try XCTUnwrap(live.request(for: key)),
+                                        store: live).canAnswer)
+
+        let draftBeforeBlankReply = try store.snapshot(context: context).drafts[key]
+        live.selectAction(ExactText("reply"), input: nil, for: key)
+        live.submitFromUser(key)
+
+        XCTAssertEqual(live.actionError, "Complete the response before sending your answer.")
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertEqual(snapshot.intents.count, 1,
+                       "Only the rejected No comment intent remains in history.")
+        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .unsupported)
+        XCTAssertTrue(snapshot.outbox.isEmpty,
+                      "The blank Reply must not create a sendable ordinary answer.")
+        XCTAssertEqual(snapshot.drafts[key], draftBeforeBlankReply,
+                       "The blank Reply attempt must not save or alter the persisted draft.")
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(request.lifecycleStatus, .open)
+        XCTAssertNil(request.intentReceipt)
+        XCTAssertFalse(request.draft.noCommentSelected)
+        XCTAssertTrue(LiveRequestDetail(request: request, store: live).canAnswer,
+                      "The person can add text and submit after the empty attempt is refused.")
     }
 
     func testNoCommentUsesItsOwnPayloadFreeFrameAndUnsupportedLeavesTheRequestOpen() throws {
