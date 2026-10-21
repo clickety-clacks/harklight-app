@@ -68,6 +68,7 @@ public enum LocalIntentState: Equatable, Sendable {
     case accepted(sequence: UInt64?)
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case terminalUnconfirmed
+    case notDelivered
     case unsupported
     case repairRequired
 }
@@ -257,6 +258,8 @@ public struct PresentedRequest: Equatable, Sendable {
     public let attentionTier: AttentionTier
     /// The relay explicitly rejected No comment; other answer methods remain usable.
     public let noCommentUnavailable: Bool
+    /// The relay explicitly rejected the latest answer operation.
+    public let answerNotDelivered: Bool
     /// Whether lifecycle and Seen state were established by the accepted
     /// bounded snapshot, a receipt, or later contiguous relay activity.
     public let inboxStateIsCurrent: Bool
@@ -280,6 +283,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 informationalSeenStatus: InformationalSeenStatus? = nil,
                 attentionTier: AttentionTier = .middle,
                 noCommentUnavailable: Bool = false,
+                answerNotDelivered: Bool = false,
                 inboxStateIsCurrent: Bool = true) {
         self.key = key
         self.acceptanceOrder = acceptanceOrder
@@ -296,6 +300,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.informationalSeenStatus = informationalSeenStatus
         self.attentionTier = attentionTier
         self.noCommentUnavailable = noCommentUnavailable
+        self.answerNotDelivered = answerNotDelivered
         self.inboxStateIsCurrent = inboxStateIsCurrent
     }
 }
@@ -529,6 +534,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
         case .lost:
             localState = .terminalUnconfirmed
             relayOutcome = .unknown
+        case .failed:
+            localState = .notDelivered
+            relayOutcome = .unknown
         case let .terminal(state, sequence, authorizedAnswer):
             localState = .terminalUnconfirmed
             relayOutcome = .terminal(state: state, authorizedAnswer: authorizedAnswer, sequence: sequence)
@@ -634,13 +642,20 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 return candidate.requestRevision == conversationRevision
             }
             let currentIntents = snapshot.intents.values.filter(matchesCurrentRevision)
+            let currentDraft = snapshot.drafts[item.request.key] ??
+                RequestDraft(interface: item.request.interface)
             let hasUnsupportedNoComment = currentIntents.contains { candidate in
                 guard candidate.isNoComment else { return false }
                 if case .unsupported = candidate.disposition { return true }
                 return false
             }
+            let hasFailedAnswer = currentIntents.contains { candidate in
+                if case .failed = candidate.disposition { return true }
+                return false
+            }
             let submission = currentIntents.first { candidate in
                 if candidate.isNoComment, case .unsupported = candidate.disposition { return false }
+                if case .failed = candidate.disposition { return false }
                 return true
             }
                 ?? session?.lifecycle.submissionValue.flatMap { value in
@@ -649,14 +664,17 @@ public final class AttentionDomainPort: @unchecked Sendable {
             // A newer saved attempt supersedes the earlier unsupported result
             // while its own delivery outcome is pending.
             let noCommentUnavailable = hasUnsupportedNoComment && submission == nil
+            let answerNotDelivered = hasFailedAnswer && submission == nil && !noCommentUnavailable &&
+                snapshot.remoteStates[item.request.key]?.isTerminal != true
             return try present(item.request,
                         acceptanceOrder: item.order,
-                        draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),
+                        draft: currentDraft,
                         session: session,
                         remote: snapshot.remoteStates[item.request.key],
                         submission: submission,
                         selector: selectors?[item.request.key],
                         noCommentUnavailable: noCommentUnavailable,
+                        answerNotDelivered: answerNotDelivered,
                         inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
                             $0.contains(item.request.key)
                         } ?? true)
@@ -705,6 +723,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          submission: Submission?,
                          selector: BoundDocumentSelector?,
                          noCommentUnavailable: Bool = false,
+                         answerNotDelivered: Bool = false,
                          inboxStateIsCurrent: Bool = true) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
@@ -846,6 +865,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     status: status, remote: remote, submission: submission),
                                 attentionTier: remote?.attentionTier ?? .middle,
                                 noCommentUnavailable: noCommentUnavailable,
+                                answerNotDelivered: answerNotDelivered,
                                 inboxStateIsCurrent: inboxStateIsCurrent)
     }
 

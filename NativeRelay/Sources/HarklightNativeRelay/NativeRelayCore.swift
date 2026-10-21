@@ -64,6 +64,7 @@ public enum OriginalOperationResult: Equatable, Sendable {
     case accepted(operationID: UUID, terminalSequence: UInt64)
     case refusedByRetraction(operationID: UUID, retractedAtMilliseconds: UInt64)
     case unsupported(operationID: UUID)
+    case failed(operationID: UUID)
     case unresolved
 }
 
@@ -1215,6 +1216,28 @@ public actor NativeRelayCore {
                          causeCode: "no_comment_unsupported", operationID: operationID,
                          request: submission.requestKey, revision: submission.requestRevision,
                          receipt: .pendingUnconfirmed)
+            case let .failed(operationID):
+                guard operationID == submission.operationID else {
+                    diagnose(.answer, .originalOperationDelivery, .unresolved,
+                             error: NativeRelayCoreError.mismatchedOperationResult,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                do {
+                    try store.recordAnswerNotDelivered(submission.intentID,
+                                                       operationID: operationID,
+                                                       context: context)
+                } catch {
+                    diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
+                             operationID: operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                    throw error
+                }
+                diagnose(.answer, .originalOperationDelivery, .rejected,
+                         causeCode: "answer_not_delivered", operationID: operationID,
+                         request: submission.requestKey, revision: submission.requestRevision,
+                         receipt: .terminal)
             case .unresolved:
                 diagnose(.answer, .originalOperationDelivery, .unresolved,
                          operationID: submission.operationID, request: submission.requestKey,

@@ -93,6 +93,7 @@ final class SampleResponse {
         statusParts.append(viewModel.isRetracted(key)
             ? "Retracted"
             : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
+        if request.answerNotDelivered { statusParts.append("Answer not delivered") }
         if let seen = request.informationalSeenStatus,
            seen != .available, !localSeenSelected {
             statusParts.append(LiveRequestDetail.informationalSeenText(seen))
@@ -103,7 +104,8 @@ final class SampleResponse {
         let serverReportedFinalResponse = request.inboxStateIsCurrent &&
             (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
         let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
-        let receiptStatus = InboxRequestRow.responseReceiptStatus(
+        let receiptStatus = request.answerNotDelivered ? .some(.failed) :
+            InboxRequestRow.responseReceiptStatus(
             request.intentReceipt,
             hasUnconfirmedOutcome: hasUnconfirmedOutcome,
             serverReportedFinalResponse: serverReportedFinalResponse,
@@ -111,6 +113,8 @@ final class SampleResponse {
         let localStatus: String?
         if serverReportedFinalResponse {
             localStatus = nil
+        } else if request.answerNotDelivered {
+            localStatus = "Answer not delivered"
         } else if receiptStatus == .failed {
             if hasUnconfirmedOutcome {
                 localStatus = "Answer outcome awaits reconciliation"
@@ -120,6 +124,7 @@ final class SampleResponse {
                 switch request.intentReceipt?.localState {
                 case .some(.refusedByRetraction): localStatus = "Answer refused · request retracted"
                 case .some(.terminalUnconfirmed): localStatus = "Answer outcome awaits reconciliation"
+                case .some(.notDelivered): localStatus = "Answer not delivered"
                 case .some(.unsupported): localStatus = "No comment is unsupported by this server"
                 case .some(.repairRequired): localStatus = "Answer needs recovery"
                 default: localStatus = "Answer not delivered"
@@ -148,7 +153,7 @@ final class SampleResponse {
             status: statusParts.joined(separator: " · "),
             bodyText: request.body?.rawValue,
             symbol: message.kind.symbol,
-            isResolved: receiptStatus == .failed ? false : request.isResolved,
+            isResolved: request.answerNotDelivered || receiptStatus == .failed ? false : request.isResolved,
             createdAt: request.createdAt,
             isLocalExample: true, localStatus: localStatus,
             informationalSeenStatus: request.informationalSeenStatus,

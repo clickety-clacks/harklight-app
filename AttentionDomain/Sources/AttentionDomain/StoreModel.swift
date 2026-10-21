@@ -125,6 +125,9 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     case pending
     case accepted(sequence: UInt64?)
     case lost
+    /// The relay explicitly rejected this operation, so it is safe to remove
+    /// its active outbox lock and let the person choose another answer.
+    case failed
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case unsupported
