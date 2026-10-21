@@ -124,7 +124,7 @@ final class HarklightUITests: XCTestCase {
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
-    func testUnconfirmedAnswerOutcomeKeepsNeutralSceneAndExactReceipt() throws {
+    func testServerAnsweredAfterUnconfirmedSendMovesToRepliedWithoutClaimingAcceptance() throws {
         let app = launchFreshApp()
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
@@ -150,14 +150,20 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inbox.isSelected,
                       "A lost or unconfirmed response leaves the user on Inbox.")
-        XCTAssertTrue(row.waitForExistence(timeout: 5),
-                      "The lost response returns the request to Inbox.")
-        XCTAssertTrue(app.staticTexts["Answer outcome awaits reconciliation"].exists,
-                      "The Inbox row keeps the existing delivery-failure status.")
-        attachScreenshot("Unconfirmed response returned to Inbox", from: app)
-        app.tabBars.buttons["Replied"].tap()
         XCTAssertFalse(row.waitForExistence(timeout: 2),
-                       "A lost response does not remain in Replied.")
+                       "A server-answered request no longer appears in Inbox.")
+        XCTAssertFalse(app.staticTexts["Answer outcome awaits reconciliation"].exists,
+                       "A server-answered request is not shown as a failed response.")
+        XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists,
+                       "The list must not claim this device's answer was accepted.")
+        attachScreenshot("Server-answered response removed from Inbox", from: app)
+
+        app.tabBars.buttons["Replied"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "The server-answered request appears in Replied.")
+        XCTAssertFalse(app.staticTexts["Answer outcome awaits reconciliation"].exists)
+        XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists)
+        attachScreenshot("Server-answered response in Replied", from: app)
     }
 
     func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {

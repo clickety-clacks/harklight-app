@@ -210,7 +210,14 @@ struct InboxRequestRow: Identifiable {
     var id: RequestKey { key }
 
     static func responseReceiptStatus(_ receipt: IntentReceipt?,
-                                      hasUnconfirmedOutcome: Bool = false) -> InboxResponseReceiptStatus? {
+                                      hasUnconfirmedOutcome: Bool = false,
+                                      serverReportedAnswered: Bool = false,
+                                      hasAcceptedOwnSubmission: Bool = false) -> InboxResponseReceiptStatus? {
+        if serverReportedAnswered {
+            // A current answered lifecycle settles list routing. Only an accepted
+            // own-operation receipt identifies this device's answer as confirmed.
+            return hasAcceptedOwnSubmission ? .pendingOrAccepted : nil
+        }
         if hasUnconfirmedOutcome { return .failed }
         guard let state = receipt?.localState else { return nil }
         return switch state {

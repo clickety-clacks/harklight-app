@@ -100,10 +100,18 @@ final class SampleResponse {
         let hasUnconfirmedOutcome = request.intentReceipt != nil &&
             request.receiptFacts?.ownOutcome == .unconfirmed &&
             request.lifecycleStatus != .pending
+        let serverReportedAnswered = request.inboxStateIsCurrent &&
+            request.lifecycleStatus == .answered
+        let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
         let receiptStatus = InboxRequestRow.responseReceiptStatus(
-            request.intentReceipt, hasUnconfirmedOutcome: hasUnconfirmedOutcome)
+            request.intentReceipt,
+            hasUnconfirmedOutcome: hasUnconfirmedOutcome,
+            serverReportedAnswered: serverReportedAnswered,
+            hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
         let localStatus: String?
-        if receiptStatus == .failed {
+        if serverReportedAnswered {
+            localStatus = nil
+        } else if receiptStatus == .failed {
             if hasUnconfirmedOutcome {
                 localStatus = "Answer outcome awaits reconciliation"
             } else if request.noCommentUnavailable {

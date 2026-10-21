@@ -336,7 +336,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
     }
 
-    func testLostOperationReplyCanShowTerminalLifecycleWithoutInventingAcceptance() async throws {
+    func testServerAnsweredAfterLostOperationReplyMovesToRepliedWithoutInventingAcceptance() async throws {
         let (context, store, live, key) = try setup()
         let receipt = try commitAnswer(store, key: key)
         let session = AnswerSession(context.identity)
@@ -350,11 +350,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertNil(live.actionError)
         let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
-        XCTAssertFalse(row.belongsToReplied,
-                       "A terminal update that cannot be matched to this device's answer stays in Inbox.")
-        XCTAssertTrue(row.hasFailedResponse)
-        XCTAssertFalse(row.isResolved)
-        XCTAssertEqual(row.localStatus, "Answer outcome awaits reconciliation")
+        XCTAssertTrue(row.belongsToReplied,
+                      "The server's answered lifecycle moves the row to Replied.")
+        XCTAssertFalse(row.hasFailedResponse)
+        XCTAssertTrue(row.isResolved)
+        XCTAssertNil(row.localStatus)
+        XCTAssertTrue(row.status.contains("Answered"),
+                      "Keep the server's answered wording without attributing it to this device.")
     }
 
     func testFailedTerminalReplayDoesNotEraseAcceptedAnswerOrResendItOnReconnect() async throws {

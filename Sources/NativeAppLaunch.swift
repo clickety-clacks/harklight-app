@@ -1216,9 +1216,14 @@ final class LivePresentationStore {
             let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
                 request.receiptFacts?.ownOutcome == .unconfirmed &&
                 request.lifecycleStatus != .pending
+            let serverReportedAnswered = request.inboxStateIsCurrent &&
+                request.lifecycleStatus == .answered
+            let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
             let receiptStatus = InboxRequestRow.responseReceiptStatus(
                 request.intentReceipt,
-                hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission)
+                hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission,
+                serverReportedAnswered: serverReportedAnswered,
+                hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
             var statusParts: [String] = []
             if request.inboxStateIsCurrent {
                 if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
