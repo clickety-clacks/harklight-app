@@ -144,4 +144,73 @@ final class MessageTextLinksTests: XCTestCase {
         XCTAssertEqual(visibleText(attributed), source)
         XCTAssertTrue(links(attributed).isEmpty)
     }
+
+    func testEmailAddressesAreNotLinkified() {
+        let source = "Write to desk@example.com or see https://example.com/help."
+        let attributed = MessageTextLinks.attributed(source)
+        XCTAssertEqual(visibleText(attributed), source)
+        XCTAssertEqual(links(attributed), [URL(string: "https://example.com/help")!],
+                       "Only web URLs become links; an email address stays plain text.")
+    }
+}
+
+/// The ruled behavior for an unresolved send: a send from this device whose
+/// request closed without a confirmed result raises a plain-language warning
+/// in the inbox warning popup, and the warning clears once no send remains
+/// unresolved. An in-flight send and a server-resolved request are not
+/// unresolved.
+@MainActor
+final class UnresolvedSendWarningTests: XCTestCase {
+    func testClosedRequestWithUnconfirmedOwnSendIsUnresolved() {
+        for status in [AppLifecycleStatus.cleared, .expired, .superseded] {
+            XCTAssertTrue(LivePresentationStore.sendIsUnresolved(
+                lifecycleStatus: status, ownOutcome: .unconfirmed,
+                answeredFromThisDevice: true),
+                "A send left without a result under \(status) is unresolved.")
+        }
+    }
+
+    func testInFlightSendIsNotUnresolved() {
+        for status in [AppLifecycleStatus.open, .pending] {
+            XCTAssertFalse(LivePresentationStore.sendIsUnresolved(
+                lifecycleStatus: status, ownOutcome: .unconfirmed,
+                answeredFromThisDevice: true),
+                "An in-flight send under \(status) carries a status line, not a warning.")
+        }
+    }
+
+    func testServerResolvedRequestIsNotUnresolved() {
+        for status in [AppLifecycleStatus.answered, .noComment] {
+            XCTAssertFalse(LivePresentationStore.sendIsUnresolved(
+                lifecycleStatus: status, ownOutcome: .unconfirmed,
+                answeredFromThisDevice: true),
+                "A server-resolved request under \(status) has its result.")
+        }
+    }
+
+    func testAcceptedOrForeignSendIsNotUnresolved() {
+        XCTAssertFalse(LivePresentationStore.sendIsUnresolved(
+            lifecycleStatus: .cleared, ownOutcome: .accepted, answeredFromThisDevice: true))
+        XCTAssertFalse(LivePresentationStore.sendIsUnresolved(
+            lifecycleStatus: .cleared, ownOutcome: nil, answeredFromThisDevice: true))
+        XCTAssertFalse(LivePresentationStore.sendIsUnresolved(
+            lifecycleStatus: .cleared, ownOutcome: .unconfirmed, answeredFromThisDevice: false))
+    }
+
+    func testWarningTextIsPlainLanguageAndClearsAtZero() {
+        XCTAssertNil(LivePresentationStore.unresolvedSendWarning(unresolvedSendCount: 0),
+                     "No unresolved send leaves no warning, which closes the popup entry.")
+        let single = LivePresentationStore.unresolvedSendWarning(unresolvedSendCount: 1)
+        XCTAssertEqual(single,
+                       "A request closed without a confirmed result for your answer. Your answer stays saved on this device.")
+        let several = LivePresentationStore.unresolvedSendWarning(unresolvedSendCount: 3)
+        XCTAssertEqual(several,
+                       "3 requests closed without a confirmed result for your answers. Your answers stay saved on this device.")
+        for text in [single, several].compactMap({ $0 }) {
+            for jargon in ["relay", "lifecycle", "evidence", "reconciliation", "terminal"] {
+                XCTAssertFalse(text.lowercased().contains(jargon),
+                               "The warning stays in plain language: \(text)")
+            }
+        }
+    }
 }

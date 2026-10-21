@@ -69,7 +69,8 @@ struct LiveContentView: View {
                                                       archiveDeparture: archiveDeparture,
                                                       connectionStatus: connectionStatus) },
                 warnings: [launch?.notificationNavigationMessage, store.observationError, store.notificationWarning,
-                           store.pushRegistrationWarning, launch?.archiveCatalogWarning,
+                           store.pushRegistrationWarning, store.unresolvedSendWarning,
+                           launch?.archiveCatalogWarning,
                            launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage,
                            fixtureStore?.persistenceError,
                            recoveryStatusFixture]
@@ -728,7 +729,7 @@ struct LiveRequestDetail: View {
                                         isPresented: $fixtureOutcomePresented,
                                         titleVisibility: .visible) {
                         ForEach([DemoTerminalScenario.ownOperationAccepted,
-                                 .answerOutcomeUnconfirmed]) { scenario in
+                                 .answerOutcomeUnconfirmed, .cleared]) { scenario in
                             Button(scenario.simulationTitle) {
                                 guard fixtureStore.simulateTerminal(for: request.key,
                                                                     scenario: scenario) else { return }
@@ -780,7 +781,7 @@ struct LiveRequestDetail: View {
                             answerSubmittedHere = true
                             try? store.refreshFromDurableStore()
                         } else {
-                            store.submitFromUser(request.key)
+                            guard store.submitFromUser(request.key) else { return }
                             answerSubmittedHere = true
                         }
                     }
@@ -980,9 +981,9 @@ struct LiveRequestDetail: View {
         guard let state else { return nil }
         return switch state {
         case .durable, .queuedForRelay: "Answer pending on this device"
-        case .accepted: "Answer accepted · terminal status pending"
+        case .accepted: "Answer accepted"
         case .refusedByRetraction: "Answer refused · request retracted"
-        case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .terminalUnconfirmed: "Answer sent · result not confirmed"
         case .notDelivered: "Answer not delivered"
         case .unsupported: "No comment is unsupported by this server"
         case .repairRequired: "Answer needs recovery"

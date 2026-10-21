@@ -2,9 +2,10 @@ import SwiftUI
 import AttentionDomain
 
 enum MessageTextLinks {
-    /// Makes ordinary web and email addresses tappable with the standard
-    /// system link behavior. The visible characters stay exactly as written;
-    /// nothing else is interpreted as markup.
+    /// Makes ordinary web URLs tappable with the standard system link
+    /// behavior. The visible characters stay exactly as written; nothing
+    /// else — including email addresses — is interpreted as a link or
+    /// other markup.
     static func attributed(_ string: String) -> AttributedString {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
             return AttributedString(string)
@@ -15,7 +16,7 @@ enum MessageTextLinks {
         var result = AttributedString()
         var cursor = string.startIndex
         for match in matches {
-            guard let url = match.url,
+            guard let url = match.url, isWebURL(url),
                   let range = Range(match.range, in: string),
                   range.lowerBound >= cursor else { continue }
             if cursor < range.lowerBound {
@@ -30,6 +31,11 @@ enum MessageTextLinks {
             result += AttributedString(String(string[cursor...]))
         }
         return result
+    }
+
+    private static func isWebURL(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https"
     }
 }
 

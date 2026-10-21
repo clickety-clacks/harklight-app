@@ -865,6 +865,39 @@ final class LivePresentationStore {
     private(set) var pushRegistrationWarning: String?
     var connectionWarning: String?
 
+    /// Present while any send from this device remains unresolved; nil once
+    /// every such send resolves, which also clears the inbox warning popup.
+    var unresolvedSendWarning: String? {
+        Self.unresolvedSendWarning(unresolvedSendCount: presentation.requests.filter {
+            Self.sendIsUnresolved(lifecycleStatus: $0.lifecycleStatus,
+                                  ownOutcome: $0.receiptFacts?.ownOutcome,
+                                  answeredFromThisDevice: $0.intentReceipt != nil)
+        }.count)
+    }
+
+    /// A send is unresolved when this device answered, the request closed,
+    /// and the server never confirmed a result for the answer. An in-flight
+    /// send (open or pending request) is not unresolved: it carries its own
+    /// status line and may still resolve normally. A server-resolved request
+    /// (answered or no comment) has its result.
+    static func sendIsUnresolved(lifecycleStatus: AppLifecycleStatus,
+                                 ownOutcome: OwnOutcome?,
+                                 answeredFromThisDevice: Bool) -> Bool {
+        guard answeredFromThisDevice, ownOutcome == .unconfirmed else { return false }
+        return switch lifecycleStatus {
+        case .cleared, .expired, .superseded: true
+        case .open, .pending, .answered, .noComment: false
+        }
+    }
+
+    static func unresolvedSendWarning(unresolvedSendCount: Int) -> String? {
+        switch unresolvedSendCount {
+        case 0: nil
+        case 1: "A request closed without a confirmed result for your answer. Your answer stays saved on this device."
+        default: "\(unresolvedSendCount) requests closed without a confirmed result for your answers. Your answers stay saved on this device."
+        }
+    }
+
     @ObservationIgnored private let port: AttentionDomainPort
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
@@ -1256,7 +1289,7 @@ final class LivePresentationStore {
                     ? (request.noCommentUnavailable
                         ? "No comment not delivered · unsupported by this server"
                         : request.receiptFacts?.ownOutcome == .unconfirmed
-                            ? "Answer outcome awaits reconciliation"
+                            ? "Answer sent · result not confirmed"
                             : cachedOperationStatus(request.intentReceipt?.localState))
                     : nil,
                 informationalSeenStatus: request.informationalSeenStatus,
@@ -1286,9 +1319,9 @@ final class LivePresentationStore {
         guard let state else { return nil }
         return switch state {
         case .durable, .queuedForRelay: "Answer pending on this device"
-        case .accepted: "Answer accepted · terminal status pending"
+        case .accepted: "Answer accepted"
         case .refusedByRetraction: "Answer refused · request retracted"
-        case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .terminalUnconfirmed: "Answer sent · result not confirmed"
         case .notDelivered: "Answer not delivered"
         case .unsupported: "No comment is unsupported by this server"
         case .repairRequired: "Answer needs recovery"
@@ -1466,15 +1499,18 @@ final class LivePresentationStore {
         return receipt
     }
 
-    func submitFromUser(_ key: RequestKey, explicitCompatibilityAction: ExactText? = nil) {
-        guard permitsDelivery, !isReadOnly else { return }
+    /// Returns whether an intent for this request now exists, so callers can
+    /// avoid treating a validation refusal as a submission.
+    @discardableResult
+    func submitFromUser(_ key: RequestKey, explicitCompatibilityAction: ExactText? = nil) -> Bool {
+        guard permitsDelivery, !isReadOnly else { return false }
         if draft(for: key)?.noCommentSelected == true {
-            submitNoCommentFromUser(key)
-            return
+            return submitNoCommentFromUser(key)
         }
         do {
             _ = try submit(key, explicitCompatibilityAction: explicitCompatibilityAction)
             retryPendingDelivery()
+            return true
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error, request: key,
                      receiptState: .unknown)
@@ -1490,6 +1526,7 @@ final class LivePresentationStore {
             }
             if let current, current.intentReceipt != nil {
                 clearActionError()
+                return true
             } else {
                 actionErrorRequest = key
                 if let current, current.lifecycleStatus != .open {
@@ -1500,20 +1537,25 @@ final class LivePresentationStore {
                     // A thrown save/refresh is not proof of non-delivery.
                     actionError = "Your answer could not be confirmed. Check its saved status before trying again."
                 }
+                return false
             }
         }
     }
 
-    func submitNoCommentFromUser(_ key: RequestKey) {
+    /// Returns whether an intent for this request now exists, so callers can
+    /// avoid treating a validation refusal as a submission.
+    @discardableResult
+    func submitNoCommentFromUser(_ key: RequestKey) -> Bool {
         guard permitsDelivery, !isReadOnly,
               let request = request(for: key), request.inboxStateIsCurrent,
               !isRetracted(key), request.lifecycleStatus == .open,
-              request.intentReceipt == nil, request.informationalSeenStatus == nil else { return }
+              request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
         selectNoComment(for: key)
-        guard flushPendingDraft(for: key) else { return }
+        guard flushPendingDraft(for: key) else { return false }
         do {
             _ = try submitNoComment(key)
             retryPendingDelivery()
+            return true
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error, request: key,
                      receiptState: .unknown)
@@ -1527,9 +1569,11 @@ final class LivePresentationStore {
             }
             if current?.intentReceipt != nil {
                 clearActionError()
+                return true
             } else {
                 actionErrorRequest = key
                 actionError = "No comment could not be confirmed. Check its saved status before trying again."
+                return false
             }
         }
     }

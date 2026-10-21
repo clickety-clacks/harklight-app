@@ -117,13 +117,13 @@ final class SampleResponse {
             localStatus = "Answer not delivered"
         } else if receiptStatus == .failed {
             if hasUnconfirmedOutcome {
-                localStatus = "Answer outcome awaits reconciliation"
+                localStatus = "Answer sent · result not confirmed"
             } else if request.noCommentUnavailable {
                 localStatus = "No comment not delivered · unsupported by this server"
             } else {
                 switch request.intentReceipt?.localState {
                 case .some(.refusedByRetraction): localStatus = "Answer refused · request retracted"
-                case .some(.terminalUnconfirmed): localStatus = "Answer outcome awaits reconciliation"
+                case .some(.terminalUnconfirmed): localStatus = "Answer sent · result not confirmed"
                 case .some(.notDelivered): localStatus = "Answer not delivered"
                 case .some(.unsupported): localStatus = "No comment is unsupported by this server"
                 case .some(.repairRequired): localStatus = "Answer needs recovery"

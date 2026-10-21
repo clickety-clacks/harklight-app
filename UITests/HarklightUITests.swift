@@ -113,6 +113,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inbox.isSelected,
                       "The automatic return keeps the tab the user entered from.")
+        XCTAssertFalse(app.buttons["inbox-warning-button"].exists,
+                       "A resolved send raises no unresolved-send warning.")
         attachScreenshot("Accepted answer returns to the list", from: app)
 
         app.tabBars.buttons["Replied"].tap()
@@ -167,7 +169,7 @@ final class HarklightUITests: XCTestCase {
                       "A lost or unconfirmed response leaves the user on Inbox.")
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A server-answered request no longer appears in Inbox.")
-        XCTAssertFalse(app.staticTexts["Answer outcome awaits reconciliation"].exists,
+        XCTAssertFalse(app.staticTexts["Answer sent · result not confirmed"].exists,
                        "A server-answered request is not shown as a failed response.")
         XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists,
                        "The list must not claim this device's answer was accepted.")
@@ -176,9 +178,32 @@ final class HarklightUITests: XCTestCase {
         app.tabBars.buttons["Replied"].tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The server-answered request appears in Replied.")
-        XCTAssertFalse(app.staticTexts["Answer outcome awaits reconciliation"].exists)
+        XCTAssertFalse(app.staticTexts["Answer sent · result not confirmed"].exists)
         XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists)
         attachScreenshot("Server-answered response in Replied", from: app)
+    }
+
+    func testUnresolvedSendRaisesPlainLanguageWarningPopup() throws {
+        let app = launchFreshApp()
+        _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
+
+        applyFixtureOutcome("cleared", in: app)
+
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        let warningButton = app.buttons["inbox-warning-button"]
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5),
+                      "A send left without a confirmed result raises the inbox warning.")
+        let message = app.staticTexts["inbox-warning-message"]
+        if !message.waitForExistence(timeout: 3) {
+            warningButton.tap()
+        }
+        XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(message.label,
+                       "A request closed without a confirmed result for your answer. Your answer stays saved on this device.",
+                       "The popup explains the unresolved send in plain language.")
+        attachScreenshot("Unresolved send warning popup", from: app)
     }
 
     func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {
