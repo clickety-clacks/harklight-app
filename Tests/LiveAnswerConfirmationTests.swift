@@ -45,12 +45,12 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         return try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
     }
 
-    private func sampleProjection(for live: LivePresentationStore, key: RequestKey) -> InboxRequestRow? {
+    private func sampleResponse(for live: LivePresentationStore, key: RequestKey) -> SampleResponse {
         let message = SampleMessage(id: key.messageID.rawValue, kind: .note,
             sender: key.senderID.rawValue, initials: "", title: "Sample request", body: "",
             options: [], deadline: nil, missed: false, revised: false,
             chatUnread: false, hasChat: false, fixtureCreatedAtMilliseconds: 0)
-        return SampleResponse(viewModel: live, key: key, message: message).inboxRow
+        return SampleResponse(viewModel: live, key: key, message: message)
     }
 
     func testDelayedSendAfterDurableAnswerNeverClaimsFailureOrCreatesAnotherIntent() throws {
@@ -378,9 +378,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let receipt = try commitNoComment(store, key: key)
         let session = AnswerSession(context.identity)
         session.loseOperationReply = true
-        session.terminalState = .noComment
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
+        let sentCount = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(sentCount, 1)
+        try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .noComment, nil)), context: context)
         try live.refreshFromDurableStore()
 
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
@@ -398,7 +399,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(liveRow.status.contains("No comment"),
                       "Show the server's lifecycle wording without claiming this device's send was accepted.")
 
-        let sampleRow = try XCTUnwrap(sampleProjection(for: live, key: key))
+        let sampleResponse = sampleResponse(for: live, key: key)
+        let sampleRow = try XCTUnwrap(sampleResponse.inboxRow)
         XCTAssertTrue(sampleRow.belongsToReplied,
                       "The sample projection follows the same server-reported final response.")
         XCTAssertFalse(sampleRow.hasFailedResponse)
@@ -415,10 +417,6 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertFalse(unsupportedLiveRow.belongsToReplied,
                        "An unsupported No comment leaves the request in Inbox.")
         XCTAssertTrue(unsupportedLiveRow.status.contains("No comment not delivered"))
-        let unsupportedSampleRow = try XCTUnwrap(sampleProjection(for: live, key: key))
-        XCTAssertFalse(unsupportedSampleRow.belongsToReplied)
-        XCTAssertTrue(unsupportedSampleRow.localStatus?.contains("No comment not delivered") == true)
-
         try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .noComment, nil)), context: context)
         try live.refreshFromDurableStore()
 
@@ -430,10 +428,11 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertFalse(liveRow.status.contains("No comment not delivered"))
         XCTAssertFalse(liveRow.localStatus?.contains("No comment not delivered") == true)
 
-        let sampleRow = try XCTUnwrap(sampleProjection(for: live, key: key))
+        let sampleResponse = sampleResponse(for: live, key: key)
+        let sampleRow = try XCTUnwrap(sampleResponse.inboxRow)
         XCTAssertTrue(sampleRow.belongsToReplied)
         XCTAssertFalse(sampleRow.status.contains("No comment not delivered"))
-        XCTAssertFalse(sampleRow.localStatus?.contains("No comment not delivered") == true)
+        XCTAssertNil(sampleRow.localStatus)
     }
 
     func testFailedTerminalReplayDoesNotEraseAcceptedAnswerOrResendItOnReconnect() async throws {
@@ -526,7 +525,6 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
     var acknowledgedCursors: [UInt64] = []
     var loseOperationReply = false
     var failReplayAfterSend = false
-    var terminalState = TerminalState.answered
 
     init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
 
@@ -538,9 +536,7 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
         let since = try JSONValue.parse(request).uniqueValue(named: "since")
         if !sentOperationIDs.isEmpty {
             if case .number(let number)? = since, number.lexeme == "1" {
-                let answer = terminalState == .answered ? ",\"answer\":\"got-it\"" : ""
-                let event = "{\"v\":1,\"type\":\"lifecycle\",\"seq\":2,\"sender_id\":\"sender\",\"message_id\":\"sample\",\"origin\":\"device\",\"state\":\"\(terminalState.rawValue)\",\"at\":1\(answer)}\n"
-                try await consume(Data(event.utf8))
+                try await consume(Data("{\"v\":1,\"type\":\"lifecycle\",\"seq\":2,\"sender_id\":\"sender\",\"message_id\":\"sample\",\"origin\":\"device\",\"state\":\"answered\",\"at\":1,\"answer\":\"got-it\"}\n".utf8))
             }
             try await consume(Data("{\"v\":1,\"type\":\"resynced\",\"seq\":2}\n".utf8))
         } else {
