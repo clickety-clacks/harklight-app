@@ -233,10 +233,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(session.sentOperationIDs, [failed.opID])
 
         live.selectAction(ExactText("reply"), input: nil, for: key)
+        live.updateCompatibilityText("Try again", action: ExactText("reply"), for: key)
         let retry = try live.submit(key)
         XCTAssertNotEqual(retry.opID, failed.opID)
         XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [retry.opID],
                        "Only the new answer is retryable after the relay explicitly rejected the old one.")
+        XCTAssertFalse(try XCTUnwrap(live.request(for: key)).answerNotDelivered,
+                       "A new pending attempt replaces the previous failure treatment.")
     }
 
     func testMissingNoCommentReplyKeepsPendingExplanationAndReusesOperationID() async throws {
