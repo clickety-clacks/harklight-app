@@ -663,8 +663,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 }
             // A newer saved attempt supersedes the earlier unsupported result
             // while its own delivery outcome is pending.
-            let noCommentUnavailable = hasUnsupportedNoComment && submission == nil &&
-                currentDraft.noCommentSelected
+            let noCommentUnavailable = hasUnsupportedNoComment && submission == nil
             let answerNotDelivered = hasFailedAnswer && submission == nil && !noCommentUnavailable &&
                 snapshot.remoteStates[item.request.key]?.isTerminal != true
             return try present(item.request,

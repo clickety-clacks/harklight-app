@@ -209,7 +209,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let session = AnswerSession(context.identity)
         session.rejectOperation = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
+        let sent = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(sent, 1)
         try live.refreshFromDurableStore()
 
         let request = try XCTUnwrap(live.request(for: key))
@@ -244,7 +245,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let session = AnswerSession(context.identity)
         session.loseOperationReply = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
+        let sent = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(sent, 1)
         try live.refreshFromDurableStore()
 
         let pending = try XCTUnwrap(live.request(for: key))
