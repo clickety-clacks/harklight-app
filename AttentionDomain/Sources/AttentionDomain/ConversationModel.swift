@@ -223,7 +223,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var redactedRevisions: Set<UInt64>?
     public var terminalAuthor: ConversationAuthor?
     public var retraction: ConversationRetraction?
-    /// Retraction time a delivery reported before its lifecycle terminal arrived.
+    /// Retraction time a delivery or inbox snapshot reported before the retraction turn arrived.
     public var reportedRetractedAtMilliseconds: UInt64?
     public var uploadGroups: [UUID: ConversationUploadGroup]?
     public var uploadCleanups: [UUID: ConversationUploadCleanup]?
@@ -281,6 +281,14 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         }
         facts[turn.id] = facts[turn.id] ?? ConversationTurnFacts()
         orderTurns()
+    }
+
+    mutating func recordReportedRetraction(at retractedAtMilliseconds: UInt64) throws {
+        guard terminal == nil || terminal == .cleared,
+              [retraction?.retractedAtMilliseconds, reportedRetractedAtMilliseconds]
+                .allSatisfy({ $0 == nil || $0 == retractedAtMilliseconds }) else { throw ConversationError.conflict }
+        terminal = .cleared
+        reportedRetractedAtMilliseconds = retractedAtMilliseconds
     }
 
     mutating func recordRetraction(turn: ExactText,

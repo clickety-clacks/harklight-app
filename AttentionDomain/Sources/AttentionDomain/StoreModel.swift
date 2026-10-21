@@ -554,7 +554,8 @@ public struct InboxPagingCheckpoint: Equatable, Codable, Sendable {
 /// Additive ordinary-stream metadata initializes or closes a conversation without
 /// borrowing a conversation sequence number or changing the sender's message JSON.
 public struct RelayConversationMetadata: Equatable, Codable, Sendable {
-    public let revision: UInt64
+    /// Absent on inbox snapshot terminals, which report a retraction without its conversation join.
+    public let revision: UInt64?
     public let sessionHandle: ExactText?
     public let eventID: ExactText?
     public let availability: ConversationAvailability?
@@ -564,7 +565,7 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
     public let retractedAtMilliseconds: UInt64?
     public let files: [ConversationFile]?
 
-    public init(revision: UInt64, sessionHandle: ExactText? = nil, eventID: ExactText? = nil,
+    public init(revision: UInt64?, sessionHandle: ExactText? = nil, eventID: ExactText? = nil,
                 availability: ConversationAvailability? = nil, listeningSupport: JSONValue? = nil,
                 author: ConversationAuthor? = nil, files: [ConversationFile]? = nil,
                 terminalReason: ExactText? = nil, retractedAtMilliseconds: UInt64? = nil) {
