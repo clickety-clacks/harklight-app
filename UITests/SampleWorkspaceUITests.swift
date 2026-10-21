@@ -306,24 +306,48 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "Replied rows have no swipe action.")
     }
 
-    func testRecoveryStatusSitsBelowNavigationControlsAndKeepsInboxRowsVisible() {
+    func testRecoveryWarningUsesTitleRowPopoverAndPresentsOnce() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "--harklight-test-recovery-status"]
         app.launch()
-        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let inbox = app.tabBars.buttons["Inbox"]
+        let replied = app.tabBars.buttons["Replied"]
+        let brand = app.descendants(matching: .any)["inbox-brand"]
+        let warningButton = app.buttons["inbox-warning-button"]
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
 
-        let status = app.descendants(matching: .any)["inbox-status-message"]
+        let message = app.staticTexts["inbox-warning-message"]
         let row = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'")).firstMatch
-        XCTAssertTrue(status.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(status.label.contains("Could not verify notification"), status.label)
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(message.label.contains("Could not verify notification"), message.label)
+        XCTAssertTrue(brand.exists, app.debugDescription)
+        XCTAssertTrue(inbox.isSelected, "Automatic warning presentation does not change the selected tab.")
+        XCTAssertGreaterThanOrEqual(warningButton.frame.minX, brand.frame.maxX - 2,
+                                    "The warning icon sits beside the Harklight title.")
+        XCTAssertLessThan(warningButton.frame.midX, settings.frame.midX,
+                          "The warning icon sits before Settings in the shared title row.")
         XCTAssertTrue(row.waitForExistence(timeout: 5), "Existing Inbox content remains visible.")
-        XCTAssertGreaterThanOrEqual(status.frame.minY, app.buttons["inbox-settings"].frame.maxY,
-                                    "Recovery status must sit below the brand/Settings header.")
-        XCTAssertGreaterThanOrEqual(row.frame.minY, status.frame.maxY,
-                                    "The status must reserve space instead of covering Inbox rows.")
-        capture("inbox-recovery-status", app)
+        capture("inbox-recovery-warning-popover", app)
+
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.10)).tap()
+        XCTAssertFalse(message.waitForExistence(timeout: 1),
+                       "Tapping outside the stock popover dismisses it.")
+        capture("inbox-recovery-warning-dismissed", app)
+        selectMessageTab("Replied", in: app)
+        XCTAssertTrue(replied.isSelected, app.debugDescription)
+        XCTAssertFalse(message.waitForExistence(timeout: 1),
+                       "The same warning does not reopen when switching lists.")
+        selectMessageTab("Inbox", in: app)
+        XCTAssertTrue(inbox.isSelected, app.debugDescription)
+        XCTAssertFalse(message.waitForExistence(timeout: 1),
+                       "Returning to Inbox does not auto-present the same warning again.")
+        warningButton.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 5),
+                      "The warning icon still opens a persistent warning manually.")
     }
 
     func testUnsupportedNoCommentControlStaysVisibleAndCanBeRetried() {
