@@ -124,7 +124,7 @@ final class HarklightUITests: XCTestCase {
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
-    func testUnconfirmedAnswerOutcomeKeepsNeutralSceneAndExactReceipt() throws {
+    func testServerAnsweredAfterUnconfirmedSendMovesToRepliedWithoutClaimingAcceptance() throws {
         let app = launchFreshApp()
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
@@ -142,6 +142,28 @@ final class HarklightUITests: XCTestCase {
                        "An unconfirmed closure must keep the neutral sender scene.")
 
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        let inbox = app.tabBars.buttons["Inbox"]
+        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inbox.isSelected,
+                      "A lost or unconfirmed response leaves the user on Inbox.")
+        XCTAssertFalse(row.waitForExistence(timeout: 2),
+                       "A server-answered request no longer appears in Inbox.")
+        XCTAssertFalse(app.staticTexts["Answer outcome awaits reconciliation"].exists,
+                       "A server-answered request is not shown as a failed response.")
+        XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists,
+                       "The list must not claim this device's answer was accepted.")
+        attachScreenshot("Server-answered response removed from Inbox", from: app)
+
+        app.tabBars.buttons["Replied"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "The server-answered request appears in Replied.")
+        XCTAssertFalse(app.staticTexts["Answer outcome awaits reconciliation"].exists)
+        XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists)
+        attachScreenshot("Server-answered response in Replied", from: app)
     }
 
     func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {
@@ -150,7 +172,8 @@ final class HarklightUITests: XCTestCase {
         app.launch()
         let list = app.collectionViews.firstMatch
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
-        let others = [app.descendants(matching: .any)["request-row-unknown-01"], app.descendants(matching: .any)["request-row-review-01"]]
+        let review = app.descendants(matching: .any)["request-row-review-01"]
+        let others = [app.descendants(matching: .any)["request-row-unknown-01"], review]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(others.allSatisfy { $0.waitForExistence(timeout: 5) }, app.debugDescription)
         let examples = app.descendants(matching: .any)
@@ -169,9 +192,13 @@ final class HarklightUITests: XCTestCase {
         let scrolledTop = top.frame.minY
         XCTAssertLessThan(scrolledTop, unscrolledTop - 10, "The list must be scrolled away from its top.")
 
-        XCTAssertTrue(facilities.isHittable, app.debugDescription)
-        facilities.tap()
-        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertGreaterThan(review.frame.minY, settings.frame.maxY + 16,
+                             "The tapped request stays clear of the pinned header.")
+        XCTAssertTrue(review.isHittable, app.debugDescription)
+        review.tap()
+        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
+                      "The detail card, rather than the matching list row, confirms navigation.")
         attachScreenshot("Native detail back control", from: app)
 
         let back = app.navigationBars.buttons.firstMatch
@@ -181,7 +208,8 @@ final class HarklightUITests: XCTestCase {
         back.tap()
         XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.tabBars.buttons["Inbox"].isSelected)
-        XCTAssertTrue(facilities.exists, "An untouched request stays in Inbox after native Back.")
+        XCTAssertTrue(review.exists, "The tapped untouched request remains in Inbox after native Back.")
+        XCTAssertTrue(facilities.exists, "The other untouched request remains in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
         let kept = NSPredicate { _, _ in abs(top.frame.minY - scrolledTop) <= 1 }
         let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
@@ -270,8 +298,10 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("Sample row in shared list renderer", from: app)
         notice.tap()
         let seenAction = app.buttons["request-seen-action"]
-        XCTAssertFalse(seenAction.exists,
-                       "The toolbar check is the only Seen control in notice detail.")
+        XCTAssertTrue(seenAction.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(seenAction.isEnabled,
+                      "The restored body Seen action performs the same response as the toolbar check.")
+        XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1)
         XCTAssertFalse(app.buttons["request-later-action"].exists,
                        "The bottom glass clock is the only Later action in card mode.")
         let finishSeen = app.buttons["request-finish-seen"]
@@ -287,7 +317,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(finishSeen.isEnabled,
                       "The top check must perform the Seen action.\n\(app.debugDescription)")
         XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1,
-                       "Notice detail must contain one Seen control.")
+                       "Notice detail keeps one toolbar Seen control.")
         XCTAssertFalse(app.staticTexts["Seen available"].exists)
         attachScreenshot("Notice detail Seen available", from: app)
         finishSeen.tap()
@@ -298,9 +328,13 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(finishSeen.label.contains("green checkmark"), finishSeen.label)
         XCTAssertEqual(finishSeen.value as? String, "Completed")
         XCTAssertFalse(finishSeen.isEnabled,
-                       "The completed Seen button is ghosted and cannot be tapped again.")
-        XCTAssertFalse(seenAction.exists,
-                       "The body must not add a second Seen control after completion.")
+                       "The completed toolbar Seen button cannot be tapped again.")
+        XCTAssertTrue(seenAction.exists,
+                      "The body Seen action remains alongside the toolbar check.")
+        XCTAssertFalse(seenAction.isEnabled,
+                       "The completed body Seen action cannot be tapped again.")
+        XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1,
+                       "The restored body Seen control remains singular after completion.")
         XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1,
                        "The completed toolbar Seen control stays in place by itself.")
         attachScreenshot("Notice detail Seen completed", from: app)
@@ -349,7 +383,7 @@ final class HarklightUITests: XCTestCase {
         add(attachment)
     }
 
-    func testAnsweredRequestMovesFromInboxToReplied() throws {
+    func testAnsweredRequestMovesToRepliedAndKeepsInboxSelected() throws {
         let app = launchFreshApp(diagnostics: true)
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
@@ -363,18 +397,20 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
 
+        let inbox = app.tabBars.buttons["Inbox"]
         let replied = app.tabBars.buttons["Replied"]
-        XCTAssertTrue(replied.waitForExistence(timeout: 5), app.debugDescription)
-        let diagnostics = app.descendants(matching: .any)["inbox-ui-diagnostics"]
-        XCTAssertTrue(replied.isSelected,
-                      "Back returns to the tab that owns the acted-on message.\(diagnostics.exists ? "\n\(diagnostics.label)" : "")\n\(app.debugDescription)")
-        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
-                      "An answered request returns in Replied.\n\(app.debugDescription)")
-        attachScreenshot("Answered request in Replied", from: app)
-
-        app.tabBars.buttons["Inbox"].tap()
+        XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inbox.isSelected,
+                      "After answering, Back keeps the tab the user entered from.")
         XCTAssertFalse(facilities.waitForExistence(timeout: 2),
-                       "The answered request no longer appears in Inbox.")
+                       "An answered request leaves the Inbox list.")
+        attachScreenshot("Answered request leaves Inbox selected", from: app)
+
+        replied.tap()
+        XCTAssertTrue(replied.isSelected, app.debugDescription)
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5),
+                      "The answered request appears in Replied after the user switches tabs.\n\(app.debugDescription)")
+        attachScreenshot("Answered request in Replied", from: app)
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {

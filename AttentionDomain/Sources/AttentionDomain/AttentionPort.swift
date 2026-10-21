@@ -634,7 +634,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 return candidate.requestRevision == conversationRevision
             }
             let currentIntents = snapshot.intents.values.filter(matchesCurrentRevision)
-            let noCommentUnavailable = currentIntents.contains { candidate in
+            let hasUnsupportedNoComment = currentIntents.contains { candidate in
                 guard candidate.isNoComment else { return false }
                 if case .unsupported = candidate.disposition { return true }
                 return false
@@ -646,6 +646,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 ?? session?.lifecycle.submissionValue.flatMap { value in
                     matchesCurrentRevision(value) ? value : nil
                 }
+            // A newer saved attempt supersedes the earlier unsupported result
+            // while its own delivery outcome is pending.
+            let noCommentUnavailable = hasUnsupportedNoComment && submission == nil
             return try present(item.request,
                         acceptanceOrder: item.order,
                         draft: snapshot.drafts[item.request.key] ?? RequestDraft(interface: item.request.interface),

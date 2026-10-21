@@ -23,6 +23,15 @@ struct LiveContentView: View {
         self.fixtureStore = fixtureStore
     }
 
+#if DEBUG
+    private var recoveryStatusFixture: String? {
+        ProcessInfo.processInfo.arguments.contains("--harklight-test-recovery-status")
+            ? "Could not verify notification. Checking again while open." : nil
+    }
+#else
+    private var recoveryStatusFixture: String? { nil }
+#endif
+
     var body: some View {
         let progress = launch?.foregroundConnectProgress
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
@@ -62,7 +71,8 @@ struct LiveContentView: View {
                 warnings: [launch?.notificationNavigationMessage, store.observationError, store.notificationWarning,
                            store.pushRegistrationWarning, launch?.archiveCatalogWarning,
                            launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage,
-                           fixtureStore?.persistenceError]
+                           fixtureStore?.persistenceError,
+                           recoveryStatusFixture]
                     .compactMap { $0 },
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
@@ -423,9 +433,7 @@ struct LiveRequestDetail: View {
     }
 
     private var canSubmitCurrentAnswer: Bool {
-        if noCommentSelected {
-            return canOfferNoComment && !showsNoCommentUnavailable
-        }
+        if noCommentSelected { return canOfferNoComment }
         return canAnswer
     }
 
@@ -473,6 +481,7 @@ struct LiveRequestDetail: View {
     }
 
     private var submitLabel: String {
+        if noCommentSelected && showsNoCommentUnavailable { return "Retry No comment" }
         if case let .sender(sender) = request.projection { return sender.submissionLabel.rawValue }
         return "Send answer"
     }
@@ -577,6 +586,7 @@ struct LiveRequestDetail: View {
                                              store: store,
                                              readOnly: controlsReadOnly,
                                              localExample: localExample,
+                                             onSeen: submitSeenAction,
                                              canOfferNoComment: canOfferNoComment,
                                              noCommentSelected: noCommentSelected,
                                              noCommentUnavailable: showsNoCommentUnavailable,
@@ -590,7 +600,7 @@ struct LiveRequestDetail: View {
                     }
                 }
                 if showsNoCommentUnavailable {
-                    Text("No comment was not delivered because this server does not support it. You can still answer this request.")
+                    Text("No comment was not delivered: this server does not support it. Tap the checkmark to retry.")
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-no-comment-unavailable")
                 }
@@ -656,11 +666,7 @@ struct LiveRequestDetail: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
-                    if seenActionIsComplete {
-                        finishSeenButton.buttonStyle(.plain)
-                    } else {
-                        finishSeenButton.buttonStyle(.glassProminent)
-                    }
+                    finishSeenButton.buttonStyle(.glass)
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         localExample.finishLocally()
@@ -1242,6 +1248,7 @@ private struct LiveCompatibilityActions: View {
     let store: LivePresentationStore
     let readOnly: Bool
     var localExample: SampleResponse? = nil
+    var onSeen: ((ExactText) -> Void)? = nil
     var canOfferNoComment = false
     var noCommentSelected = false
     var noCommentUnavailable = false
@@ -1252,6 +1259,12 @@ private struct LiveCompatibilityActions: View {
 
     private var selected: ExactText? {
         readOnly ? request.draft.compatibility.selectedActionID : store.draft(for: request.key)?.compatibility.selectedActionID
+    }
+
+    private var seenActionIsComplete: Bool {
+        localExample?.localSeenSelected == true ||
+            request.informationalSeenStatus == .pending ||
+            request.informationalSeenStatus == .confirmed
     }
 
     private var replyEditorSurface: Color {
@@ -1321,7 +1334,28 @@ private struct LiveCompatibilityActions: View {
         if let seenStatus = request.informationalSeenStatus {
             switch seenStatus {
             case .available, .pending, .confirmed:
-                EmptyView()
+                Button {
+                    guard seenStatus == .available, let action = actions.first else { return }
+                    if let onSeen {
+                        onSeen(action.id)
+                    } else {
+                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: seenActionIsComplete ? "checkmark" : "eye")
+                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.blue)
+                        Text(seenActionIsComplete ? "Seen" : (actions.first?.label.rawValue ?? "Seen"))
+                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.primary)
+                    }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                }
+                .buttonStyle(.plain)
+                .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
+                .disabled(readOnly || seenStatus != .available)
+                .opacity(seenActionIsComplete ? 0.76 : (readOnly ? 0.48 : 1))
+                .accessibilityIdentifier("request-seen-action")
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
             }
@@ -1372,12 +1406,10 @@ private struct NoCommentChoiceRow: View {
                                suggested: false)
         }
         .buttonStyle(.plain)
-        .disabled(unavailable)
-        .opacity(unavailable ? 0.48 : 1)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityValue(selected ? "Selected" : "Not selected")
         .accessibilityHint(unavailable
-            ? "No comment was not delivered because this server does not support it."
+            ? "This server did not accept No comment. Use the checkmark to retry, or choose another answer."
             : "Select No comment as your answer, then send it with the checkmark.")
         .accessibilityIdentifier("request-no-comment")
     }

@@ -658,6 +658,66 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(try domain.snapshot(context: context).intents.isEmpty)
     }
 
+    func testNotificationRecoveryKeepsRetainedRowsWithoutMarkingThemSeen() async throws {
+        let namespace = "Harklight.notification-recovery." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
+        defer { defaults.removePersistentDomain(forName: namespace); deleteEnrollmentRecord(service: namespace) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: namespace)
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
+                                     transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = try XCTUnwrap(NativeNotificationLocator(notificationPayload())).request
+        let informationalPayload = try JSONValue.parse(Data(#"{"title":"Build complete","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: informationalPayload), .message)),
+            context: context)
+        let live = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(live.request(for: key)?.informationalSeenStatus, .available)
+
+        let router = NativeNotificationRouter(defaults: defaults)
+        var refreshes = 0
+        let app = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: namespace),
+            joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
+            initialState: .live(live), initialEnrollmentRecord: record, notificationRouter: router,
+            refreshOperation: { _ in
+                refreshes += 1
+                guard refreshes > 1 else { return .unavailable }
+                return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
+                    confirmedContext: context, confirmedTransportAttemptID: UUID())
+            })
+        let before = try persistence.load(identity: context.identity)
+        live.selectRequest(key)
+        XCTAssertEqual(live.selectedRequestKey, key)
+        XCTAssertEqual(try persistence.load(identity: context.identity), before,
+                       "Opening a request does not record its Seen action.")
+        router.receive(try notificationPayload(), opened: true)
+        await app.handleNotification()
+
+        XCTAssertEqual(refreshes, 1)
+        XCTAssertNil(app.notificationNavigation?.request)
+        XCTAssertEqual(app.notificationNavigationMessage,
+                       "Could not verify notification. Checking again while open.")
+        let retained = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertFalse(retained.belongsToReplied)
+        XCTAssertTrue(retained.canMarkSeen)
+        XCTAssertEqual(live.request(for: key)?.informationalSeenStatus, .available)
+        XCTAssertEqual(try persistence.load(identity: context.identity), before)
+
+        await app.refreshLive()
+        XCTAssertEqual(refreshes, 2)
+        XCTAssertEqual(app.notificationNavigation?.request, key)
+        XCTAssertEqual(live.selectedRequestKey, key)
+        XCTAssertNil(app.notificationNavigationMessage)
+        XCTAssertEqual(live.request(for: key)?.informationalSeenStatus, .available,
+                       "Routing a notification must not record Seen, even after a confirmed refresh.")
+        let after = try domain.snapshot(context: context)
+        XCTAssertTrue(after.outbox.isEmpty)
+        XCTAssertTrue(after.intents.isEmpty)
+        XCTAssertEqual(try persistence.load(identity: context.identity), before)
+    }
+
     func testLegacyAndUnknownNotificationOpenInboxWithoutSelectingSimilarRows() async throws {
         let namespace = "Harklight.notification-fallback." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))

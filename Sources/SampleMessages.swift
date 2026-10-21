@@ -97,8 +97,35 @@ final class SampleResponse {
            seen != .available, !localSeenSelected {
             statusParts.append(LiveRequestDetail.informationalSeenText(seen))
         }
+        let hasUnconfirmedOutcome = request.intentReceipt != nil &&
+            request.receiptFacts?.ownOutcome == .unconfirmed &&
+            request.lifecycleStatus != .pending
+        let serverReportedAnswered = request.inboxStateIsCurrent &&
+            request.lifecycleStatus == .answered
+        let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
+        let receiptStatus = InboxRequestRow.responseReceiptStatus(
+            request.intentReceipt,
+            hasUnconfirmedOutcome: hasUnconfirmedOutcome,
+            serverReportedAnswered: serverReportedAnswered,
+            hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
         let localStatus: String?
-        if finished {
+        if serverReportedAnswered {
+            localStatus = nil
+        } else if receiptStatus == .failed {
+            if hasUnconfirmedOutcome {
+                localStatus = "Answer outcome awaits reconciliation"
+            } else if request.noCommentUnavailable {
+                localStatus = "No comment not delivered · unsupported by this server"
+            } else {
+                switch request.intentReceipt?.localState {
+                case .some(.refusedByRetraction): localStatus = "Answer refused · request retracted"
+                case .some(.terminalUnconfirmed): localStatus = "Answer outcome awaits reconciliation"
+                case .some(.unsupported): localStatus = "No comment is unsupported by this server"
+                case .some(.repairRequired): localStatus = "Answer needs recovery"
+                default: localStatus = "Answer not delivered"
+                }
+            }
+        } else if finished {
             localStatus = noCommentSelected
                 ? "No comment selected locally · nothing sent"
                 : request.informationalSeenStatus == nil
@@ -121,16 +148,15 @@ final class SampleResponse {
             status: statusParts.joined(separator: " · "),
             bodyText: request.body?.rawValue,
             symbol: message.kind.symbol,
-            isResolved: request.isResolved, createdAt: request.createdAt,
+            isResolved: receiptStatus == .failed ? false : request.isResolved,
+            createdAt: request.createdAt,
             isLocalExample: true, localStatus: localStatus,
             informationalSeenStatus: request.informationalSeenStatus,
             canNoComment: canDeclineLocally && request.informationalSeenStatus == nil,
             localSeenSelected: localSeenSelected,
-            hasUserAction: finished || request.intentReceipt != nil ||
-                request.lifecycleStatus == .answered ||
-                request.lifecycleStatus == .noComment ||
-                request.informationalSeenStatus == .pending ||
-                request.informationalSeenStatus == .confirmed,
+            hasUserAction: finished || receiptStatus == .pendingOrAccepted ||
+                request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment,
+            hasFailedResponse: receiptStatus == .failed,
             chatUnread: message.hasChat ? message.chatUnread && !chatRead : nil,
             initials: message.initials,
             emphasis: emphasis,
