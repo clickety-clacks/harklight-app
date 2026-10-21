@@ -1441,7 +1441,9 @@ final class LivePresentationStore {
         let hasAnswerContent = records.contains { record in
             switch record {
             case let .responseText(_, _, text), let .text(_, text), let .compatibilityText(_, text):
-                return !text.rawValue.isEmpty
+                // Whitespace-only text is as incomplete as empty text; real text
+                // still goes out exactly as typed, surrounding spaces included.
+                return text.rawValue.contains { !$0.isWhitespace }
             case .responseValue, .point, .compatibilityValue:
                 return true
             }
