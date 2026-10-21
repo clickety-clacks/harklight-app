@@ -22,6 +22,7 @@ struct InboxCardContext {
     var inlineChat = false
     var canInlineChat = false
     var openChat: (() -> Void)? = nil
+    var dismissToList: (() -> Void)? = nil
     let move: (Int) -> Void
 
     static var standalone: InboxCardContext {

@@ -107,6 +107,19 @@ final class HarklightUITests: XCTestCase {
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
 
+        let inbox = app.tabBars.buttons["Inbox"]
+        XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
+                      "A confirmed accepted answer returns the compact detail to the list.")
+        XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inbox.isSelected,
+                      "The automatic return keeps the tab the user entered from.")
+        attachScreenshot("Accepted answer returns to the list", from: app)
+
+        app.tabBars.buttons["Replied"].tap()
+        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
         let answeredControl = app.buttons["request-answered"]
         XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
                       "An accepted answer shows Answered on the toolbar checkmark.")
@@ -389,19 +402,14 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("ownOperationAccepted", in: app)
-        let answeredControl = app.buttons["request-answered"]
-        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
-                      "An accepted answer shows Answered on the toolbar checkmark.")
-
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
+                      "A confirmed accepted answer returns the compact detail to the list.")
 
         let inbox = app.tabBars.buttons["Inbox"]
         let replied = app.tabBars.buttons["Replied"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inbox.isSelected,
-                      "After answering, Back keeps the tab the user entered from.")
+                      "The automatic return keeps the tab the user entered from.")
         XCTAssertFalse(facilities.waitForExistence(timeout: 2),
                        "An answered request leaves the Inbox list.")
         attachScreenshot("Answered request leaves Inbox selected", from: app)
@@ -411,6 +419,11 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
                       "The answered request appears in Replied after the user switches tabs.\n\(app.debugDescription)")
         attachScreenshot("Answered request in Replied", from: app)
+
+        facilities.tap()
+        let answeredControl = app.buttons["request-answered"]
+        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
+                      "An accepted answer shows Answered on the toolbar checkmark.")
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {

@@ -75,6 +75,34 @@ final class AnswerStatusPresentationTests: XCTestCase {
     }
 }
 
+/// The ruled behavior for the automatic return to the list: only a submission
+/// the relay confirms accepted dismisses the compact detail. A pending or
+/// refused submission must not dismiss as if it were done.
+@MainActor
+final class SubmissionDismissalTests: XCTestCase {
+    func testPendingUnconfirmedSubmissionDoesNotDismiss() {
+        XCTAssertFalse(LiveRequestDetail.submissionDismissesToList(
+            ownOutcome: .unconfirmed, answerNotDelivered: false))
+        XCTAssertFalse(LiveRequestDetail.submissionDismissesToList(
+            ownOutcome: nil, answerNotDelivered: false))
+    }
+
+    func testRefusedSubmissionDoesNotDismiss() {
+        XCTAssertFalse(LiveRequestDetail.submissionDismissesToList(
+            ownOutcome: .refused, answerNotDelivered: false))
+    }
+
+    func testUndeliveredAnswerDoesNotDismiss() {
+        XCTAssertFalse(LiveRequestDetail.submissionDismissesToList(
+            ownOutcome: .accepted, answerNotDelivered: true))
+    }
+
+    func testConfirmedAcceptedSubmissionDismisses() {
+        XCTAssertTrue(LiveRequestDetail.submissionDismissesToList(
+            ownOutcome: .accepted, answerNotDelivered: false))
+    }
+}
+
 /// The ruled behavior for links: ordinary URLs become tappable with the
 /// standard system behavior while the visible characters stay exactly as
 /// written, and nothing else is interpreted as markup.

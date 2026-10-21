@@ -609,7 +609,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return InboxCardContext(position: (index ?? 0) + 1, total: ids.count,
             previous: previous,
             next: next,
-            inlineChat: inlineChat, canInlineChat: canInlineChat, openChat: openChat) { direction in
+            inlineChat: inlineChat, canInlineChat: canInlineChat, openChat: openChat,
+            dismissToList: { navigate(to: nil) }) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
                 let currentIDs = cardNavigationIDs
                 guard let current = currentIDs.firstIndex(of: id),
@@ -839,10 +840,13 @@ struct InboxList: View {
         guard !requestedInGesture, !isFetchingOlderPage,
               let fetchOlderInboxPage else { return }
         requestedInGesture = true
-        isFetchingOlderPage = true
+        // Animate the loading row in and out: an unanimated content-size change
+        // while the list is displaced past its extents clamps the offset and
+        // reads as a snap instead of the native elastic settle.
+        withAnimation { isFetchingOlderPage = true }
         Task {
             _ = await fetchOlderInboxPage()
-            isFetchingOlderPage = false
+            withAnimation { isFetchingOlderPage = false }
         }
     }
 

@@ -361,6 +361,7 @@ struct LiveRequestDetail: View {
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
+    @State private var answerSubmittedHere = false
     @FocusState private var focusedReplyActionID: String?
 
     private var controlsReadOnly: Bool {
@@ -444,6 +445,20 @@ struct LiveRequestDetail: View {
         guard !answerNotDelivered else { return false }
         if lifecycleStatus == .answered { return true }
         return ownOutcome == .accepted && lifecycleStatus != .noComment
+    }
+
+    private var submissionIsConfirmedAccepted: Bool {
+        Self.submissionDismissesToList(ownOutcome: request.receiptFacts?.ownOutcome,
+                                       answerNotDelivered: request.answerNotDelivered)
+    }
+
+    /// A checkmark submission returns the compact detail to the list only once
+    /// the relay confirms acceptance. A pending or refused send must not
+    /// dismiss as if it were done.
+    static func submissionDismissesToList(ownOutcome: OwnOutcome?,
+                                          answerNotDelivered: Bool) -> Bool {
+        guard !answerNotDelivered else { return false }
+        return ownOutcome == .accepted
     }
 
     private var answerStatusText: String? {
@@ -758,9 +773,11 @@ struct LiveRequestDetail: View {
                                 ? fixtureStore.sendNoCommentLocally(for: request.key)
                                 : fixtureStore.sendSelectedAnswer(for: request.key)
                             guard sent else { return }
+                            answerSubmittedHere = true
                             try? store.refreshFromDurableStore()
                         } else {
                             store.submitFromUser(request.key)
+                            answerSubmittedHere = true
                         }
                     }
                         .labelStyle(.iconOnly)
@@ -811,6 +828,10 @@ struct LiveRequestDetail: View {
             }
         }
         .toolbar(focusedReplyActionID == nil ? .visible : .hidden, for: .bottomBar)
+        .onChange(of: submissionIsConfirmedAccepted) { _, confirmed in
+            guard confirmed, answerSubmittedHere, horizontalSizeClass == .compact else { return }
+            context.dismissToList?()
+        }
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)
         }
