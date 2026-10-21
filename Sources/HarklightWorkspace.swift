@@ -575,12 +575,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       notificationNavigation: activeNotificationNavigation,
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
+                .searchable(text: $search, prompt: "Search")
+                .toolbar(exposesNotificationTestAction ? .visible : .hidden, for: .navigationBar)
                 .navigationDestination(for: InboxSelection.self) { destination in
                     detailContent(for: destination, wideChat: wideChat,
                                   inlineChat: inlineChat, geometry: geometry)
+                        .toolbar(.visible, for: .navigationBar)
                 }
         }
-        .searchable(text: $search, prompt: "Search")
         .onChange(of: searchPath) { _, path in
             guard workspaceTab == .search else { return }
             navigate(to: path.last)
@@ -653,9 +655,16 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && (landscape || chatOpen)
             let tabs = TabView(selection: $workspaceTab) {
-                Tab("Inbox", systemImage: "envelope.badge", value: .inbox) {
+                Tab(value: .inbox) {
                     inboxSplitView(for: .inbox, wideChat: wideChat, inlineChat: inlineChat,
                                    geometry: geometry)
+                } label: {
+                    // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
+                    Label {
+                        Text("Inbox")
+                    } icon: {
+                        Image(uiImage: UIImage(systemName: "envelope.badge")!)
+                    }
                 }
 
                 Tab("Replied", systemImage: "envelope.open", value: .replied) {

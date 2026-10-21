@@ -166,7 +166,8 @@ final class HarklightUITests: XCTestCase {
         app.launch()
         let list = app.collectionViews.firstMatch
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
-        let others = [app.descendants(matching: .any)["request-row-unknown-01"], app.descendants(matching: .any)["request-row-review-01"]]
+        let review = app.descendants(matching: .any)["request-row-review-01"]
+        let others = [app.descendants(matching: .any)["request-row-unknown-01"], review]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(others.allSatisfy { $0.waitForExistence(timeout: 5) }, app.debugDescription)
         let examples = app.descendants(matching: .any)
@@ -185,9 +186,13 @@ final class HarklightUITests: XCTestCase {
         let scrolledTop = top.frame.minY
         XCTAssertLessThan(scrolledTop, unscrolledTop - 10, "The list must be scrolled away from its top.")
 
-        XCTAssertTrue(facilities.isHittable, app.debugDescription)
-        facilities.tap()
-        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertGreaterThan(review.frame.minY, settings.frame.maxY + 16,
+                             "The tapped request stays clear of the pinned header.")
+        XCTAssertTrue(review.isHittable, app.debugDescription)
+        review.tap()
+        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
+                      "The detail card, rather than the matching list row, confirms navigation.")
         attachScreenshot("Native detail back control", from: app)
 
         let back = app.navigationBars.buttons.firstMatch
@@ -197,7 +202,8 @@ final class HarklightUITests: XCTestCase {
         back.tap()
         XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.tabBars.buttons["Inbox"].isSelected)
-        XCTAssertTrue(facilities.exists, "An untouched request stays in Inbox after native Back.")
+        XCTAssertTrue(review.exists, "The tapped untouched request remains in Inbox after native Back.")
+        XCTAssertTrue(facilities.exists, "The other untouched request remains in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
         let kept = NSPredicate { _, _ in abs(top.frame.minY - scrolledTop) <= 1 }
         let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)

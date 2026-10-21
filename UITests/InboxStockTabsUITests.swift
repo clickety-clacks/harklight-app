@@ -45,8 +45,11 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(searchTab.exists, app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+        XCTAssertEqual(inboxTab.images.firstMatch.identifier, "envelope.badge",
+                       "The Inbox tab keeps the outline envelope and solid dot in both appearance states.")
         XCTAssertFalse(app.searchFields.firstMatch.exists, app.debugDescription)
         assertListHeader(in: app)
+        let inboxHeaderY = app.descendants(matching: .any)["inbox-brand"].frame.minY
         attachScreenshot("Inbox tab", from: app)
 
         repliedTab.tap()
@@ -58,6 +61,8 @@ final class InboxStockTabsUITests: XCTestCase {
         inboxTab.tap()
         searchTab.tap()
         assertListHeader(in: app)
+        XCTAssertEqual(app.descendants(matching: .any)["inbox-brand"].frame.minY, inboxHeaderY,
+                       accuracy: 3, "Search keeps the header at the same height as Inbox.")
         attachScreenshot("Search tab selected", from: app)
         let searchField = app.searchFields.firstMatch
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
@@ -74,6 +79,8 @@ final class InboxStockTabsUITests: XCTestCase {
                        "Submitting a whitespace-only query with the stock Search key dismisses the keyboard.")
         XCTAssertGreaterThan(searchField.frame.midY, app.frame.height * 0.65,
                              "The idle Search tab field returns to the bottom area.")
+        XCTAssertEqual(app.descendants(matching: .any)["inbox-brand"].frame.minY, inboxHeaderY,
+                       accuracy: 3, "Search keeps the header aligned after the field returns to the bottom.")
         attachScreenshot("Search idle", from: app)
 
         searchField.tap()
@@ -105,9 +112,15 @@ final class InboxStockTabsUITests: XCTestCase {
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
-        XCTAssertTrue(searchTab.isSelected, app.debugDescription)
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5),
+                      "The stock Search field remains available after returning from a Search detail.")
+        XCTAssertTrue(searchField.isHittable, app.debugDescription)
         XCTAssertFalse(approval.waitForExistence(timeout: 2),
                        "Search remains scoped to Inbox after the response moves out of Inbox.")
+        XCTAssertEqual(app.descendants(matching: .any)["inbox-brand"].frame.minY, inboxHeaderY,
+                       accuracy: 3, "Returning from a Search detail keeps the header in place.")
+        XCTAssertGreaterThan(searchField.frame.midY, app.frame.height * 0.65,
+                             "Returning from a Search detail leaves Search in the bottom tab area.")
         attachScreenshot("Answered request leaves Inbox search", from: app)
 
         selectMessageTab("Replied", in: app)
