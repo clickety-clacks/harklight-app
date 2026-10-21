@@ -759,7 +759,7 @@ struct LiveRequestDetail: View {
                     if seenActionIsComplete {
                         finishSeenButton.buttonStyle(.plain)
                     } else {
-                        finishSeenButton.buttonStyle(.glassProminent)
+                        finishSeenButton.buttonStyle(.glass)
                     }
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
