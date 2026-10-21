@@ -386,7 +386,7 @@ private struct ConversationTurnView: View {
                 if let status = turn.resultStatus {
                     Text("Original answer result: " + status.rawValue).font(.caption.weight(.semibold))
                 }
-                if !turn.text.rawValue.isEmpty { Text(turn.text.rawValue).textSelection(.enabled) }
+                if !turn.text.rawValue.isEmpty { Text(MessageTextLinks.attributed(turn.text.rawValue)).textSelection(.enabled) }
             }
             ForEach(turn.files) { file in
                 Button { inspect(file, turn.binding.revision) } label: { Label(file.name.rawValue, systemImage: "doc") }.font(.caption)

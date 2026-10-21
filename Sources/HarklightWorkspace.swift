@@ -783,6 +783,7 @@ struct InboxList: View {
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
+    @State private var warningContentHeight: CGFloat = 0
 
     private func messageTab(for tab: InboxWorkspaceTab) -> InboxMessageTab {
         tab.messageTab ?? selectedTab
@@ -940,19 +941,30 @@ struct InboxList: View {
                         .accessibilityLabel("Warnings")
                         .accessibilityIdentifier("inbox-warning-button")
                         .popover(isPresented: $isWarningPresented) {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
-                                    .font(.headline)
-                                    .foregroundStyle(.orange)
-                                ForEach(warnings.indices, id: \.self) { index in
-                                    Text(warnings[index])
-                                        .font(.body)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .accessibilityIdentifier("inbox-warning-message")
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
+                                        .font(.headline)
+                                        .foregroundStyle(.orange)
+                                    ForEach(warnings.indices, id: \.self) { index in
+                                        Text(warnings[index])
+                                            .font(.body)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .accessibilityIdentifier("inbox-warning-message")
+                                    }
+                                }
+                                .padding(16)
+                                .onGeometryChange(for: CGFloat.self) { proxy in
+                                    proxy.size.height
+                                } action: { height in
+                                    warningContentHeight = height
                                 }
                             }
-                            .padding(16)
-                            .frame(maxWidth: 320, alignment: .leading)
+                            // The popover otherwise sizes a ScrollView to zero;
+                            // fit short content exactly and scroll past the cap.
+                            .frame(width: 320,
+                                   height: min(max(warningContentHeight, 88), 440))
                             .presentationCompactAdaptation(.popover)
                         }
                     }

@@ -107,14 +107,15 @@ final class HarklightUITests: XCTestCase {
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
 
-        let acceptedStatus = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(acceptedStatus.waitForExistence(timeout: 5))
-        XCTAssertEqual(acceptedStatus.label, "Answered")
-        let acceptedEvidence = app.staticTexts["request-receipt-evidence"]
-        XCTAssertTrue(acceptedEvidence.waitForExistence(timeout: 5))
-        XCTAssertEqual(acceptedEvidence.label,
-                       "simulated success for this original operation",
-                       "The fixture must identify acceptance for this exact submission.")
+        let answeredControl = app.buttons["request-answered"]
+        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
+                      "An accepted answer shows Answered on the toolbar checkmark.")
+        XCTAssertFalse(answeredControl.isEnabled,
+                       "The Answered state is a completed status, not an action.")
+        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
+                       "The content area omits the redundant Answered status line.")
+        XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
+                       "Internal evidence wording stays out of the content area.")
         let knownPoint = app.descendants(matching: .any)["Established submitted location"].firstMatch
         XCTAssertTrue(knownPoint.waitForExistence(timeout: 5),
                       "The accepted original operation should select the known sender result scene.")
@@ -130,14 +131,13 @@ final class HarklightUITests: XCTestCase {
 
         applyFixtureOutcome("answerOutcomeUnconfirmed", in: app)
 
-        let unconfirmedStatus = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(unconfirmedStatus.waitForExistence(timeout: 5))
-        XCTAssertEqual(unconfirmedStatus.label, "Answered")
-        let unconfirmedEvidence = app.staticTexts["request-receipt-evidence"]
-        XCTAssertTrue(unconfirmedEvidence.waitForExistence(timeout: 5))
-        XCTAssertEqual(unconfirmedEvidence.label,
-                       "simulated closure without this operation's result",
-                       "The fixture must retain the unconfirmed original-operation distinction.")
+        let answeredControl = app.buttons["request-answered"]
+        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
+                      "A server-answered request shows Answered on the toolbar checkmark.")
+        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
+                       "The content area omits the redundant Answered status line.")
+        XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
+                       "Internal evidence wording stays out of the content area.")
         XCTAssertFalse(app.descendants(matching: .any)["Established submitted location"].exists,
                        "An unconfirmed closure must keep the neutral sender scene.")
 
@@ -389,9 +389,9 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("ownOperationAccepted", in: app)
-        let status = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
-        XCTAssertEqual(status.label, "Answered")
+        let answeredControl = app.buttons["request-answered"]
+        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
+                      "An accepted answer shows Answered on the toolbar checkmark.")
 
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
@@ -435,6 +435,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertEqual(receipt.label,
                        "{\"point\":{\"x\":\(point.x),\"y\":\(point.y)},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}",
                        "The terminal fixture outcome must preserve the exact originally submitted answer.")
+        XCTAssertTrue(app.staticTexts["request-details-receipt-evidence"].exists,
+                      "The technical receipt evidence remains available in request details.")
         attachScreenshot("Exact saved answer sheet", from: app)
         app.buttons["request-details-done"].tap()
     }
