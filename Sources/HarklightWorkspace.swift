@@ -211,10 +211,10 @@ struct InboxRequestRow: Identifiable {
 
     static func responseReceiptStatus(_ receipt: IntentReceipt?,
                                       hasUnconfirmedOutcome: Bool = false,
-                                      serverReportedAnswered: Bool = false,
+                                      serverReportedFinalResponse: Bool = false,
                                       hasAcceptedOwnSubmission: Bool = false) -> InboxResponseReceiptStatus? {
-        if serverReportedAnswered {
-            // A current answered lifecycle settles list routing. Only an accepted
+        if serverReportedFinalResponse {
+            // A current answered or no-comment lifecycle settles list routing. Only an accepted
             // own-operation receipt identifies this device's answer as confirmed.
             return hasAcceptedOwnSubmission ? .pendingOrAccepted : nil
         }
