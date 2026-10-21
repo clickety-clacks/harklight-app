@@ -755,7 +755,11 @@ struct LiveRequestDetail: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
-                    finishSeenButton
+                    if seenActionIsComplete {
+                        finishSeenButton.buttonStyle(.plain)
+                    } else {
+                        finishSeenButton.buttonStyle(.glassProminent)
+                    }
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         localExample.finishLocally()
