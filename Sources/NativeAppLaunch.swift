@@ -1216,13 +1216,13 @@ final class LivePresentationStore {
             let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
                 request.receiptFacts?.ownOutcome == .unconfirmed &&
                 request.lifecycleStatus != .pending
-            let serverReportedAnswered = request.inboxStateIsCurrent &&
-                request.lifecycleStatus == .answered
+            let serverReportedFinalResponse = request.inboxStateIsCurrent &&
+                (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
             let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
             let receiptStatus = InboxRequestRow.responseReceiptStatus(
                 request.intentReceipt,
                 hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission,
-                serverReportedAnswered: serverReportedAnswered,
+                serverReportedFinalResponse: serverReportedFinalResponse,
                 hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
             var statusParts: [String] = []
             if request.inboxStateIsCurrent {
@@ -1230,7 +1230,8 @@ final class LivePresentationStore {
                 let lifecycle = isRetracted(request.key) ? retractionLabel(request.key) :
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
                 statusParts.append(lifecycle)
-                if request.noCommentUnavailable, receiptStatus != .failed {
+                if request.noCommentUnavailable, receiptStatus != .failed,
+                   !serverReportedFinalResponse {
                     statusParts.append("No comment not delivered · unsupported by this server")
                 }
                 if let seenStatus = request.informationalSeenStatus, seenStatus != .available {

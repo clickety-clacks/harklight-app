@@ -100,16 +100,16 @@ final class SampleResponse {
         let hasUnconfirmedOutcome = request.intentReceipt != nil &&
             request.receiptFacts?.ownOutcome == .unconfirmed &&
             request.lifecycleStatus != .pending
-        let serverReportedAnswered = request.inboxStateIsCurrent &&
-            request.lifecycleStatus == .answered
+        let serverReportedFinalResponse = request.inboxStateIsCurrent &&
+            (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
         let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
         let receiptStatus = InboxRequestRow.responseReceiptStatus(
             request.intentReceipt,
             hasUnconfirmedOutcome: hasUnconfirmedOutcome,
-            serverReportedAnswered: serverReportedAnswered,
+            serverReportedFinalResponse: serverReportedFinalResponse,
             hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
         let localStatus: String?
-        if serverReportedAnswered {
+        if serverReportedFinalResponse {
             localStatus = nil
         } else if receiptStatus == .failed {
             if hasUnconfirmedOutcome {

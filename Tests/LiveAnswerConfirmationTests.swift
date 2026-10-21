@@ -39,6 +39,20 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                                              inputs: [.compatibilityValue(action: ExactText("got-it"))]))
     }
 
+    private func commitNoComment(_ store: AttentionDomainStore, key: RequestKey) throws -> IntentReceipt {
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        return try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+    }
+
+    private func sampleProjection(for live: LivePresentationStore, key: RequestKey) -> InboxRequestRow? {
+        let message = SampleMessage(id: key.messageID.rawValue, kind: .note,
+            sender: key.senderID.rawValue, initials: "", title: "Sample request", body: "",
+            options: [], deadline: nil, missed: false, revised: false,
+            chatUnread: false, hasChat: false, fixtureCreatedAtMilliseconds: 0)
+        return SampleResponse(viewModel: live, key: key, message: message).inboxRow
+    }
+
     func testDelayedSendAfterDurableAnswerNeverClaimsFailureOrCreatesAnotherIntent() throws {
         let (context, store, live, key) = try setup()
         // The displayed Open view is deliberately older than the durable intent.
@@ -359,6 +373,69 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                       "Keep the server's answered wording without attributing it to this device.")
     }
 
+    func testServerNoCommentAfterLostOperationReplyMovesToRepliedWithoutInventingAcceptance() async throws {
+        let (context, store, live, key) = try setup()
+        let receipt = try commitNoComment(store, key: key)
+        let session = AnswerSession(context.identity)
+        session.loseOperationReply = true
+        session.terminalState = .noComment
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        try live.refreshFromDurableStore()
+
+        XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .noComment)
+        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .unconfirmed)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        XCTAssertNil(live.actionError)
+
+        let liveRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertTrue(liveRow.belongsToReplied,
+                      "The server's no-comment lifecycle moves the row to Replied.")
+        XCTAssertFalse(liveRow.hasFailedResponse)
+        XCTAssertTrue(liveRow.isResolved)
+        XCTAssertNil(liveRow.localStatus)
+        XCTAssertTrue(liveRow.status.contains("No comment"),
+                      "Show the server's lifecycle wording without claiming this device's send was accepted.")
+
+        let sampleRow = try XCTUnwrap(sampleProjection(for: live, key: key))
+        XCTAssertTrue(sampleRow.belongsToReplied,
+                      "The sample projection follows the same server-reported final response.")
+        XCTAssertFalse(sampleRow.hasFailedResponse)
+        XCTAssertNil(sampleRow.localStatus)
+    }
+
+    func testServerNoCommentHidesPriorUnsupportedNoteFromBothRepliedProjections() throws {
+        let (context, store, live, key) = try setupReplyOnly()
+        let receipt = try commitNoComment(store, key: key)
+        try store.recordNoCommentUnsupported(receipt.intentID, operationID: receipt.opID, context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertTrue(live.request(for: key)?.noCommentUnavailable == true)
+        let unsupportedLiveRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertFalse(unsupportedLiveRow.belongsToReplied,
+                       "An unsupported No comment leaves the request in Inbox.")
+        XCTAssertTrue(unsupportedLiveRow.status.contains("No comment not delivered"))
+        let unsupportedSampleRow = try XCTUnwrap(sampleProjection(for: live, key: key))
+        XCTAssertFalse(unsupportedSampleRow.belongsToReplied)
+        XCTAssertTrue(unsupportedSampleRow.localStatus?.contains("No comment not delivered") == true)
+
+        try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .noComment, nil)), context: context)
+        try live.refreshFromDurableStore()
+
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertTrue(request.noCommentUnavailable,
+                      "The underlying unsupported-send fact remains available for detail behavior.")
+        let liveRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertTrue(liveRow.belongsToReplied)
+        XCTAssertFalse(liveRow.status.contains("No comment not delivered"))
+        XCTAssertFalse(liveRow.localStatus?.contains("No comment not delivered") == true)
+
+        let sampleRow = try XCTUnwrap(sampleProjection(for: live, key: key))
+        XCTAssertTrue(sampleRow.belongsToReplied)
+        XCTAssertFalse(sampleRow.status.contains("No comment not delivered"))
+        XCTAssertFalse(sampleRow.localStatus?.contains("No comment not delivered") == true)
+    }
+
     func testFailedTerminalReplayDoesNotEraseAcceptedAnswerOrResendItOnReconnect() async throws {
         let (context, store, live, key) = try setup()
         let receipt = try commitAnswer(store, key: key)
@@ -449,6 +526,7 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
     var acknowledgedCursors: [UInt64] = []
     var loseOperationReply = false
     var failReplayAfterSend = false
+    var terminalState = TerminalState.answered
 
     init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
 
@@ -460,7 +538,9 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
         let since = try JSONValue.parse(request).uniqueValue(named: "since")
         if !sentOperationIDs.isEmpty {
             if case .number(let number)? = since, number.lexeme == "1" {
-                try await consume(Data("{\"v\":1,\"type\":\"lifecycle\",\"seq\":2,\"sender_id\":\"sender\",\"message_id\":\"sample\",\"origin\":\"device\",\"state\":\"answered\",\"at\":1,\"answer\":\"got-it\"}\n".utf8))
+                let answer = terminalState == .answered ? ",\"answer\":\"got-it\"" : ""
+                let event = "{\"v\":1,\"type\":\"lifecycle\",\"seq\":2,\"sender_id\":\"sender\",\"message_id\":\"sample\",\"origin\":\"device\",\"state\":\"\(terminalState.rawValue)\",\"at\":1\(answer)}\n"
+                try await consume(Data(event.utf8))
             }
             try await consume(Data("{\"v\":1,\"type\":\"resynced\",\"seq\":2}\n".utf8))
         } else {
