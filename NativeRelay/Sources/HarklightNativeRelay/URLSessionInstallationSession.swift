@@ -409,7 +409,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
                 if isNoCommentOperation, let reason {
                     let normalizedReason = reason.lowercased()
-                    if normalizedReason.contains("unsupported") || normalizedReason.contains("unknown") {
+                    if normalizedReason == "unknown_type" || normalizedReason.contains("unsupported") {
                         diagnose(.answer, .originalOperationDelivery, .rejected,
                                  causeCode: NativeDiagnosticCauseCode.serverReason(reason),
                                  operationID: operationID, receipt: .pendingUnconfirmed)
@@ -431,21 +431,26 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     close()
                     return .unresolved
                 }
-                diagnose(.answer, .originalOperationDelivery, .unresolved,
+                if reason == "closed" || reason == "stale_revision" || reason == nil {
+                    // Closed can follow an earlier accepted send whose reply
+                    // was lost, and stale revisions need conversation replay.
+                    // Keep the original operation pending until reconciliation.
+                    diagnose(.answer, .originalOperationDelivery, .unresolved,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                             operationID: operationID, receipt: .unknown)
+                    return .unresolved
+                }
+                diagnose(.answer, .originalOperationDelivery, .rejected,
                          causeCode: NativeDiagnosticCauseCode.serverReason(reason),
-                         operationID: operationID, receipt: .unknown)
-                return .unresolved
+                         operationID: operationID, receipt: .terminal)
+                return .failed(operationID: operationID)
             case "delivery", "lifecycle", "conversation":
                 continue
             default:
-                if isNoCommentOperation {
-                    diagnose(.answer, .originalOperationDelivery, .rejected,
-                             causeCode: "unknown_no_comment_response_frame",
-                             operationID: operationID, receipt: .pendingUnconfirmed)
-                    return .unsupported(operationID: operationID)
-                }
                 diagnose(.answer, .originalOperationDelivery, .unresolved,
-                         causeCode: "unexpected_relay_frame", operationID: operationID,
+                         causeCode: isNoCommentOperation
+                            ? "unknown_no_comment_response_frame" : "unexpected_relay_frame",
+                         operationID: operationID,
                          receipt: .unknown)
                 close()
                 return .unresolved

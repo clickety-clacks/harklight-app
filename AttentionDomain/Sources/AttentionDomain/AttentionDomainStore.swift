@@ -607,6 +607,39 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try commit(next)
     }
 
+    /// A correlated relay error proves this operation was not delivered. Retain
+    /// the receipt for history while releasing its active request/outbox lock.
+    public func recordAnswerNotDelivered(_ intentID: UUID,
+                                         operationID: UUID,
+                                         context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var intent = state.intents[intentID],
+              intent.operationID == operationID,
+              state.intentByRequest[intent.requestKey] == intentID else {
+            throw AttentionStoreError.intentConflict
+        }
+        switch intent.disposition {
+        case .pending:
+            intent.disposition = .failed
+        case .failed:
+            return
+        default:
+            throw AttentionStoreError.intentConflict
+        }
+        var next = state
+        next.intents[intentID] = intent
+        next.outboxOrder.removeAll(where: { $0 == intentID })
+        next.intentByRequest.removeValue(forKey: intent.requestKey)
+        if var published = next.replayPublishedIntents {
+            published[intentID] = intent
+            next.replayPublishedIntents = published
+        }
+        try commit(next)
+    }
+
     /// Persists the server's definite answer refusal without advancing either replay cursor.
     public func recordAnswerRefusedByRetraction(_ intentID: UUID,
                                                 operationID: UUID,

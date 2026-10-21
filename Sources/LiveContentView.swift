@@ -599,6 +599,11 @@ struct LiveRequestDetail: View {
                         if canOfferNoComment { noCommentChoice }
                     }
                 }
+                if request.answerNotDelivered {
+                    Label("Answer not delivered", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("request-answer-not-delivered")
+                }
                 if showsNoCommentUnavailable {
                     Text("No comment was not delivered: this server does not support it. Tap the checkmark to retry.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -874,6 +879,7 @@ struct LiveRequestDetail: View {
         case .accepted: "Answer accepted · terminal status pending"
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .notDelivered: "Answer not delivered"
         case .unsupported: "No comment is unsupported by this server"
         case .repairRequired: "Answer needs recovery"
         }

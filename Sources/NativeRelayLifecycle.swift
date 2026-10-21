@@ -1156,6 +1156,7 @@ final class NativeRelayLifecycle {
         case .pending: "pending_unconfirmed"
         case let .accepted(sequence): "relay_accepted_sequence_\(sequence.map { String($0) } ?? "unknown")_awaiting_terminal_state"
         case .lost: "locally_lost_unconfirmed"
+        case .failed: "not_delivered"
         case let .terminal(state, sequence, _): "terminal_\(state.rawValue)_sequence_\(sequence)"
         case let .refusedByRetraction(retractedAt): "refused_retracted_at_\(retractedAt)"
         case .unsupported: "unsupported"
@@ -1168,6 +1169,7 @@ final class NativeRelayLifecycle {
         guard remoteStates[submission.requestKey]?.isTerminal != true else { return false }
         if case .terminal = submission.disposition { return false }
         if case .unsupported = submission.disposition { return false }
+        if case .failed = submission.disposition { return false }
         return true
     }
 

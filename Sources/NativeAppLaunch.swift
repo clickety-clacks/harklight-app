@@ -1219,7 +1219,8 @@ final class LivePresentationStore {
             let serverReportedFinalResponse = request.inboxStateIsCurrent &&
                 (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
             let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
-            let receiptStatus = InboxRequestRow.responseReceiptStatus(
+            let receiptStatus = request.answerNotDelivered ? .some(.failed) :
+                InboxRequestRow.responseReceiptStatus(
                 request.intentReceipt,
                 hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission,
                 serverReportedFinalResponse: serverReportedFinalResponse,
@@ -1230,6 +1231,7 @@ final class LivePresentationStore {
                 let lifecycle = isRetracted(request.key) ? retractionLabel(request.key) :
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
                 statusParts.append(lifecycle)
+                if request.answerNotDelivered { statusParts.append("Answer not delivered") }
                 if request.noCommentUnavailable, receiptStatus != .failed,
                    !serverReportedFinalResponse {
                     statusParts.append("No comment not delivered · unsupported by this server")
@@ -1248,9 +1250,9 @@ final class LivePresentationStore {
                 status: statusParts.joined(separator: " · "),
                 bodyText: request.body?.rawValue,
                 symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: receiptStatus == .failed ? false :
+                isResolved: request.answerNotDelivered || receiptStatus == .failed ? false :
                     !request.inboxStateIsCurrent || request.isResolved, createdAt: request.createdAt,
-                localStatus: receiptStatus == .failed
+                localStatus: request.answerNotDelivered ? "Answer not delivered" : receiptStatus == .failed
                     ? (request.noCommentUnavailable
                         ? "No comment not delivered · unsupported by this server"
                         : request.receiptFacts?.ownOutcome == .unconfirmed
@@ -1287,6 +1289,7 @@ final class LivePresentationStore {
         case .accepted: "Answer accepted · terminal status pending"
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .notDelivered: "Answer not delivered"
         case .unsupported: "No comment is unsupported by this server"
         case .repairRequired: "Answer needs recovery"
         }

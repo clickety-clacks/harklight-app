@@ -202,6 +202,72 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "An accepted final No comment answer cannot be submitted a second time.")
     }
 
+    func testDefinitiveNoCommentErrorReturnsToInboxWithNotDeliveredTreatment() async throws {
+        let (context, store, live, key) = try setupReplyOnly()
+        live.selectNoComment(for: key)
+        let failed = try live.submit(key)
+        let session = AnswerSession(context.identity)
+        session.rejectOperation = true
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        try live.refreshFromDurableStore()
+
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(try store.lookupIntent(failed.intentID, context: context)?.disposition, .failed)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "A definitive rejection retires the refused operation instead of retrying it.")
+        XCTAssertEqual(request.lifecycleStatus, .open)
+        XCTAssertNil(request.intentReceipt)
+        XCTAssertTrue(request.answerNotDelivered)
+        XCTAssertFalse(request.noCommentUnavailable,
+                       "A generic rejection must not claim the server lacks No comment support.")
+        XCTAssertTrue(LiveRequestDetail(request: request, store: live).canAnswer,
+                      "After a definite refusal, the person can choose another response.")
+
+        let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertFalse(row.belongsToReplied)
+        XCTAssertTrue(row.hasFailedResponse)
+        XCTAssertEqual(row.localStatus, "Answer not delivered")
+        XCTAssertTrue(row.status.contains("Answer not delivered"))
+        XCTAssertEqual(session.sentOperationIDs, [failed.opID])
+
+        live.selectAction(ExactText("reply"), input: nil, for: key)
+        let retry = try live.submit(key)
+        XCTAssertNotEqual(retry.opID, failed.opID)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [retry.opID],
+                       "Only the new answer is retryable after the relay explicitly rejected the old one.")
+    }
+
+    func testMissingNoCommentReplyKeepsPendingExplanationAndReusesOperationID() async throws {
+        let (context, store, live, key) = try setupReplyOnly()
+        let receipt = try commitNoComment(store, key: key)
+        let session = AnswerSession(context.identity)
+        session.loseOperationReply = true
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        try live.refreshFromDurableStore()
+
+        let pending = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(pending.lifecycleStatus, .pending)
+        XCTAssertEqual(pending.receiptFacts?.evidenceLabel,
+                       "Your answer is saved on this device. Relay acceptance is not yet confirmed.")
+        XCTAssertFalse(pending.answerNotDelivered)
+        XCTAssertFalse(LiveRequestDetail(request: pending, store: live).canAnswer,
+                       "An unknown delivery remains locked until the original operation is reconciled.")
+        let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertTrue(row.belongsToReplied,
+                      "The pending response stays in Replied while its outcome is unknown.")
+        XCTAssertFalse(row.hasFailedResponse)
+        XCTAssertNil(row.localStatus)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID])
+
+        _ = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(session.sentOperationIDs, [receipt.opID, receipt.opID],
+                       "Retry sends the same durable operation rather than creating a duplicate answer.")
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID])
+    }
+
     func testSwipeNoCommentAcceptanceIsFinalAndCannotBeResubmitted() throws {
         let (context, store, live, key) = try setupReplyOnly()
         live.submitNoCommentFromUser(key)
@@ -571,6 +637,7 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
     var acceptedOperationIDs: Set<UUID> = []
     var acknowledgedCursors: [UInt64] = []
     var loseOperationReply = false
+    var rejectOperation = false
     var failReplayAfterSend = false
 
     init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
@@ -598,6 +665,7 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
 
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
         sentOperationIDs.append(operationID)
+        if rejectOperation { return .failed(operationID: operationID) }
         if loseOperationReply { return .unresolved }
         acceptedOperationIDs.insert(operationID)
         return .accepted(operationID: operationID, terminalSequence: 2)
