@@ -113,8 +113,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(LiveRequestDetail(request: try XCTUnwrap(live.request(for: key)),
                                         store: live).canAnswer)
 
-        let draftBeforeBlankReply = try store.snapshot(context: context).drafts[key]
         live.selectAction(ExactText("reply"), input: nil, for: key)
+        let draftBeforeBlankReply = try store.snapshot(context: context).drafts[key]
         live.submitFromUser(key)
 
         XCTAssertEqual(live.actionError, "Complete the response before sending your answer.")
