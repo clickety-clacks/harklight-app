@@ -123,6 +123,8 @@ final class HarklightUITests: XCTestCase {
         let answeredControl = app.buttons["request-answered"]
         XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
                       "An accepted answer shows Answered on the toolbar checkmark.")
+        XCTAssertEqual(answeredControl.value as? String, "Completed",
+                       "The Answered checkmark presents its completed state like Seen does.")
         XCTAssertFalse(answeredControl.isEnabled,
                        "The Answered state is a completed status, not an action.")
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,

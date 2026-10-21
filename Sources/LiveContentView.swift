@@ -769,7 +769,7 @@ struct LiveRequestDetail: View {
                     .disabled(!localExample.canFinishLocally || localExample.finished)
                     .accessibilityIdentifier("sample-finish")
                 } else if answerIsComplete {
-                    answeredStatusButton
+                    answeredStatusButton.buttonStyle(.plain)
                 } else {
                     Button(submitLabel, systemImage: "checkmark") {
                         if let fixtureStore {
