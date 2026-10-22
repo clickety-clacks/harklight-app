@@ -189,22 +189,12 @@ final class HarklightUITests: XCTestCase {
 
         applyFixtureOutcome("cleared", in: app)
 
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        // While the fixture dialog is still dismissing, the back button is not
-        // hittable and a tap synthesized then does not navigate.
-        let warningButton = app.buttons["inbox-warning-button"]
-        for _ in 0..<3 where !warningButton.exists {
-            if back.exists && back.isHittable { back.tap() }
-            _ = warningButton.waitForExistence(timeout: 3)
-        }
-        XCTAssertTrue(warningButton.waitForExistence(timeout: 5),
-                      "A send left without a confirmed result raises the inbox warning.")
+        // A fresh warning auto-presents the warning popover, including over
+        // the request detail, so its message is readable without navigating
+        // back or tapping the warning button (which the open popover covers).
         let message = app.staticTexts["inbox-warning-message"]
-        if !message.waitForExistence(timeout: 3) {
-            warningButton.tap()
-        }
-        XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(message.waitForExistence(timeout: 10),
+                      "A send left without a confirmed result raises the inbox warning.")
         XCTAssertEqual(message.label,
                        "A request closed without a confirmed result for your answer. Your answer stays saved on this device.",
                        "The popup explains the unresolved send in plain language.")
