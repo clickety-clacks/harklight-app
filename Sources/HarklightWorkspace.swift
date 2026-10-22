@@ -1127,12 +1127,14 @@ struct InboxRowContent: View {
             .foregroundStyle(.secondary)
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 if row.isRetracted {
+                    // Fixed colors so the pill stays readable inside the
+                    // resolved row's hierarchical .secondary dimming.
                     Text("Retracted")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color(uiColor: .label))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
-                        .background(.quaternary, in: Capsule())
+                        .background(Color(uiColor: .systemGray5), in: Capsule())
                         .accessibilityIdentifier("inbox-retracted-pill")
                 }
                 Image(systemName: row.symbol)
