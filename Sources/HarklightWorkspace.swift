@@ -203,6 +203,7 @@ struct InboxRequestRow: Identifiable {
     var localSeenSelected = false
     var hasUserAction = false
     var hasFailedResponse = false
+    var isRetracted = false
     var chatUnread: Bool? = nil
     var initials: String = ""
     var emphasis: InboxRowEmphasis = .standard
@@ -294,6 +295,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let selectRequest: (RequestKey) -> Void
     var markSeenRequest: (RequestKey) -> Void = { _ in }
     var markNoCommentRequest: (RequestKey) -> Void = { _ in }
+    var clearRetractedRequest: (RequestKey) -> Void = { _ in }
     @ViewBuilder let requestDetail: (RequestKey, InboxCardContext) -> RequestDetail
     @ViewBuilder let settingsContent: () -> SettingsContent
     var warnings: [String] = []
@@ -447,6 +449,18 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
     }
 
+    private func clearRetracted(_ id: InboxSelection) {
+        switch id {
+        case let .request(key):
+            guard rows.first(where: { $0.id == id })?.isRetracted == true else { return }
+            clearRetractedRequest(key)
+        case let .sample(sampleID):
+            guard let response = samples.responses[sampleID],
+                  response.inboxRow?.isRetracted == true else { return }
+            response.clearRetractedLocally()
+        }
+    }
+
     private func restoreLastViewedListPosition() {
         let lastViewedItem = lastViewedSelection.flatMap(currentItem(for:))
         guard navigatedBetweenMessages else {
@@ -555,6 +569,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       didRestoreLastViewed: { restoreLastViewedOnReturn = false },
                       showSettings: { settings = true }, markSeen: markSeen,
                       markNoComment: markNoComment,
+                      clearRetracted: clearRetracted,
                       fetchOlderInboxPage: fetchOlderInboxPage,
                       notificationNavigation: activeNotificationNavigation,
                       triggerNotification: nil)
@@ -578,6 +593,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       didRestoreLastViewed: { restoreLastViewedOnReturn = false },
                       showSettings: { settings = true }, markSeen: markSeen,
                       markNoComment: markNoComment,
+                      clearRetracted: clearRetracted,
                       fetchOlderInboxPage: fetchOlderInboxPage,
                       notificationNavigation: activeNotificationNavigation,
                       triggerNotification: exposesNotificationTestAction
@@ -777,6 +793,7 @@ struct InboxList: View {
     let showSettings: () -> Void
     let markSeen: (InboxSelection) -> Void
     let markNoComment: (InboxSelection) -> Void
+    let clearRetracted: (InboxSelection) -> Void
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
     let triggerNotification: (() -> Void)?
@@ -884,7 +901,13 @@ struct InboxList: View {
                 rowContent(for: row)
                 .tag(row.id)
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
+                    if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
+                        Button { clearRetracted(row.id) } label: {
+                            Label("Clear", systemImage: "xmark")
+                        }
+                        .tint(.gray)
+                        .accessibilityIdentifier("inbox-clear-retracted")
+                    } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
                         Button { markSeen(row.id) } label: {
                             Label("Seen", systemImage: "checkmark")
                         }
@@ -899,7 +922,13 @@ struct InboxList: View {
                     }
                 }
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
+                    if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
+                        Button { clearRetracted(row.id) } label: {
+                            Label("Clear", systemImage: "xmark")
+                        }
+                        .tint(.gray)
+                        .accessibilityIdentifier("inbox-clear-retracted")
+                    } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
                         Button { markSeen(row.id) } label: {
                             Label("Seen", systemImage: "checkmark")
                         }
@@ -1097,6 +1126,15 @@ struct InboxRowContent: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             HStack(alignment: .firstTextBaseline, spacing: 7) {
+                if row.isRetracted {
+                    Text("Retracted")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                        .accessibilityIdentifier("inbox-retracted-pill")
+                }
                 Image(systemName: row.symbol)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(symbolColor)

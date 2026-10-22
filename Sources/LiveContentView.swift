@@ -57,6 +57,7 @@ struct LiveContentView: View {
                 }, samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { markSeen($0) },
                 markNoCommentRequest: { store.submitNoCommentFromUser($0) },
+                clearRetractedRequest: { store.clearRetracted($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
                         LiveRequestDetail(request: request, store: store, context: context,
