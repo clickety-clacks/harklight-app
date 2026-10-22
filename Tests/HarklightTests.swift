@@ -708,6 +708,29 @@ final class HarklightTests: XCTestCase {
         XCTAssertFalse(store.canSend(for: facilities.key))
     }
 
+    @MainActor
+    func testClearedRequestWithoutResultRaisesUnresolvedSendWarning() throws {
+        let fixtures = try loadFixtures()
+        let store = PrototypeStore(fixtures: fixtures)
+        let facilities = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
+        let presentation = try XCTUnwrap(store.presentationStore)
+        XCTAssertNil(presentation.unresolvedSendWarning,
+                     "An untouched inbox has no unresolved send.")
+
+        store.setPoint(PointValue(x: 240, y: 610), for: facilities.key, inputID: ExactText("location"))
+        store.updateText("Near the door", for: facilities.key, inputID: ExactText("note"), actionID: nil)
+        XCTAssertTrue(store.sendSelectedAnswer(for: facilities.key))
+        try presentation.refreshFromDurableStore()
+        XCTAssertNil(presentation.unresolvedSendWarning,
+                     "An in-flight send carries its status line, not a warning.")
+
+        XCTAssertTrue(store.simulateTerminal(for: facilities.key, scenario: .cleared))
+        try presentation.refreshFromDurableStore()
+        XCTAssertEqual(presentation.unresolvedSendWarning,
+                       "A request closed without a confirmed result for your answer. Your answer stays saved on this device.",
+                       "A send whose request closed without a confirmed result raises the warning.")
+    }
+
     func testDuplicateGrammarKeysAndUnknownInactiveBranchFailWholeDocument() throws {
         let fixtures = try loadFixtures()
         let facilities = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))

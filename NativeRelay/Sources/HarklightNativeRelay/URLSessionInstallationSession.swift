@@ -447,10 +447,14 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             case "delivery", "lifecycle", "conversation":
                 continue
             default:
+                if isNoCommentOperation {
+                    diagnose(.answer, .originalOperationDelivery, .rejected,
+                             causeCode: "unknown_no_comment_response_frame",
+                             operationID: operationID, receipt: .pendingUnconfirmed)
+                    return .unsupported(operationID: operationID)
+                }
                 diagnose(.answer, .originalOperationDelivery, .unresolved,
-                         causeCode: isNoCommentOperation
-                            ? "unknown_no_comment_response_frame" : "unexpected_relay_frame",
-                         operationID: operationID,
+                         causeCode: "unexpected_relay_frame", operationID: operationID,
                          receipt: .unknown)
                 close()
                 return .unresolved

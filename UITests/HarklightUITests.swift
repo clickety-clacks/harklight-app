@@ -107,14 +107,32 @@ final class HarklightUITests: XCTestCase {
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
 
-        let acceptedStatus = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(acceptedStatus.waitForExistence(timeout: 5))
-        XCTAssertEqual(acceptedStatus.label, "Answered")
-        let acceptedEvidence = app.staticTexts["request-receipt-evidence"]
-        XCTAssertTrue(acceptedEvidence.waitForExistence(timeout: 5))
-        XCTAssertEqual(acceptedEvidence.label,
-                       "simulated success for this original operation",
-                       "The fixture must identify acceptance for this exact submission.")
+        let inbox = app.tabBars.buttons["Inbox"]
+        XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
+                      "A confirmed accepted answer returns the compact detail to the list.")
+        XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inbox.isSelected,
+                      "The automatic return keeps the tab the user entered from.")
+        XCTAssertFalse(app.buttons["inbox-warning-button"].exists,
+                       "A resolved send raises no unresolved-send warning.")
+        attachScreenshot("Accepted answer returns to the list", from: app)
+
+        app.tabBars.buttons["Replied"].tap()
+        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let answeredControl = app.buttons["request-answered"]
+        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
+                      "An accepted answer shows Answered on the toolbar checkmark.")
+        XCTAssertEqual(answeredControl.value as? String, "Completed",
+                       "The Answered checkmark presents its completed state like Seen does.")
+        XCTAssertFalse(answeredControl.isEnabled,
+                       "The Answered state is a completed status, not an action.")
+        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
+                       "The content area omits the redundant Answered status line.")
+        XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
+                       "Internal evidence wording stays out of the content area.")
         let knownPoint = app.descendants(matching: .any)["Established submitted location"].firstMatch
         XCTAssertTrue(knownPoint.waitForExistence(timeout: 5),
                       "The accepted original operation should select the known sender result scene.")
@@ -130,14 +148,13 @@ final class HarklightUITests: XCTestCase {
 
         applyFixtureOutcome("answerOutcomeUnconfirmed", in: app)
 
-        let unconfirmedStatus = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(unconfirmedStatus.waitForExistence(timeout: 5))
-        XCTAssertEqual(unconfirmedStatus.label, "Answered")
-        let unconfirmedEvidence = app.staticTexts["request-receipt-evidence"]
-        XCTAssertTrue(unconfirmedEvidence.waitForExistence(timeout: 5))
-        XCTAssertEqual(unconfirmedEvidence.label,
-                       "simulated closure without this operation's result",
-                       "The fixture must retain the unconfirmed original-operation distinction.")
+        let answeredControl = app.buttons["request-answered"]
+        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
+                      "A server-answered request shows Answered on the toolbar checkmark.")
+        XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
+                       "The content area omits the redundant Answered status line.")
+        XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
+                       "Internal evidence wording stays out of the content area.")
         XCTAssertFalse(app.descendants(matching: .any)["Established submitted location"].exists,
                        "An unconfirmed closure must keep the neutral sender scene.")
 
@@ -152,7 +169,7 @@ final class HarklightUITests: XCTestCase {
                       "A lost or unconfirmed response leaves the user on Inbox.")
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A server-answered request no longer appears in Inbox.")
-        XCTAssertFalse(app.staticTexts["Answer outcome awaits reconciliation"].exists,
+        XCTAssertFalse(app.staticTexts["Answer sent · result not confirmed"].exists,
                        "A server-answered request is not shown as a failed response.")
         XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists,
                        "The list must not claim this device's answer was accepted.")
@@ -161,9 +178,27 @@ final class HarklightUITests: XCTestCase {
         app.tabBars.buttons["Replied"].tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The server-answered request appears in Replied.")
-        XCTAssertFalse(app.staticTexts["Answer outcome awaits reconciliation"].exists)
+        XCTAssertFalse(app.staticTexts["Answer sent · result not confirmed"].exists)
         XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists)
         attachScreenshot("Server-answered response in Replied", from: app)
+    }
+
+    func testUnresolvedSendRaisesPlainLanguageWarningPopup() throws {
+        let app = launchFreshApp()
+        _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
+
+        applyFixtureOutcome("cleared", in: app)
+
+        // A fresh warning auto-presents the warning popover, including over
+        // the request detail, so its message is readable without navigating
+        // back or tapping the warning button (which the open popover covers).
+        let message = app.staticTexts["inbox-warning-message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 10),
+                      "A send left without a confirmed result raises the inbox warning.")
+        XCTAssertEqual(message.label,
+                       "A request closed without a confirmed result for your answer. Your answer stays saved on this device.",
+                       "The popup explains the unresolved send in plain language.")
+        attachScreenshot("Unresolved send warning popup", from: app)
     }
 
     func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {
@@ -389,19 +424,14 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("ownOperationAccepted", in: app)
-        let status = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
-        XCTAssertEqual(status.label, "Answered")
-
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
+                      "A confirmed accepted answer returns the compact detail to the list.")
 
         let inbox = app.tabBars.buttons["Inbox"]
         let replied = app.tabBars.buttons["Replied"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inbox.isSelected,
-                      "After answering, Back keeps the tab the user entered from.")
+                      "The automatic return keeps the tab the user entered from.")
         XCTAssertFalse(facilities.waitForExistence(timeout: 2),
                        "An answered request leaves the Inbox list.")
         attachScreenshot("Answered request leaves Inbox selected", from: app)
@@ -411,6 +441,11 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
                       "The answered request appears in Replied after the user switches tabs.\n\(app.debugDescription)")
         attachScreenshot("Answered request in Replied", from: app)
+
+        facilities.tap()
+        let answeredControl = app.buttons["request-answered"]
+        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
+                      "An accepted answer shows Answered on the toolbar checkmark.")
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
@@ -435,6 +470,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertEqual(receipt.label,
                        "{\"point\":{\"x\":\(point.x),\"y\":\(point.y)},\"note\":\"Near the east entrance\",\"drawingRevision\":9007199254740993}",
                        "The terminal fixture outcome must preserve the exact originally submitted answer.")
+        XCTAssertTrue(app.staticTexts["request-details-receipt-evidence"].exists,
+                      "The technical receipt evidence remains available in request details.")
         attachScreenshot("Exact saved answer sheet", from: app)
         app.buttons["request-details-done"].tap()
     }

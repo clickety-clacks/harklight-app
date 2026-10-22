@@ -134,6 +134,31 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                       "The person can add text and submit after the empty attempt is refused.")
     }
 
+    func testWhitespaceOnlyReplyIsRefusedAndTypedSurroundingSpacesAreSentAsIs() throws {
+        let (context, store, live, key) = try setupTextReplyOnly()
+        live.selectAction(ExactText("reply"), input: nil, for: key)
+        live.updateCompatibilityText("  \n \n  ", action: ExactText("reply"), for: key)
+        live.submitFromUser(key)
+
+        XCTAssertEqual(live.actionError, "Complete the response before sending your answer.")
+        let refused = try store.snapshot(context: context)
+        XCTAssertTrue(refused.intents.isEmpty,
+                      "A whitespace-only Reply must not create an intent.")
+        XCTAssertTrue(refused.outbox.isEmpty,
+                      "A whitespace-only Reply must not queue anything to send.")
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .open)
+
+        let typed = "  Near the east entrance \n"
+        live.updateCompatibilityText(typed, action: ExactText("reply"), for: key)
+        live.submitFromUser(key)
+
+        XCTAssertNil(live.actionError)
+        let sent = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        XCTAssertEqual(sent.typedInputs,
+                       [.compatibilityText(action: ExactText("reply"), text: ExactText(typed))],
+                       "Ordinary surrounding whitespace goes out exactly as typed.")
+    }
+
     func testNoCommentUsesItsOwnPayloadFreeFrameAndUnsupportedLeavesTheRequestOpen() throws {
         let (context, store, live, key) = try setup()
         let port = AttentionDomainPort(store: store)

@@ -609,7 +609,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return InboxCardContext(position: (index ?? 0) + 1, total: ids.count,
             previous: previous,
             next: next,
-            inlineChat: inlineChat, canInlineChat: canInlineChat, openChat: openChat) { direction in
+            inlineChat: inlineChat, canInlineChat: canInlineChat, openChat: openChat,
+            dismissToList: { navigate(to: nil) }) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
                 let currentIDs = cardNavigationIDs
                 guard let current = currentIDs.firstIndex(of: id),
@@ -783,6 +784,7 @@ struct InboxList: View {
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
+    @State private var warningContentHeight: CGFloat = 0
 
     private func messageTab(for tab: InboxWorkspaceTab) -> InboxMessageTab {
         tab.messageTab ?? selectedTab
@@ -838,10 +840,13 @@ struct InboxList: View {
         guard !requestedInGesture, !isFetchingOlderPage,
               let fetchOlderInboxPage else { return }
         requestedInGesture = true
-        isFetchingOlderPage = true
+        // Animate the loading row in and out: an unanimated content-size change
+        // while the list is displaced past its extents clamps the offset and
+        // reads as a snap instead of the native elastic settle.
+        withAnimation { isFetchingOlderPage = true }
         Task {
             _ = await fetchOlderInboxPage()
-            isFetchingOlderPage = false
+            withAnimation { isFetchingOlderPage = false }
         }
     }
 
@@ -940,19 +945,30 @@ struct InboxList: View {
                         .accessibilityLabel("Warnings")
                         .accessibilityIdentifier("inbox-warning-button")
                         .popover(isPresented: $isWarningPresented) {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
-                                    .font(.headline)
-                                    .foregroundStyle(.orange)
-                                ForEach(warnings.indices, id: \.self) { index in
-                                    Text(warnings[index])
-                                        .font(.body)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .accessibilityIdentifier("inbox-warning-message")
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
+                                        .font(.headline)
+                                        .foregroundStyle(.orange)
+                                    ForEach(warnings.indices, id: \.self) { index in
+                                        Text(warnings[index])
+                                            .font(.body)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .accessibilityIdentifier("inbox-warning-message")
+                                    }
+                                }
+                                .padding(16)
+                                .onGeometryChange(for: CGFloat.self) { proxy in
+                                    proxy.size.height
+                                } action: { height in
+                                    warningContentHeight = height
                                 }
                             }
-                            .padding(16)
-                            .frame(maxWidth: 320, alignment: .leading)
+                            // The popover otherwise sizes a ScrollView to zero;
+                            // fit short content exactly and scroll past the cap.
+                            .frame(width: 320,
+                                   height: min(max(warningContentHeight, 88), 440))
                             .presentationCompactAdaptation(.popover)
                         }
                     }

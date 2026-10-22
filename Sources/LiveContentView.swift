@@ -69,7 +69,8 @@ struct LiveContentView: View {
                                                       archiveDeparture: archiveDeparture,
                                                       connectionStatus: connectionStatus) },
                 warnings: [launch?.notificationNavigationMessage, store.observationError, store.notificationWarning,
-                           store.pushRegistrationWarning, launch?.archiveCatalogWarning,
+                           store.pushRegistrationWarning, store.unresolvedSendWarning,
+                           launch?.archiveCatalogWarning,
                            launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage,
                            fixtureStore?.persistenceError,
                            recoveryStatusFixture]
@@ -361,6 +362,7 @@ struct LiveRequestDetail: View {
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
+    @State private var answerSubmittedHere = false
     @FocusState private var focusedReplyActionID: String?
 
     private var controlsReadOnly: Bool {
@@ -426,6 +428,85 @@ struct LiveRequestDetail: View {
         .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
         .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
         .accessibilityIdentifier("request-finish-seen")
+    }
+
+    private var answerIsComplete: Bool {
+        guard localExample == nil, request.informationalSeenStatus == nil,
+              !store.isRetracted(request.key) else { return false }
+        return Self.answerStatusIsComplete(lifecycleStatus: request.lifecycleStatus,
+                                           ownOutcome: request.receiptFacts?.ownOutcome,
+                                           answerNotDelivered: request.answerNotDelivered)
+    }
+
+    /// A pending or refused send never counts as Answered; only a request the
+    /// relay reports answered, or an accepted submission, completes the state.
+    static func answerStatusIsComplete(lifecycleStatus: AppLifecycleStatus,
+                                       ownOutcome: OwnOutcome?,
+                                       answerNotDelivered: Bool) -> Bool {
+        guard !answerNotDelivered else { return false }
+        if lifecycleStatus == .answered { return true }
+        return ownOutcome == .accepted && lifecycleStatus != .noComment
+    }
+
+    private var submissionIsConfirmedAccepted: Bool {
+        Self.submissionDismissesToList(ownOutcome: request.receiptFacts?.ownOutcome,
+                                       answerNotDelivered: request.answerNotDelivered)
+    }
+
+    /// A checkmark submission returns the compact detail to the list only once
+    /// the relay confirms acceptance. A pending or refused send must not
+    /// dismiss as if it were done.
+    static func submissionDismissesToList(ownOutcome: OwnOutcome?,
+                                          answerNotDelivered: Bool) -> Bool {
+        guard !answerNotDelivered else { return false }
+        return ownOutcome == .accepted
+    }
+
+    private var answerStatusText: String? {
+        guard let facts = request.receiptFacts else { return nil }
+        return Self.answerStatusText(lifecycleStatus: request.lifecycleStatus,
+                                     ownOutcome: facts.ownOutcome,
+                                     answeredFromThisDevice: request.intentReceipt != nil)
+    }
+
+    /// Plain-language send status for the content area. Internal evidence
+    /// wording stays in the request details sheet.
+    static func answerStatusText(lifecycleStatus: AppLifecycleStatus,
+                                 ownOutcome: OwnOutcome,
+                                 answeredFromThisDevice: Bool) -> String? {
+        switch lifecycleStatus {
+        case .open, .answered:
+            return nil
+        case .noComment:
+            return "The sender recorded your No comment answer."
+        case .pending:
+            return ownOutcome == .unconfirmed
+                ? "Your answer is saved on this device. Delivery is not yet confirmed."
+                : nil
+        case .cleared, .expired, .superseded:
+            if ownOutcome == .refused {
+                return "The sender retracted this request before your answer was accepted. The answer was not accepted."
+            }
+            if ownOutcome == .unconfirmed && answeredFromThisDevice {
+                return "This request closed without a confirmed result for your answer."
+            }
+            return nil
+        }
+    }
+
+    private var answeredStatusButton: some View {
+        Button(action: {}) {
+            Label("Answered", systemImage: "checkmark")
+                .labelStyle(.titleAndIcon)
+                .foregroundStyle(Color.green)
+                .font(.headline)
+        }
+        .tint(.green)
+        .opacity(0.76)
+        .disabled(true)
+        .accessibilityLabel("Answered with green checkmark")
+        .accessibilityValue("Completed")
+        .accessibilityIdentifier("request-answered")
     }
 
     private var noCommentSelected: Bool {
@@ -552,14 +633,14 @@ struct LiveRequestDetail: View {
                 }
                 if let body = request.body {
                     if let noticeBodyColor {
-                        Text(body.rawValue)
+                        Text(MessageTextLinks.attributed(body.rawValue))
                             .textSelection(.enabled)
                             .foregroundStyle(noticeTextColor)
                             .padding(.horizontal, 14).padding(.vertical, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(noticeBodyColor, in: RoundedRectangle(cornerRadius: 14))
                     } else {
-                        Text(body.rawValue)
+                        Text(MessageTextLinks.attributed(body.rawValue))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -610,8 +691,12 @@ struct LiveRequestDetail: View {
                         .accessibilityIdentifier("request-no-comment-unavailable")
                 }
                 if request.inboxStateIsCurrent {
-                    if request.lifecycleStatus != .open || store.isRetracted(request.key) {
-                        Text(store.isRetracted(request.key) ? store.retractionLabel(request.key) : String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
+                    if store.isRetracted(request.key) {
+                        Text(store.retractionLabel(request.key))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("request-lifecycle-status")
+                    } else if request.lifecycleStatus != .open && request.lifecycleStatus != .answered {
+                        Text(String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                             .font(.caption).foregroundStyle(.secondary)
                             .accessibilityIdentifier("request-lifecycle-status")
                     }
@@ -644,7 +729,7 @@ struct LiveRequestDetail: View {
                                         isPresented: $fixtureOutcomePresented,
                                         titleVisibility: .visible) {
                         ForEach([DemoTerminalScenario.ownOperationAccepted,
-                                 .answerOutcomeUnconfirmed]) { scenario in
+                                 .answerOutcomeUnconfirmed, .cleared]) { scenario in
                             Button(scenario.simulationTitle) {
                                 guard fixtureStore.simulateTerminal(for: request.key,
                                                                     scenario: scenario) else { return }
@@ -658,8 +743,8 @@ struct LiveRequestDetail: View {
                     Label(actionError, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
                 }
-                if request.inboxStateIsCurrent, let facts = request.receiptFacts {
-                    Text(facts.evidenceLabel)
+                if request.inboxStateIsCurrent, let statusText = answerStatusText {
+                    Text(statusText)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-receipt-evidence")
@@ -671,7 +756,11 @@ struct LiveRequestDetail: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
-                    finishSeenButton.buttonStyle(.glass)
+                    if seenActionIsComplete {
+                        finishSeenButton.buttonStyle(.plain)
+                    } else {
+                        finishSeenButton.buttonStyle(.glass)
+                    }
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         localExample.finishLocally()
@@ -680,16 +769,20 @@ struct LiveRequestDetail: View {
                     .buttonStyle(.glassProminent)
                     .disabled(!localExample.canFinishLocally || localExample.finished)
                     .accessibilityIdentifier("sample-finish")
-                } else if request.informationalSeenStatus == nil {
+                } else if answerIsComplete {
+                    answeredStatusButton.buttonStyle(.plain)
+                } else {
                     Button(submitLabel, systemImage: "checkmark") {
                         if let fixtureStore {
                             let sent = store.draft(for: request.key)?.noCommentSelected == true
                                 ? fixtureStore.sendNoCommentLocally(for: request.key)
                                 : fixtureStore.sendSelectedAnswer(for: request.key)
                             guard sent else { return }
+                            answerSubmittedHere = true
                             try? store.refreshFromDurableStore()
                         } else {
-                            store.submitFromUser(request.key)
+                            guard store.submitFromUser(request.key) else { return }
+                            answerSubmittedHere = true
                         }
                     }
                         .labelStyle(.iconOnly)
@@ -740,6 +833,10 @@ struct LiveRequestDetail: View {
             }
         }
         .toolbar(focusedReplyActionID == nil ? .visible : .hidden, for: .bottomBar)
+        .onChange(of: submissionIsConfirmedAccepted) { _, confirmed in
+            guard confirmed, answerSubmittedHere, horizontalSizeClass == .compact else { return }
+            context.dismissToList?()
+        }
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)
         }
@@ -777,6 +874,14 @@ struct LiveRequestDetail: View {
                             .font(.caption.monospaced())
                             .textSelection(.enabled)
                             .accessibilityIdentifier("request-details-original-answer-json")
+                    }
+                    if let facts = request.receiptFacts {
+                        Text("Receipt evidence")
+                            .font(.headline)
+                        Text(facts.evidenceLabel)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("request-details-receipt-evidence")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -876,9 +981,9 @@ struct LiveRequestDetail: View {
         guard let state else { return nil }
         return switch state {
         case .durable, .queuedForRelay: "Answer pending on this device"
-        case .accepted: "Answer accepted · terminal status pending"
+        case .accepted: "Answer accepted"
         case .refusedByRetraction: "Answer refused · request retracted"
-        case .terminalUnconfirmed: "Answer outcome awaits reconciliation"
+        case .terminalUnconfirmed: "Answer sent · result not confirmed"
         case .notDelivered: "Answer not delivered"
         case .unsupported: "No comment is unsupported by this server"
         case .repairRequired: "Answer needs recovery"

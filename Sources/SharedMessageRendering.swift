@@ -1,6 +1,44 @@
 import SwiftUI
 import AttentionDomain
 
+enum MessageTextLinks {
+    /// Makes ordinary web URLs tappable with the standard system link
+    /// behavior. The visible characters stay exactly as written; nothing
+    /// else — including email addresses — is interpreted as a link or
+    /// other markup.
+    static func attributed(_ string: String) -> AttributedString {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return AttributedString(string)
+        }
+        let matches = detector.matches(in: string,
+                                       range: NSRange(string.startIndex..., in: string))
+        guard !matches.isEmpty else { return AttributedString(string) }
+        var result = AttributedString()
+        var cursor = string.startIndex
+        for match in matches {
+            guard let url = match.url, isWebURL(url),
+                  let range = Range(match.range, in: string),
+                  range.lowerBound >= cursor else { continue }
+            if cursor < range.lowerBound {
+                result += AttributedString(String(string[cursor..<range.lowerBound]))
+            }
+            var link = AttributedString(String(string[range]))
+            link.link = url
+            result += link
+            cursor = range.upperBound
+        }
+        if cursor < string.endIndex {
+            result += AttributedString(String(string[cursor...]))
+        }
+        return result
+    }
+
+    private static func isWebURL(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https"
+    }
+}
+
 struct SceneTextView: View {
     let text: String
     let style: SceneTextStyle
