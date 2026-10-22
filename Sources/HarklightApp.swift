@@ -13,6 +13,20 @@ struct HarklightApp: App {
         _launch = State(initialValue: NativeAppLaunch())
     }
 
+    /// The account Inbox drives the icon badge even while an archive is open;
+    /// a whole-app local example badges its own inbox. No inbox means no badge.
+    private var inboxBadgeCount: Int {
+        if let store = launch.inboxPresentation {
+            return InboxBadge.count(requests: store.inboxRows, samples: samples,
+                                    showsLocalExamples: !store.isReadOnly)
+        }
+        if case let .fixture(fixture) = launch.state, let store = fixture.presentationStore {
+            return InboxBadge.count(requests: store.inboxRows, samples: samples,
+                                    showsLocalExamples: !store.isReadOnly)
+        }
+        return 0
+    }
+
     var body: some Scene {
         WindowGroup {
             ShakeHostingView(onShake: { samples.populate() }) {
@@ -62,6 +76,9 @@ struct HarklightApp: App {
             .task {
                 await launch.restoreInstallation()
                 await launch.handleNotification()
+            }
+            .task(id: inboxBadgeCount) {
+                await NativeIconBadge.system.apply(inboxBadgeCount)
             }
             .onChange(of: launch.notificationRouter.intent?.serial) { _, _ in
                 Task { await launch.handleNotification() }
