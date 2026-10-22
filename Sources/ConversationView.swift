@@ -65,6 +65,9 @@ struct ConversationPanel: View {
                     .onChange(of: thread.turns.count) { _, _ in
                         if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
+                    .onChange(of: thread.latestAgentReply?.id, initial: true) { _, _ in
+                        store.markConversationRead(key)
+                    }
                 }
                 if let terminal = thread.terminal {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")

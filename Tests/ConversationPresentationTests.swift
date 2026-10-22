@@ -309,6 +309,52 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertThrowsError(try fixture.domain.prepareDiscussion(ConversationBinding(request: revised.key, revision: 2), context: fixture.context))
     }
 
+    func testAgentReplyStaysUnreadUntilChatShowsItAcrossForegroundAndRelaunch() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let persistence = FileAttentionStatePersistence(directoryURL: root)
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let request = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: request, revision: 1)
+        let session = ExactText("session")
+        func turn(_ id: String, _ author: ConversationAuthor, _ kind: ConversationTurn.Kind) -> ConversationTurn {
+            ConversationTurn(id: ExactText(id), binding: binding, author: author, sessionHandle: session,
+                text: ExactText("Turn \(id)"), inReplyTo: author == .person ? nil : ExactText("2"), kind: kind)
+        }
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: session, payload: .null)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(turn("2", .person, .discussion))), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        XCTAssertFalse(model.hasUnreadAgentReply(request), "The person's own turn does not light the marker.")
+
+        // Foreground: the reply arrives while Chat is closed.
+        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .turn(turn("3", .agent, .reply))), context: context)
+        try model.refreshFromDurableStore()
+        XCTAssertTrue(model.hasUnreadAgentReply(request))
+
+        // Opening Chat clears it, and the cleared state survives a relaunch.
+        model.markConversationRead(request)
+        XCTAssertFalse(model.hasUnreadAgentReply(request))
+        let relaunched = try LivePresentationStore(store: AttentionDomainStore(context: context, persistence: persistence),
+            context: context)
+        XCTAssertFalse(relaunched.hasUnreadAgentReply(request))
+
+        // Background: a later reply is replayed into durable state before the app shows it.
+        let replayed = try AttentionDomainStore(context: context, persistence: persistence)
+        try replayed.applyConversation(ConversationEvent(sequence: 4, binding: binding,
+            fact: .turn(turn("4", .origin, .reply))), context: context)
+        let resumed = try LivePresentationStore(store: AttentionDomainStore(context: context, persistence: persistence),
+            context: context)
+        XCTAssertTrue(resumed.hasUnreadAgentReply(request))
+        resumed.markConversationRead(request)
+        XCTAssertFalse(resumed.hasUnreadAgentReply(request))
+    }
+
 }
 
 private final class FailOnceAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {

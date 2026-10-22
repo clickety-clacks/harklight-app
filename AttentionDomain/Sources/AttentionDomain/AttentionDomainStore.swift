@@ -2192,6 +2192,22 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return draft
     }
 
+    /// Records that Chat has shown the request's latest agent reply.
+    public func markConversationRead(_ request: RequestKey, context suppliedContext: ProfileContext) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(request, in: context.identity)
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[request] else { throw ConversationError.missingRequest }
+        guard let latest = thread.latestAgentReply?.id, thread.readThroughTurn != latest else { return }
+        thread.readThroughTurn = latest
+        conversation.threads[request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws {
         lock.lock()
         defer { lock.unlock() }

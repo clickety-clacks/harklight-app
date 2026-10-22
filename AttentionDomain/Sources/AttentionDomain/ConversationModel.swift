@@ -227,6 +227,17 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var reportedRetractedAtMilliseconds: UInt64?
     public var uploadGroups: [UUID: ConversationUploadGroup]?
     public var uploadCleanups: [UUID: ConversationUploadCleanup]?
+    /// The latest agent reply that was on screen in this request's Chat.
+    public var readThroughTurn: ExactText?
+
+    public var latestAgentReply: ConversationTurn? {
+        turns.last { $0.kind == .reply && $0.author != .person }
+    }
+    /// An agent reply arrived after Chat last showed this request's replies.
+    public var hasUnreadAgentReply: Bool {
+        guard let latest = latestAgentReply else { return false }
+        return latest.id != readThroughTurn
+    }
 
     public var isRetracted: Bool { retraction != nil || reportedRetractedAtMilliseconds != nil }
 

@@ -830,7 +830,7 @@ struct LiveRequestDetail: View {
             return localExample.message.hasChat
                 ? localExample.message.chatUnread && !localExample.chatRead : nil
         }
-        return store.conversation(for: request.key) == nil ? nil : false
+        return store.conversation(for: request.key) == nil ? nil : store.hasUnreadAgentReply(request.key)
     }
 
     private var noticeTextColor: Color {
