@@ -52,7 +52,7 @@ struct LiveContentView: View {
             HarklightInbox(
                 requests: store.inboxRows.map { row in
                     var row = row
-                    if store.conversation(for: row.key) != nil { row.chatUnread = false }
+                    if store.conversation(for: row.key) != nil { row.chatUnread = store.hasUnreadAgentReply(row.key) }
                     return row
                 }, samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { markSeen($0) },
@@ -830,7 +830,7 @@ struct LiveRequestDetail: View {
             return localExample.message.hasChat
                 ? localExample.message.chatUnread && !localExample.chatRead : nil
         }
-        return store.conversation(for: request.key) == nil ? nil : false
+        return store.conversation(for: request.key) == nil ? nil : store.hasUnreadAgentReply(request.key)
     }
 
     private var noticeTextColor: Color {

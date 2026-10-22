@@ -948,6 +948,23 @@ final class LivePresentationStore {
 
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
 
+    func hasUnreadAgentReply(_ key: RequestKey) -> Bool {
+        conversationThreads[key]?.hasUnreadAgentReply == true
+    }
+
+    /// Chat calls this while it is on screen. The mark is durable, so a reply
+    /// replayed after a relaunch or background wake stays unread until shown.
+    func markConversationRead(_ key: RequestKey) {
+        guard !isReadOnly, var thread = conversationThreads[key], thread.hasUnreadAgentReply else { return }
+        do {
+            try port.markConversationRead(key, context: port.context)
+            thread.readThroughTurn = thread.latestAgentReply?.id
+            conversationThreads[key] = thread
+        } catch {
+            UIDiagnostics.shared.record("store.markConversationRead \(UIDiagnostics.describe(key)) error=\(error)")
+        }
+    }
+
     func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
         do { return try port.inspectAnswerDraft(context: port.context, request: key, revision: revision) }
         catch {

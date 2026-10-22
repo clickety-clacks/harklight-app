@@ -369,6 +369,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
         return try store.updateConversationDraftText(text, for: binding, context: profileContext)
     }
 
+    public func markConversationRead(_ request: RequestKey, context suppliedContext: PortContext) throws {
+        try validate(suppliedContext)
+        try store.markConversationRead(request, context: profileContext)
+    }
+
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws {
         try validate(suppliedContext)
         try store.appendFixtureDiscussion(binding, context: profileContext)
