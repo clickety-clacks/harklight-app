@@ -191,8 +191,13 @@ final class HarklightUITests: XCTestCase {
 
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        // While the fixture dialog is still dismissing, the back button is not
+        // hittable and a tap synthesized then does not navigate.
         let warningButton = app.buttons["inbox-warning-button"]
+        for _ in 0..<3 where !warningButton.exists {
+            if back.exists && back.isHittable { back.tap() }
+            _ = warningButton.waitForExistence(timeout: 3)
+        }
         XCTAssertTrue(warningButton.waitForExistence(timeout: 5),
                       "A send left without a confirmed result raises the inbox warning.")
         let message = app.staticTexts["inbox-warning-message"]
