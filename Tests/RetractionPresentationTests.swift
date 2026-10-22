@@ -245,26 +245,30 @@ final class RetractionPresentationTests: XCTestCase {
         let context = profile()
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let retractedKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+        let staleKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("stale"))
         let openKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("open"))
         let retractedDelivery = Data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"origin","as":"message","message":{"title":"Retained question"},"request_revision":1,"session_handle":"handle","event_id":"1","state":"retracted","retracted_at":1760000000123}"#.utf8)
         try domain.apply(try RelayWire(profile: context).decodeEvent(retractedDelivery), context: context)
-        try domain.apply(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: openKey,
-            originalPayload: .object([JSONMember("title", .string(ExactText("Open question")))])), .message),
-            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("2"))), context: context)
-        defaults.set(try JSONEncoder().encode(Set([openKey])), forKey: "harklight.cleared-retracted-requests")
+        for (sequence, key) in [(UInt64(2), staleKey), (UInt64(3), openKey)] {
+            try domain.apply(RelayEvent(sequence: sequence, body: .delivery(StoredRequest(key: key,
+                originalPayload: .object([JSONMember("title", .string(ExactText("Open question")))])), .message),
+                conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"),
+                                                        eventID: ExactText("\(sequence)"))), context: context)
+        }
+        defaults.set(try JSONEncoder().encode(Set([staleKey])), forKey: "harklight.cleared-retracted-requests")
         let model = try LivePresentationStore(store: domain, context: context, clearedRetractionDefaults: defaults)
-        XCTAssertEqual(model.inboxRows.count, 2, "A stale cleared entry hides nothing unless its request is retracted")
+        XCTAssertEqual(model.inboxRows.count, 3, "A stale cleared entry hides nothing unless its request is retracted")
         XCTAssertTrue(try XCTUnwrap(model.inboxRows.first { $0.key == retractedKey }).isRetracted)
-        XCTAssertFalse(try XCTUnwrap(model.inboxRows.first { $0.key == openKey }).isRetracted)
+        XCTAssertFalse(try XCTUnwrap(model.inboxRows.first { $0.key == staleKey }).isRetracted)
         model.clearRetracted(openKey)
         XCTAssertFalse(model.isRetractionCleared(openKey), "Only a retracted row can be cleared")
         model.clearRetracted(retractedKey)
-        XCTAssertEqual(model.inboxRows.map(\.key), [openKey])
+        XCTAssertEqual(Set(model.inboxRows.map(\.key)), [staleKey, openKey])
         XCTAssertTrue(model.isRetracted(retractedKey), "Clearing hides the row; the retracted record stays")
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty, "Clearing sends no frame")
-        XCTAssertEqual(try domain.snapshot(context: context).requests.count, 2)
+        XCTAssertEqual(try domain.snapshot(context: context).requests.count, 3)
         let restarted = try LivePresentationStore(store: domain, context: context, clearedRetractionDefaults: defaults)
-        XCTAssertEqual(restarted.inboxRows.map(\.key), [openKey], "The cleared row stays hidden after relaunch")
+        XCTAssertEqual(Set(restarted.inboxRows.map(\.key)), [staleKey, openKey], "The cleared row stays hidden after relaunch")
     }
 
     func testPlainOriginClearHasNoRetractionMeaning() throws {
