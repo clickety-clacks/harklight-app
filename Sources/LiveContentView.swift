@@ -356,6 +356,7 @@ struct LiveRequestDetail: View {
         noCommentUnavailableOverride ?? request.noCommentUnavailable
     }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.colorScheme) private var colorScheme
     @State private var deferred = false
     @State private var chatPresented = false
     @State private var enlargedPicture: SampleOption?
@@ -819,10 +820,16 @@ struct LiveRequestDetail: View {
         switch localExample?.message.kind {
         case .some(.error): Color(red: 1, green: 0.89, blue: 0.88)
         case .some(.warning): Color(red: 1, green: 0.95, blue: 0.80)
-        case .some(.information): Color(red: 0.89, green: 0.94, blue: 1)
+        case .some(.information): informationBodyColor
         case .some(.completed): Color(red: 0.89, green: 0.96, blue: 0.90)
-        default: request.informationalSeenStatus == nil ? nil : Color(red: 0.89, green: 0.94, blue: 1)
+        default: request.informationalSeenStatus == nil ? nil : informationBodyColor
         }
+    }
+
+    private var informationBodyColor: Color {
+        colorScheme == .dark
+            ? Color(uiColor: .secondarySystemBackground)
+            : Color(red: 0.89, green: 0.94, blue: 1)
     }
 
     private var conversationIndicator: Bool? {
@@ -838,7 +845,9 @@ struct LiveRequestDetail: View {
         case .some(.error): Color(red: 0.48, green: 0, blue: 0.04)
         case .some(.warning): Color(red: 0.36, green: 0.24, blue: 0)
         case .some(.completed): Color(red: 0.10, green: 0.37, blue: 0.16)
-        default: Color(red: 0.04, green: 0.23, blue: 0.43)
+        default: colorScheme == .dark
+            ? Color(uiColor: .label)
+            : Color(red: 0.04, green: 0.23, blue: 0.43)
         }
     }
 
