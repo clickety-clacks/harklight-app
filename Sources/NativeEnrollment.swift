@@ -1,5 +1,4 @@
 import AttentionDomain
-import CryptoKit
 import Foundation
 import HarklightNativeRelay
 import Security
@@ -17,7 +16,6 @@ enum NativeEnrollmentError: Error {
     case keyPending
     case keyInUse
     case preparedIdentityMismatch
-    case endpointMigrationNotAllowed
 }
 
 struct NativeEnrollmentSettings {
@@ -87,39 +85,6 @@ struct NativeEnrollmentRecord: Codable, Equatable {
         accountDisplayName == NativeJoinInvitation.unnamedAccountPlaceholder ? nil : accountDisplayName
     }
     var profileAuthority: String { localProfileAuthority ?? host }
-}
-
-enum NativeEndpointMigrationPolicy {
-    static let sourceHost = HarklightDirectEndpointMigration.profileAuthority
-    static let gibsonHost = HarklightDirectEndpointMigration.endpointHost
-    static let gibsonEnrollmentPort = HarklightDirectEndpointMigration.enrollmentPort
-    static let gibsonRelayPort = HarklightDirectEndpointMigration.relayPort
-    static let pinnedRootSHA256 = HarklightDirectEndpointMigration.trustedRootSHA256
-
-    static func matchesApprovedRoot(_ rootDER: Data) -> Bool {
-        HarklightDirectEndpointMigration.matchesTrustedRoot(rootDER)
-    }
-
-    static func rootSHA256(_ rootDER: Data) -> String {
-        SHA256.hash(data: rootDER).map { String(format: "%02x", $0) }.joined()
-    }
-
-    static func candidate(from record: NativeEnrollmentRecord,
-                          acceptedRootSHA256: String = pinnedRootSHA256) throws -> NativeEnrollmentRecord {
-        let rootHash = rootSHA256(record.trustedRootDER)
-        guard record.isApproved,
-              record.host == sourceHost,
-              record.localProfileAuthority == nil || record.localProfileAuthority == sourceHost,
-              record.enrollmentPort == gibsonEnrollmentPort,
-              record.relayPort == gibsonRelayPort,
-              rootHash == acceptedRootSHA256 else {
-            throw NativeEnrollmentError.endpointMigrationNotAllowed
-        }
-        var migrated = record
-        migrated.localProfileAuthority = record.profileAuthority
-        migrated.host = gibsonHost
-        return migrated
-    }
 }
 
 /// Account identifiers are opaque wire bytes, including across Unicode forms.
@@ -355,17 +320,6 @@ struct NativeEnrollmentStore {
             return
         }
         try save(record)
-    }
-
-    func commitGibsonEndpointMigration(from expected: NativeEnrollmentRecord,
-                                       to replacement: NativeEnrollmentRecord,
-                                       acceptedRootSHA256: String = NativeEndpointMigrationPolicy.pinnedRootSHA256) throws {
-        guard let current = try load(), current == expected,
-              try NativeEndpointMigrationPolicy.candidate(from: expected,
-                                                          acceptedRootSHA256: acceptedRootSHA256) == replacement else {
-            throw NativeEnrollmentError.endpointMigrationNotAllowed
-        }
-        try save(replacement)
     }
 
     func markNotificationExplanationSeen(for deviceID: String) throws {

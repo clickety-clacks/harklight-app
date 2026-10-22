@@ -18,8 +18,8 @@ final class InboxVisualRulesTests: XCTestCase {
 
     func testSenderLabelUsesLastKindAndAgentSegment() {
         XCTAssertEqual(InboxSenderDisplay.name(for: "fixture:Facilities"), "Facilities")
-        XCTAssertEqual(InboxSenderDisplay.name(for: "app:tightbeam-harklight-0.1"), "tightbeam-harklight-0.1")
-        XCTAssertEqual(InboxSenderDisplay.name(for: "app:tightbeam/harklight-pdo"), "harklight-pdo")
+        XCTAssertEqual(InboxSenderDisplay.name(for: "app:relay-messenger-0.1"), "relay-messenger-0.1")
+        XCTAssertEqual(InboxSenderDisplay.name(for: "app:messenger/support-desk"), "support-desk")
         XCTAssertEqual(InboxSenderDisplay.name(for: "app:"), "app:")
         XCTAssertEqual(InboxSenderDisplay.name(for: "Planning assistant"), "Planning assistant")
     }

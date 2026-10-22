@@ -93,10 +93,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
               relayURL.password == nil,
               let host = relayURL.host,
               !host.isEmpty,
-              host == profile.identity.trustedRelayAuthority.rawValue ||
-                HarklightDirectEndpointMigration.allows(profile: profile.identity,
-                                                        endpointHost: host.lowercased(),
-                                                        trustedRootDER: trustedRootDER) else {
+              host == profile.identity.trustedRelayAuthority.rawValue else {
             throw InstallationTransportError.invalidEndpoint
         }
         guard let root = SecCertificateCreateWithData(nil, trustedRootDER as CFData) else {
