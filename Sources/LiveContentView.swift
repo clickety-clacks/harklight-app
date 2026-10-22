@@ -52,7 +52,7 @@ struct LiveContentView: View {
             HarklightInbox(
                 requests: store.inboxRows.map { row in
                     var row = row
-                    if store.conversation(for: row.key) != nil { row.chatUnread = store.hasUnreadAgentReply(row.key) }
+                    if store.conversation(for: row.key) != nil { row.chatUnread = false }
                     return row
                 }, samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { markSeen($0) },
