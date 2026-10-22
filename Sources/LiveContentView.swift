@@ -846,7 +846,7 @@ struct LiveRequestDetail: View {
         case .some(.warning): Color(red: 0.36, green: 0.24, blue: 0)
         case .some(.completed): Color(red: 0.10, green: 0.37, blue: 0.16)
         default: colorScheme == .dark
-            ? Color(uiColor: .label)
+            ? Color(uiColor: .secondaryLabel)
             : Color(red: 0.04, green: 0.23, blue: 0.43)
         }
     }
