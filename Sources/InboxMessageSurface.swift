@@ -1,5 +1,9 @@
 import SwiftUI
 
+extension EnvironmentValues {
+    @Entry var harklightMessageType: HarklightMessageType = .request
+}
+
 private struct MessageCardContentHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
 
@@ -23,6 +27,7 @@ struct InboxCardContext {
     var canInlineChat = false
     var openChat: (() -> Void)? = nil
     var dismissToList: (() -> Void)? = nil
+    var messageType: HarklightMessageType = .request
     let move: (Int) -> Void
 
     static var standalone: InboxCardContext {
@@ -33,9 +38,7 @@ struct InboxCardContext {
 /// Native scroll and toolbar host shared by admitted messages and local examples.
 struct MessageCardSurface<Content: View>: View {
     let context: InboxCardContext
-    var backgroundColor: Color = Color(red: 0.89, green: 0.94, blue: 1)
     @ViewBuilder let content: () -> Content
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @State private var pull: CGFloat = 0
     @State private var armedDirection = 0
@@ -50,6 +53,7 @@ struct MessageCardSurface<Content: View>: View {
 
             ScrollView {
                 content()
+                    .environment(\.harklightMessageType, context.messageType)
                     .frame(maxWidth: 680)
                     .frame(maxWidth: .infinity)
                     .background {
@@ -72,10 +76,8 @@ struct MessageCardSurface<Content: View>: View {
                 }
             }
             .background {
-                let detailBackground = colorScheme == .dark
-                    ? Color(uiColor: .systemBackground)
-                    : backgroundColor
-                (horizontalSizeClass == .compact ? detailBackground : Color(uiColor: .systemBackground))
+                HarklightDesignSystem.palette(for: colorScheme)
+                    .messageType(context.messageType).backgroundColor
                     .ignoresSafeArea()
             }
             .toolbarBackground(.hidden, for: .navigationBar)
@@ -109,6 +111,8 @@ struct MessageCardSurface<Content: View>: View {
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Text("\(context.position) of \(context.total)").font(.subheadline.monospacedDigit())
+                        .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme)
+                            .messageType(context.messageType).textColor)
                         .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
                 }
             }
@@ -122,6 +126,11 @@ struct MessageNeighborPreview: View {
     let preview: InboxCardPreview
     let showingBottom: Bool
     let armed: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var neutral: HarklightDesignSource.Neutral {
+        HarklightDesignSystem.palette(for: colorScheme).neutral
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -132,12 +141,13 @@ struct MessageNeighborPreview: View {
         .padding(22).frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxHeight: .infinity, alignment: showingBottom ? .bottom : .top)
-        .clipped().background(Color(uiColor: .systemBackground))
-        .padding(showingBottom ? .bottom : .top, 8).background(.white)
+        .clipped().background(neutral.backgroundColor)
+        .foregroundStyle(neutral.textColor)
+        .padding(showingBottom ? .bottom : .top, 8).background(neutral.backgroundColor)
         .overlay(alignment: .trailing) {
             if armed {
                 Image(systemName: showingBottom ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
-                    .padding().foregroundStyle(.blue)
+                    .padding().foregroundStyle(neutral.textColor)
             }
         }
     }
@@ -149,23 +159,38 @@ struct MessageChoiceLabel: View {
     let selected: Bool
     let multiple: Bool
     let suggested: Bool
-    var selectionColor: Color = .blue
     var ownAnswer = false
     var drawsSurface = true
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var appearance: HarklightDesignSource.Appearance {
+        HarklightDesignSystem.palette(for: colorScheme)
+    }
+
+    private var messageColors: HarklightDesignSource.MessageType {
+        appearance.messageType(messageType)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             ZStack {
                 if multiple {
                     RoundedRectangle(cornerRadius: 4)
-                        .stroke(selected ? Color.white : Color.secondary, lineWidth: 1.5)
+                        .stroke(selected ? messageColors.textColor : messageColors.secondaryTextColor,
+                                lineWidth: 1.5)
                         .frame(width: 20, height: 20)
-                    if selected { Image(systemName: "checkmark").font(.caption.bold()) }
+                    if selected {
+                        Image(systemName: "checkmark")
+                            .font(.caption.bold())
+                            .foregroundStyle(messageColors.textColor)
+                    }
                 } else {
                     Circle()
-                        .stroke(selected ? Color.white : Color.secondary, lineWidth: 1.5)
+                        .stroke(selected ? messageColors.textColor : messageColors.secondaryTextColor,
+                                lineWidth: selected ? 6 : 2)
                         .frame(width: 20, height: 20)
-                    if selected { Circle().fill(.white).frame(width: 11, height: 11) }
                 }
             }
             .frame(width: 20, height: 22)
@@ -175,33 +200,33 @@ struct MessageChoiceLabel: View {
                     if suggested {
                         Text("Suggested")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(selected ? Color.white : Color.blue)
+                            .foregroundStyle(messageColors.secondaryTextColor)
                     }
                 }
                 if !detail.isEmpty {
                     Text(detail)
                         .font(.subheadline)
-                        .foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
+                        .foregroundStyle(messageColors.secondaryTextColor)
                 }
             }
             Spacer(minLength: 0)
         }
-        .foregroundStyle(selected ? Color.white : Color.primary)
+        .foregroundStyle(messageColors.textColor)
         .padding(14).frame(maxWidth: .infinity, alignment: .leading)
         .background {
             if drawsSurface {
                 RoundedRectangle(cornerRadius: 16)
-                    .fill(selected ? selectionColor : Color(uiColor: .systemBackground))
+                    .fill(selected ? appearance.detail.selectedChoiceColor : Color.clear)
             }
         }
         .overlay {
             if drawsSurface {
-                RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(selected ? Color.clear : Color(uiColor: .separator).opacity(ownAnswer ? 0.6 : 0),
-                                  style: StrokeStyle(lineWidth: ownAnswer ? 1.5 : 0,
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(selected ? messageColors.textColor : messageColors.textColor.opacity(0.3),
+                                  style: StrokeStyle(lineWidth: selected ? 1.5 : 1,
                                                      dash: ownAnswer ? [5, 4] : []))
             }
         }
-        .contentShape(RoundedRectangle(cornerRadius: 14))
+        .contentShape(RoundedRectangle(cornerRadius: 16))
     }
 }

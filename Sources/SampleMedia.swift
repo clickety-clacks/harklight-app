@@ -45,6 +45,13 @@ struct SamplePictureChoices: View {
     let response: SampleResponse
     var isReadOnly = false
     let enlarge: (SampleOption) -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var messageColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             ForEach(options) { option in
@@ -54,14 +61,22 @@ struct SamplePictureChoices: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 9) {
                         SamplePicture(name: option.id)
-                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(response.choices.contains(option.id) ? Color.blue : .clear, lineWidth: 3))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(response.choices.contains(option.id)
+                                                ? messageColors.textColor
+                                                : messageColors.textColor.opacity(0.3),
+                                            lineWidth: 1)
+                            }
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(option.title).font(.headline)
-                                Text(option.detail).font(.subheadline).foregroundStyle(.secondary)
+                                Text(option.title).font(.headline).foregroundStyle(messageColors.textColor)
+                                Text(option.detail).font(.subheadline).foregroundStyle(messageColors.secondaryTextColor)
                             }
                             Spacer()
-                            if response.choices.contains(option.id) { Image(systemName: "checkmark.circle.fill").foregroundStyle(.blue) }
+                            if response.choices.contains(option.id) {
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(messageColors.textColor)
+                            }
                         }
                     }.contentShape(Rectangle())
                 }
@@ -217,14 +232,15 @@ struct SampleChoiceRow: View {
     let swatch: String?
     let sound: Bool
     let choose: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var messageColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    }
 
     private var suggested: Bool {
         if case .suggested = option.role { return true }
-        return false
-    }
-
-    private var destructive: Bool {
-        if case .destructive = option.role { return true }
         return false
     }
 
@@ -238,12 +254,11 @@ struct SampleChoiceRow: View {
                 }
                 if sound { Image(systemName: "waveform").frame(width: 34) }
                 MessageChoiceLabel(title: option.title, detail: option.detail, selected: selected,
-                                   multiple: multiple, suggested: suggested,
-                                   selectionColor: destructive ? .red : .blue)
+                                   multiple: multiple, suggested: suggested)
             }
         }
         .buttonStyle(.plain)
-        .foregroundStyle(destructive ? Color.red : Color.primary)
+        .foregroundStyle(messageColors.textColor)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityValue(selected ? "Selected" : "Not selected")
     }
@@ -263,6 +278,12 @@ private enum SampleSwatch {
 struct SampleNumberInput: View {
     @Bindable var response: SampleResponse
     var isReadOnly = false
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var messageColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -270,36 +291,53 @@ struct SampleNumberInput: View {
                 TextField("Days", value: $response.number, format: .number)
                     .keyboardType(.numberPad).font(.system(size: 56, weight: .medium, design: .rounded))
                     .multilineTextAlignment(.center).frame(width: 150)
+                    .foregroundStyle(messageColors.textColor)
+                    .tint(messageColors.textColor)
                     .disabled(isReadOnly)
-                Text("days").foregroundStyle(.secondary)
+                Text("days").foregroundStyle(messageColors.secondaryTextColor)
             }
             Slider(value: $response.number, in: 7...90, step: 1) { Text("Days to keep drafts") }
+                .tint(messageColors.textColor)
                 .disabled(isReadOnly)
             HStack { Text("7 days"); Spacer(); Text("90 days") }
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(messageColors.secondaryTextColor)
             if !(7...90).contains(response.number) {
-                Text("Choose 7 to 90 days.").foregroundStyle(.red)
+                Text("Choose 7 to 90 days.").foregroundStyle(messageColors.secondaryTextColor)
             }
         }
     }
 }
 
 struct SampleDiffView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var messageColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("welcome.md · +2 −1").font(.caption.weight(.semibold)).padding(14)
             Text("− Welcome to our comprehensive collection of recent work.")
-                .padding(14).frame(maxWidth: .infinity, alignment: .leading).background(.red.opacity(0.07))
+                .padding(14).frame(maxWidth: .infinity, alignment: .leading)
             Text("+ A place for ideas to grow.\n+ Explore the journal, one page at a time.")
-                .padding(14).frame(maxWidth: .infinity, alignment: .leading).background(.green.opacity(0.08))
+                .padding(14).frame(maxWidth: .infinity, alignment: .leading)
         }
-        .font(.system(.subheadline, design: .monospaced)).textSelection(.enabled)
-        .background(Color(uiColor: .secondarySystemBackground))
+        .font(.system(.subheadline, design: .monospaced))
+        .foregroundStyle(messageColors.textColor)
+        .textSelection(.enabled)
     }
 }
 
 struct LocalSampleContext: View {
     let response: SampleResponse
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var messageColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -308,7 +346,7 @@ struct LocalSampleContext: View {
             }
             if let deadline = response.message.deadline {
                 Label(deadline, systemImage: "clock")
-                    .foregroundStyle(response.message.missed ? Color.orange : Color.secondary)
+                    .foregroundStyle(messageColors.secondaryTextColor)
             }
         }
         .font(.caption)

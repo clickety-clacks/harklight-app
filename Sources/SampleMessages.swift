@@ -10,6 +10,15 @@ enum SampleKind: String, CaseIterable, Identifiable {
     case error, warning, information, completed
     var id: String { rawValue }
     var isNotice: Bool { [.error, .warning, .information, .completed].contains(self) }
+    var designMessageType: HarklightMessageType {
+        switch self {
+        case .error: .error
+        case .warning: .warning
+        case .information: .info
+        case .completed: .done
+        default: .request
+        }
+    }
     var symbol: String {
         switch self {
         case .approval: "checkmark.circle"
@@ -164,6 +173,7 @@ final class SampleResponse {
             chatUnread: message.hasChat ? message.chatUnread && !chatRead : nil,
             initials: message.initials,
             emphasis: emphasis,
+            messageType: message.kind.designMessageType,
             tier: message.tier)
     }
 
