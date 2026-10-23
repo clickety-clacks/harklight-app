@@ -125,6 +125,7 @@ final class InboxPagePersistenceTests: XCTestCase {
         let f = try PageFixture()
         defer { f.remove() }
         let bytes = try f.persistence.load(identity: f.context.identity)
+        XCTAssertThrowsError(try f.save((2...22).map { f.item($0) }))
         XCTAssertThrowsError(try f.save([f.item(2), f.item(2)]))
         XCTAssertThrowsError(try f.save([f.item(1)]))
         XCTAssertThrowsError(try f.save([], next: "last"))
@@ -138,6 +139,23 @@ final class InboxPagePersistenceTests: XCTestCase {
         XCTAssertThrowsError(try f.save([InboxSnapshotItem(acceptance: RelayEvent(sequence: 2,
             body: .originReference(foreign)))]))
         XCTAssertEqual(try f.persistence.load(identity: f.context.identity), bytes)
+    }
+
+    func testLegacyCheckpointOrderIsRecoveredBeforeAppendingTheNextPage() throws {
+        let f = try PageFixture()
+        defer { f.remove() }
+        try f.save([f.item(3)])
+        let data = try XCTUnwrap(f.persistence.load(identity: f.context.identity))
+        var plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any])
+        var checkpoint = try XCTUnwrap(plist["inboxCheckpoint"] as? [String: Any])
+        checkpoint.removeValue(forKey: "sourceOrder")
+        plist["inboxCheckpoint"] = checkpoint
+        try f.persistence.file.commit(PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0),
+                                      identity: f.context.identity)
+        let restored = try AttentionDomainStore(context: f.context, persistence: f.persistence)
+        try restored.saveInboxOlderPage(snapshotID: "snapshot", highWater: PageFixture.highWater,
+            cursor: "last", items: [f.item(2)], nextCursor: nil, context: f.context)
+        XCTAssertEqual(try f.reopen().inboxSourceOrder, [f.key(3), f.key(1), f.key(2)])
     }
 
     func testFailureBeforeReplacementKeepsOldCheckpointAndRetryCommitsOnce() throws {
