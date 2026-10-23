@@ -808,7 +808,8 @@ final class SampleWorkspaceUITests: XCTestCase {
             wait(for: [restored], timeout: 5)
             for _ in 0..<8 {
                 if firstRow.isHittable && brand.isHittable &&
-                    settings.isHittable && sidebarToggle.isHittable { break }
+                    settings.isHittable && sidebarToggle.isHittable &&
+                    firstRow.frame.minY >= settings.frame.maxY + 8 { break }
                 list.swipeDown()
             }
             XCTAssertTrue(firstRow.isHittable, "The list returns to its top row.")
