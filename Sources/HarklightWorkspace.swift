@@ -571,8 +571,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func inboxSplitView(for tab: InboxWorkspaceTab, wideChat: Bool, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(columnVisibility: $visibility) {
-            InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
+            InboxList(tab: tab,
                   usesSidebarToolbarHeader: horizontalSizeClass == .regular,
+                  rows: rows, warnings: visibleWarnings,
                   isRefreshing: isRefreshing,
                   prioritizationReasons: prioritizationReasons,
                   showsBasicOrderMarker: showsBasicOrderMarker,
@@ -599,8 +600,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func searchStack(wideChat: Bool, inlineChat: Bool,
                              geometry: GeometryProxy) -> some View {
         NavigationStack(path: $searchPath) {
-            InboxList(tab: .search, rows: rows, warnings: visibleWarnings,
+            InboxList(tab: .search,
                   usesSidebarToolbarHeader: horizontalSizeClass == .regular,
+                  rows: rows, warnings: visibleWarnings,
                   isRefreshing: isRefreshing,
                   prioritizationReasons: prioritizationReasons,
                   showsBasicOrderMarker: showsBasicOrderMarker,
