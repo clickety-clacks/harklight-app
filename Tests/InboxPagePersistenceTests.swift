@@ -323,16 +323,17 @@ final class InboxPagePersistenceTests: XCTestCase {
                 reader.run {
                     let start = DispatchTime.now().uptimeNanoseconds
                     readStarted.signal()
-                    let snapshot = try store.snapshot(context: f.context)
-                    XCTAssertTrue(snapshot.requests.count == 401 || snapshot.requests.count == 421)
-                    return Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+                    let cursor = try store.relayCursor(context: f.context)
+                    let elapsed = DispatchTime.now().uptimeNanoseconds - start
+                    XCTAssertEqual(cursor, PageFixture.highWater)
+                    return Double(elapsed) / 1_000_000
                 }
             }
             let milliseconds = try reader.value()
             try writer.value()
             XCTAssertEqual(try AttentionDomainStore(context: f.context, persistence: f.persistence)
                 .snapshot(context: f.context).requests.count, 421)
-            print("PAGE_READER_INTERVAL sample=\(sample) seed_bytes=\(bytes.count) retained=401 page=20 wait_and_snapshot_ms=\(milliseconds)")
+            print("PAGE_READER_INTERVAL sample=\(sample) seed_bytes=\(bytes.count) retained=401 page=20 cursor_read_ms=\(milliseconds)")
         }
     }
 }
