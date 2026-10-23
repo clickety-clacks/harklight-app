@@ -41,12 +41,12 @@ struct MessageCardSurface<Content: View>: View {
     @State private var armedDirection = 0
     @State private var contentHeight: CGFloat = 0
 
-    private let bottomToolbarClearance: CGFloat = 72
+    private let bottomControlClearance: CGFloat = 72
 
     var body: some View {
         GeometryReader { viewport in
-            let availableHeight = max(0, viewport.size.height - bottomToolbarClearance)
-            let needsBottomToolbarClearance = contentHeight > availableHeight + 1
+            let availableHeight = max(0, viewport.size.height - bottomControlClearance)
+            let needsBottomControlClearance = contentHeight > availableHeight + 1
 
             ScrollView {
                 content()
@@ -67,8 +67,8 @@ struct MessageCardSurface<Content: View>: View {
             // Only add scroll room when the card is taller than the usable area.
             // Short cards stay at the true boundary for the next/previous pull gesture.
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if needsBottomToolbarClearance {
-                    Color.clear.frame(height: bottomToolbarClearance).accessibilityHidden(true)
+                if needsBottomControlClearance {
+                    Color.clear.frame(height: bottomControlClearance).accessibilityHidden(true)
                 }
             }
             .background {
@@ -78,7 +78,7 @@ struct MessageCardSurface<Content: View>: View {
                 (horizontalSizeClass == .compact ? detailBackground : Color(uiColor: .systemBackground))
                     .ignoresSafeArea()
             }
-            .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .navigationBarTitleDisplayMode(.inline)
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 let top = geometry.contentOffset.y + geometry.contentInsets.top
