@@ -650,7 +650,6 @@ final class NativeAppLaunch {
         let store = try AttentionDomainStore(context: installation.context, persistence: persistence,
                                              conversationFileReferences: fileStorage)
         let presentation = try LivePresentationStore(store: store, context: installation.context,
-                                                     inboxOrderPresentation: NativeRelayLifecycle.shared.inboxOrderPresentation,
                                                      diagnostics: diagnostics)
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
@@ -884,7 +883,6 @@ final class LivePresentationStore {
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     private(set) var conversationError: String?
     @ObservationIgnored private let conversationAvailability: NativeConversationAvailability
-    @ObservationIgnored private let inboxOrderPresentation: InboxOrderPresentation?
     var conversationUnavailableMessage: String? {
         guard permitsDelivery, !isReadOnly else { return nil }
         return conversationAvailability.message(for: profileContext)
@@ -957,13 +955,11 @@ final class LivePresentationStore {
 
     convenience init(store: AttentionDomainStore, context: ProfileContext,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
-                     inboxOrderPresentation: InboxOrderPresentation? = nil,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
                      clearedRetractionDefaults: UserDefaults = .standard) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
                       conversationAvailability: conversationAvailability,
-                      inboxOrderPresentation: inboxOrderPresentation,
                       clearedRetractionDefaults: clearedRetractionDefaults)
     }
 
@@ -983,12 +979,9 @@ final class LivePresentationStore {
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
-                 inboxOrderPresentation: InboxOrderPresentation? = nil,
                  clearedRetractionDefaults: UserDefaults = .standard) throws {
         self.clearedRetractionDefaults = clearedRetractionDefaults
         self.conversationAvailability = conversationAvailability
-        self.inboxOrderPresentation = inboxOrderPresentation
-        inboxOrderPresentation?.prepare(for: context.identity)
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
         self.isReadOnly = isReadOnly
@@ -1333,7 +1326,7 @@ final class LivePresentationStore {
     }
 
     var inboxRows: [InboxRequestRow] {
-        let rows: [InboxRequestRow] = presentation.requests.compactMap { request -> InboxRequestRow? in
+        presentation.requests.compactMap { request in
             let retracted = isRetracted(request.key)
             if retracted, clearedRetractions.contains(request.key) { return nil }
             let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
@@ -1396,15 +1389,6 @@ final class LivePresentationStore {
                 isRetracted: retracted,
                 tier: request.attentionTier.inboxRowStyleTier)
         }
-        return InboxOrderPresentationRules.ordered(rows, by: inboxOrderPresentation?.view)
-    }
-
-    var inboxOrderReasons: [RequestKey: InboxOrderRowReason] {
-        InboxOrderPresentationRules.reasons(in: inboxOrderPresentation?.view)
-    }
-
-    var showsBasicOrderMarker: Bool {
-        InboxOrderPresentationRules.showsBasicOrder(in: inboxOrderPresentation?.view)
     }
 
     private func canNoComment(_ request: PresentedRequest) -> Bool {

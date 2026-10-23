@@ -283,9 +283,17 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         drafts[revision] = draft
     }
 
-    mutating func orderTurns() {
-        if turns.allSatisfy({ UInt64($0.id.rawValue) != nil }) {
-            turns.sort { UInt64($0.id.rawValue)! < UInt64($1.id.rawValue)! }
+    mutating func orderTurns(using projectionSequences: [ExactText: UInt64]) {
+        // Keep rows without a conversation-projection sequence in their existing
+        // slots. Reorder only entries whose server sequence is known.
+        let sequencedIndexes = turns.indices.filter { projectionSequences[turns[$0].id] != nil }
+        let sequencedTurns = sequencedIndexes.map { turns[$0] }.sorted {
+            let left = projectionSequences[$0.id]!
+            let right = projectionSequences[$1.id]!
+            return left == right ? false : left < right
+        }
+        for (index, turn) in zip(sequencedIndexes, sequencedTurns) {
+            turns[index] = turn
         }
     }
 
@@ -299,7 +307,6 @@ public struct ConversationThread: Equatable, Codable, Sendable {
             turns.append(turn)
         }
         facts[turn.id] = facts[turn.id] ?? ConversationTurnFacts()
-        orderTurns()
     }
 
     mutating func recordReportedRetraction(at retractedAtMilliseconds: UInt64) throws {
@@ -337,7 +344,6 @@ public struct ConversationThread: Equatable, Codable, Sendable {
             turns.append(ConversationTurn(id: turn, binding: ConversationBinding(request: request, revision: revision),
                 author: .origin, sessionHandle: sessionHandle, text: ExactText(""), kind: .terminal))
             facts[turn] = ConversationTurnFacts()
-            orderTurns()
         }
         for revision in drafts.keys {
             if var draft = drafts[revision], case .saved = draft.disposition {
@@ -391,6 +397,43 @@ struct ConversationState: Codable {
     var cursor: UInt64 = 0
     var events: [UInt64: ConversationEvent] = [:]
     var threads: [RequestKey: ConversationThread] = [:]
+
+    /// Reconstruct old persisted turn arrays from the conversation sequence
+    /// journal. Turn IDs are identities and are not chronological ordering keys.
+    mutating func orderTurnsFromProjectionEvents() {
+        var turnSequences: [RequestKey: [ExactText: UInt64]] = [:]
+        var retractionSequences: [RequestKey: [ExactText: UInt64]] = [:]
+        for event in events.values {
+            switch event.fact {
+            case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
+                let key = event.binding.request
+                let old = turnSequences[key]?[turn.id]
+                turnSequences[key, default: [:]][turn.id] = min(old ?? event.sequence, event.sequence)
+            case let .terminal(turn, _, _):
+                let key = event.binding.request
+                let old = turnSequences[key]?[turn]
+                turnSequences[key, default: [:]][turn] = min(old ?? event.sequence, event.sequence)
+            case let .retraction(turn, _):
+                let key = event.binding.request
+                let old = retractionSequences[key]?[turn]
+                retractionSequences[key, default: [:]][turn] = min(old ?? event.sequence, event.sequence)
+            default:
+                continue
+            }
+        }
+
+        var orderedThreads: [RequestKey: ConversationThread] = [:]
+        for (request, existing) in threads {
+            var thread = existing
+            var sequences = turnSequences[request] ?? [:]
+            for (turn, sequence) in retractionSequences[request] ?? [:] where sequences[turn] == nil {
+                sequences[turn] = sequence
+            }
+            thread.orderTurns(using: sequences)
+            orderedThreads[request] = thread
+        }
+        threads = orderedThreads
+    }
 
     mutating func apply(_ event: ConversationEvent) throws {
         guard event.binding.revision > 0 else { throw ConversationError.invalidBinding }

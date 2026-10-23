@@ -152,8 +152,8 @@ final class HarklightUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
 
-        let inboxTab = app.tabBars.buttons["Inbox"]
-        let repliedTab = app.tabBars.buttons["Replied"]
+        let inboxTab = workspaceTab("Inbox", in: app)
+        let repliedTab = workspaceTab("Replied", in: app)
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected)
@@ -173,7 +173,7 @@ final class HarklightUITests: XCTestCase {
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
 
-        let inbox = app.tabBars.buttons["Inbox"]
+        let inbox = workspaceTab("Inbox", in: app)
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
                       "A confirmed accepted answer returns the compact detail to the list.")
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
@@ -183,7 +183,7 @@ final class HarklightUITests: XCTestCase {
                        "A resolved send raises no unresolved-send warning.")
         attachScreenshot("Accepted answer returns to the list", from: app)
 
-        app.tabBars.buttons["Replied"].tap()
+        workspaceTab("Replied", in: app).tap()
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
@@ -228,7 +228,7 @@ final class HarklightUITests: XCTestCase {
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
-        let inbox = app.tabBars.buttons["Inbox"]
+        let inbox = workspaceTab("Inbox", in: app)
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inbox.isSelected,
@@ -241,7 +241,7 @@ final class HarklightUITests: XCTestCase {
                        "The list must not claim this device's answer was accepted.")
         attachScreenshot("Server-answered response removed from Inbox", from: app)
 
-        app.tabBars.buttons["Replied"].tap()
+        workspaceTab("Replied", in: app).tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The server-answered request appears in Replied.")
         XCTAssertFalse(app.staticTexts["Answer sent · result not confirmed"].exists)
@@ -308,7 +308,7 @@ final class HarklightUITests: XCTestCase {
                        "Detail uses the native navigation back control.")
         back.tap()
         XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.tabBars.buttons["Inbox"].isSelected)
+        XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected)
         XCTAssertTrue(review.exists, "The tapped untouched request remains in Inbox after native Back.")
         XCTAssertTrue(facilities.exists, "The other untouched request remains in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
@@ -376,7 +376,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
 
-        let search = app.tabBars.buttons["Search"]
+        let search = workspaceTab("Search", in: app)
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.tap()
         for frame in 0..<5 {
@@ -446,7 +446,7 @@ final class HarklightUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
-        let search = app.tabBars.buttons["Search"]
+        let search = workspaceTab("Search", in: app)
         XCTAssertTrue(search.waitForExistence(timeout: 10))
         search.tap()
         let field = app.searchFields.firstMatch
@@ -494,8 +494,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
                       "A confirmed accepted answer returns the compact detail to the list.")
 
-        let inbox = app.tabBars.buttons["Inbox"]
-        let replied = app.tabBars.buttons["Replied"]
+        let inbox = workspaceTab("Inbox", in: app)
+        let replied = workspaceTab("Replied", in: app)
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inbox.isSelected,
                       "The automatic return keeps the tab the user entered from.")

@@ -57,7 +57,6 @@
 		583306081ABB5948FB0C9A78 /* UIDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8286E1FCE4892900854DCF31 /* UIDiagnostics.swift */; };
 		5B3C628638BE1366BBCE7A08 /* SampleMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 321798AEF657AEBF709D6F76 /* SampleMedia.swift */; };
 		5FAA08D77C7D7A90F5B0D173 /* BoundedNativeJoinExchange.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */; };
-		60BDB927BD06B68E1692FCFC /* InboxOrderPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9185A9E8C1B1C61A40B957B6 /* InboxOrderPresentation.swift */; };
 		639C2AB322317F665A80943C /* InboxBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22C8B2615CAF891BC13EE419 /* InboxBadge.swift */; };
 		63F44E763F683E3A18C463A0 /* SenderRevisionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3AD83C5473F6DFB7981B536 /* SenderRevisionPresentationTests.swift */; };
 		68E5DA318170672675F2F3F0 /* NativeJoinInvitation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */; };
@@ -92,13 +91,13 @@
 		B3C08BF4ABBD8D6D3C45506B /* NativeNotificationRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52949BDC0CBA558115562E33 /* NativeNotificationRouting.swift */; };
 		B5518512516A448A8F26776D /* attention-client-m2-r1-compat.json in Resources */ = {isa = PBXBuildFile; fileRef = D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */; };
 		B6B619E44660391F92D05D83 /* InboxBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22C8B2615CAF891BC13EE419 /* InboxBadge.swift */; };
+		BD89225524ACF7B897FF8F6A /* WorkspaceTabQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EC7E7FF78F30F051661B0A6 /* WorkspaceTabQuery.swift */; };
 		BE643B97C8A33F2D233B3982 /* HarklightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F494026B1521CC27BCB3AA3 /* HarklightTests.swift */; };
 		C01C38AC47AAF286B1690DB4 /* AnswerStatusPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 396AEC07109CDA54130ED482 /* AnswerStatusPresentationTests.swift */; };
 		C0E907D35A2BE0D76A5389AE /* NativeNotificationPermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEA39F969EDE1E6B2FA7678C /* NativeNotificationPermission.swift */; };
 		C2C9693CD9622596022A9C6C /* ConversationDomainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E74397EED841B8F6A5601C9 /* ConversationDomainTests.swift */; };
 		C3F2ACDF6B6FDBEBF2C5E6FC /* BoundedNativeJoinExchange.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */; };
 		C58F9DAB29034D462893213A /* SampleMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3B9732F966E6F1372B2C35C /* SampleMessages.swift */; };
-		C75BFE4FF10CA3AEA5DDFC44 /* InboxOrderPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9185A9E8C1B1C61A40B957B6 /* InboxOrderPresentation.swift */; };
 		C847FB33CCA1E747A47034C5 /* tokens.json in Resources */ = {isa = PBXBuildFile; fileRef = B190A2CC6123E6B2601A49C6 /* tokens.json */; };
 		D115595E684D1EA54457AEF2 /* NativeEnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF276C5C5CAA98BC82FE81BB /* NativeEnrollmentView.swift */; };
 		D3AB5F8C10715ACB5A57BA91 /* NativeGuidedJoinCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F233FE6DF42A345529BFBCB9 /* NativeGuidedJoinCoordinator.swift */; };
@@ -195,7 +194,7 @@
 		8286E1FCE4892900854DCF31 /* UIDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIDiagnostics.swift; sourceTree = "<group>"; };
 		82A636EA3A9AD62ED6E2B6D3 /* RetractionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetractionPresentationTests.swift; sourceTree = "<group>"; };
 		8C68B1C8C342277A72B59A3D /* SampleWorkspaceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleWorkspaceUITests.swift; sourceTree = "<group>"; };
-		9185A9E8C1B1C61A40B957B6 /* InboxOrderPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxOrderPresentation.swift; sourceTree = "<group>"; };
+		8EC7E7FF78F30F051661B0A6 /* WorkspaceTabQuery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTabQuery.swift; sourceTree = "<group>"; };
 		92EB6E77E7267A8DF8A2B1DB /* InboxVisualRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxVisualRulesTests.swift; sourceTree = "<group>"; };
 		9338A49F12238750815D8518 /* InboxItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxItem.swift; sourceTree = "<group>"; };
 		962E8942C7FC38C447AABC29 /* HarklightTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HarklightTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -316,6 +315,7 @@
 				D2FEF6E138B9762AA2BE4AE1 /* NativeClientDiagnosticsVersionUITests.swift */,
 				A8C181717DB8E29809C7DBD5 /* ReplyDraftPersistenceUITests.swift */,
 				8C68B1C8C342277A72B59A3D /* SampleWorkspaceUITests.swift */,
+				8EC7E7FF78F30F051661B0A6 /* WorkspaceTabQuery.swift */,
 			);
 			path = UITests;
 			sourceTree = "<group>";
@@ -398,7 +398,6 @@
 				22C8B2615CAF891BC13EE419 /* InboxBadge.swift */,
 				9338A49F12238750815D8518 /* InboxItem.swift */,
 				7B98DB32B39F5FB6D0FADF4F /* InboxMessageSurface.swift */,
-				9185A9E8C1B1C61A40B957B6 /* InboxOrderPresentation.swift */,
 				7753DC115D8E0AF282B32EB7 /* LiveContentView.swift */,
 				53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */,
 				F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */,
@@ -679,7 +678,6 @@
 				639C2AB322317F665A80943C /* InboxBadge.swift in Sources */,
 				437A73A6271E258BE1CC70ED /* InboxItem.swift in Sources */,
 				FAAEC6DD7ADD88708C8B5C30 /* InboxMessageSurface.swift in Sources */,
-				60BDB927BD06B68E1692FCFC /* InboxOrderPresentation.swift in Sources */,
 				8DB41E7415DD218BC6E405FB /* LiveContentView.swift in Sources */,
 				78CBE0A1F4BC73DE17C9F271 /* NativeAppLaunch.swift in Sources */,
 				AE4F3DDAE591865D84D685E0 /* NativeClientDiagnostics.swift in Sources */,
@@ -724,7 +722,6 @@
 				B6B619E44660391F92D05D83 /* InboxBadge.swift in Sources */,
 				6A5434D1F1A9F8C3F6CE2C84 /* InboxItem.swift in Sources */,
 				A4B67EB0B1355A91F57E9C54 /* InboxMessageSurface.swift in Sources */,
-				C75BFE4FF10CA3AEA5DDFC44 /* InboxOrderPresentation.swift in Sources */,
 				782CD559247C24AFCC18A24F /* LiveContentView.swift in Sources */,
 				9D262F1A9341068BB8EFA25E /* NativeAppLaunch.swift in Sources */,
 				FE9A2435E3DEEA8115BA04B5 /* NativeClientDiagnostics.swift in Sources */,
@@ -757,6 +754,7 @@
 				37E4C22CB53D4BD1BA7598C9 /* NativeClientDiagnosticsVersionUITests.swift in Sources */,
 				32A67CA965A95B84B97E81AB /* ReplyDraftPersistenceUITests.swift in Sources */,
 				0BC9EB296999010C1D6DAB10 /* SampleWorkspaceUITests.swift in Sources */,
+				BD89225524ACF7B897FF8F6A /* WorkspaceTabQuery.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

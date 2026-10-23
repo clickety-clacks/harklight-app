@@ -102,8 +102,6 @@ struct LiveContentView: View {
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
                 showsLocalExamples: !store.isReadOnly,
-                prioritizationReasons: store.inboxOrderReasons,
-                showsBasicOrderMarker: store.showsBasicOrderMarker,
                 notificationNavigation: launch?.notificationNavigation)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
@@ -495,7 +493,6 @@ struct LiveRequestDetail: View {
                     .font(.headline)
             } else {
                 Image(systemName: "checkmark")
-                    .foregroundStyle(Color.white)
                     .font(.headline)
             }
         }
@@ -1243,8 +1240,14 @@ private struct LiveProjectedInputView: View {
             .accessibilityIdentifier("request-input-" + input.id.rawValue + "-response")
             .disabled(readOnly || !selected)
         }
-        .background(selected ? Color.blue : Color(uiColor: .secondarySystemBackground), in: cardShape)
-        .overlay(cardShape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
+        .background(
+            selected
+                ? HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor
+                : Color.clear,
+            in: cardShape)
+        .overlay(cardShape.strokeBorder(
+            selected ? detailColors.textColor : detailColors.textColor.opacity(0.30),
+            lineWidth: 1.5))
         .clipShape(cardShape)
         .opacity(selected ? 1 : 0.55)
         .animation(.smooth(duration: 0.25), value: selected)
@@ -1506,8 +1509,14 @@ private struct LiveCompatibilityActions: View {
             .accessibilityIdentifier("request-compatibility-" + action.id.rawValue + "-response")
             .disabled(readOnly || !selected)
         }
-        .background(selected ? Color.blue : Color(uiColor: .secondarySystemBackground), in: shape)
-        .overlay(shape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
+        .background(
+            selected
+                ? HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor
+                : Color.clear,
+            in: shape)
+        .overlay(shape.strokeBorder(
+            selected ? detailColors.textColor : detailColors.textColor.opacity(0.30),
+            lineWidth: 1.5))
         .clipShape(shape)
         .opacity(selected ? 1 : 0.55)
         .animation(.smooth(duration: 0.25), value: selected)

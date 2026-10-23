@@ -32,14 +32,6 @@ public protocol AuthenticatedInboxEventStreamSession: AuthenticatedInboxPagingSe
     func nextPostCheckpointInboxEvent() async throws -> Data
 }
 
-/// Opt-in server-owned inbox ordering on the attached event stream.
-public protocol AuthenticatedInboxPrioritizationSession: AuthenticatedInboxEventStreamSession {
-    var supportsInboxPrioritization: Bool { get }
-    func inboxViewRequest(_ request: Data, ref: String) async throws -> Data
-}
-
-public typealias InboxOrderViewObserver = @MainActor @Sendable (InboxOrderView?) -> Void
-
 public extension AuthenticatedInstallationSession {
     var relayEndpointHost: String { authenticatedIdentity.trustedRelayAuthority.rawValue }
 }
@@ -110,17 +102,9 @@ public actor NativeRelayCore {
     private let session: any AuthenticatedInstallationSession
     private let wire: RelayWire
     private let inboxWire: InboxPagingWire
-    private let inboxPrioritizationWire: InboxPrioritizationWire
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
-    private let onInboxOrderViewChange: InboxOrderViewObserver
     private let attemptID: UUID?
-    private var inboxOrderView: InboxOrderView?
-    private var inboxOrderRequestAttempted = false
-    private var inboxOrderSupportDisabled = false
-    private var isRefreshingInboxOrder = false
-    private var pendingInboxOrderRevision: String?
-    private var inboxPageFetchTask: Task<InboxPageResponse?, any Error>?
     private var active = true
     private var busy = false
     private var activeInboxReplay: ReplayProgress?
@@ -341,9 +325,7 @@ public actor NativeRelayCore {
                 session: any AuthenticatedInstallationSession,
                 attemptID: UUID? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
-                initialInboxOrderView: InboxOrderView? = nil,
-                onInboxOrderViewChange: @escaping InboxOrderViewObserver = { _ in }) throws {
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
@@ -355,11 +337,8 @@ public actor NativeRelayCore {
         self.onProgress = onProgress
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
-        self.inboxOrderView = initialInboxOrderView
-        self.onInboxOrderViewChange = onInboxOrderViewChange
         self.wire = try RelayWire(profile: context)
         self.inboxWire = try InboxPagingWire(profile: context)
-        self.inboxPrioritizationWire = try InboxPrioritizationWire(profile: context)
     }
 
     public func deactivate() {
@@ -371,7 +350,6 @@ public actor NativeRelayCore {
         liveConversationConsumerTask?.cancel()
         liveConversationConsumerTask = nil
         pendingLiveConversationReplay = false
-        pendingInboxOrderRevision = nil
         resumePostCheckpointWaiters(throwing: NativeRelayCoreError.inactive)
     }
 
@@ -406,14 +384,6 @@ public actor NativeRelayCore {
             high = try await bootstrapInbox(using: pagingSession,
                                             trackingAcceptedOperations: acceptedBeforeReplay)
             inboxBootstrapped = true
-        }
-        if let viewSession = session as? any AuthenticatedInboxPrioritizationSession,
-           viewSession.supportsInboxPrioritization,
-           viewSession.supportsPostCheckpointInboxEvents,
-           !inboxOrderSupportDisabled,
-           !inboxOrderRequestAttempted {
-            inboxOrderRequestAttempted = true
-            try await refreshInboxOrder(using: viewSession, force: true)
         }
         onProgress(.postAckDrainBegan)
         do {
@@ -503,131 +473,25 @@ public actor NativeRelayCore {
         do {
             try validate()
             try throwPostCheckpointInboxFailureIfPresent()
-            return try await fetchNextInboxPage(using: pagingSession) != nil
+            let checkpoint = try store.snapshot(context: context).inboxCheckpoint
+            guard let checkpoint, checkpoint.checkpointAccepted,
+                  checkpoint.hasInitialPage,
+                  let snapshotID = checkpoint.snapshotID,
+                  let highWater = checkpoint.highWater,
+                  let cursor = checkpoint.nextCursor else {
+                return false
+            }
+            let ref = Self.inboxRef("page")
+            let reply = try await pagingSession.inboxRequest(
+                inboxWire.inboxPage(snapshotID: snapshotID, cursor: cursor, ref: ref), ref: ref)
+            try validate()
+            let page = try inboxWire.decodePage(reply, ref: ref,
+                                                snapshotID: snapshotID, highWater: highWater)
+            try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
+                cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context)
+            return true
         } catch {
             throw error
-        }
-    }
-
-    private func fetchNextInboxPage(using pagingSession: any AuthenticatedInboxPagingSession) async throws -> InboxPageResponse? {
-        if let inboxPageFetchTask {
-            return try await inboxPageFetchTask.value
-        }
-        let task = Task { try await self.performInboxPageFetch(using: pagingSession) }
-        inboxPageFetchTask = task
-        do {
-            let page = try await task.value
-            inboxPageFetchTask = nil
-            return page
-        } catch {
-            inboxPageFetchTask = nil
-            throw error
-        }
-    }
-
-    private func performInboxPageFetch(using pagingSession: any AuthenticatedInboxPagingSession) async throws -> InboxPageResponse? {
-        try validate()
-        try throwPostCheckpointInboxFailureIfPresent()
-        let checkpoint = try store.snapshot(context: context).inboxCheckpoint
-        guard let checkpoint, checkpoint.checkpointAccepted,
-              checkpoint.hasInitialPage,
-              let snapshotID = checkpoint.snapshotID,
-              let highWater = checkpoint.highWater,
-              let cursor = checkpoint.nextCursor else {
-            return nil
-        }
-        let ref = Self.inboxRef("page")
-        let reply = try await pagingSession.inboxRequest(
-            inboxWire.inboxPage(snapshotID: snapshotID, cursor: cursor, ref: ref), ref: ref)
-        try validate()
-        let page = try inboxWire.decodePage(reply, ref: ref,
-                                            snapshotID: snapshotID, highWater: highWater)
-        try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
-            cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context)
-        return page
-    }
-
-    private func refreshInboxOrder(using viewSession: any AuthenticatedInboxPrioritizationSession,
-                                   force: Bool,
-                                   noticeRevision: String? = nil) async throws {
-        guard active, !inboxOrderSupportDisabled else { return }
-        if isRefreshingInboxOrder {
-            if let noticeRevision { pendingInboxOrderRevision = noticeRevision }
-            return
-        }
-        guard force || (noticeRevision != nil && noticeRevision != inboxOrderView?.revision) else { return }
-        isRefreshingInboxOrder = true
-        defer { isRefreshingInboxOrder = false }
-
-        var shouldFetch = force || noticeRevision != inboxOrderView?.revision
-        while shouldFetch {
-            try validate()
-            let ref = Self.inboxRef("view")
-            let knownRevision = inboxOrderView?.revision
-            let replyBytes = try await viewSession.inboxViewRequest(
-                inboxPrioritizationWire.viewGet(knownRevision: knownRevision, ref: ref), ref: ref)
-            try validate()
-            let candidate: InboxOrderView
-            do {
-                switch try inboxPrioritizationWire.decodeViewGetReply(
-                    replyBytes, ref: ref, knownRevision: knownRevision) {
-                case .unsupported:
-                    inboxOrderSupportDisabled = true
-                    inboxOrderView = nil
-                    pendingInboxOrderRevision = nil
-                    await onInboxOrderViewChange(nil)
-                    return
-                case let .unchanged(revision):
-                    guard let current = inboxOrderView, current.revision == revision else {
-                        throw InboxPrioritizationWireError.invalidFrame
-                    }
-                    candidate = current
-                case let .view(view):
-                    candidate = view
-                }
-            } catch let error as InboxPrioritizationWireError {
-                if case .serverRefused = error {
-                    // A view refusal does not change the inbox or its replay cursor.
-                    // Leave the ordinary local ordering active until another notice
-                    // or connection gives the server another chance to answer.
-                    inboxOrderView = nil
-                    await onInboxOrderViewChange(nil)
-                    // A notice can arrive while this request is in flight. It is
-                    // already the next signal to retry after this refusal, so keep
-                    // that coalesced retry instead of waiting for another change.
-                    shouldFetch = pendingInboxOrderRevision != nil
-                    pendingInboxOrderRevision = nil
-                    if shouldFetch { continue }
-                    return
-                }
-                throw error
-            }
-            try await loadInboxRows(namedBy: candidate, using: viewSession)
-            try validate()
-            inboxOrderView = candidate
-            await onInboxOrderViewChange(candidate)
-
-            let nextNotice = pendingInboxOrderRevision
-            pendingInboxOrderRevision = nil
-            shouldFetch = nextNotice != nil && nextNotice != inboxOrderView?.revision
-        }
-    }
-
-    private func loadInboxRows(namedBy view: InboxOrderView,
-                               using viewSession: any AuthenticatedInboxPrioritizationSession) async throws {
-        while true {
-            try validate()
-            let snapshot = try store.snapshot(context: context)
-            guard let checkpoint = snapshot.inboxCheckpoint,
-                  checkpoint.checkpointAccepted else { return }
-            let missing = Set(view.entries.map(\.key)).subtracting(snapshot.requests.keys)
-            guard !missing.isEmpty,
-                  checkpoint.nextCursor != nil,
-                  !checkpoint.loadedKeys.contains(where: { snapshot.remoteStates[$0]?.isTerminal == true }) else {
-                return
-            }
-            guard let page = try await fetchNextInboxPage(using: viewSession) else { return }
-            if page.items.contains(where: { $0.terminal != nil }) { return }
         }
     }
 
@@ -904,19 +768,6 @@ public actor NativeRelayCore {
         do {
             while !Task.isCancelled {
                 let frame = try await eventStream.nextPostCheckpointInboxEvent()
-                if let revision = inboxPrioritizationWire.changedRevision(frame) {
-                    guard let viewSession = session as? any AuthenticatedInboxPrioritizationSession,
-                          viewSession.supportsInboxPrioritization,
-                          viewSession.supportsPostCheckpointInboxEvents,
-                          !inboxOrderSupportDisabled,
-                          revision != inboxOrderView?.revision else {
-                        continue
-                    }
-                    Task { [weak self] in
-                        await self?.refreshInboxOrderAfterNotice(revision, using: viewSession)
-                    }
-                    continue
-                }
                 let previousCursor = try validatedRelayCursor()
                 let event = try wire.decodeEvent(frame)
                 let result = store.applyRelayEvent(event, context: context)
@@ -949,22 +800,6 @@ public actor NativeRelayCore {
             }
         } catch {
             guard !Task.isCancelled else { return }
-            failPostCheckpointInbox(error)
-            diagnose(.relay, .ordinaryReplay,
-                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
-        }
-    }
-
-    private func refreshInboxOrderAfterNotice(
-        _ revision: String,
-        using viewSession: any AuthenticatedInboxPrioritizationSession
-    ) async {
-        guard active, revision != inboxOrderView?.revision else { return }
-        inboxOrderRequestAttempted = true
-        do {
-            try await refreshInboxOrder(using: viewSession, force: true,
-                                        noticeRevision: revision)
-        } catch {
             failPostCheckpointInbox(error)
             diagnose(.relay, .ordinaryReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)

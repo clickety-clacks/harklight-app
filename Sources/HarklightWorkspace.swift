@@ -317,8 +317,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var conversationStore: LivePresentationStore? = nil
     var fetchOlderInboxPage: (() async -> Bool)? = nil
     var showsLocalExamples = true
-    var prioritizationReasons: [RequestKey: InboxOrderRowReason] = [:]
-    var showsBasicOrderMarker = false
     var notificationNavigation: NativeInboxNavigation? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
@@ -585,10 +583,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func inboxSplitView(for tab: InboxWorkspaceTab, wideChat: Bool, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(columnVisibility: $visibility) {
-            InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
-                  isRefreshing: isRefreshing,
-                  prioritizationReasons: prioritizationReasons,
-                  showsBasicOrderMarker: showsBasicOrderMarker,
+            InboxList(tab: tab, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
@@ -612,10 +607,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func searchStack(wideChat: Bool, inlineChat: Bool,
                              geometry: GeometryProxy) -> some View {
         NavigationStack(path: $searchPath) {
-            InboxList(tab: .search, rows: rows, warnings: visibleWarnings,
-                  isRefreshing: isRefreshing,
-                  prioritizationReasons: prioritizationReasons,
-                  showsBasicOrderMarker: showsBasicOrderMarker,
+            InboxList(tab: .search, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
                   isWarningPresented: warningPresentationBinding(for: .search),
                   selected: navigationSelection,
                       selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
@@ -801,8 +793,6 @@ struct InboxList: View {
     let rows: [InboxItem]
     let warnings: [String]
     var isRefreshing = false
-    let prioritizationReasons: [RequestKey: InboxOrderRowReason]
-    let showsBasicOrderMarker: Bool
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var selectedTab: InboxMessageTab
@@ -903,16 +893,14 @@ struct InboxList: View {
         switch row {
         case let .request(request):
             NavigationLink(value: row.id) {
-                InboxRowContent(row: request, selected: isSelected,
-                                prioritizationReason: prioritizationReasons[request.key])
+                InboxRowContent(row: request, selected: isSelected)
             }
             .buttonStyle(.plain)
             .navigationLinkIndicatorVisibility(.hidden)
         case let .example(_, response):
             if let request = response.inboxRow {
                 NavigationLink(value: row.id) {
-                    InboxRowContent(row: request, selected: isSelected,
-                                    prioritizationReason: prioritizationReasons[request.key])
+                    InboxRowContent(row: request, selected: isSelected)
                 }
                 .buttonStyle(.plain)
                 .navigationLinkIndicatorVisibility(.hidden)
@@ -990,16 +978,6 @@ struct InboxList: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     HarklightBrand().accessibilityIdentifier("inbox-brand")
-                    if showsBasicOrderMarker, tab == .inbox,
-                       workspaceTab == .inbox, selectedTab == .inbox {
-                        Label("Basic order", systemImage: "arrow.down.circle")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(designPalette.neutral.secondaryTextColor)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(designPalette.neutral.replySurfaceColor, in: Capsule())
-                            .accessibilityIdentifier("inbox-basic-order")
-                    }
                     if isRefreshing {
                         HStack(spacing: 5) {
                             ProgressView().controlSize(.small)
@@ -1065,7 +1043,7 @@ struct InboxList: View {
                 .padding(.vertical, 8)
                 .background(designPalette.neutral.backgroundColor)
             }
-            .background(Color(uiColor: .systemBackground))
+            .background(designPalette.neutral.backgroundColor)
         }
         .toolbar {
             if let triggerNotification {
@@ -1161,21 +1139,7 @@ private struct InboxScrollMetrics: Equatable {
 struct InboxRowContent: View {
     let row: InboxRequestRow
     var selected = false
-    var prioritizationReason: InboxOrderRowReason? = nil
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.locale) private var locale
-    @Environment(\.calendar) private var calendar
-    @Environment(\.timeZone) private var timeZone
-
-    private var prioritizationReasonText: String? {
-        guard let prioritizationReason else { return nil }
-        switch prioritizationReason {
-        case let .serverText(text): return text
-        case let .dueAtMilliseconds(milliseconds):
-            return InboxOrderPresentationRules.duePhrase(dueAtMilliseconds: milliseconds,
-                locale: locale, calendar: calendar, timeZone: timeZone)
-        }
-    }
 
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
@@ -1251,13 +1215,6 @@ struct InboxRowContent: View {
                     .foregroundStyle(palette.neutral.secondaryTextColor)
                     .lineLimit(row.tier.bodyLineLimit)
                     .truncationMode(.tail)
-            }
-            if let prioritizationReasonText {
-                Text(verbatim: prioritizationReasonText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("inbox-order-reason")
             }
             if !row.isResolved && !row.status.isEmpty && row.status != "Open" {
                 Text(row.status).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
