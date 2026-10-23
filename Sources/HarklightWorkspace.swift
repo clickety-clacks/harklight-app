@@ -1144,9 +1144,9 @@ struct InboxRowContent: View {
     private var prioritizationReasonText: String? {
         guard let prioritizationReason else { return nil }
         switch prioritizationReason {
-        case let .serverText(text): text
+        case let .serverText(text): return text
         case let .dueAtMilliseconds(milliseconds):
-            InboxOrderPresentationRules.duePhrase(dueAtMilliseconds: milliseconds,
+            return InboxOrderPresentationRules.duePhrase(dueAtMilliseconds: milliseconds,
                 locale: locale, calendar: calendar, timeZone: timeZone)
         }
     }
