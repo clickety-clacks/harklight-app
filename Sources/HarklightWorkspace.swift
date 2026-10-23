@@ -803,6 +803,21 @@ struct InboxList: View {
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
     @State private var warningContentHeight: CGFloat = 0
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private var shouldShowBasicOrderMarker: Bool {
+        showsBasicOrderMarker && tab == .inbox && workspaceTab == .inbox && selectedTab == .inbox
+    }
+
+    private var basicOrderMarker: some View {
+        Label("Basic order", systemImage: "arrow.down.circle")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+            .accessibilityIdentifier("inbox-basic-order")
+    }
 
     private func messageTab(for tab: InboxWorkspaceTab) -> InboxMessageTab {
         tab.messageTab ?? selectedTab
@@ -964,15 +979,8 @@ struct InboxList: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     HarklightBrand().accessibilityIdentifier("inbox-brand")
-                    if showsBasicOrderMarker, tab == .inbox,
-                       workspaceTab == .inbox, selectedTab == .inbox {
-                        Label("Basic order", systemImage: "arrow.down.circle")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
-                            .accessibilityIdentifier("inbox-basic-order")
+                    if shouldShowBasicOrderMarker, horizontalSizeClass != .regular {
+                        basicOrderMarker
                     }
                     if isRefreshing {
                         HStack(spacing: 5) {
@@ -1038,6 +1046,18 @@ struct InboxList: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .background(Color(uiColor: .systemBackground))
+                if shouldShowBasicOrderMarker, horizontalSizeClass == .regular {
+                    HStack {
+                        basicOrderMarker
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.leading, 44)
+                    .padding(.top, 2)
+                    .padding(.bottom, 8)
+                    .background(Color(uiColor: .systemBackground))
+                }
             }
             .background(Color(uiColor: .systemBackground))
         }
