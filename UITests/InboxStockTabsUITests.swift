@@ -191,12 +191,6 @@ final class InboxStockTabsUITests: XCTestCase {
         if !destination.isSelected { destination.tap() }
     }
 
-    private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIElement {
-        let tabBarButton = app.tabBars.buttons[title]
-        if tabBarButton.exists { return tabBarButton }
-        return app.buttons[title]
-    }
-
     private func assertListHeader(in app: XCUIApplication, file: StaticString = #filePath,
                                   line: UInt = #line) {
         let brand = app.descendants(matching: .any)["inbox-brand"]

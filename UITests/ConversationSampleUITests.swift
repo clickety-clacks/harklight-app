@@ -208,7 +208,7 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        app.tabBars.buttons["Inbox"].tap()
+        workspaceTab("Inbox", in: app).tap()
         enterSearch("Archive", in: app)
         let row = app.descendants(matching: .any)["request-row-sample-approval-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
@@ -293,7 +293,7 @@ final class ConversationSampleUITests: XCTestCase {
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
         let field = app.searchFields.firstMatch
-        let searchTab = app.tabBars.buttons["Search"]
+        let searchTab = workspaceTab("Search", in: app)
         if searchTab.exists && !searchTab.isSelected { searchTab.tap() }
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         let clearText = field.buttons["Clear text"]
@@ -304,7 +304,7 @@ final class ConversationSampleUITests: XCTestCase {
 
     private func showInbox(_ app: XCUIApplication) {
         guard app.scrollViews["message-card-scroll"].exists else { return }
-        let searchTab = app.tabBars.buttons["Search"]
+        let searchTab = workspaceTab("Search", in: app)
         let searchField = app.searchFields.firstMatch
         let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
@@ -313,8 +313,8 @@ final class ConversationSampleUITests: XCTestCase {
             let sidebar = app.buttons["Show Sidebar"]
             if sidebar.exists && sidebar.isHittable { sidebar.tap() }
         }
-        XCTAssertTrue(app.tabBars.buttons["Inbox"].waitForExistence(timeout: 5) ||
-                      app.tabBars.buttons["Replied"].waitForExistence(timeout: 5) ||
+        XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 5) ||
+                      workspaceTab("Replied", in: app).waitForExistence(timeout: 5) ||
                       searchTab.waitForExistence(timeout: 5) ||
                       searchField.waitForExistence(timeout: 5), app.debugDescription)
     }
@@ -385,10 +385,20 @@ final class ConversationSampleUITests: XCTestCase {
     }
 
     private func bottomControlsTop(_ app: XCUIApplication) -> CGFloat {
-        let tabButtons = [app.tabBars.buttons["Inbox"], app.tabBars.buttons["Replied"], app.tabBars.buttons["Search"]]
-            .filter(\.exists)
+        let tabButtons = [
+            workspaceTab("Inbox", in: app),
+            workspaceTab("Replied", in: app),
+            workspaceTab("Search", in: app),
+        ].filter(\.exists)
         if let tabTop = tabButtons.map(\.frame.minY).min() { return tabTop }
         let searchField = app.searchFields.firstMatch
         return searchField.exists ? searchField.frame.minY : app.windows.firstMatch.frame.maxY
     }
+}
+
+@MainActor
+private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIElement {
+    let tabBarButton = app.tabBars.buttons[title]
+    if tabBarButton.exists { return tabBarButton }
+    return app.buttons[title]
 }
