@@ -777,6 +777,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
 @MainActor
 struct InboxList: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
     let tab: InboxWorkspaceTab
     let rows: [InboxItem]
     let warnings: [String]
@@ -810,6 +812,84 @@ struct InboxList: View {
 
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
         InboxListProjection.filteredRows(rows, in: tab, selectedTab: selectedTab, search: search)
+    }
+
+    private var brandAndStatusHeader: some View {
+        HStack(spacing: 8) {
+            HarklightBrand().accessibilityIdentifier("inbox-brand")
+            if showsBasicOrderMarker, tab == .inbox,
+               workspaceTab == .inbox, selectedTab == .inbox {
+                Label("Basic order", systemImage: "arrow.down.circle")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                    .accessibilityIdentifier("inbox-basic-order")
+            }
+            if isRefreshing {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.small)
+                    Text("Refreshing").font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(Color.accentColor)
+                .tint(Color.accentColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.accentColor.opacity(0.14), in: Capsule())
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Refreshing")
+                .accessibilityIdentifier("inbox-refreshing-badge")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var warningButton: some View {
+        if !warnings.isEmpty {
+            Button {
+                isWarningPresented = true
+            } label: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Warnings")
+            .accessibilityIdentifier("inbox-warning-button")
+            .popover(isPresented: $isWarningPresented) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
+                            .font(.headline)
+                            .foregroundStyle(.orange)
+                        ForEach(warnings.indices, id: \.self) { index in
+                            Text(warnings[index])
+                                .font(.body)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("inbox-warning-message")
+                        }
+                    }
+                    .padding(16)
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { height in
+                        warningContentHeight = height
+                    }
+                }
+                .frame(width: 320,
+                       height: min(max(warningContentHeight, 88), 440))
+                .presentationCompactAdaptation(.popover)
+            }
+        }
+    }
+
+    private var settingsButton: some View {
+        Button("Settings", systemImage: "gearshape", action: showSettings)
+            .labelStyle(.iconOnly)
+            .accessibilityIdentifier("inbox-settings")
     }
 
     private func restoreLastViewed(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
@@ -960,80 +1040,32 @@ struct InboxList: View {
         .scrollContentBackground(.hidden)
         .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
         .scrollDismissesKeyboard(.interactively)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                HStack(spacing: 8) {
-                    HarklightBrand().accessibilityIdentifier("inbox-brand")
-                    if showsBasicOrderMarker, tab == .inbox,
-                       workspaceTab == .inbox, selectedTab == .inbox {
-                        Label("Basic order", systemImage: "arrow.down.circle")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
-                            .accessibilityIdentifier("inbox-basic-order")
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if horizontalSizeClass == .compact {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        brandAndStatusHeader
+                        warningButton
+                        Spacer(minLength: 16)
+                        settingsButton.buttonStyle(.glass)
                     }
-                    if isRefreshing {
-                        HStack(spacing: 5) {
-                            ProgressView().controlSize(.small)
-                            Text("Refreshing").font(.caption2.weight(.semibold))
-                        }
-                        .foregroundStyle(Color.accentColor)
-                        .tint(Color.accentColor)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(Color.accentColor.opacity(0.14), in: Capsule())
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("Refreshing")
-                        .accessibilityIdentifier("inbox-refreshing-badge")
-                    }
+                    .frame(height: 52)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color(uiColor: .systemBackground))
                 }
+                .background(Color(uiColor: .systemBackground))
             }
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if !warnings.isEmpty {
-                    Button {
-                        isWarningPresented = true
-                    } label: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Warnings")
-                    .accessibilityIdentifier("inbox-warning-button")
-                    .popover(isPresented: $isWarningPresented) {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
-                                    .font(.headline)
-                                    .foregroundStyle(.orange)
-                                ForEach(warnings.indices, id: \.self) { index in
-                                    Text(warnings[index])
-                                        .font(.body)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .accessibilityIdentifier("inbox-warning-message")
-                                }
-                            }
-                            .padding(16)
-                            .onGeometryChange(for: CGFloat.self) { proxy in
-                                proxy.size.height
-                            } action: { height in
-                                warningContentHeight = height
-                            }
-                        }
-                        // The popover otherwise sizes a ScrollView to zero;
-                        // fit short content exactly and scroll past the cap.
-                        .frame(width: 320,
-                               height: min(max(warningContentHeight, 88), 440))
-                        .presentationCompactAdaptation(.popover)
-                    }
+        }
+        .toolbar {
+            if horizontalSizeClass == .regular {
+                ToolbarItem(placement: .topBarLeading) {
+                    brandAndStatusHeader
                 }
-                Button("Settings", systemImage: "gearshape", action: openSettings)
-                    .labelStyle(.iconOnly)
-                    .accessibilityIdentifier("inbox-settings")
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    warningButton
+                    settingsButton
+                }
             }
             if let triggerNotification {
                 ToolbarItem(placement: .topBarLeading) {
@@ -1042,8 +1074,9 @@ struct InboxList: View {
                 }
             }
         }
-        .toolbarMinimizationBehavior(tab == .search ? .never : .onScrollDown,
-                                     for: .navigationBar)
+        .toolbarMinimizeBehavior(
+            horizontalSizeClass == .regular && tab != .search ? .onScrollDown : .never,
+            for: .navigationBar)
         .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
         .onAppear {
             guard workspaceTab == tab else { return }
