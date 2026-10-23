@@ -291,7 +291,8 @@ def main() -> int:
         run(["xcrun", "simctl", "install", args.device_id, str(app_path)])
         run(["xcrun", "simctl", "launch", "--terminate-running-process", args.device_id,
              BUNDLE_ID, "--reset-attention-fixture", "--harklight-samples"])
-        time.sleep(2)
+        # CoreSimulator returns before the first SwiftUI screen is visible.
+        time.sleep(10)
 
         original_appearance = run(["xcrun", "simctl", "ui", args.device_id, "appearance"], capture_output=True)
         staging_dir = Path(tempfile.mkdtemp(prefix=".preview-page-", dir=page_dir.parent))
