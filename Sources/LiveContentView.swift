@@ -809,14 +809,11 @@ struct LiveRequestDetail: View {
     private var detailChatButton: some View {
         if context.openChat != nil || context.canInlineChat {
             chatButton
-        } else if horizontalSizeClass == .compact {
-            chatButton.sheet(isPresented: $chatPresented) {
-                conversationPanel
-                    .presentationDetents([.medium, .large])
-            }
         } else {
             chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                conversationPanel.frame(idealWidth: 380, idealHeight: 560)
+                conversationPanel
+                    .frame(idealWidth: 380, idealHeight: 560)
+                    .presentationCompactAdaptation(.popover)
             }
         }
     }
