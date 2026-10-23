@@ -71,6 +71,7 @@
 		78CBE0A1F4BC73DE17C9F271 /* NativeAppLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */; };
 		7BDFD2B2D70BD71596D8B6C5 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68B30BAF95249EB48C166A9 /* ConversationView.swift */; };
 		833032321AE0F761EBDA5421 /* ReplyDraftUpdateLatencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E41F3132369779887ECC5470 /* ReplyDraftUpdateLatencyTests.swift */; };
+		8C11958E5805EC64676AFFDE /* InboxPagePersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B514134D4BA6C88E6F0DD52 /* InboxPagePersistenceTests.swift */; };
 		8DB41E7415DD218BC6E405FB /* LiveContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7753DC115D8E0AF282B32EB7 /* LiveContentView.swift */; };
 		8E80CAD6B583184A43DBBA80 /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 9207A7DBF50D40572ADD6DC0 /* AttentionDomain */; };
 		8F92F083F4EC747848ADD5E8 /* NativeInstallationIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C4F9E78BF2506606ABA7742 /* NativeInstallationIdentity.swift */; };
@@ -151,6 +152,7 @@
 		130EE825A778D0A7E64C7673 /* NativeGuidedTLSTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedTLSTests.swift; sourceTree = "<group>"; };
 		13CD46E1416E0F7FD24B20D0 /* DetailChatButtonUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailChatButtonUITests.swift; sourceTree = "<group>"; };
 		1B2803FE632975943E92BCAF /* InstalledRelayDecoderFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstalledRelayDecoderFixture.swift; sourceTree = "<group>"; };
+		1B514134D4BA6C88E6F0DD52 /* InboxPagePersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxPagePersistenceTests.swift; sourceTree = "<group>"; };
 		22C8B2615CAF891BC13EE419 /* InboxBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxBadge.swift; sourceTree = "<group>"; };
 		255502492F966DB5F48DEAD8 /* ConversationUploadCleanupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationUploadCleanupTests.swift; sourceTree = "<group>"; };
 		25F29EBA65F53DDD48291079 /* ConversationSampleUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSampleUITests.swift; sourceTree = "<group>"; };
@@ -328,6 +330,7 @@
 				E324FFEA53B23DC189F2078B /* DevelopmentAPNsAddressStoreTests.swift */,
 				4F494026B1521CC27BCB3AA3 /* HarklightTests.swift */,
 				A535B54D8F4374D0170AD5B4 /* InboxBadgeCountTests.swift */,
+				1B514134D4BA6C88E6F0DD52 /* InboxPagePersistenceTests.swift */,
 				11A405C60454A2FFEFCFDA45 /* InboxPagingSessionTestSupport.swift */,
 				92EB6E77E7267A8DF8A2B1DB /* InboxVisualRulesTests.swift */,
 				1B2803FE632975943E92BCAF /* InstalledRelayDecoderFixture.swift */,
@@ -623,6 +626,7 @@
 				32C25EF03B9BF5D1C1095F73 /* DevelopmentAPNsAddressStoreTests.swift in Sources */,
 				BE643B97C8A33F2D233B3982 /* HarklightTests.swift in Sources */,
 				E1293E76ADFDF807073C55CE /* InboxBadgeCountTests.swift in Sources */,
+				8C11958E5805EC64676AFFDE /* InboxPagePersistenceTests.swift in Sources */,
 				F2FA7ED45E91937AC37A2944 /* InboxPagingSessionTestSupport.swift in Sources */,
 				13A97B14B08570A7E49888F0 /* InboxVisualRulesTests.swift in Sources */,
 				EB268D8018E0E94991604D07 /* InstalledRelayDecoderFixture.swift in Sources */,
