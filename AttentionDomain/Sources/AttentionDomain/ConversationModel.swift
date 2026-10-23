@@ -391,12 +391,13 @@ struct ConversationState: Codable {
                 throw ConversationError.conflict
             }
             if previous != event {
-                guard case let .retraction(turn, terminalSequence) = event.fact,
-                      var thread = threads[event.binding.request] else { throw ConversationError.conflict }
-                try thread.recordRetraction(turn: turn, sequence: terminalSequence,
-                    revision: event.binding.revision,
-                    retractedAtMilliseconds: event.retractedAtMilliseconds)
-                threads[event.binding.request] = thread
+                guard case let .retraction(turn, terminalSequence) = event.fact else { throw ConversationError.conflict }
+                if var thread = threads[event.binding.request] {
+                    try thread.recordRetraction(turn: turn, sequence: terminalSequence,
+                        revision: event.binding.revision,
+                        retractedAtMilliseconds: event.retractedAtMilliseconds)
+                    threads[event.binding.request] = thread
+                }
                 events[event.sequence] = event
             }
             return
@@ -452,6 +453,14 @@ struct ConversationState: Codable {
         default: appliesTurn = question == nil
         }
         if appliesTurn {
+            if case .retraction = event.fact, threads[binding.request] == nil {
+                // Bootstrap reads only the first inbox page, so a retraction can name a
+                // request this device has not loaded. Hold it for when the request
+                // arrives; refusing it would stall every later event.
+                events[event.sequence] = event
+                cursor = event.sequence
+                return
+            }
             guard var thread = threads[binding.request], thread.revisionNumbers.contains(binding.revision) else {
                 throw ConversationError.missingRequest
             }
@@ -529,6 +538,16 @@ struct ConversationState: Codable {
         }
         events[event.sequence] = event
         cursor = event.sequence
+    }
+
+    /// Applies retractions replayed before this device held their request.
+    func applyHeldRetractions(to thread: inout ConversationThread) throws {
+        let held = events.values.filter { $0.binding.request == thread.request }.sorted { $0.sequence < $1.sequence }
+        for event in held {
+            guard case let .retraction(turn, terminalSequence) = event.fact else { continue }
+            try thread.recordRetraction(turn: turn, sequence: terminalSequence, revision: event.binding.revision,
+                retractedAtMilliseconds: event.retractedAtMilliseconds)
+        }
     }
 
     static func sameOriginalFiles(_ left: [ConversationFile], _ right: [ConversationFile]) -> Bool {

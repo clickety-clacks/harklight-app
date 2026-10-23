@@ -988,6 +988,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 if let availability = metadata.availability { thread.availability = availability }
                 thread.listeningSupport = metadata.listeningSupport
                 thread.terminal = next.remoteStates[request.key]?.state
+                try conversation.applyHeldRetractions(to: &thread)
             }
             if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
             if let reported = metadata.retractedAtMilliseconds { try thread.recordReportedRetraction(at: reported) }
