@@ -157,7 +157,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         self.conversationFileReferences = conversationFileReferences
         self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
         if let data = try persistence.load(identity: context.identity) {
-            let loaded = try PropertyListDecoder().decode(PersistedAttentionState.self, from: data)
+            var loaded = try PropertyListDecoder().decode(PersistedAttentionState.self, from: data)
             guard loaded.profileIdentity == context.identity else { throw AttentionStoreError.wrongAccount }
             guard loaded.schemaVersion == PersistedAttentionState.currentSchemaVersion else {
                 throw AttentionStoreError.persistence("Unsupported local state schema \(loaded.schemaVersion).")
@@ -219,6 +219,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                   (loaded.conversation?.events.values.allSatisfy { $0.binding.request.accountScope == context.identity.personID } ?? true) else {
                 throw AttentionStoreError.persistence("The conversation store contains a different account's requests.")
             }
+            loaded.conversation?.orderTurnsFromProjectionEvents()
             self.state = try Self.externalizingConversationFiles(in: loaded,
                 using: conversationFileReferences,
                 allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
@@ -1036,7 +1037,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 thread.turns.append(ConversationTurn(id: id, binding: ConversationBinding(request: request.key, revision: 1),
                     author: .origin, sessionHandle: handle, text: ExactText(""), files: metadata.files ?? [], kind: .revision))
                 thread.facts[id, default: ConversationTurnFacts()] = thread.facts[id] ?? ConversationTurnFacts()
-                thread.orderTurns()
             }
             conversation.threads[request.key] = thread
         case let .terminal(key, terminal, _):
@@ -1053,7 +1053,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                         binding: ConversationBinding(request: key, revision: revision), author: author,
                         sessionHandle: thread.sessionHandle, text: ExactText(""), files: event.conversation?.files ?? [], kind: .terminal))
                     thread.facts[eventID, default: ConversationTurnFacts()] = thread.facts[eventID] ?? ConversationTurnFacts()
-                    thread.orderTurns()
                 }
             }
             if event.conversation?.terminalReason == ExactText("retracted") {

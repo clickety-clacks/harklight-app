@@ -17,6 +17,24 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertEqual(composers.count, 1)
         XCTAssertTrue(app.staticTexts["Could you explain the tradeoff?"].exists,
                       "Ordinary request chat must project its domain history")
+        let prompt = app.staticTexts["Could you explain the tradeoff?"]
+        let reply = app.staticTexts["The first option favors speed; the second leaves more room to revise. This is an example conversation."]
+        let agentReply = app.staticTexts["Agent example: the shorter path is faster, while the longer path is easier to revise."]
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(reply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(agentReply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertLessThan(prompt.frame.minY, reply.frame.minY,
+                          "A reply must appear below the prompt it answers even when its ID sorts first")
+        XCTAssertLessThan(reply.frame.minY, agentReply.frame.minY,
+                          "The later reply must remain below the earlier reply it answers")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Replying to: Could you explain the tradeoff?"
+        )).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Replying to: The first option favors speed"
+        )).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["Local example · nothing sent"].exists,
+                      "The fixture must keep its local delivery state truthful")
         XCTAssertTrue(app.staticTexts["Agent"].waitForExistence(timeout: 5),
                       "An agent-authored answer must keep its distinct author in the ordinary conversation view")
         XCTAssertTrue(app.staticTexts["Agent example: the shorter path is faster, while the longer path is easier to revise."].exists)
