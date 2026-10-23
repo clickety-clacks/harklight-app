@@ -7,7 +7,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    func testBuildEightHeaderRemainsVisibleAcrossScrollStates() {
+    func testInboxHeaderMinimizesOnScrollAndRestoresOnScrollUp() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -16,21 +16,24 @@ final class InboxStockTabsUITests: XCTestCase {
         let settings = app.buttons["inbox-settings"]
         XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
-        attachScreenshot("Build 8 header at top", from: app)
+        attachScreenshot("Inbox header at top", from: app)
 
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
         let dragStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
         let dragEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.68))
         dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
-        XCTAssertTrue(brand.exists, app.debugDescription)
-        XCTAssertTrue(settings.exists, app.debugDescription)
-        attachScreenshot("Build 8 header mid-scroll", from: app)
-
         app.swipeUp()
-        XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(settings.exists, app.debugDescription)
-        attachScreenshot("Build 8 header after scrolling", from: app)
+        let hidden = expectation(for: NSPredicate(format: "isHittable == false"), evaluatedWith: brand)
+        wait(for: [hidden], timeout: 5)
+        XCTAssertFalse(settings.isHittable, "The toolbar hides as the inbox scrolls down.")
+        attachScreenshot("Inbox header minimized", from: app)
+
+        app.swipeDown()
+        let restored = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: brand)
+        wait(for: [restored], timeout: 5)
+        XCTAssertTrue(settings.isHittable, "The toolbar returns when scrolling up.")
+        attachScreenshot("Inbox header restored", from: app)
     }
 
     func testStockTabsAndSearchKeepInboxAndRepliedResults() {

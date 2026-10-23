@@ -316,26 +316,26 @@ final class SampleWorkspaceUITests: XCTestCase {
         let brand = app.descendants(matching: .any)["inbox-brand"]
         let warningButton = app.buttons["inbox-warning-button"]
         let settings = app.buttons["inbox-settings"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
 
         let message = app.staticTexts["inbox-warning-message"]
         let row = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'")).firstMatch
-        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(message.label.contains("Could not verify notification"), message.label)
-        XCTAssertTrue(brand.exists, app.debugDescription)
         XCTAssertTrue(inbox.isSelected, "Automatic warning presentation does not change the selected tab.")
-        XCTAssertGreaterThanOrEqual(warningButton.frame.minX, brand.frame.maxX - 2,
-                                    "The warning icon sits beside the Harklight title.")
-        XCTAssertLessThan(warningButton.frame.midX, settings.frame.midX,
-                          "The warning icon sits before Settings in the shared title row.")
         XCTAssertTrue(row.waitForExistence(timeout: 5), "Existing Inbox content remains visible.")
         capture("inbox-recovery-warning-popover", app)
 
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.10)).tap()
         XCTAssertFalse(message.waitForExistence(timeout: 1),
                        "Tapping outside the stock popover dismisses it.")
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(brand.exists, app.debugDescription)
+        XCTAssertGreaterThanOrEqual(warningButton.frame.minX, brand.frame.maxX - 2,
+                                    "The warning icon sits beside the Harklight title.")
+        XCTAssertLessThan(warningButton.frame.midX, settings.frame.midX,
+                          "The warning icon sits before Settings in the shared title row.")
         capture("inbox-recovery-warning-dismissed", app)
         selectMessageTab("Replied", in: app)
         XCTAssertTrue(replied.isSelected, app.debugDescription)
@@ -776,6 +776,13 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(sidebarToggle.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(list.exists, app.debugDescription)
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+            for _ in 0..<8 {
+                if brand.isHittable && firstRow.frame.minY >= settings.frame.maxY + 8 { break }
+                list.swipeDown()
+            }
+            XCTAssertTrue(brand.isHittable, "The toolbar is visible at the list top.")
+            XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY + 8,
+                                        "The first row clears the restored toolbar at the top.")
             XCTAssertEqual(app.frame.width > app.frame.height, orientation == .landscapeLeft,
                            app.debugDescription)
             XCTAssertEqual(brand.frame.midY, settings.frame.midY, accuracy: 5,

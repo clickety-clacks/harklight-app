@@ -1042,7 +1042,8 @@ struct InboxList: View {
                 }
             }
         }
-        .toolbarMinimizationBehavior(.onScrollDown, for: .navigationBar)
+        .toolbarMinimizationBehavior(tab == .search ? .never : .onScrollDown,
+                                     for: .navigationBar)
         .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
         .onAppear {
             guard workspaceTab == tab else { return }

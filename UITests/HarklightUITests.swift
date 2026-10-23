@@ -135,11 +135,11 @@ final class HarklightUITests: XCTestCase {
         let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
         let warningButton = app.buttons["inbox-warning-button"]
         let message = app.staticTexts["inbox-warning-message"]
-        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
         if message.waitForExistence(timeout: 1) {
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.10)).tap()
             XCTAssertFalse(message.waitForExistence(timeout: 1), app.debugDescription)
         }
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(warningButton.isHittable, app.debugDescription)
         warningButton.tap()
         XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
