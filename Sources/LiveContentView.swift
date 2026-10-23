@@ -2,6 +2,18 @@ import AttentionDomain
 import SwiftUI
 import UIKit
 
+/// True while a reply editor below has keyboard focus. Auto-presented surfaces
+/// (the warning popover, the connection alert) defer while this is set, because
+/// presenting over the editor resigns first responder mid-typing. They present
+/// once focus clears; the underlying one-shot state stays pending until then.
+struct ReplyEditorFocusKey: PreferenceKey {
+    static let defaultValue = false
+
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
 @MainActor
 struct LiveContentView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -10,6 +22,10 @@ struct LiveContentView: View {
     let launch: NativeAppLaunch?
     let archiveDeparture: NativeAccountDeparture?
     let fixtureStore: PrototypeStore?
+    @State private var replyEditorFocused = false
+#if DEBUG
+    @State private var didApplyPresentationTestFixture = false
+#endif
 
     init(store: LivePresentationStore,
          samples: SampleLibrary,
@@ -38,10 +54,11 @@ struct LiveContentView: View {
         let failureKey = launch?.foregroundConnectFailureKey
         let diagnostic = launch?.foregroundConnectDiagnostic
         let connectionStatus = showsRecovery ? progress?.headline : store.connectionWarning
+        let connectionWarning = showsRecovery ? progress?.message : store.connectionWarning
         let presentsFailureDetails = !store.isReadOnly && diagnostic != nil &&
             (failureKey.map { launch?.shouldPresentForegroundConnectFailure($0) ?? false } ?? false)
         let failureAlertPresented = Binding<Bool>(
-            get: { presentsFailureDetails },
+            get: { presentsFailureDetails && !replyEditorFocused },
             set: { isPresented in
                 guard !isPresented, let launch, let failureKey else { return }
                 launch.dismissForegroundConnectFailure(failureKey)
@@ -55,8 +72,10 @@ struct LiveContentView: View {
                     if store.conversation(for: row.key) != nil { row.chatUnread = false }
                     return row
                 }, samples: samples, selectRequest: { store.selectRequest($0) },
-                markSeenRequest: { markSeen($0) },
-                markNoCommentRequest: { store.submitNoCommentFromUser($0) },
+                markSeenRequest: { key, revision in markSeen(key, requestRevision: revision) },
+                markNoCommentRequest: { key, revision in
+                    store.submitNoCommentFromUser(key, requestRevision: revision)
+                },
                 clearRetractedRequest: { store.clearRetracted($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
@@ -69,13 +88,15 @@ struct LiveContentView: View {
                 settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
                                                       archiveDeparture: archiveDeparture,
                                                       connectionStatus: connectionStatus) },
-                warnings: [launch?.notificationNavigationMessage, store.observationError, store.notificationWarning,
+                warnings: [launch?.notificationNavigationMessage, connectionWarning,
+                           store.observationError, store.notificationWarning,
                            store.pushRegistrationWarning, store.unresolvedSendWarning,
                            launch?.archiveCatalogWarning,
                            launch?.disconnectedAccount?.removed == true ? nil : launch?.disconnectMessage,
                            fixtureStore?.persistenceError,
                            recoveryStatusFixture]
                     .compactMap { $0 },
+                isRefreshing: store.isRefreshing,
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
                 showsLocalExamples: !store.isReadOnly,
@@ -104,16 +125,44 @@ struct LiveContentView: View {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background { store.flushPendingDrafts() }
             }
+            .onPreferenceChange(ReplyEditorFocusKey.self) { replyEditorFocused = $0 }
+            .onAppear { applyPresentationTestFixtureIfNeeded() }
         }
     }
 
-    private func markSeen(_ key: RequestKey) {
+#if DEBUG
+    private func applyPresentationTestFixtureIfNeeded() {
+        guard !didApplyPresentationTestFixture else { return }
+        didApplyPresentationTestFixture = true
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--harklight-test-refreshing") {
+            store.beginRefresh()
+        }
+        if arguments.contains("--harklight-test-connection-warning") {
+            store.connectionWarning = "The approved server could not be reached."
+        }
+        if arguments.contains("--harklight-test-stale-answer"),
+           let current = store.presentation.requests.first {
+            store.staleAnswerDialog = StaleAnswerDialog(
+                operationID: UUID(), requestKey: current.key,
+                submittedRevision: current.requestRevision,
+                currentRevision: current.requestRevision + 1,
+                title: "Updated request: \(current.title?.rawValue ?? "Message")",
+                body: "The sender updated this request. Review the new details before answering.")
+        }
+    }
+#else
+    private func applyPresentationTestFixtureIfNeeded() {}
+#endif
+
+    private func markSeen(_ key: RequestKey, requestRevision: UInt64) {
         if let fixtureStore {
             guard fixtureStore.sendSelectedAnswer(for: key,
                                                    explicitCompatibilityAction: ExactText("seen")) else { return }
             try? store.refreshFromDurableStore()
         } else {
-            store.submitFromUser(key, explicitCompatibilityAction: ExactText("seen"))
+            store.submitFromUser(key, explicitCompatibilityAction: ExactText("seen"),
+                                 requestRevision: requestRevision)
         }
     }
 }
@@ -373,7 +422,15 @@ struct LiveRequestDetail: View {
             return store.isReadOnly || request.lifecycleStatus != .open ||
                 request.intentReceipt != nil || store.isRetracted(request.key) || localExample.finished
         }
-        return !canAnswer
+        return !canEdit
+    }
+
+    /// Send actions follow the visible request's eligibility. Freshness is
+    /// carried by the request revision for answers and cannot block Seen while
+    /// the inbox is checking whether its snapshot is current.
+    private var sendControlsDisabled: Bool {
+        if localExample != nil { return controlsReadOnly }
+        return !canEdit
     }
 
     private var localSeenAction: ((ExactText) -> Void)? {
@@ -426,8 +483,8 @@ struct LiveRequestDetail: View {
             }
         }
         .tint(seenActionIsComplete ? .green : .blue)
-        .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
-        .disabled(controlsReadOnly || !canFinishSeenAction || seenActionIsComplete)
+        .opacity(seenActionIsComplete ? 0.76 : (sendControlsDisabled ? 0.48 : 1))
+        .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
         .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
         .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
         .accessibilityIdentifier("request-finish-seen")
@@ -513,7 +570,8 @@ struct LiveRequestDetail: View {
     }
 
     private var noCommentSelected: Bool {
-        localExample?.noCommentSelected ?? store.draft(for: request.key)?.noCommentSelected ?? false
+        localExample?.noCommentSelected ??
+            store.draft(for: request.key, revision: request.requestRevision)?.noCommentSelected ?? false
     }
 
     private var canSubmitCurrentAnswer: Bool {
@@ -525,7 +583,7 @@ struct LiveRequestDetail: View {
         guard request.informationalSeenStatus == nil else { return false }
         if let localExample { return localExample.canDeclineLocally }
         if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
-        guard request.inboxStateIsCurrent, !store.isReadOnly,
+        guard !store.isReadOnly,
               !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         return true
@@ -539,19 +597,27 @@ struct LiveRequestDetail: View {
 
     private func selectNoCommentAction() {
         focusedReplyActionID = nil
-        store.selectNoComment(for: request.key)
+        store.selectNoComment(for: request.key, requestRevision: request.requestRevision)
     }
 
     private func submitSeenAction(_ action: ExactText) {
         if let localSeenAction {
             localSeenAction(action)
         } else {
-            store.submitFromUser(request.key, explicitCompatibilityAction: action)
+            store.submitFromUser(request.key, explicitCompatibilityAction: action,
+                                 requestRevision: request.requestRevision)
         }
     }
 
     var canAnswer: Bool {
-        guard request.inboxStateIsCurrent, !store.isReadOnly, !store.isRetracted(request.key), request.lifecycleStatus == .open,
+        canEdit
+    }
+
+    /// Answer eligibility follows the visible request, not the cache's
+    /// transient freshness. Every submission carries request.requestRevision;
+    /// the server can decline that exact version if the message changed.
+    var canEdit: Bool {
+        guard !store.isReadOnly, !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         switch request.projection {
         case .sender: return true
@@ -656,6 +722,7 @@ struct LiveRequestDetail: View {
                                              actions: actions,
                                              store: store,
                                              readOnly: controlsReadOnly,
+                                             sendDisabled: sendControlsDisabled,
                                              localExample: localExample,
                                              onSeen: submitSeenAction,
                                              canOfferNoComment: canOfferNoComment,
@@ -774,14 +841,16 @@ struct LiveRequestDetail: View {
                 } else {
                     Button(submitLabel, systemImage: "checkmark") {
                         if let fixtureStore {
-                            let sent = store.draft(for: request.key)?.noCommentSelected == true
+                            let sent = store.draft(for: request.key,
+                                                   revision: request.requestRevision)?.noCommentSelected == true
                                 ? fixtureStore.sendNoCommentLocally(for: request.key)
                                 : fixtureStore.sendSelectedAnswer(for: request.key)
                             guard sent else { return }
                             answerSubmittedHere = true
                             try? store.refreshFromDurableStore()
                         } else {
-                            guard store.submitFromUser(request.key) else { return }
+                            guard store.submitFromUser(request.key,
+                                                       requestRevision: request.requestRevision) else { return }
                             answerSubmittedHere = true
                         }
                     }
@@ -805,6 +874,7 @@ struct LiveRequestDetail: View {
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
         }
+        .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
     }
 
     @ViewBuilder
@@ -972,6 +1042,7 @@ struct HistoricalAnswerDraftView: View {
             case let .compatibility(actions):
                 LiveCompatibilityActions(request: request, actions: actions, store: store,
                                          readOnly: true,
+                                         sendDisabled: true,
                                          focusedReplyActionID: $focusedReplyActionID)
             case .unsupported:
                 Text("This saved answer format cannot be displayed.").font(.caption)
@@ -1061,22 +1132,24 @@ private struct LiveProjectedInputView: View {
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
     @State private var pointGestureCapture = PointGestureCapture()
-    @State private var typedInputText: String?
-    @State private var replyEditorTexts: [ExactText: String] = [:]
+    @State private var typedInputTextByRevision: [UInt64: String] = [:]
+    @State private var replyEditorTextsByRevision: [UInt64: [ExactText: String]] = [:]
     @GestureState private var pointGestureActive = false
     @FocusState.Binding var focusedReplyActionID: String?
     @Environment(\.colorScheme) private var colorScheme
 
     private var draft: InputDraft? {
-        readOnly ? request.draft.inputs[input.id] : store.draft(for: request.key)?.inputs[input.id]
+        readOnly ? request.draft.inputs[input.id]
+            : store.draft(for: request.key, revision: request.requestRevision)?.inputs[input.id]
     }
 
     private var textBinding: Binding<String> {
         Binding(
-            get: { typedInputText ?? draft?.text?.rawValue ?? "" },
+            get: { typedInputTextByRevision[request.requestRevision] ?? draft?.text?.rawValue ?? "" },
             set: {
-                typedInputText = $0
-                store.stageText($0, input: input.id, action: nil, for: request.key)
+                typedInputTextByRevision[request.requestRevision] = $0
+                store.stageText($0, input: input.id, action: nil, for: request.key,
+                                requestRevision: request.requestRevision)
             }
         )
     }
@@ -1104,7 +1177,8 @@ private struct LiveProjectedInputView: View {
                 }
                 localExample.ownAnswer = true
             } else {
-                store.selectAction(action.id, input: input.id, for: request.key)
+                store.selectAction(action.id, input: input.id, for: request.key,
+                                   requestRevision: request.requestRevision)
             }
         } completion: {
             focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
@@ -1124,10 +1198,16 @@ private struct LiveProjectedInputView: View {
                                selected: selected, multiple: false, suggested: false,
                                ownAnswer: action.id.rawValue == "own", drawsSurface: false)
             TextEditor(text: Binding(
-                get: { replyEditorTexts[action.id] ?? draft?.textByActionID[action.id]?.rawValue ?? text },
+                get: {
+                    replyEditorTextsByRevision[request.requestRevision]?[action.id] ??
+                        draft?.textByActionID[action.id]?.rawValue ?? text
+                },
                 set: {
-                    replyEditorTexts[action.id] = $0
-                    store.stageText($0, input: input.id, action: action.id, for: request.key)
+                    var revisionTexts = replyEditorTextsByRevision[request.requestRevision] ?? [:]
+                    revisionTexts[action.id] = $0
+                    replyEditorTextsByRevision[request.requestRevision] = revisionTexts
+                    store.stageText($0, input: input.id, action: action.id, for: request.key,
+                                    requestRevision: request.requestRevision)
                 }
             ))
             .font(.body)
@@ -1237,7 +1317,8 @@ private struct LiveProjectedInputView: View {
                                                 guard !readOnly else { return }
                                                 var capture = pointGestureCapture
                                                 if let point = capture.finish(at: value.location, in: bounds) {
-                                                    store.setPoint(point, input: input.id, for: request.key)
+                                                    store.setPoint(point, input: input.id, for: request.key,
+                                                                    requestRevision: request.requestRevision)
                                                 }
                                                 pointGestureCapture = capture
                                             }, isEnabled: !readOnly)
@@ -1259,7 +1340,8 @@ private struct LiveProjectedInputView: View {
                             .accessibilityHint(readOnly ? "Read-only illustration." : "Tap or drag to select a point.")
                             .accessibilityAction(named: "Set point at center") {
                                 guard !readOnly else { return }
-                                store.setPoint(PointValue(x: 500, y: 500), input: input.id, for: request.key)
+                                store.setPoint(PointValue(x: 500, y: 500), input: input.id, for: request.key,
+                                               requestRevision: request.requestRevision)
                             }
                             .accessibilityIdentifier("request-point-" + input.id.rawValue)
                         if let point = draft?.effectivePoint {
@@ -1284,7 +1366,8 @@ private struct LiveProjectedInputView: View {
                             multiple: false,
                             swatch: localExample.message.kind == .colorChoice ? option.id : nil,
                             sound: localExample.message.kind == .soundChoice) {
-                store.selectAction(action.id, input: input.id, for: request.key)
+                store.selectAction(action.id, input: input.id, for: request.key,
+                                   requestRevision: request.requestRevision)
             }
             .disabled(readOnly)
         } else {
@@ -1319,18 +1402,22 @@ private struct LiveCompatibilityActions: View {
     let actions: [ProjectedAction]
     let store: LivePresentationStore
     let readOnly: Bool
+    /// Used only by the informational Seen control. Inbox freshness must not
+    /// dim or disable a response while a refresh is pending.
+    let sendDisabled: Bool
     var localExample: SampleResponse? = nil
     var onSeen: ((ExactText) -> Void)? = nil
     var canOfferNoComment = false
     var noCommentSelected = false
     var noCommentUnavailable = false
     var onSelectNoComment: () -> Void = {}
-    @State private var replyTextByActionID: [ExactText: String] = [:]
+    @State private var replyTextByRevision: [UInt64: [ExactText: String]] = [:]
     @FocusState.Binding var focusedReplyActionID: String?
     @Environment(\.colorScheme) private var colorScheme
 
     private var selected: ExactText? {
-        readOnly ? request.draft.compatibility.selectedActionID : store.draft(for: request.key)?.compatibility.selectedActionID
+        readOnly ? request.draft.compatibility.selectedActionID
+            : store.draft(for: request.key, revision: request.requestRevision)?.compatibility.selectedActionID
     }
 
     private var seenActionIsComplete: Bool {
@@ -1347,7 +1434,8 @@ private struct LiveCompatibilityActions: View {
 
     private func activate(_ action: ProjectedAction) {
         withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
-            store.selectAction(action.id, input: nil, for: request.key)
+            store.selectAction(action.id, input: nil, for: request.key,
+                               requestRevision: request.requestRevision)
         } completion: {
             focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
         }
@@ -1365,13 +1453,17 @@ private struct LiveCompatibilityActions: View {
                                drawsSurface: false)
             TextEditor(text: Binding(
                 get: {
-                    replyTextByActionID[action.id] ??
-                        (readOnly ? request.draft.compatibility : store.draft(for: request.key)?.compatibility)?
+                    replyTextByRevision[request.requestRevision]?[action.id] ??
+                        (readOnly ? request.draft.compatibility
+                                  : store.draft(for: request.key, revision: request.requestRevision)?.compatibility)?
                             .textByActionID[action.id]?.rawValue ?? text
                 },
                 set: {
-                    replyTextByActionID[action.id] = $0
-                    store.stageCompatibilityText($0, action: action.id, for: request.key)
+                    var revisionTexts = replyTextByRevision[request.requestRevision] ?? [:]
+                    revisionTexts[action.id] = $0
+                    replyTextByRevision[request.requestRevision] = revisionTexts
+                    store.stageCompatibilityText($0, action: action.id, for: request.key,
+                                                 requestRevision: request.requestRevision)
                 }
             ))
             .font(.body)
@@ -1411,7 +1503,8 @@ private struct LiveCompatibilityActions: View {
                     if let onSeen {
                         onSeen(action.id)
                     } else {
-                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id)
+                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id,
+                                             requestRevision: request.requestRevision)
                     }
                 } label: {
                     HStack(spacing: 10) {
@@ -1425,8 +1518,8 @@ private struct LiveCompatibilityActions: View {
                 }
                 .buttonStyle(.plain)
                 .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
-                .disabled(readOnly || seenStatus != .available)
-                .opacity(seenActionIsComplete ? 0.76 : (readOnly ? 0.48 : 1))
+                .disabled(sendDisabled || seenStatus != .available)
+                .opacity(seenActionIsComplete ? 0.76 : (sendDisabled ? 0.48 : 1))
                 .accessibilityIdentifier("request-seen-action")
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
@@ -1436,8 +1529,9 @@ private struct LiveCompatibilityActions: View {
                 ForEach(actions, id: \.id) { action in
                     let option = localExample?.message.options.first { $0.id == action.id.rawValue }
                     let isSelected = selected == action.id
-                    let replyText = replyTextByActionID[action.id] ??
-                        (readOnly ? request.draft.compatibility : store.draft(for: request.key)?.compatibility)?
+                    let replyText = replyTextByRevision[request.requestRevision]?[action.id] ??
+                        (readOnly ? request.draft.compatibility
+                                  : store.draft(for: request.key, revision: request.requestRevision)?.compatibility)?
                             .textByActionID[action.id]?.rawValue ?? ""
                     if action.kind == .text && (isSelected || !replyText.isEmpty) {
                         compatibilityChoice(action, selected: isSelected, detail: option?.detail ?? "",

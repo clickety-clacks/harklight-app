@@ -286,17 +286,25 @@ private struct ConversationComposer: View {
     }
 }
 
-private struct ConversationAvailabilityLabel: View {
+struct ConversationAvailabilityLabel: View {
     let availability: ConversationAvailability
     let local: Bool
     var body: some View {
         let prefix = local ? "Example · " : ""
         switch availability {
         case .listening: Text(prefix + "Agent listening · delivery shown per message").font(.caption2).foregroundStyle(.secondary)
-        case let .notListening(time): Text(prefix + "Agent not listening" + (time.map { " since " + $0.rawValue } ?? "")).font(.caption2).foregroundStyle(.secondary)
+        case let .notListening(time): Text(prefix + Self.notListeningText(since: time)).font(.caption2).foregroundStyle(.secondary)
         case .gone: Text(prefix + "Originating session gone · request remains available").font(.caption2).foregroundStyle(.secondary)
         case let .unsupported(reason): Text(prefix + "Listening unsupported · " + reason.rawValue).font(.caption2).foregroundStyle(.secondary)
         }
+    }
+
+    /// The relay reports the detach time in epoch milliseconds; show it as a date.
+    static func notListeningText(since time: ExactText?) -> String {
+        guard let time else { return "Agent not listening" }
+        guard let milliseconds = UInt64(time.rawValue) else { return "Agent not listening since " + time.rawValue }
+        let date = Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+        return "Agent not listening since " + date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 

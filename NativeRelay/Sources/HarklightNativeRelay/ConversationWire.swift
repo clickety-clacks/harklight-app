@@ -134,7 +134,11 @@ public struct ConversationWire: Sendable {
         } else {
             sessionHandle = nil
         }
-        guard kind == "attention_tier" || sessionHandle != nil else { throw RelayWireError.invalidFrame }
+        // A retraction names its request by key and never uses the handle; the
+        // relay emits it without one, and refusing it would stall every later event.
+        guard kind == "attention_tier" || kind == "retraction" || sessionHandle != nil else {
+            throw RelayWireError.invalidFrame
+        }
         let handle = sessionHandle ?? ExactText("")
         let fact: ConversationEvent.Fact
         var retractedAtMilliseconds: UInt64? = nil

@@ -171,8 +171,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(receipt.exactAnswer, .null,
                        "The local null placeholder is distinguished by answerKind and is never the wire frame.")
         let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
-        XCTAssertNil(submitted.requestRevision,
-                     "Ordinary requests have no server-supplied request revision.")
+        XCTAssertEqual(submitted.requestRevision, 1,
+                       "An ordinary request is the first revision even without conversation history.")
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"sample","request_revision":1}"# + "\n")
         try live.refreshFromDurableStore()
@@ -394,7 +394,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(String(decoding: staleSubmission.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"conversation","request_revision":2}"# + "\n")
 
-        // A stale refusal stays unconfirmed; replay supplies the newer open revision.
+        // A newer replayed revision supersedes the locally pending older attempt.
         let thirdBinding = ConversationBinding(request: key, revision: 3)
         let thirdRevision = ConversationTurn(id: ExactText("revision-3"), binding: thirdBinding,
             author: .origin, sessionHandle: ExactText("origin"), text: ExactText("Current wording"),
@@ -609,7 +609,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         _ = try await core.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
 
-        let result = await NativeRelayRefreshResult.afterConfirmedRelay {
+        let result = await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: UUID()) {
             throw InstallationTransportError.serverRejected
         }
         live.applyRefreshResult(result)
@@ -636,7 +637,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
         XCTAssertNil(live.actionError)
 
-        let result = await NativeRelayRefreshResult.afterConfirmedRelay { .notAttempted }
+        let result = await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: UUID()) { .notAttempted }
         live.applyRefreshResult(result)
         XCTAssertNil(live.connectionWarning)
         XCTAssertEqual(result.pushRegistration, .notAttempted,
@@ -646,12 +648,14 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
     func testConfirmedNotificationSetupClearsItsWarningWithoutCreatingAnAnswer() async throws {
         let (context, store, live, key) = try setup()
-        let refused = await NativeRelayRefreshResult.afterConfirmedRelay {
+        let refused = await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: UUID()) {
             throw InstallationTransportError.serverRejected
         }
         live.applyRefreshResult(refused)
         XCTAssertNotNil(live.pushRegistrationWarning)
-        let registered = await NativeRelayRefreshResult.afterConfirmedRelay { .confirmed }
+        let registered = await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: UUID()) { .confirmed }
         live.applyRefreshResult(registered)
         XCTAssertEqual(registered.pushRegistration, .confirmed)
         XCTAssertNil(live.pushRegistrationWarning)

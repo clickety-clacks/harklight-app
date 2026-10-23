@@ -572,6 +572,49 @@ final class NativeRelayCoreTests: XCTestCase {
                        .unsupported)
     }
 
+    func testStaleAnswerDeclineReleasesTheRequestForItsCurrentRevision() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("stale-answer"))
+        let first = try JSONValue.parse(data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#))
+        let second = try JSONValue.parse(data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
+        let handle = ExactText("origin")
+        let revisionOne = ConversationBinding(request: key, revision: 1)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: revisionOne,
+            fact: .request(sessionHandle: handle, payload: first)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        session.result = .staleRevision(operationID: receipt.opID, currentRevision: 2)
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let attempted = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(attempted, 1)
+        let declined = try XCTUnwrap(try port.lookupIntent(context: port.context, intentID: receipt.intentID))
+        XCTAssertEqual(declined.localState, .notDelivered)
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition,
+                       .staleRevision(currentRevision: 2))
+        XCTAssertEqual(try store.snapshot(context: context).outbox, [])
+
+        let revisionTwo = ConversationBinding(request: key, revision: 2)
+        let update = ConversationTurn(id: ExactText("revision-2"), binding: revisionTwo,
+            author: .origin, sessionHandle: handle, text: ExactText("Revised wording"), kind: .revision)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: revisionTwo,
+            fact: .revision(update, payload: second)), context: context)
+        let current = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        XCTAssertEqual(current.title, ExactText("Revised wording"))
+        XCTAssertEqual(current.staleAnswerRevision?.currentRevision, 2)
+        let currentSelector = try XCTUnwrap(port.inspect(context: port.context, request: key)
+            .requests.first?.selector)
+        let retry = try port.submit(SubmitIntent(context: port.context, selector: currentSelector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        XCTAssertEqual(retry.selector.requestRevision, 2)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.first?.requestRevision, 2)
+    }
+
     func testForeignDeliveryAndTerminalCommitBeforeOneContiguousACK() async throws {
         let (context, store, session) = try setup()
         let message = "{\"answer_ui\":null,\"title\":\"Hello\"}"
@@ -833,7 +876,7 @@ final class NativeRelayCoreTests: XCTestCase {
         await core.deactivate()
     }
 
-    func testCheckpointMarksCachedRowsUnrefreshedUntilTheirStablePageArrives() async throws {
+    func testCheckpointKeepsCachedRowsAnswerableUntilTheirStablePageArrives() async throws {
         let (context, store, session) = try setup()
         let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
         func key(_ sequence: Int) -> RequestKey {
@@ -865,17 +908,15 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(bounded.inboxCurrentKeys?.count, 20)
         XCTAssertEqual(try port.inspect(context: port.context, request: key(1)).requests.first?.inboxStateIsCurrent, true)
         XCTAssertEqual(try port.inspect(context: port.context, request: key(21)).requests.first?.inboxStateIsCurrent, false)
-        XCTAssertThrowsError(try port.submit(SubmitIntent(context: port.context, selector: staleSelector,
-            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))) {
-            XCTAssertEqual($0 as? AttentionStoreError, .inboxStateUnrefreshed)
-        }
+        let cachedAnswer = try port.submit(SubmitIntent(context: port.context, selector: staleSelector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        XCTAssertEqual(cachedAnswer.selector.requestRevision, 1)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1,
+                       "An incomplete inbox listing never blocks an answer the person chose to send.")
 
         let fetched = try await core.fetchNextInboxPage()
         XCTAssertTrue(fetched)
         XCTAssertEqual(try store.snapshot(context: context).inboxCurrentKeys?.count, 21)
-        let refreshedSelector = try XCTUnwrap(port.inspect(context: port.context, request: key(21)).requests.first?.selector)
-        _ = try port.submit(SubmitIntent(context: port.context, selector: refreshedSelector,
-            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
     }
 

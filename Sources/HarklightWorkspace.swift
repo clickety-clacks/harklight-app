@@ -187,6 +187,7 @@ enum InboxResponseReceiptStatus: Equatable {
 
 struct InboxRequestRow: Identifiable {
     let key: RequestKey
+    var requestRevision: UInt64 = 1
     let title: String
     let sender: String
     let status: String
@@ -293,12 +294,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let requests: [InboxRequestRow]
     let samples: SampleLibrary
     let selectRequest: (RequestKey) -> Void
-    var markSeenRequest: (RequestKey) -> Void = { _ in }
-    var markNoCommentRequest: (RequestKey) -> Void = { _ in }
+    var markSeenRequest: (RequestKey, UInt64) -> Void = { _, _ in }
+    var markNoCommentRequest: (RequestKey, UInt64) -> Void = { _, _ in }
     var clearRetractedRequest: (RequestKey) -> Void = { _ in }
     @ViewBuilder let requestDetail: (RequestKey, InboxCardContext) -> RequestDetail
     @ViewBuilder let settingsContent: () -> SettingsContent
     var warnings: [String] = []
+    var isRefreshing = false
     var conversationStore: LivePresentationStore? = nil
     var fetchOlderInboxPage: (() async -> Bool)? = nil
     var showsLocalExamples = true
@@ -310,6 +312,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var visibility: NavigationSplitViewVisibility = .all
     @State private var isWarningPresented = false
     @State private var automaticallyPresentedWarnings = Set<String>()
+    @State private var replyEditorFocused = false
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
@@ -339,11 +342,24 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         )
     }
 
+    private var staleAnswerPresentation: Binding<Bool> {
+        Binding(
+            get: { conversationStore?.staleAnswerDialog != nil },
+            set: { isPresented in
+                if !isPresented { conversationStore?.dismissStaleAnswerDialog() }
+            }
+        )
+    }
+
     private func updateWarningPresentation(with newWarnings: [String]) {
         guard !newWarnings.isEmpty else {
             isWarningPresented = false
             return
         }
+        // Auto-presenting over a focused reply editor resigns the keyboard
+        // mid-typing. Defer, leaving fresh warnings unmarked so they present
+        // when focus clears; the header warning button stays available.
+        guard !replyEditorFocused else { return }
         let freshWarnings = Set(newWarnings).subtracting(automaticallyPresentedWarnings)
         automaticallyPresentedWarnings.formUnion(newWarnings)
         if !freshWarnings.isEmpty && !isWarningPresented {
@@ -432,8 +448,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func markSeen(_ id: InboxSelection) {
         switch id {
         case let .request(key):
-            guard rows.first(where: { $0.id == id })?.canMarkSeen == true else { return }
-            markSeenRequest(key)
+            guard let item = rows.first(where: { $0.id == id }),
+                  case let .request(row) = item, row.canMarkSeen else { return }
+            markSeenRequest(key, row.requestRevision)
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canMarkSeenLocally else { return }
             response.finishLocally()
@@ -443,8 +460,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func markNoComment(_ id: InboxSelection) {
         switch id {
         case let .request(key):
-            guard rows.first(where: { $0.id == id })?.canNoComment == true else { return }
-            markNoCommentRequest(key)
+            guard let item = rows.first(where: { $0.id == id }),
+                  case let .request(row) = item, row.canNoComment else { return }
+            markNoCommentRequest(key, row.requestRevision)
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canDeclineLocally else { return }
             response.declineLocally()
@@ -563,6 +581,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(columnVisibility: $visibility) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
+                  isRefreshing: isRefreshing,
                   prioritizationReasons: prioritizationReasons,
                   showsBasicOrderMarker: showsBasicOrderMarker,
                   isWarningPresented: warningPresentationBinding(for: tab),
@@ -589,6 +608,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                              geometry: GeometryProxy) -> some View {
         NavigationStack(path: $searchPath) {
             InboxList(tab: .search, rows: rows, warnings: visibleWarnings,
+                  isRefreshing: isRefreshing,
                   prioritizationReasons: prioritizationReasons,
                   showsBasicOrderMarker: showsBasicOrderMarker,
                   isWarningPresented: warningPresentationBinding(for: .search),
@@ -725,6 +745,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: visibleWarnings, initial: true) { _, newWarnings in
                 updateWarningPresentation(with: newWarnings)
             }
+            .onPreferenceChange(ReplyEditorFocusKey.self) { focused in
+                replyEditorFocused = focused
+                if !focused { updateWarningPresentation(with: visibleWarnings) }
+            }
             tabs
             .sheet(isPresented: $conversationPresented) {
                 conversationPresentation
@@ -779,6 +803,25 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         .background(WorkspaceWindowReader { windowSize = $0 })
         .sheet(isPresented: $settings, content: settingsContent)
+        .alert("The message changed", isPresented: staleAnswerPresentation,
+               presenting: conversationStore?.staleAnswerDialog) { dialog in
+            Button("Review message") {
+                conversationStore?.dismissStaleAnswerDialog()
+                settings = false
+                chatOpen = false
+                conversationPresented = false
+                workspaceTab = .inbox
+                selectedTab = .inbox
+                search = ""
+                searchPath = []
+                navigate(to: .request(dialog.requestKey))
+            }
+            Button("Dismiss", role: .cancel) {
+                conversationStore?.dismissStaleAnswerDialog()
+            }
+        } message: { dialog in
+            Text(dialog.localizedMessage)
+        }
         .tint(.blue)
     }
 }
@@ -788,6 +831,7 @@ struct InboxList: View {
     let tab: InboxWorkspaceTab
     let rows: [InboxItem]
     let warnings: [String]
+    var isRefreshing = false
     let prioritizationReasons: [RequestKey: String]
     let showsBasicOrderMarker: Bool
     @Binding var isWarningPresented: Bool
@@ -981,6 +1025,20 @@ struct InboxList: View {
                             .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
                             .accessibilityIdentifier("inbox-basic-order")
                     }
+                    if isRefreshing {
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text("Refreshing").font(.caption2.weight(.semibold))
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .tint(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Refreshing")
+                        .accessibilityIdentifier("inbox-refreshing-badge")
+                    }
                     if !warnings.isEmpty {
                         Button {
                             isWarningPresented = true
@@ -1032,6 +1090,7 @@ struct InboxList: View {
                 .padding(.vertical, 8)
                 .background(Color(uiColor: .systemBackground))
             }
+            .background(Color(uiColor: .systemBackground))
         }
         .toolbar {
             if let triggerNotification {
