@@ -39,9 +39,11 @@ final class SampleFixtureDomain {
                 : message.id.hasSuffix("-2") ? .notListening(lastDetachedAt: nil) : .listening
             try apply(.availability(sessionHandle: handle, availability))
             if message.hasChat {
-                let person = ConversationTurn(id: ExactText(message.id + "-question"), binding: binding,
+                let personID = message.id == "sample-information-0" ? "30" : message.id + "-question"
+                let replyID = message.id == "sample-information-0" ? "20" : message.id + "-reply"
+                let person = ConversationTurn(id: ExactText(personID), binding: binding,
                     author: .person, sessionHandle: handle, text: ExactText("Could you explain the tradeoff?"))
-                let reply = ConversationTurn(id: ExactText(message.id + "-reply"), binding: binding,
+                let reply = ConversationTurn(id: ExactText(replyID), binding: binding,
                     author: .origin, sessionHandle: handle,
                     text: ExactText("The first option favors speed; the second leaves more room to revise. This is an example conversation."),
                     inReplyTo: person.id)
@@ -50,7 +52,7 @@ final class SampleFixtureDomain {
                 try apply(.turn(reply))
                 try apply(.acted(turn: person.id, by: reply.id))
                 if message.id == "sample-information-0" {
-                    let agentReply = ConversationTurn(id: ExactText(message.id + "-agent-answer"), binding: binding,
+                    let agentReply = ConversationTurn(id: ExactText("10"), binding: binding,
                         author: .agent, sessionHandle: handle,
                         text: ExactText("Agent example: the shorter path is faster, while the longer path is easier to revise."),
                         inReplyTo: reply.id, kind: .reply)
