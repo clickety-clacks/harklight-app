@@ -27,13 +27,14 @@ final class InboxPrioritizationWireTests: XCTestCase {
 
     func testDecodesOrderedViewReasonsUnchangedAndServerErrors() throws {
         let (wire, context) = try makeWire()
-        let reply = #"{"v":1,"type":"ok","ref":"view-a","view_rev":"rev-4","algorithm":"jev-set","basis":"fallback","entries":[{"sender_id":"sender","message_id":"m2","reason":"Due soon"},{"sender_id":"sender","message_id":"m1"}]}"#
+        let reply = #"{"v":1,"type":"ok","ref":"view-a","view_rev":"rev-4","algorithm":"jev-set","basis":"fallback","entries":[{"sender_id":"sender","message_id":"m2","reason":"Due soon","due_at":1792790400000},{"sender_id":"sender","message_id":"m1"}]}"#
         let decoded = try wire.decodeViewGetReply(Data((reply + "\n").utf8), ref: "view-a",
                                                   knownRevision: nil)
         let expected = InboxOrderView(revision: "rev-4", algorithm: .jevSet, basis: .fallback,
             entries: [
                 InboxOrderEntry(key: RequestKey(accountScope: context.identity.personID,
-                    senderID: ExactText("sender"), messageID: ExactText("m2")), reason: "Due soon"),
+                    senderID: ExactText("sender"), messageID: ExactText("m2")), reason: "Due soon",
+                    dueAtMilliseconds: 1_792_790_400_000),
                 InboxOrderEntry(key: RequestKey(accountScope: context.identity.personID,
                     senderID: ExactText("sender"), messageID: ExactText("m1")))
             ])
@@ -59,6 +60,8 @@ final class InboxPrioritizationWireTests: XCTestCase {
         let invalidReplies = [
             #"{"v":1,"type":"ok","ref":"view-a","view_rev":"rev-1","algorithm":"baseline","basis":"selected","entries":[{"sender_id":"sender","message_id":"m1","reason":""}]}"#,
             #"{"v":1,"type":"ok","ref":"view-a","view_rev":"rev-1","algorithm":"baseline","basis":"selected","entries":[{"sender_id":"sender","message_id":"m1","reason":"first\nsecond"}]}"#,
+            #"{"v":1,"type":"ok","ref":"view-a","view_rev":"rev-1","algorithm":"baseline","basis":"selected","entries":[{"sender_id":"sender","message_id":"m1","due_at":"tomorrow"}]}"#,
+            #"{"v":1,"type":"ok","ref":"view-a","view_rev":"rev-1","algorithm":"baseline","basis":"selected","entries":[{"sender_id":"sender","message_id":"m1","due_at":1.5}]}"#,
             #"{"v":1,"type":"ok","ref":"view-a","view_rev":"rev-1","algorithm":"baseline","basis":"selected","entries":[{"sender_id":"sender","message_id":"m1"},{"sender_id":"sender","message_id":"m1"}]}"#,
             #"{"v":1,"type":"ok","ref":"wrong-ref","view_rev":"rev-1","algorithm":"baseline","basis":"selected","entries":[]}"#
         ]

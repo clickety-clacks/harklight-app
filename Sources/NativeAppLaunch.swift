@@ -1399,7 +1399,7 @@ final class LivePresentationStore {
         return InboxOrderPresentationRules.ordered(rows, by: inboxOrderPresentation?.view)
     }
 
-    var inboxOrderReasons: [RequestKey: String] {
+    var inboxOrderReasons: [RequestKey: InboxOrderRowReason] {
         InboxOrderPresentationRules.reasons(in: inboxOrderPresentation?.view)
     }
 

@@ -14,10 +14,12 @@ public enum InboxOrderBasis: String, Equatable, Sendable {
 public struct InboxOrderEntry: Equatable, Sendable {
     public let key: RequestKey
     public let reason: String?
+    public let dueAtMilliseconds: Int64?
 
-    public init(key: RequestKey, reason: String? = nil) {
+    public init(key: RequestKey, reason: String? = nil, dueAtMilliseconds: Int64? = nil) {
         self.key = key
         self.reason = reason
+        self.dueAtMilliseconds = dueAtMilliseconds
     }
 }
 
@@ -126,9 +128,19 @@ public struct InboxPrioritizationWire: Sendable {
             } else {
                 reason = nil
             }
+            let dueAtMilliseconds: Int64?
+            if let rawDueAt = rawEntry.uniqueValue(named: "due_at") {
+                guard let milliseconds = rawDueAt.integerValue else {
+                    throw InboxPrioritizationWireError.invalidFrame
+                }
+                dueAtMilliseconds = milliseconds
+            } else {
+                dueAtMilliseconds = nil
+            }
             let key = RequestKey(accountScope: accountScope, senderID: senderID, messageID: messageID)
             guard seen.insert(key).inserted else { throw InboxPrioritizationWireError.invalidFrame }
-            entries.append(InboxOrderEntry(key: key, reason: reason))
+            entries.append(InboxOrderEntry(key: key, reason: reason,
+                                           dueAtMilliseconds: dueAtMilliseconds))
         }
         return .view(InboxOrderView(revision: revision, algorithm: algorithm,
                                     basis: basis, entries: entries))

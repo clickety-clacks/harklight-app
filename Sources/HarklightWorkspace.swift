@@ -304,7 +304,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var conversationStore: LivePresentationStore? = nil
     var fetchOlderInboxPage: (() async -> Bool)? = nil
     var showsLocalExamples = true
-    var prioritizationReasons: [RequestKey: String] = [:]
+    var prioritizationReasons: [RequestKey: InboxOrderRowReason] = [:]
     var showsBasicOrderMarker = false
     var notificationNavigation: NativeInboxNavigation? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -781,7 +781,7 @@ struct InboxList: View {
     let rows: [InboxItem]
     let warnings: [String]
     var isRefreshing = false
-    let prioritizationReasons: [RequestKey: String]
+    let prioritizationReasons: [RequestKey: InboxOrderRowReason]
     let showsBasicOrderMarker: Bool
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
@@ -1135,8 +1135,21 @@ private struct InboxScrollMetrics: Equatable {
 struct InboxRowContent: View {
     let row: InboxRequestRow
     var selected = false
-    var prioritizationReason: String? = nil
+    var prioritizationReason: InboxOrderRowReason? = nil
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.locale) private var locale
+    @Environment(\.calendar) private var calendar
+    @Environment(\.timeZone) private var timeZone
+
+    private var prioritizationReasonText: String? {
+        guard let prioritizationReason else { return nil }
+        switch prioritizationReason {
+        case let .serverText(text): text
+        case let .dueAtMilliseconds(milliseconds):
+            InboxOrderPresentationRules.duePhrase(dueAtMilliseconds: milliseconds,
+                locale: locale, calendar: calendar, timeZone: timeZone)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -1194,8 +1207,8 @@ struct InboxRowContent: View {
                     .lineLimit(row.tier.bodyLineLimit)
                     .truncationMode(.tail)
             }
-            if let prioritizationReason {
-                Text(verbatim: prioritizationReason)
+            if let prioritizationReasonText {
+                Text(verbatim: prioritizationReasonText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
