@@ -62,8 +62,9 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"resynced","seq":1}"#)]
         return (context, persistence, store, session)
     }
-    private func event(_ kind: String, sequence: Int, fields: String) -> Data {
-        data("{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(sequence),\"sender_id\":\"author\",\"message_id\":\"request\",\"origin\":\"origin\",\"session_handle\":\"handle\",\"request_revision\":1,\"kind\":\"\(kind)\",\(fields)}")
+    private func event(_ kind: String, sequence: Int, fields: String,
+                       messageID: String = "request", sessionHandle: String = "handle") -> Data {
+        data("{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(sequence),\"sender_id\":\"author\",\"message_id\":\"\(messageID)\",\"origin\":\"origin\",\"session_handle\":\"\(sessionHandle)\",\"request_revision\":1,\"kind\":\"\(kind)\",\(fields)}")
     }
     func testUnavailableChatDoesNotFailInboxDrainOrProbeAgainUntilNewConnection() async throws {
         let (context, _, store, session) = try setup()
@@ -254,6 +255,63 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(threads[earlier]?.retraction?.retractedAtMilliseconds, 1792643952343)
         XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 4)
         await core.deactivate()
+    }
+    func testThreadFactsForAnUnloadedRequestAreHeldWhileLaterChatIsAppliedAndACKed() async throws {
+        let (context, persistence, store, session) = try setup()
+        let earlier = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("earlier"))
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("availability", sequence: 1,
+                fields: #""author":"server","availability":"listening","last_detached_at":null"#,
+                messageID: "earlier", sessionHandle: "earlier-handle"),
+            event("discussion", sequence: 2,
+                fields: #""author":"person","event_id":"5","op_id":"7eaac5c0-02a6-43a7-9934-8bbde62d7bde","text":"Hi there""#,
+                messageID: "earlier", sessionHandle: "earlier-handle"),
+            event("receipt", sequence: 3, fields: #""author":"origin","event_id":"5","delivered":true"#,
+                messageID: "earlier", sessionHandle: "earlier-handle"),
+            event("reply", sequence: 4,
+                fields: #""author":"origin","event_id":"6","in_reply_to":"5","op_id":"7d76be3a-c45d-4cef-87c7-248982fe3b0d","text":"Hello""#,
+                messageID: "earlier", sessionHandle: "earlier-handle"),
+            event("discussion", sequence: 5,
+                fields: #""author":"person","event_id":"7","text":"Current request still works""#),
+            event("receipt", sequence: 6, fields: #""author":"origin","event_id":"7","delivered":true"#),
+            event("reply", sequence: 7,
+                fields: #""author":"origin","event_id":"8","in_reply_to":"7","text":"Current reply""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":7}"#)]
+        session.onConversationACK = {
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 7)
+            XCTAssertNil(try store.conversationSnapshot(context: context).threads[earlier])
+            let current = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+            XCTAssertEqual(current.facts[ExactText("7")]?.delivered, true)
+            XCTAssertEqual(current.turns.first { $0.id == ExactText("8") }?.text, ExactText("Current reply"))
+        }
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":7,"ref":"native-conversation-ack"}"# + "\n")])
+        await core.deactivate()
+
+        // The held events survive a store restart, then apply when inbox paging
+        // eventually loads their request.
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let later = Session(context.identity)
+        later.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"earlier","origin":"origin","as":"message","message":{"title":"Earlier request"},"session_handle":"earlier-handle","request_revision":1,"availability":"not_listening","last_detached_at":null}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        later.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":7}"#)]
+        let resumed = try NativeRelayCore(store: restored, context: context, session: later)
+        _ = try await resumed.resyncAndDrainOutbox()
+
+        let threads = try restored.conversationSnapshot(context: context).threads
+        let thread = try XCTUnwrap(threads[earlier])
+        XCTAssertEqual(thread.availability, .listening)
+        XCTAssertEqual(thread.turns.first { $0.id == ExactText("5") }?.text, ExactText("Hi there"))
+        XCTAssertEqual(thread.facts[ExactText("5")]?.delivered, true)
+        XCTAssertEqual(thread.turns.first { $0.id == ExactText("6") }?.text, ExactText("Hello"))
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 7)
+        XCTAssertEqual(later.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":7,"ref":"native-conversation-ack"}"# + "\n")])
+        await resumed.deactivate()
     }
     func testUnboundTierFactIsDurableBeforeACKAndAppliesWhenDeliveryArrives() async throws {
         let (context, persistence, store, session) = try setup()
