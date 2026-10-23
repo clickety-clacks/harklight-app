@@ -13,6 +13,13 @@ enum InboxItem: Identifiable {
         }
     }
 
+    var resolvedMessageType: HarklightMessageType {
+        switch self {
+        case let .request(row): row.resolvedMessageType
+        case let .example(message, _): message.kind.designMessageType
+        }
+    }
+
     var preview: InboxCardPreview {
         switch self {
         case let .request(row): InboxCardPreview(sender: row.sender, title: row.title, body: row.bodyText ?? "")

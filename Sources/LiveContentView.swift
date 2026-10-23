@@ -14,6 +14,130 @@ struct ReplyEditorFocusKey: PreferenceKey {
     }
 }
 
+private struct ReplyEditorTarget: Hashable {
+    let inputID: String?
+    let actionID: String
+
+    var actionIdentifier: String { actionID }
+
+    var fieldIdentifier: String {
+        if let inputID { "request-input-\(inputID)-response" }
+        else { "request-compatibility-\(actionID)-response" }
+    }
+
+    var summaryIdentifier: String {
+        if let inputID { "request-input-\(inputID)-reply-\(actionID)" }
+        else { "request-compatibility-reply-\(actionID)" }
+    }
+}
+
+private struct ReplyChoiceCard: View {
+    let title: String
+    let detail: String
+    let selected: Bool
+    let text: String
+    let isEditing: Bool
+    let multiple: Bool
+    let suggested: Bool
+    let ownAnswer: Bool
+    let textColor: Color
+    let selectedColor: Color
+    let replySurface: Color
+    let target: ReplyEditorTarget
+    let isReadOnly: Bool
+    let onOpen: () -> Void
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 16)
+        let card = VStack(alignment: .leading, spacing: 0) {
+            MessageChoiceLabel(title: title, detail: detail, selected: selected,
+                               multiple: multiple, suggested: suggested,
+                               ownAnswer: ownAnswer, drawsSurface: false)
+            if !isEditing, !text.isEmpty {
+                Text(text)
+                    .font(.body)
+                    .foregroundStyle(textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(replySurface, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.top, 10)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(selected ? selectedColor : Color.clear, in: shape)
+        .overlay(shape.strokeBorder(selected ? textColor : textColor.opacity(0.30), lineWidth: 1.5))
+        .clipShape(shape)
+        .opacity(selected ? 1 : 0.55)
+        .animation(.smooth(duration: 0.25), value: selected)
+
+        if isEditing {
+            card
+        } else {
+            Button(action: onOpen) {
+                card
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier(target.summaryIdentifier)
+            .accessibilityHint(text.isEmpty ? "Opens the reply field." : "Edit your reply.")
+            .disabled(isReadOnly)
+        }
+    }
+}
+
+private struct ReplyEditorComposer: View {
+    @Binding var text: String
+    @FocusState.Binding var focusedActionID: String?
+    let target: ReplyEditorTarget
+    let textColor: Color
+    let backgroundColor: Color
+    let fieldColor: Color
+    let maximumHeight: CGFloat
+    let onSend: () -> Void
+
+    private var maximumLineCount: Int {
+        let lineHeight = max(UIFont.preferredFont(forTextStyle: .body).lineHeight, 1)
+        return max(1, Int((maximumHeight - 16) / lineHeight))
+    }
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            TextField("Reply", text: $text, axis: .vertical)
+                .lineLimit(1...maximumLineCount)
+                .fixedSize(horizontal: false, vertical: true)
+                .font(.body)
+                .foregroundStyle(textColor)
+                .tint(textColor)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                .background(fieldColor, in: RoundedRectangle(cornerRadius: 14))
+                .focused($focusedActionID, equals: target.actionIdentifier)
+                .accessibilityLabel("Reply")
+                .accessibilityIdentifier(target.fieldIdentifier)
+
+            Button(action: onSend) {
+                Image(systemName: "arrow.up")
+                    .font(.headline.weight(.semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.glassProminent)
+            .buttonBorderShape(.circle)
+            .tint(textColor)
+            .foregroundStyle(backgroundColor)
+            .disabled(!text.contains { !$0.isWhitespace })
+            .accessibilityLabel("Send reply")
+            .accessibilityIdentifier("request-reply-send")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(backgroundColor)
+    }
+}
+
 @MainActor
 struct LiveContentView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -69,7 +193,9 @@ struct LiveContentView: View {
             HarklightInbox(
                 requests: store.inboxRows.map { row in
                     var row = row
-                    if store.conversation(for: row.key) != nil { row.chatUnread = false }
+                    if store.conversation(for: row.key) != nil {
+                        row.chatUnread = store.hasUnreadAgentReply(row.key)
+                    }
                     return row
                 }, samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { key, revision in markSeen(key, requestRevision: revision) },
@@ -175,6 +301,16 @@ struct MessageHeading: View {
     var symbol: String? = nil
     var titleColor: Color = .primary
     var chatUnread: Bool? = nil
+    var secondaryTextColor: Color? = nil
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var neutralTokens: HarklightDesignSource.Neutral {
+        HarklightDesignSystem.palette(for: colorScheme).neutral
+    }
+
+    private var mutedTextColor: Color {
+        secondaryTextColor ?? neutralTokens.secondaryTextColor
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -183,7 +319,7 @@ struct MessageHeading: View {
                     Text(initials)
                         .font(.caption.bold())
                         .frame(width: 28, height: 28)
-                        .background(.quaternary, in: Circle())
+                        .background(titleColor.opacity(0.18), in: Circle())
                 }
                 if let sender {
                     Text(sender).font(.subheadline)
@@ -192,12 +328,12 @@ struct MessageHeading: View {
                 if let createdAt {
                     Text(InboxFriendlyDate.label(for: createdAt))
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(mutedTextColor)
                 }
                 if let chatUnread {
-                    Image(systemName: "bubble.left.and.bubble.right")
+                    Image(systemName: chatUnread ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
                         .font(.caption)
-                        .foregroundStyle(chatUnread ? .blue : .secondary)
+                        .foregroundStyle(chatUnread ? titleColor : mutedTextColor)
                         .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
                 }
             }
@@ -413,7 +549,61 @@ struct LiveRequestDetail: View {
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
     @State private var answerSubmittedHere = false
+    @State private var activeReplyEditor: ReplyEditorTarget?
+    @State private var replyComposerContainerHeight: CGFloat = 0
     @FocusState private var focusedReplyActionID: String?
+
+    private var detailColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(context.messageType)
+    }
+
+    private var replyComposerMaximumHeight: CGFloat {
+        let activeScene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        let window = activeScene?.windows.first(where: \.isKeyWindow)
+            ?? activeScene?.windows.first
+        let screenHeight = window?.bounds.height ?? replyComposerContainerHeight
+        return max(44, screenHeight * 0.3)
+    }
+
+    private var replyEditorSurface: Color {
+        HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
+    }
+
+    private func openReplyEditor(_ target: ReplyEditorTarget) {
+        activeReplyEditor = target
+        focusedReplyActionID = target.actionIdentifier
+    }
+
+    private func closeReplyEditor() {
+        focusedReplyActionID = nil
+        activeReplyEditor = nil
+    }
+
+    private func replyTextBinding(for target: ReplyEditorTarget) -> Binding<String> {
+        Binding(
+            get: {
+                guard let draft = store.draft(for: request.key, revision: request.requestRevision) else {
+                    return ""
+                }
+                if let inputID = target.inputID {
+                    return draft.inputs[ExactText(inputID)]?
+                        .textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
+                }
+                return draft.compatibility.textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
+            },
+            set: { text in
+                guard !controlsReadOnly else { return }
+                if let inputID = target.inputID {
+                    store.stageText(text, input: ExactText(inputID), action: ExactText(target.actionID),
+                                    for: request.key, requestRevision: request.requestRevision)
+                } else {
+                    store.stageCompatibilityText(text, action: ExactText(target.actionID),
+                                                 for: request.key, requestRevision: request.requestRevision)
+                }
+            })
+    }
 
     private var controlsReadOnly: Bool {
         if let localExample {
@@ -473,14 +663,17 @@ struct LiveRequestDetail: View {
             if seenActionIsComplete {
                 Label("Seen", systemImage: "checkmark")
                     .labelStyle(.titleAndIcon)
-                    .foregroundStyle(Color.green)
+                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
                     .font(.headline)
             } else {
                 Image(systemName: "checkmark")
+                    .foregroundStyle(detailColors.textColor)
                     .font(.headline)
             }
         }
-        .tint(seenActionIsComplete ? .green : .blue)
+        .tint(seenActionIsComplete
+              ? HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
+              : detailColors.textColor)
         .opacity(seenActionIsComplete ? 0.76 : (sendControlsDisabled ? 0.48 : 1))
         .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
         .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
@@ -556,10 +749,10 @@ struct LiveRequestDetail: View {
         Button(action: {}) {
             Label("Answered", systemImage: "checkmark")
                 .labelStyle(.titleAndIcon)
-                .foregroundStyle(Color.green)
+                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
                 .font(.headline)
         }
-        .tint(.green)
+        .tint(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
         .opacity(0.76)
         .disabled(true)
         .accessibilityLabel("Answered with green checkmark")
@@ -594,7 +787,7 @@ struct LiveRequestDetail: View {
     }
 
     private func selectNoCommentAction() {
-        focusedReplyActionID = nil
+        closeReplyEditor()
         store.selectNoComment(for: request.key, requestRevision: request.requestRevision)
     }
 
@@ -635,8 +828,7 @@ struct LiveRequestDetail: View {
     }
 
     var body: some View {
-        MessageCardSurface(context: context,
-            backgroundColor: Color(uiColor: .systemBackground)) {
+        MessageCardSurface(context: context) {
             VStack(alignment: .leading, spacing: 12) {
                 Button {
                     requestDetailsPresented = true
@@ -649,12 +841,9 @@ struct LiveRequestDetail: View {
                                title: request.title?.rawValue ?? "Message",
                                createdAt: request.createdAt,
                                symbol: localExample?.message.kind.symbol ?? (request.informationalSeenStatus == nil ? "text.bubble" : "info.circle"),
-                               titleColor: localExample?.message.kind == .error
-                                   ? Color(red: 0.70, green: 0, blue: 0.06)
-                                   : localExample?.message.kind == .warning
-                                       ? Color(red: 0.48, green: 0.30, blue: 0)
-                                       : .primary,
-                               chatUnread: conversationIndicator)
+                               titleColor: detailColors.textColor,
+                               chatUnread: conversationIndicator,
+                               secondaryTextColor: detailColors.secondaryTextColor)
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("request-heading")
@@ -670,7 +859,7 @@ struct LiveRequestDetail: View {
                                   ? "Answered locally · nothing sent"
                                   : "Seen selected locally · nothing sent",
                               systemImage: "checkmark.circle")
-                            .font(.subheadline).foregroundStyle(.secondary)
+                            .font(.subheadline).foregroundStyle(detailColors.secondaryTextColor)
                             .accessibilityIdentifier(localExample.noCommentSelected
                                 ? "request-local-no-comment-status"
                                 : "request-local-answer-status")
@@ -678,26 +867,17 @@ struct LiveRequestDetail: View {
                 }
                 if let thread = store.conversation(for: request.key), thread.currentRevision > 1 {
                     Text(store.hasAcceptedUpdate(for: request.key) ? "Updated · version \(thread.currentRevision)" : "Question version \(thread.currentRevision)")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                         .accessibilityIdentifier("request-update-fact")
                 }
                 if store.isRetracted(request.key) {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                 }
                 if let body = request.body {
-                    if let noticeBodyColor {
-                        Text(MessageTextLinks.attributed(body.rawValue))
-                            .textSelection(.enabled)
-                            .foregroundStyle(noticeTextColor)
-                            .padding(.horizontal, 14).padding(.vertical, 12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(noticeBodyColor, in: RoundedRectangle(cornerRadius: 14))
-                    } else {
-                        Text(MessageTextLinks.attributed(body.rawValue))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    Text(MessageTextLinks.attributed(body.rawValue))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if localExample?.message.kind == .review {
                     SampleDiffView()
@@ -710,7 +890,9 @@ struct LiveRequestDetail: View {
                                                node: sender.scene,
                                                store: store,
                                                readOnly: controlsReadOnly,
-                                               focusedReplyActionID: $focusedReplyActionID,
+                                               activeReplyEditor: activeReplyEditor,
+                                               openReplyEditor: { openReplyEditor($0) },
+                                               closeReplyEditor: closeReplyEditor,
                                                localExample: localExample,
                                                enlargePicture: { enlargedPicture = $0 })
                         if canOfferNoComment { noCommentChoice }
@@ -727,11 +909,13 @@ struct LiveRequestDetail: View {
                                              noCommentSelected: noCommentSelected,
                                              noCommentUnavailable: showsNoCommentUnavailable,
                                              onSelectNoComment: selectNoCommentAction,
-                                             focusedReplyActionID: $focusedReplyActionID)
+                                             activeReplyEditor: activeReplyEditor,
+                                             openReplyEditor: { openReplyEditor($0) },
+                                             closeReplyEditor: closeReplyEditor)
                 case .unsupported:
                     VStack(alignment: .leading, spacing: 10) {
                         Text("This request uses an unsupported answer format.")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(detailColors.secondaryTextColor)
                         if canOfferNoComment { noCommentChoice }
                     }
                 }
@@ -742,32 +926,32 @@ struct LiveRequestDetail: View {
                 }
                 if showsNoCommentUnavailable {
                     Text("No comment was not delivered: this server does not support it. Tap the checkmark to retry.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                         .accessibilityIdentifier("request-no-comment-unavailable")
                 }
                 if request.inboxStateIsCurrent {
                     if store.isRetracted(request.key) {
                         Text(store.retractionLabel(request.key))
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                             .accessibilityIdentifier("request-lifecycle-status")
                     } else if request.lifecycleStatus != .open && request.lifecycleStatus != .answered {
                         Text(String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                             .accessibilityIdentifier("request-lifecycle-status")
                     }
                     if let seenStatus = request.informationalSeenStatus,
                        seenStatus != .available {
                         Label(Self.informationalSeenText(seenStatus),
                               systemImage: Self.informationalSeenSymbol(seenStatus))
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                             .accessibilityIdentifier("informational-seen-status")
                     }
                 } else {
                     Label("Cached history · status not refreshed", systemImage: "clock.arrow.circlepath")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                         .accessibilityIdentifier("inbox-status-unrefreshed")
                     if let localStatus = Self.cachedOperationStatus(request.intentReceipt?.localState) {
-                        Text(localStatus).font(.caption).foregroundStyle(.secondary)
+                        Text(localStatus).font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                     }
                 }
                 if localExample == nil && fixtureStore == nil && request.lifecycleStatus == .pending {
@@ -801,23 +985,57 @@ struct LiveRequestDetail: View {
                 if request.inboxStateIsCurrent, let statusText = answerStatusText {
                     Text(statusText)
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(detailColors.secondaryTextColor)
                         .accessibilityIdentifier("request-receipt-evidence")
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .foregroundStyle(detailColors.textColor)
+        }
+        .background {
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { replyComposerContainerHeight = geometry.size.height }
+                    .onChange(of: geometry.size.height) { _, height in
+                        replyComposerContainerHeight = height
+                    }
+            }
+            .ignoresSafeArea(.keyboard)
         }
         .overlay(alignment: .bottomTrailing) {
-            if focusedReplyActionID == nil {
-                detailChatButton
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.circle)
-                    .controlSize(.large)
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 16)
+            if activeReplyEditor == nil {
+                Group {
+                    if conversationIndicator == true {
+                        detailChatButton
+                            .buttonStyle(.glassProminent)
+                            .foregroundStyle(detailColors.backgroundColor)
+                    } else {
+                        detailChatButton
+                            .buttonStyle(.glass)
+                            .foregroundStyle(detailColors.textColor)
+                    }
+                }
+                .tint(detailColors.textColor)
+                .buttonBorderShape(.circle)
+                .controlSize(.large)
+                .padding(.trailing, 16)
+                .padding(.bottom, 16)
             }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let target = activeReplyEditor {
+                ReplyEditorComposer(text: replyTextBinding(for: target),
+                                    focusedActionID: $focusedReplyActionID,
+                                    target: target,
+                                    textColor: detailColors.textColor,
+                                    backgroundColor: detailColors.backgroundColor,
+                                    fieldColor: replyEditorSurface,
+                                    maximumHeight: replyComposerMaximumHeight,
+                                    onSend: closeReplyEditor)
+            }
+        }
+        .tint(detailColors.textColor)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
@@ -828,10 +1046,13 @@ struct LiveRequestDetail: View {
                     }
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
+                        closeReplyEditor()
                         localExample.finishLocally()
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.glassProminent)
+                    .tint(detailColors.textColor)
+                    .foregroundStyle(detailColors.backgroundColor)
                     .disabled(!localExample.canFinishLocally || localExample.finished)
                     .accessibilityIdentifier("sample-finish")
                 } else if answerIsComplete {
@@ -844,16 +1065,20 @@ struct LiveRequestDetail: View {
                                 ? fixtureStore.sendNoCommentLocally(for: request.key)
                                 : fixtureStore.sendSelectedAnswer(for: request.key)
                             guard sent else { return }
+                            closeReplyEditor()
                             answerSubmittedHere = true
                             try? store.refreshFromDurableStore()
                         } else {
                             guard store.submitFromUser(request.key,
                                                        requestRevision: request.requestRevision) else { return }
+                            closeReplyEditor()
                             answerSubmittedHere = true
                         }
                     }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.glassProminent)
+                        .tint(detailColors.textColor)
+                        .foregroundStyle(detailColors.backgroundColor)
                         .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
@@ -895,6 +1120,18 @@ struct LiveRequestDetail: View {
             else { chatPresented = true }
         }
         .labelStyle(.iconOnly)
+        .overlay(alignment: .topTrailing) {
+            if conversationIndicator == true {
+                Circle()
+                    .fill(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
+                    .frame(width: 12, height: 12)
+                    .overlay {
+                        Circle().strokeBorder(detailColors.textColor, lineWidth: 2)
+                    }
+                    .offset(x: -6, y: 6)
+                    .accessibilityHidden(true)
+            }
+        }
     }
 
     private var requestDetailsSheet: some View {
@@ -936,22 +1173,6 @@ struct LiveRequestDetail: View {
                 }
             }
         }
-    }
-
-    private var noticeBodyColor: Color? {
-        switch localExample?.message.kind {
-        case .some(.error): Color(red: 1, green: 0.89, blue: 0.88)
-        case .some(.warning): Color(red: 1, green: 0.95, blue: 0.80)
-        case .some(.information): informationBodyColor
-        case .some(.completed): Color(red: 0.89, green: 0.96, blue: 0.90)
-        default: request.informationalSeenStatus == nil ? nil : informationBodyColor
-        }
-    }
-
-    private var informationBodyColor: Color {
-        colorScheme == .dark
-            ? Color(uiColor: .secondarySystemBackground)
-            : Color(red: 0.89, green: 0.94, blue: 1)
     }
 
     private var conversationIndicator: Bool? {
@@ -1022,7 +1243,6 @@ struct HistoricalAnswerDraftView: View {
     let request: PresentedRequest
     let store: LivePresentationStore
     var retracted = false
-    @FocusState private var focusedReplyActionID: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(request.title?.rawValue ?? "Earlier question").font(.headline)
@@ -1032,13 +1252,11 @@ struct HistoricalAnswerDraftView: View {
             switch request.projection {
             case let .sender(sender):
                 LiveProjectedSceneView(request: request, sender: sender, node: sender.scene,
-                                       store: store, readOnly: true,
-                                       focusedReplyActionID: $focusedReplyActionID)
+                                       store: store, readOnly: true)
             case let .compatibility(actions):
                 LiveCompatibilityActions(request: request, actions: actions, store: store,
                                          readOnly: true,
-                                         sendDisabled: true,
-                                         focusedReplyActionID: $focusedReplyActionID)
+                                         sendDisabled: true)
             case .unsupported:
                 Text("This saved answer format cannot be displayed.").font(.caption)
             }
@@ -1053,7 +1271,9 @@ private struct LiveProjectedSceneView: View {
     let node: ProjectedSceneNode
     let store: LivePresentationStore
     let readOnly: Bool
-    @FocusState.Binding var focusedReplyActionID: String?
+    var activeReplyEditor: ReplyEditorTarget? = nil
+    var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
+    var closeReplyEditor: () -> Void = {}
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
 
@@ -1091,7 +1311,9 @@ private struct LiveProjectedSceneView: View {
                                        readOnly: readOnly,
                                        localExample: localExample,
                                        enlargePicture: enlargePicture,
-                                       focusedReplyActionID: $focusedReplyActionID)
+                                       activeReplyEditor: activeReplyEditor,
+                                       openReplyEditor: openReplyEditor,
+                                       closeReplyEditor: closeReplyEditor)
             }
         case let .resultPoint(illustrationID, label, point):
             if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
@@ -1111,7 +1333,9 @@ private struct LiveProjectedSceneView: View {
     private func childView(_ child: ProjectedSceneNode) -> some View {
         LiveProjectedSceneView(request: request, sender: sender,
                                node: child, store: store, readOnly: readOnly,
-                               focusedReplyActionID: $focusedReplyActionID,
+                               activeReplyEditor: activeReplyEditor,
+                               openReplyEditor: openReplyEditor,
+                               closeReplyEditor: closeReplyEditor,
                                localExample: localExample, enlargePicture: enlargePicture)
     }
 }
@@ -1126,12 +1350,18 @@ private struct LiveProjectedInputView: View {
     let readOnly: Bool
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
+    var activeReplyEditor: ReplyEditorTarget? = nil
+    var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
+    var closeReplyEditor: () -> Void = {}
     @State private var pointGestureCapture = PointGestureCapture()
     @State private var typedInputTextByRevision: [UInt64: String] = [:]
-    @State private var replyEditorTextsByRevision: [UInt64: [ExactText: String]] = [:]
     @GestureState private var pointGestureActive = false
-    @FocusState.Binding var focusedReplyActionID: String?
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var detailColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    }
 
     private var draft: InputDraft? {
         readOnly ? request.draft.inputs[input.id]
@@ -1152,16 +1382,18 @@ private struct LiveProjectedInputView: View {
     private var textEditor: some View {
         TextField(input.label.rawValue, text: textBinding, axis: .vertical)
             .lineLimit(4...8)
-            .textFieldStyle(.roundedBorder)
+            .textFieldStyle(.plain)
+            .foregroundStyle(detailColors.textColor)
+            .tint(detailColors.textColor)
+            .padding(8)
+            .background(replyEditorSurface, in: RoundedRectangle(cornerRadius: 8))
             .accessibilityLabel(input.label.rawValue)
             .accessibilityIdentifier("request-input-" + input.id.rawValue)
             .disabled(readOnly)
     }
 
     private var replyEditorSurface: Color {
-        colorScheme == .dark
-            ? Color(uiColor: .secondarySystemBackground)
-            : Color(red: 0.96, green: 0.975, blue: 1)
+        HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
     }
 
     private func activate(_ action: ProjectedAction) {
@@ -1176,7 +1408,12 @@ private struct LiveProjectedInputView: View {
                                    requestRevision: request.requestRevision)
             }
         } completion: {
-            focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
+            if action.kind == .text {
+                openReplyEditor(ReplyEditorTarget(inputID: input.id.rawValue,
+                                                  actionID: action.id.rawValue))
+            } else {
+                closeReplyEditor()
+            }
         }
     }
 
@@ -1187,49 +1424,17 @@ private struct LiveProjectedInputView: View {
         let detail = localExample != nil && action.id.rawValue == "own"
             ? "Write it here, or say why none of these fit."
             : ""
-        let cardShape = RoundedRectangle(cornerRadius: 16)
-        let card = VStack(spacing: 0) {
-            MessageChoiceLabel(title: action.label.rawValue, detail: detail,
-                               selected: selected, multiple: false, suggested: false,
-                               ownAnswer: action.id.rawValue == "own", drawsSurface: false)
-            TextEditor(text: Binding(
-                get: {
-                    replyEditorTextsByRevision[request.requestRevision]?[action.id] ??
-                        draft?.textByActionID[action.id]?.rawValue ?? text
-                },
-                set: {
-                    var revisionTexts = replyEditorTextsByRevision[request.requestRevision] ?? [:]
-                    revisionTexts[action.id] = $0
-                    replyEditorTextsByRevision[request.requestRevision] = revisionTexts
-                    store.stageText($0, input: input.id, action: action.id, for: request.key,
-                                    requestRevision: request.requestRevision)
-                }
-            ))
-            .font(.body)
-            .foregroundStyle(.primary)
-            .scrollContentBackground(.hidden)
-            .frame(minHeight: 120)
-            .padding(8)
-            .background(replyEditorSurface)
-            .focused($focusedReplyActionID, equals: action.id.rawValue)
-            .accessibilityLabel(action.label.rawValue)
-            .accessibilityIdentifier("request-input-" + input.id.rawValue + "-response")
-            .disabled(readOnly || !selected)
-        }
-        .background(selected ? Color.blue : Color(uiColor: .secondarySystemBackground), in: cardShape)
-        .overlay(cardShape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
-        .clipShape(cardShape)
-        .opacity(selected ? 1 : 0.55)
-        .animation(.smooth(duration: 0.25), value: selected)
-
-        if selected {
-            card
-        } else {
-            Button { activate(action) } label: { card }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(.isButton)
-                .disabled(readOnly)
-        }
+        let target = ReplyEditorTarget(inputID: input.id.rawValue, actionID: action.id.rawValue)
+        ReplyChoiceCard(title: action.label.rawValue, detail: detail,
+                        selected: selected, text: text,
+                        isEditing: activeReplyEditor == target,
+                        multiple: false, suggested: false,
+                        ownAnswer: action.id.rawValue == "own",
+                        textColor: detailColors.textColor,
+                        selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
+                        replySurface: replyEditorSurface,
+                        target: target, isReadOnly: readOnly,
+                        onOpen: { activate(action) })
     }
 
     var body: some View {
@@ -1406,9 +1611,19 @@ private struct LiveCompatibilityActions: View {
     var noCommentSelected = false
     var noCommentUnavailable = false
     var onSelectNoComment: () -> Void = {}
-    @State private var replyTextByRevision: [UInt64: [ExactText: String]] = [:]
-    @FocusState.Binding var focusedReplyActionID: String?
+    var activeReplyEditor: ReplyEditorTarget? = nil
+    var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
+    var closeReplyEditor: () -> Void = {}
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var detailColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    }
+
+    private var seenColor: Color {
+        HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
+    }
 
     private var selected: ExactText? {
         readOnly ? request.draft.compatibility.selectedActionID
@@ -1421,18 +1636,16 @@ private struct LiveCompatibilityActions: View {
             request.informationalSeenStatus == .confirmed
     }
 
-    private var replyEditorSurface: Color {
-        colorScheme == .dark
-            ? Color(uiColor: .secondarySystemBackground)
-            : Color(red: 0.96, green: 0.975, blue: 1)
-    }
-
     private func activate(_ action: ProjectedAction) {
         withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
             store.selectAction(action.id, input: nil, for: request.key,
                                requestRevision: request.requestRevision)
         } completion: {
-            focusedReplyActionID = action.kind == .text ? action.id.rawValue : nil
+            if action.kind == .text {
+                openReplyEditor(ReplyEditorTarget(inputID: nil, actionID: action.id.rawValue))
+            } else {
+                closeReplyEditor()
+            }
         }
     }
 
@@ -1441,51 +1654,19 @@ private struct LiveCompatibilityActions: View {
                                      selected: Bool,
                                      detail: String,
                                      text: String) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 16)
-        let card = VStack(spacing: 0) {
-            MessageChoiceLabel(title: action.label.rawValue, detail: detail,
-                               selected: selected, multiple: false, suggested: false,
-                               drawsSurface: false)
-            TextEditor(text: Binding(
-                get: {
-                    replyTextByRevision[request.requestRevision]?[action.id] ??
-                        (readOnly ? request.draft.compatibility
-                                  : store.draft(for: request.key, revision: request.requestRevision)?.compatibility)?
-                            .textByActionID[action.id]?.rawValue ?? text
-                },
-                set: {
-                    var revisionTexts = replyTextByRevision[request.requestRevision] ?? [:]
-                    revisionTexts[action.id] = $0
-                    replyTextByRevision[request.requestRevision] = revisionTexts
-                    store.stageCompatibilityText($0, action: action.id, for: request.key,
-                                                 requestRevision: request.requestRevision)
-                }
-            ))
-            .font(.body)
-            .foregroundStyle(.primary)
-            .scrollContentBackground(.hidden)
-            .frame(minHeight: 120)
-            .padding(8)
-            .background(replyEditorSurface)
-            .focused($focusedReplyActionID, equals: action.id.rawValue)
-            .accessibilityLabel(action.label.rawValue)
-            .accessibilityIdentifier("request-compatibility-" + action.id.rawValue + "-response")
-            .disabled(readOnly || !selected)
-        }
-        .background(selected ? Color.blue : Color(uiColor: .secondarySystemBackground), in: shape)
-        .overlay(shape.strokeBorder(selected ? Color.blue : Color(uiColor: .separator), lineWidth: 1.5))
-        .clipShape(shape)
-        .opacity(selected ? 1 : 0.55)
-        .animation(.smooth(duration: 0.25), value: selected)
-
-        if selected {
-            card
-        } else {
-            Button { activate(action) } label: { card }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(.isButton)
-                .disabled(readOnly)
-        }
+        let target = ReplyEditorTarget(inputID: nil, actionID: action.id.rawValue)
+        let suggested = localExample?.message.options.first { $0.id == action.id.rawValue }.map {
+            if case .suggested = $0.role { true } else { false }
+        } ?? false
+        ReplyChoiceCard(title: action.label.rawValue, detail: detail,
+                        selected: selected, text: text,
+                        isEditing: activeReplyEditor == target,
+                        multiple: false, suggested: suggested, ownAnswer: false,
+                        textColor: detailColors.textColor,
+                        selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
+                        replySurface: HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor,
+                        target: target, isReadOnly: readOnly,
+                        onOpen: { activate(action) })
     }
 
     @ViewBuilder
@@ -1504,15 +1685,15 @@ private struct LiveCompatibilityActions: View {
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: seenActionIsComplete ? "checkmark" : "eye")
-                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.blue)
+                            .foregroundStyle(seenActionIsComplete ? seenColor : detailColors.textColor)
                         Text(seenActionIsComplete ? "Seen" : (actions.first?.label.rawValue ?? "Seen"))
-                            .foregroundStyle(seenActionIsComplete ? Color.green : Color.primary)
+                            .foregroundStyle(seenActionIsComplete ? seenColor : detailColors.textColor)
                     }
                     .font(.headline)
                     .frame(maxWidth: .infinity, minHeight: 50)
                 }
-                .buttonStyle(.plain)
-                .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
+                .buttonStyle(.glass)
+                .tint(seenActionIsComplete ? seenColor : detailColors.textColor)
                 .disabled(sendDisabled || seenStatus != .available)
                 .opacity(seenActionIsComplete ? 0.76 : (sendDisabled ? 0.48 : 1))
                 .accessibilityIdentifier("request-seen-action")
@@ -1524,10 +1705,9 @@ private struct LiveCompatibilityActions: View {
                 ForEach(actions, id: \.id) { action in
                     let option = localExample?.message.options.first { $0.id == action.id.rawValue }
                     let isSelected = selected == action.id
-                    let replyText = replyTextByRevision[request.requestRevision]?[action.id] ??
-                        (readOnly ? request.draft.compatibility
-                                  : store.draft(for: request.key, revision: request.requestRevision)?.compatibility)?
-                            .textByActionID[action.id]?.rawValue ?? ""
+                    let replyText = (readOnly ? request.draft.compatibility
+                                              : store.draft(for: request.key, revision: request.requestRevision)?.compatibility)?
+                        .textByActionID[action.id]?.rawValue ?? ""
                     if action.kind == .text && (isSelected || !replyText.isEmpty) {
                         compatibilityChoice(action, selected: isSelected, detail: option?.detail ?? "",
                                             text: replyText)
@@ -1536,8 +1716,7 @@ private struct LiveCompatibilityActions: View {
                             MessageChoiceLabel(title: action.label.rawValue,
                                     detail: option?.detail ?? "",
                                     selected: isSelected, multiple: false,
-                                    suggested: option.map { if case .suggested = $0.role { true } else { false } } ?? false,
-                                    selectionColor: option.map { if case .destructive = $0.role { .red } else { .blue } } ?? .blue)
+                                    suggested: option.map { if case .suggested = $0.role { true } else { false } } ?? false)
                         }
                         .buttonStyle(.plain)
                         .accessibilityAddTraits(isSelected ? .isSelected : [])

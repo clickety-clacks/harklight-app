@@ -21,6 +21,8 @@ targets:
       - path: Sources
       - path: Resources
         buildPhase: resources
+      - path: Design/tokens.json
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.Harklight
@@ -52,6 +54,8 @@ targets:
       - path: UITestHost
       - path: Resources
         buildPhase: resources
+      - path: Design/tokens.json
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.attentionclient.duo-prototype.uitesthost
@@ -68,6 +72,8 @@ targets:
     sources:
       - path: Tests
       - path: Resources
+        buildPhase: resources
+      - path: Design/tokens.json
         buildPhase: resources
     dependencies:
       - package: AttentionDomain
