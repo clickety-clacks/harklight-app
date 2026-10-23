@@ -38,9 +38,9 @@ final class InboxStockTabsUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let inboxTab = app.tabBars.buttons["Inbox"]
-        let repliedTab = app.tabBars.buttons["Replied"]
-        let searchTab = app.tabBars.buttons["Search"]
+        let inboxTab = workspaceTab("Inbox", in: app)
+        let repliedTab = workspaceTab("Replied", in: app)
+        let searchTab = workspaceTab("Search", in: app)
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(searchTab.exists, app.debugDescription)
@@ -146,8 +146,8 @@ final class InboxStockTabsUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation"]
         app.launch()
 
-        let inboxTab = app.tabBars.buttons["Inbox"]
-        let searchTab = app.tabBars.buttons["Search"]
+        let inboxTab = workspaceTab("Inbox", in: app)
+        let searchTab = workspaceTab("Search", in: app)
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         searchTab.tap()
 
@@ -185,7 +185,7 @@ final class InboxStockTabsUITests: XCTestCase {
         let closeSearch = app.buttons["Close"]
         if closeSearch.exists { closeSearch.tap() }
 
-        let destination = app.tabBars.buttons[title]
+        let destination = workspaceTab(title, in: app)
         XCTAssertTrue(destination.waitForExistence(timeout: 5), app.debugDescription,
                       file: file, line: line)
         if !destination.isSelected { destination.tap() }

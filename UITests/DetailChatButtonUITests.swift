@@ -17,7 +17,7 @@ final class DetailChatButtonUITests: XCTestCase {
         app.launch()
 
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
-        let searchTab = app.tabBars.buttons["Search"]
+        let searchTab = workspaceTab("Search", in: app)
         if searchTab.exists && !searchTab.isSelected { searchTab.tap() }
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
