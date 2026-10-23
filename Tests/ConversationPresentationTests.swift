@@ -6,6 +6,12 @@ import XCTest
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testNotListeningShowsTheDetachTimeAsADateNotEpochMilliseconds() {
+        let date = Date(timeIntervalSince1970: 1_792_701_232.529)
+        XCTAssertEqual(ConversationAvailabilityLabel.notListeningText(since: ExactText("1792701232529")),
+            "Agent not listening since " + date.formatted(date: .abbreviated, time: .shortened))
+        XCTAssertEqual(ConversationAvailabilityLabel.notListeningText(since: nil), "Agent not listening")
+    }
     func testInlineTurnAndDraftBytesStayBehindReferencesAcrossTextOnlyComposerWrites() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
