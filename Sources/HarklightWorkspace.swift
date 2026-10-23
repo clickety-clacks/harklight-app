@@ -758,6 +758,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Button("Review message") {
                 conversationStore?.dismissStaleAnswerDialog()
                 settings = false
+                chatOpen = false
                 workspaceTab = .inbox
                 selectedTab = .inbox
                 search = ""
