@@ -390,7 +390,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func currentItem(for selection: InboxSelection) -> InboxItem? {
         if case let .request(key) = selection,
-           let request = conversationStore?.inboxRows.first(where: { $0.key == key }) {
+           let request = conversationStore?.inboxRow(for: key) {
             return .request(request)
         }
         return rows.first { $0.id == selection }

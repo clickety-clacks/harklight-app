@@ -264,6 +264,9 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertFalse(model.isRetractionCleared(openKey), "Only a retracted row can be cleared")
         model.clearRetracted(retractedKey)
         XCTAssertEqual(Set(model.inboxRows.map(\.key)), [staleKey, openKey])
+        XCTAssertNil(model.inboxRow(for: retractedKey), "A direct detail lookup must not reintroduce a cleared row")
+        XCTAssertEqual(model.inboxRow(for: openKey)?.status,
+                       try XCTUnwrap(model.inboxRows.first { $0.key == openKey }).status)
         XCTAssertTrue(model.isRetracted(retractedKey), "Clearing hides the row; the retracted record stays")
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty, "Clearing sends no frame")
         XCTAssertEqual(try domain.snapshot(context: context).requests.count, 3)
