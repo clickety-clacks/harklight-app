@@ -747,7 +747,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             }
             let submission = currentIntents.first { candidate in
                 if candidate.isNoComment, case .unsupported = candidate.disposition { return false }
-                switch candidate.disposition {
+                return switch candidate.disposition {
                 case .failed, .staleRevision: false
                 default: true
                 }
