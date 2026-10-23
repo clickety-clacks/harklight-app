@@ -391,8 +391,9 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(seenAction.isEnabled,
                       "The restored body Seen action performs the same response as the toolbar check.")
         XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1)
-        XCTAssertFalse(app.buttons["request-later-action"].exists,
-                       "The bottom glass clock is the only Later action in card mode.")
+        XCTAssertFalse(app.buttons["Later"].exists,
+                       "Request detail does not offer a Later action.")
+        XCTAssertFalse(app.staticTexts["Not now"].exists)
         let finishSeen = app.buttons["request-finish-seen"]
         if !finishSeen.exists || !finishSeen.isEnabled {
             attachScreenshot("Seen toolbar before action", from: app)

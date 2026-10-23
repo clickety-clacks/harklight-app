@@ -62,7 +62,6 @@ final class SampleLibraryTests: XCTestCase {
         for response in library.responses.values {
             response.choose("example", multiple: false)
             response.finished = true
-            response.deferred = true
             response.chatDraft = "Never deliver this"
             response.attachments = ["Local photo"]
             response.sendLocalChat()

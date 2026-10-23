@@ -408,7 +408,6 @@ struct LiveRequestDetail: View {
     }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
-    @State private var deferred = false
     @State private var chatPresented = false
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
@@ -675,12 +674,6 @@ struct LiveRequestDetail: View {
                             .accessibilityIdentifier(localExample.noCommentSelected
                                 ? "request-local-no-comment-status"
                                 : "request-local-answer-status")
-                    } else if localExample.deferred {
-                        HStack {
-                            Label("Deferred locally", systemImage: "clock")
-                            Spacer()
-                            Button("Undo") { localExample.deferred = false }
-                        }.font(.subheadline)
                     }
                 }
                 if let thread = store.conversation(for: request.key), thread.currentRevision > 1 {
@@ -691,13 +684,6 @@ struct LiveRequestDetail: View {
                 if store.isRetracted(request.key) {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
                         .font(.caption).foregroundStyle(.secondary)
-                }
-                if localExample == nil && deferred {
-                    HStack {
-                        Label("Not now", systemImage: "clock")
-                        Spacer()
-                        Button("Undo") { deferred = false }
-                    }.font(.subheadline)
                 }
                 if let body = request.body {
                     if let noticeBodyColor {
@@ -822,6 +808,16 @@ struct LiveRequestDetail: View {
             .padding(.horizontal, 16).padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .overlay(alignment: .bottomTrailing) {
+            if focusedReplyActionID == nil {
+                detailChatButton
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.large)
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 16)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
@@ -862,48 +858,7 @@ struct LiveRequestDetail: View {
                         .accessibilityIdentifier("request-finish")
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
-                if horizontalSizeClass == .regular && UIDevice.current.userInterfaceIdiom == .phone {
-                    if context.openChat == nil {
-                        chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                            conversationPanel.frame(idealWidth: 380, idealHeight: 560)
-                        }
-                    } else {
-                        chatButton
-                    }
-                }
-            }
-            ToolbarItemGroup(placement: .bottomBar) {
-                if horizontalSizeClass == .compact {
-                    Spacer()
-                    compactBottomControls
-                    Spacer()
-                } else {
-                Button("Later", systemImage: "clock") {
-                    if let localExample { localExample.deferred.toggle() }
-                    else { deferred.toggle() }
-                }
-                .labelStyle(.iconOnly)
-                .disabled(store.isReadOnly || store.isRetracted(request.key) || localExample?.finished == true)
-                Spacer()
-                if horizontalSizeClass != .regular || UIDevice.current.userInterfaceIdiom != .phone {
-                    if context.openChat != nil || context.canInlineChat {
-                        chatButton
-                    } else if horizontalSizeClass == .compact {
-                        chatButton.sheet(isPresented: $chatPresented) {
-                            conversationPanel
-                                .presentationDetents([.medium, .large])
-                        }
-                    } else if UIDevice.current.userInterfaceIdiom != .phone {
-                        chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                            conversationPanel.frame(idealWidth: 380, idealHeight: 560)
-                        }
-                    }
-                }
-                }
-            }
         }
-        .toolbar(focusedReplyActionID == nil ? .visible : .hidden, for: .bottomBar)
         .onChange(of: submissionIsConfirmedAccepted) { _, confirmed in
             guard confirmed, answerSubmittedHere, horizontalSizeClass == .compact else { return }
             context.dismissToList?()
@@ -918,6 +873,22 @@ struct LiveRequestDetail: View {
             if inline { chatPresented = false }
         }
         .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
+    }
+
+    @ViewBuilder
+    private var detailChatButton: some View {
+        if context.openChat != nil || context.canInlineChat {
+            chatButton
+        } else if horizontalSizeClass == .compact {
+            chatButton.sheet(isPresented: $chatPresented) {
+                conversationPanel
+                    .presentationDetents([.medium, .large])
+            }
+        } else {
+            chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
+                conversationPanel.frame(idealWidth: 380, idealHeight: 560)
+            }
+        }
     }
 
     private var chatButton: some View {
@@ -966,28 +937,6 @@ struct LiveRequestDetail: View {
                     Button("Done") { requestDetailsPresented = false }
                         .accessibilityIdentifier("request-details-done")
                 }
-            }
-        }
-    }
-
-    private var compactBottomControls: some View {
-        HStack(spacing: 0) {
-            Button("Later", systemImage: "clock") {
-                if let localExample { localExample.deferred.toggle() }
-                else { deferred.toggle() }
-            }
-            .labelStyle(.iconOnly)
-            .frame(width: 58, height: 52)
-            .disabled(store.isReadOnly || store.isRetracted(request.key) || localExample?.finished == true)
-
-            if context.openChat != nil || context.canInlineChat {
-                chatButton.frame(width: 58, height: 52)
-            } else {
-                chatButton
-                    .frame(width: 58, height: 52)
-                    .sheet(isPresented: $chatPresented) {
-                        conversationPanel.presentationDetents([.medium, .large])
-                    }
             }
         }
     }
