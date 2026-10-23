@@ -572,6 +572,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(columnVisibility: $visibility) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
+                  usesSidebarToolbarHeader: horizontalSizeClass == .regular,
                   isRefreshing: isRefreshing,
                   prioritizationReasons: prioritizationReasons,
                   showsBasicOrderMarker: showsBasicOrderMarker,
@@ -599,6 +600,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                              geometry: GeometryProxy) -> some View {
         NavigationStack(path: $searchPath) {
             InboxList(tab: .search, rows: rows, warnings: visibleWarnings,
+                  usesSidebarToolbarHeader: horizontalSizeClass == .regular,
                   isRefreshing: isRefreshing,
                   prioritizationReasons: prioritizationReasons,
                   showsBasicOrderMarker: showsBasicOrderMarker,
@@ -777,9 +779,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
 @MainActor
 struct InboxList: View {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-
     let tab: InboxWorkspaceTab
+    let usesSidebarToolbarHeader: Bool
     let rows: [InboxItem]
     let warnings: [String]
     var isRefreshing = false
@@ -1041,7 +1042,7 @@ struct InboxList: View {
         .background { Color(uiColor: .systemBackground).ignoresSafeArea() }
         .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .top, spacing: 0) {
-            if horizontalSizeClass == .compact {
+            if !usesSidebarToolbarHeader {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack {
                         brandAndStatusHeader
@@ -1058,7 +1059,7 @@ struct InboxList: View {
             }
         }
         .toolbar {
-            if horizontalSizeClass == .regular {
+            if usesSidebarToolbarHeader {
                 ToolbarItem(placement: .topBarLeading) {
                     brandAndStatusHeader
                 }
@@ -1075,7 +1076,7 @@ struct InboxList: View {
             }
         }
         .toolbarMinimizationBehavior(
-            horizontalSizeClass == .regular && tab != .search ? .onScrollDown : .never,
+            usesSidebarToolbarHeader && tab != .search ? .onScrollDown : .never,
             for: .navigationBar)
         .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
         .onAppear {
