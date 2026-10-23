@@ -1013,6 +1013,8 @@ struct InboxList: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
                         .background(Color.accentColor.opacity(0.14), in: Capsule())
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Refreshing")
                         .accessibilityIdentifier("inbox-refreshing-badge")
                     }
                     if !warnings.isEmpty {
