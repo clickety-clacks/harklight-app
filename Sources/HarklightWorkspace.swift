@@ -302,6 +302,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var conversationStore: LivePresentationStore? = nil
     var fetchOlderInboxPage: (() async -> Bool)? = nil
     var showsLocalExamples = true
+    var prioritizationReasons: [RequestKey: String] = [:]
+    var showsBasicOrderMarker = false
     var notificationNavigation: NativeInboxNavigation? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: InboxSelection?
@@ -561,6 +563,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(columnVisibility: $visibility) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
+                  prioritizationReasons: prioritizationReasons,
+                  showsBasicOrderMarker: showsBasicOrderMarker,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
@@ -585,6 +589,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                              geometry: GeometryProxy) -> some View {
         NavigationStack(path: $searchPath) {
             InboxList(tab: .search, rows: rows, warnings: visibleWarnings,
+                  prioritizationReasons: prioritizationReasons,
+                  showsBasicOrderMarker: showsBasicOrderMarker,
                   isWarningPresented: warningPresentationBinding(for: .search),
                   selected: navigationSelection,
                       selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
@@ -782,6 +788,8 @@ struct InboxList: View {
     let tab: InboxWorkspaceTab
     let rows: [InboxItem]
     let warnings: [String]
+    let prioritizationReasons: [RequestKey: String]
+    let showsBasicOrderMarker: Bool
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var selectedTab: InboxMessageTab
@@ -877,14 +885,16 @@ struct InboxList: View {
         switch row {
         case let .request(request):
             NavigationLink(value: row.id) {
-                InboxRowContent(row: request, selected: isSelected)
+                InboxRowContent(row: request, selected: isSelected,
+                                prioritizationReason: prioritizationReasons[request.key])
             }
             .buttonStyle(.plain)
             .navigationLinkIndicatorVisibility(.hidden)
         case let .example(_, response):
             if let request = response.inboxRow {
                 NavigationLink(value: row.id) {
-                    InboxRowContent(row: request, selected: isSelected)
+                    InboxRowContent(row: request, selected: isSelected,
+                                    prioritizationReason: prioritizationReasons[request.key])
                 }
                 .buttonStyle(.plain)
                 .navigationLinkIndicatorVisibility(.hidden)
@@ -961,6 +971,16 @@ struct InboxList: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     HarklightBrand().accessibilityIdentifier("inbox-brand")
+                    if showsBasicOrderMarker, tab == .inbox,
+                       workspaceTab == .inbox, selectedTab == .inbox {
+                        Label("Basic order", systemImage: "arrow.down.circle")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                            .accessibilityIdentifier("inbox-basic-order")
+                    }
                     if !warnings.isEmpty {
                         Button {
                             isWarningPresented = true
@@ -1107,6 +1127,7 @@ private struct InboxScrollMetrics: Equatable {
 struct InboxRowContent: View {
     let row: InboxRequestRow
     var selected = false
+    var prioritizationReason: String? = nil
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -1164,6 +1185,13 @@ struct InboxRowContent: View {
                     .foregroundStyle(row.isResolved ? Color(uiColor: .tertiaryLabel) : .secondary)
                     .lineLimit(row.tier.bodyLineLimit)
                     .truncationMode(.tail)
+            }
+            if let prioritizationReason {
+                Text(verbatim: prioritizationReason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("inbox-order-reason")
             }
             if !row.isResolved && !row.status.isEmpty && row.status != "Open" {
                 Text(row.status).font(.caption2).foregroundStyle(.secondary)

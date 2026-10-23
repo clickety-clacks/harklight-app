@@ -1156,6 +1156,51 @@ final class NativeGuidedTLSTests: XCTestCase {
         await session.close()
     }
 
+    func testViewChangeDuringInboxPageIsDeliveredSeparatelyFromItsReply() async throws {
+        let namespace = "Harklight.relay-inbox-view-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            if text.contains("\"inbox_attach\"") {
+                return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"attach\",\"paging_version\":1,"
+                            + "\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        "{\"v\":1,\"type\":\"resynced\"}\n"]
+            }
+            if text.contains("\"inbox_page\"") {
+                return ["{\"v\":1,\"type\":\"view_changed\",\"view_rev\":\"view-2\"}\n",
+                        "{\"v\":1,\"type\":\"ok\",\"ref\":\"page\"}\n"]
+            }
+            return []
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(
+            profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+
+        try await session.attachInboxReplay(
+            Data(#"{"v":1,"type":"inbox_attach","ref":"attach"}"#.utf8) + Data([0x0A]),
+            ref: "attach") { _ in }
+        let page = try await session.inboxRequest(
+            Data(#"{"v":1,"type":"inbox_page","ref":"page"}"#.utf8) + Data([0x0A]),
+            ref: "page")
+        XCTAssertEqual(try JSONValue.parse(page).uniqueValue(named: "ref")?.stringValue?.rawValue, "page")
+
+        let notice = try await session.nextPostCheckpointInboxEvent()
+        let value = try JSONValue.parse(notice)
+        XCTAssertEqual(value.uniqueValue(named: "type")?.stringValue?.rawValue, "view_changed")
+        XCTAssertEqual(value.uniqueValue(named: "view_rev")?.stringValue?.rawValue, "view-2")
+        await session.close()
+    }
+
     func testLongConversationCatchUpWithASlowConsumerDeliversEveryEntryInOrder() async throws {
         let namespace = "Harklight.relay-conversation-catch-up-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()

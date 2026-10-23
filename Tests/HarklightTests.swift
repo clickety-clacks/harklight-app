@@ -1,8 +1,52 @@
 import XCTest
 @testable import Harklight
 import AttentionDomain
+import HarklightNativeRelay
 
 final class HarklightTests: XCTestCase {
+    @MainActor
+    func testInboxOrderUsesServerWaitingOrderThenLocalAndResolvedOrder() {
+        func row(_ id: String, isResolved: Bool = false) -> InboxRequestRow {
+            InboxRequestRow(
+                key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                messageID: ExactText(id)),
+                title: id, sender: "Assistant", status: isResolved ? "Answered" : "Open",
+                isResolved: isResolved)
+        }
+        let waitingA = row("a")
+        let waitingB = row("b")
+        let waitingC = row("c")
+        let resolved = row("resolved", isResolved: true)
+        let notHeld = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                 messageID: ExactText("not-held"))
+        let view = InboxOrderView(revision: "view-1", algorithm: .jevSet, basis: .selected,
+            entries: [
+                InboxOrderEntry(key: waitingB.key, reason: "Due soon"),
+                InboxOrderEntry(key: notHeld, reason: "Not loaded yet"),
+                InboxOrderEntry(key: waitingA.key)
+            ])
+
+        let ordered = InboxOrderPresentationRules.ordered(
+            [waitingA, resolved, waitingB, waitingC], by: view)
+        XCTAssertEqual(ordered.map(\.key), [waitingB.key, waitingA.key, waitingC.key, resolved.key])
+        XCTAssertEqual(InboxOrderPresentationRules.reasons(in: view), [waitingB.key: "Due soon"])
+    }
+
+    @MainActor
+    func testBasicOrderMarkerFollowsOnlyTheServerReportedFallbackBasis() {
+        let fallback = InboxOrderView(revision: "fallback", algorithm: .jevSet, basis: .fallback,
+                                      entries: [])
+        let selectedJev = InboxOrderView(revision: "selected-jev", algorithm: .jevSet,
+                                         basis: .selected, entries: [])
+        let selectedBaseline = InboxOrderView(revision: "selected-baseline", algorithm: .baseline,
+                                              basis: .selected, entries: [])
+
+        XCTAssertTrue(InboxOrderPresentationRules.showsBasicOrder(in: fallback))
+        XCTAssertFalse(InboxOrderPresentationRules.showsBasicOrder(in: selectedJev))
+        XCTAssertFalse(InboxOrderPresentationRules.showsBasicOrder(in: selectedBaseline))
+        XCTAssertFalse(InboxOrderPresentationRules.showsBasicOrder(in: nil))
+    }
+
     @MainActor
     func testSearchProjectionUsesOnlyMatchingRowsInTheSelectedMessageTab() {
         let inboxMatch = InboxRequestRow(
