@@ -2411,6 +2411,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard var conversation = next.conversation, var thread = conversation.threads[request] else { return [] }
         let committed = Set(thread.turns.compactMap(\.operationID))
         let groups = (thread.uploadGroups ?? [:]).values.filter { $0.cleanupID == nil && !committed.contains($0.operationID) }
+        guard !groups.isEmpty else {
+            return (thread.uploadCleanups ?? [:]).values.filter {
+                if case .acknowledged = $0.outcome { return false }; return true
+            }
+        }
         for revision in Set(groups.map { $0.binding.revision }) {
             let operations = groups.filter { $0.binding.revision == revision }.map(\.operationID)
                 .sorted { $0.uuidString < $1.uuidString }
