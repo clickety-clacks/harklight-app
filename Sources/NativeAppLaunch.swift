@@ -650,8 +650,8 @@ final class NativeAppLaunch {
         let store = try AttentionDomainStore(context: installation.context, persistence: persistence,
                                              conversationFileReferences: fileStorage)
         let presentation = try LivePresentationStore(store: store, context: installation.context,
-                                                     diagnostics: diagnostics,
-                                                     inboxOrderPresentation: NativeRelayLifecycle.shared.inboxOrderPresentation)
+                                                     inboxOrderPresentation: NativeRelayLifecycle.shared.inboxOrderPresentation,
+                                                     diagnostics: diagnostics)
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
                                                            context: installation.context,

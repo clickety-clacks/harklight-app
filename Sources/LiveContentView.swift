@@ -55,8 +55,6 @@ struct LiveContentView: View {
                     if store.conversation(for: row.key) != nil { row.chatUnread = false }
                     return row
                 }, samples: samples, selectRequest: { store.selectRequest($0) },
-                prioritizationReasons: store.inboxOrderReasons,
-                showsBasicOrderMarker: store.showsBasicOrderMarker,
                 markSeenRequest: { markSeen($0) },
                 markNoCommentRequest: { store.submitNoCommentFromUser($0) },
                 clearRetractedRequest: { store.clearRetracted($0) },
@@ -81,6 +79,8 @@ struct LiveContentView: View {
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
                 showsLocalExamples: !store.isReadOnly,
+                prioritizationReasons: store.inboxOrderReasons,
+                showsBasicOrderMarker: store.showsBasicOrderMarker,
                 notificationNavigation: launch?.notificationNavigation)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
