@@ -28,7 +28,7 @@ struct ConversationPanel: View {
                     Text(sender).font(.headline)
                     Text("About \(title)").font(.caption).foregroundStyle(.secondary)
                     if let thread, store.conversationUnavailableMessage == nil {
-                        ConversationAvailabilityLabel(availability: thread.availability, local: store.isLocalExample)
+                        ConversationAvailabilityLabel(availability: thread.availability, terminal: thread.terminal, local: store.isLocalExample)
                     }
                 }.padding().frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -286,16 +286,25 @@ private struct ConversationComposer: View {
     }
 }
 
-private struct ConversationAvailabilityLabel: View {
+struct ConversationAvailabilityLabel: View {
     let availability: ConversationAvailability
+    let terminal: TerminalState?
     let local: Bool
     var body: some View {
+        Text(Self.text(availability: availability, terminal: terminal, local: local)).font(.caption2).foregroundStyle(.secondary)
+    }
+
+    /// A closed request takes no more messages, so listener state would mislead.
+    static func text(availability: ConversationAvailability, terminal: TerminalState?, local: Bool) -> String {
         let prefix = local ? "Example · " : ""
+        if let terminal {
+            return prefix + (terminal == .answered ? "Request answered" : "Request closed") + " · nothing more can be sent"
+        }
         switch availability {
-        case .listening: Text(prefix + "Agent listening · delivery shown per message").font(.caption2).foregroundStyle(.secondary)
-        case let .notListening(time): Text(prefix + "Agent not listening" + (time.map { " since " + $0.rawValue } ?? "")).font(.caption2).foregroundStyle(.secondary)
-        case .gone: Text(prefix + "Originating session gone · request remains available").font(.caption2).foregroundStyle(.secondary)
-        case let .unsupported(reason): Text(prefix + "Listening unsupported · " + reason.rawValue).font(.caption2).foregroundStyle(.secondary)
+        case .listening: return prefix + "Agent listening · delivery shown per message"
+        case let .notListening(time): return prefix + "Agent not listening" + (time.map { " since " + $0.rawValue } ?? "")
+        case .gone: return prefix + "Originating session gone · request remains available"
+        case let .unsupported(reason): return prefix + "Listening unsupported · " + reason.rawValue
         }
     }
 }

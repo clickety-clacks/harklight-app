@@ -355,6 +355,29 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertFalse(resumed.hasUnreadAgentReply(request))
     }
 
+    func testChatSaysAnAnsweredRequestIsClosedInsteadOfAgentNotListening() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let request = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: request, revision: 1)
+        let session = ExactText("session")
+        func label() throws -> String {
+            let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[request])
+            return ConversationAvailabilityLabel.text(availability: thread.availability, terminal: thread.terminal, local: false)
+        }
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: session, payload: .null)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .availability(sessionHandle: session, .notListening(lastDetachedAt: ExactText("1:33 PM")))), context: context)
+        XCTAssertEqual(try label(), "Agent not listening since 1:33 PM")
+
+        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .terminal(turn: ExactText("3"), author: .person, state: .answered)), context: context)
+        XCTAssertEqual(try label(), "Request answered · nothing more can be sent")
+    }
+
 }
 
 private final class FailOnceAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
