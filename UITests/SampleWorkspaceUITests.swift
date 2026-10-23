@@ -769,7 +769,7 @@ final class SampleWorkspaceUITests: XCTestCase {
                 NSPredicate(format: "label CONTAINS[c] %@", "sidebar")).firstMatch
             let list = app.scrollViews.firstMatch.exists
                 ? app.scrollViews.firstMatch : app.collectionViews.firstMatch
-            let firstRow = app.descendants(matching: .any)["request-row-review-01"]
+            let firstRow = app.descendants(matching: .any)["request-row-unknown-01"]
 
             XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
             XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
@@ -806,12 +806,22 @@ final class SampleWorkspaceUITests: XCTestCase {
             let restored = expectation(for: NSPredicate(format: "isHittable == true"),
                                        evaluatedWith: brand)
             wait(for: [restored], timeout: 5)
-            for _ in 0..<3 {
-                if firstRow.isHittable { break }
+            for _ in 0..<8 {
+                if firstRow.isHittable && brand.isHittable &&
+                    settings.isHittable && sidebarToggle.isHittable { break }
                 list.swipeDown()
             }
             XCTAssertTrue(firstRow.isHittable, "The list returns to its top row.")
             XCTAssertTrue(brand.isHittable, "The header is restored at the top.")
+            XCTAssertTrue(settings.isHittable, "Settings returns with the header.")
+            XCTAssertTrue(sidebarToggle.isHittable, "The sidebar toggle returns with the header.")
+            XCTAssertGreaterThan(brand.frame.height, 20, "The restored brand has a visible frame.")
+            XCTAssertGreaterThan(settings.frame.height, 20, "The restored Settings control has a visible frame.")
+            XCTAssertEqual(brand.frame.midY, settings.frame.midY, accuracy: 5,
+                           "The restored brand and Settings share the navigation row.")
+            XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY + 8,
+                                        "The restored first row clears the toolbar.")
+            print("NATIVE_HEADER_\(name)_restored brand=\(brand.frame) settings=\(settings.frame) toggle=\(sidebarToggle.frame) row=\(firstRow.frame)")
             capture("native-header-\(name)-restored", app)
             app.terminate()
         }

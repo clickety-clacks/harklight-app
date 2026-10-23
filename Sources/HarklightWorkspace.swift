@@ -1080,7 +1080,7 @@ struct InboxList: View {
         .toolbarMinimizationBehavior(
             usesSidebarToolbarHeader && tab != .search ? .onScrollDown : .never,
             for: .navigationBar)
-        .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
+        .toolbarMinimizationRestoration(.atScrollEdge, for: .navigationBar)
         .onAppear {
             guard workspaceTab == tab else { return }
             restoreLastViewed(using: proxy, in: tab)
