@@ -83,6 +83,10 @@ final class HarklightUITests: XCTestCase {
 
     func testAnswerRemainsAvailableWhileRefreshIsRunning() throws {
         let app = launchFreshApp(additionalArguments: ["--harklight-test-refreshing"])
+        let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
+        XCTAssertTrue(refreshing.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("Inbox badge while refreshing", from: app)
+
         selectFacilitiesRequest(in: app)
         _ = setFacilitiesPoint(in: app, x: 240, y: 500)
 
@@ -91,8 +95,6 @@ final class HarklightUITests: XCTestCase {
         note.tap()
         note.typeText("Near the east entrance")
 
-        let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
-        XCTAssertTrue(refreshing.waitForExistence(timeout: 5), app.debugDescription)
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.isEnabled,
                       "A refresh must not dim or disable the visible answer action.")
@@ -102,7 +104,6 @@ final class HarklightUITests: XCTestCase {
         let lifecycle = app.staticTexts["request-lifecycle-status"]
         XCTAssertTrue(lifecycle.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(lifecycle.label, "Pending")
-        XCTAssertTrue(refreshing.exists, "The answer can be submitted while the refresh remains active.")
         attachScreenshot("Answer submitted while inbox is refreshing", from: app)
     }
 

@@ -162,7 +162,7 @@ final class ConversationPresentationTests: XCTestCase {
         let port = AttentionDomainPort(store: domain)
         let oldSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let old = try port.submit(SubmitIntent(context: port.context, selector: oldSelector, intentID: UUID(),
-            inputs: [.compatibilityValue(action: ExactText("old"))]))
+            inputs: [.compatibilityText(action: ExactText("old"), text: ExactText("Old answer"))]))
         XCTAssertEqual(try domain.lookupIntent(old.intentID, context: context)?.requestRevision, 1)
         try domain.applyConversation(ConversationEvent(sequence: 2, binding: b2,
             fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
@@ -170,12 +170,10 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(revised.title, ExactText("Revised wording"))
         XCTAssertNil(revised.intentReceipt, "The earlier answer must not become the new version's receipt")
         XCTAssertNil(revised.draft.compatibility.selectedActionID)
-        let stale = try port.submit(SubmitIntent(context: port.context, selector: oldSelector,
-            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("old"))]))
-        let staleSubmission = try XCTUnwrap(domain.lookupIntent(stale.intentID, context: context))
+        let staleSubmission = try XCTUnwrap(domain.lookupIntent(old.intentID, context: context))
         XCTAssertEqual(staleSubmission.requestRevision, 1)
         XCTAssertEqual(staleSubmission.operation.uniqueValue(named: "request_revision")?.integerValue, 1)
-        try domain.recordAnswerStaleRevision(stale.intentID, operationID: stale.opID,
+        try domain.recordAnswerStaleRevision(old.intentID, operationID: old.opID,
             currentRevision: 2, context: context)
         let currentAfterDecline = try XCTUnwrap(port.observe(context: port.context).requests.first)
         XCTAssertEqual(currentAfterDecline.title, ExactText("Revised wording"))
@@ -202,8 +200,8 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(historical.selector, "Historical drafts cannot acquire a current answer selector")
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         let retained = try XCTUnwrap(domain.lookupIntent(old.intentID, context: context))
-        XCTAssertEqual(retained.disposition, .lost)
-        XCTAssertEqual(retained.answer, .string(ExactText("old")))
+        XCTAssertEqual(retained.disposition, .staleRevision(currentRevision: 2))
+        XCTAssertEqual(retained.answer, .string(ExactText("Old answer")))
         guard case let .compatibility(actions) = latestRequest.projection,
               let newAction = actions.first else {
             return XCTFail("The revised request should expose its new answer action.")
@@ -226,24 +224,23 @@ final class ConversationPresentationTests: XCTestCase {
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("draft-revision"))
-        let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"value","value":"old"}]}}"#.utf8))
-        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"value","value":"new"}]}}"#.utf8))
+        let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
+        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
         try domain.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
         try domain.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
-        try domain.applyConversation(ConversationEvent(sequence: 2,
-            binding: ConversationBinding(request: key, revision: 2),
-            fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
-
         let live = try LivePresentationStore(store: domain, context: context)
         let port = AttentionDomainPort(store: domain)
         live.selectAction(ExactText("old"), input: nil, for: key, requestRevision: 1)
         live.stageCompatibilityText("Old-version draft", action: ExactText("old"),
                                     for: key, requestRevision: 1)
+        try domain.applyConversation(ConversationEvent(sequence: 2,
+            binding: ConversationBinding(request: key, revision: 2),
+            fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
 
-        let historical = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 1).requests.first)
+        let historical = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
         let current = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 2).requests.first)
         XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertNil(current.draft.compatibility.selectedActionID,
@@ -251,11 +248,9 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(live.draft(for: key, revision: 1)?.compatibility.textByActionID[ExactText("old")],
                        ExactText("Old-version draft"))
         XCTAssertNil(live.draft(for: key, revision: 2)?.compatibility.textByActionID[ExactText("new")])
-
-        let receipt = try live.submit(key, requestRevision: 1)
-        XCTAssertEqual(receipt.selector.requestRevision, 1)
-        XCTAssertEqual(receipt.exactAnswerJSON, #""Old-version draft"#)
-        XCTAssertEqual(try domain.snapshot(context: context).outbox.first?.requestRevision, 1)
+        XCTAssertNil(historical.selector,
+                     "A new request version cannot issue an answer selector for the archived version.")
+        XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
     }
 
     func testShakeConversationUsesTheDomainAndOrdinaryViewModelAndCannotPrepareDelivery() throws {

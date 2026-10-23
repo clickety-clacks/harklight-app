@@ -30,6 +30,13 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         let domain = try AttentionDomainStore(context: context,
                                               persistence: MemoryAttentionStatePersistence())
         let key = try deliverTextRequest(to: domain, context: context)
+        _ = try domain.beginInboxCandidate(startupID: "accepted", since: 1, batches: [],
+                                           context: context)
+        try domain.saveInboxInitialPage(snapshotID: "accepted-empty", highWater: 1, items: [],
+                                        nextCursor: nil, receiptCursor: nil, context: context)
+        _ = try domain.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try domain.acceptInboxCheckpoint(snapshotID: "accepted-empty", highWater: 1,
+                                             context: context)
         let visible = try LivePresentationStore(store: domain, context: context)
 
         let request = try XCTUnwrap(visible.request(for: key))
@@ -44,7 +51,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         XCTAssertTrue(before.canEdit)
         XCTAssertTrue(before.canAnswer)
 
-        _ = try domain.beginInboxCandidate(startupID: "startup", since: 0, batches: [],
+        _ = try domain.beginInboxCandidate(startupID: "startup", since: 1, batches: [],
                                            context: context)
         try visible.refreshFromDurableStore()
 

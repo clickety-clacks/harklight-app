@@ -297,8 +297,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard requestRevision > 0 else { throw AttentionStoreError.requestMissing }
         let request: StoredRequest
         if let thread {
-            guard thread.redactedRevisions?.contains(requestRevision) != true else {
-                throw AttentionStoreError.unsupportedInterface
+            guard requestRevision == thread.currentRevision,
+                  thread.redactedRevisions?.contains(requestRevision) != true else {
+                throw AttentionStoreError.selectorExpired
             }
             guard let payload = thread.revisions[requestRevision] else { throw AttentionStoreError.requestMissing }
             guard let acceptanceOrder = state.requests[requestKey]?.acceptanceOrder else {
@@ -654,12 +655,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard suppliedContext.transportMode == .relay,
               var intent = state.intents[intentID],
               intent.operationID == operationID,
-              state.intentByRequest[intent.requestKey] == intentID,
               currentRevision > (intent.requestRevision ?? 1) else {
             throw AttentionStoreError.intentConflict
         }
         switch intent.disposition {
-        case .pending:
+        case .pending, .lost:
             intent.disposition = .staleRevision(currentRevision: currentRevision)
         case let .staleRevision(previous) where previous == currentRevision:
             return
@@ -669,7 +669,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
-        next.intentByRequest.removeValue(forKey: intent.requestKey)
+        if next.intentByRequest[intent.requestKey] == intentID {
+            next.intentByRequest.removeValue(forKey: intent.requestKey)
+        }
         if var published = next.replayPublishedIntents {
             published[intentID] = intent
             next.replayPublishedIntents = published
@@ -2563,7 +2565,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.selectorExpired
         }
         if let thread = state.conversation?.threads[selector.request] {
-            guard thread.redactedRevisions?.contains(selector.requestRevision) != true,
+            guard selector.requestRevision == thread.currentRevision,
+                  thread.redactedRevisions?.contains(selector.requestRevision) != true,
                   let payload = thread.revisions[selector.requestRevision],
                   let acceptanceOrder = state.requests[selector.request]?.acceptanceOrder else {
                 throw AttentionStoreError.selectorExpired

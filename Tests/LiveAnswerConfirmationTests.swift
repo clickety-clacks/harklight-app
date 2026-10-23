@@ -609,7 +609,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         _ = try await core.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
 
-        let result = await NativeRelayRefreshResult.afterConfirmedRelay {
+        let result = await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: UUID()) {
             throw InstallationTransportError.serverRejected
         }
         live.applyRefreshResult(result)
@@ -636,7 +637,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
         XCTAssertNil(live.actionError)
 
-        let result = await NativeRelayRefreshResult.afterConfirmedRelay { .notAttempted }
+        let result = await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: UUID()) { .notAttempted }
         live.applyRefreshResult(result)
         XCTAssertNil(live.connectionWarning)
         XCTAssertEqual(result.pushRegistration, .notAttempted,
@@ -646,12 +648,14 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
     func testConfirmedNotificationSetupClearsItsWarningWithoutCreatingAnAnswer() async throws {
         let (context, store, live, key) = try setup()
-        let refused = await NativeRelayRefreshResult.afterConfirmedRelay {
+        let refused = await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: UUID()) {
             throw InstallationTransportError.serverRejected
         }
         live.applyRefreshResult(refused)
         XCTAssertNotNil(live.pushRegistrationWarning)
-        let registered = await NativeRelayRefreshResult.afterConfirmedRelay { .confirmed }
+        let registered = await NativeRelayRefreshResult.afterConfirmedRelay(
+            context: context, transportAttemptID: UUID()) { .confirmed }
         live.applyRefreshResult(registered)
         XCTAssertEqual(registered.pushRegistration, .confirmed)
         XCTAssertNil(live.pushRegistrationWarning)
