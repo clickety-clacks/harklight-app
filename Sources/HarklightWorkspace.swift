@@ -740,7 +740,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 visibility = destination.selection == nil ? .all : .detailOnly
             }
             .onChange(of: samples.selectedID) { _, id in
-                UIDiagnostics.shared.record("inbox.samplesSelectedChanged \(id ?? "nil") selection=\(UIDiagnostics.describe(selection))")
+                let sampleIDDescription: String = id ?? "nil"
+                let selectionDescription: String = UIDiagnostics.describe(selection)
+                let diagnostic = "inbox.samplesSelectedChanged " + sampleIDDescription +
+                    " selection=" + selectionDescription
+                UIDiagnostics.shared.record(diagnostic)
                 guard showsLocalExamples, case .sample = selection else { return }
                 navigate(to: id.map { .sample($0) })
             }
