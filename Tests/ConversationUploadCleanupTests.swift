@@ -83,6 +83,16 @@ final class ConversationUploadCleanupTests: XCTestCase {
         XCTAssertTrue(try restored.abandonConversationUploads(for: binding.request, context: context).isEmpty)
         XCTAssertThrowsError(try wire.decodeDiscard(Data(#"{"v":1,"type":"ok","discarded":0}"#.utf8), status: 200))
     }
+
+    func testDepartureWithoutUncommittedUploadsDoesNotPersistAnUnchangedState() throws {
+        let (context, persistence, store, binding) = try setup()
+        let before = try XCTUnwrap(persistence.load(identity: context.identity))
+
+        XCTAssertTrue(try store.abandonConversationUploads(for: binding.request, context: context).isEmpty)
+
+        XCTAssertEqual(try persistence.load(identity: context.identity), before)
+    }
+
     @MainActor
     func testActualMessageDepartureDiffersFromSelectionRebuildAndKeepsOfflineCleanupRecoverable() async throws {
         let (context, persistence, domain, binding) = try setup()

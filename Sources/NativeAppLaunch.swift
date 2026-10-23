@@ -1326,73 +1326,99 @@ final class LivePresentationStore {
     }
 
     var inboxRows: [InboxRequestRow] {
-        presentation.requests.compactMap { request in
-            let retracted = isRetracted(request.key)
-            if retracted, clearedRetractions.contains(request.key) { return nil }
-            let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
-                request.receiptFacts?.ownOutcome == .unconfirmed &&
-                request.lifecycleStatus != .pending
-            let serverReportedFinalResponse = request.inboxStateIsCurrent &&
-                (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
-            let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
-            let receiptStatus = request.answerNotDelivered ? .some(.failed) :
-                InboxRequestRow.responseReceiptStatus(
-                request.intentReceipt,
-                hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission,
-                serverReportedFinalResponse: serverReportedFinalResponse,
-                hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
-            var statusParts: [String] = []
-            if request.inboxStateIsCurrent {
-                if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
-                let lifecycle = retracted ? retractionLabel(request.key) :
-                    String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
-                statusParts.append(lifecycle)
-                if request.answerNotDelivered { statusParts.append("Answer not delivered") }
-                if request.noCommentUnavailable, receiptStatus != .failed,
-                   !serverReportedFinalResponse {
-                    statusParts.append("No comment not delivered · unsupported by this server")
-                }
-                if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
-                    statusParts.append(informationalSeenRowStatus(seenStatus))
-                }
-            } else {
-                if let localStatus = cachedOperationStatus(request.intentReceipt?.localState) {
-                    statusParts.append(localStatus)
-                }
-                statusParts.append("Cached history · status not refreshed")
-            }
-            return InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
-                title: request.title?.rawValue ?? "Message",
-                sender: request.key.senderID.rawValue,
-                status: statusParts.joined(separator: " · "),
-                bodyText: request.body?.rawValue,
-                symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: request.answerNotDelivered || receiptStatus == .failed ? false :
-                    request.isResolved, createdAt: request.createdAt,
-                localStatus: request.answerNotDelivered ? "Answer not delivered" : receiptStatus == .failed
-                    ? (request.noCommentUnavailable
-                        ? "No comment not delivered · unsupported by this server"
-                        : request.receiptFacts?.ownOutcome == .unconfirmed
-                            ? "Answer sent · result not confirmed"
-                            : cachedOperationStatus(request.intentReceipt?.localState))
-                    : nil,
-                informationalSeenStatus: request.informationalSeenStatus,
-                canMarkSeen: !isReadOnly &&
-                    !retracted && request.lifecycleStatus == .open &&
-                    request.intentReceipt == nil && request.informationalSeenStatus == .available,
-                canNoComment: canNoComment(request),
-                noCommentUnavailable: request.noCommentUnavailable,
-                hasUserAction: receiptStatus == .pendingOrAccepted ||
-                    request.lifecycleStatus == .answered ||
-                    request.lifecycleStatus == .noComment,
-                hasFailedResponse: receiptStatus == .failed,
-                isRetracted: retracted,
-                tier: request.attentionTier.inboxRowStyleTier)
-        }
+        presentation.requests.compactMap { makeInboxRow(for: $0) }
     }
 
-    private func canNoComment(_ request: PresentedRequest) -> Bool {
-        guard !isReadOnly, !isRetracted(request.key),
+    func inboxRow(for key: RequestKey) -> InboxRequestRow? {
+        guard let request = presentation.requests.first(where: { $0.key == key }) else { return nil }
+        return makeInboxRow(for: request)
+    }
+
+    private func makeInboxRow(for request: PresentedRequest) -> InboxRequestRow? {
+        let retracted = isRetracted(request)
+        if retracted, clearedRetractions.contains(request.key) { return nil }
+        let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
+            request.receiptFacts?.ownOutcome == .unconfirmed &&
+            request.lifecycleStatus != .pending
+        let serverReportedFinalResponse = request.inboxStateIsCurrent &&
+            (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
+        let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
+        let receiptStatus = request.answerNotDelivered ? .some(.failed) :
+            InboxRequestRow.responseReceiptStatus(
+            request.intentReceipt,
+            hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission,
+            serverReportedFinalResponse: serverReportedFinalResponse,
+            hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
+        var statusParts: [String] = []
+        if request.inboxStateIsCurrent {
+            if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
+            let lifecycle = retracted ? retractionLabel(for: request) :
+                String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
+            statusParts.append(lifecycle)
+            if request.answerNotDelivered { statusParts.append("Answer not delivered") }
+            if request.noCommentUnavailable, receiptStatus != .failed,
+               !serverReportedFinalResponse {
+                statusParts.append("No comment not delivered · unsupported by this server")
+            }
+            if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
+                statusParts.append(informationalSeenRowStatus(seenStatus))
+            }
+        } else {
+            if let localStatus = cachedOperationStatus(request.intentReceipt?.localState) {
+                statusParts.append(localStatus)
+            }
+            statusParts.append("Cached history · status not refreshed")
+        }
+        return InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
+            title: request.title?.rawValue ?? "Message",
+            sender: request.key.senderID.rawValue,
+            status: statusParts.joined(separator: " · "),
+            bodyText: request.body?.rawValue,
+            symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
+            isResolved: request.answerNotDelivered || receiptStatus == .failed ? false :
+                request.isResolved, createdAt: request.createdAt,
+            localStatus: request.answerNotDelivered ? "Answer not delivered" : receiptStatus == .failed
+                ? (request.noCommentUnavailable
+                    ? "No comment not delivered · unsupported by this server"
+                    : request.receiptFacts?.ownOutcome == .unconfirmed
+                        ? "Answer sent · result not confirmed"
+                        : cachedOperationStatus(request.intentReceipt?.localState))
+                : nil,
+            informationalSeenStatus: request.informationalSeenStatus,
+            canMarkSeen: !isReadOnly &&
+                !retracted && request.lifecycleStatus == .open &&
+                request.intentReceipt == nil && request.informationalSeenStatus == .available,
+            canNoComment: canNoComment(request, isRetracted: retracted),
+            noCommentUnavailable: request.noCommentUnavailable,
+            hasUserAction: receiptStatus == .pendingOrAccepted ||
+                request.lifecycleStatus == .answered ||
+                request.lifecycleStatus == .noComment,
+            hasFailedResponse: receiptStatus == .failed,
+            isRetracted: retracted,
+            tier: request.attentionTier.inboxRowStyleTier)
+    }
+
+    private func isRetracted(_ request: PresentedRequest) -> Bool {
+        if conversationThreads[request.key]?.isRetracted == true { return true }
+        if let outcome = request.intentReceipt?.relayOutcome,
+           case .refusedByRetraction = outcome { return true }
+        return false
+    }
+
+    private func retractionLabel(for request: PresentedRequest) -> String {
+        let thread = conversationThreads[request.key]
+        let timestamp = thread?.retraction?.retractedAtMilliseconds ?? thread?.reportedRetractedAtMilliseconds ?? {
+            guard let outcome = request.intentReceipt?.relayOutcome,
+                  case let .refusedByRetraction(retractedAtMilliseconds) = outcome else { return nil }
+            return retractedAtMilliseconds
+        }()
+        guard let timestamp else { return "Retracted" }
+        let date = Date(timeIntervalSince1970: Double(timestamp) / 1_000)
+        return "Retracted · " + date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func canNoComment(_ request: PresentedRequest, isRetracted: Bool) -> Bool {
+        guard !isReadOnly, !isRetracted,
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil else { return false }
         // No comment is its own wire answer and does not depend on the
