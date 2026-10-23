@@ -495,7 +495,7 @@ struct LiveRequestDetail: View {
                     .font(.headline)
             } else {
                 Image(systemName: "checkmark")
-                    .foregroundStyle(Color.white)
+                    .foregroundStyle(detailColors.textColor)
                     .font(.headline)
             }
         }
@@ -577,10 +577,10 @@ struct LiveRequestDetail: View {
         Button(action: {}) {
             Label("Answered", systemImage: "checkmark")
                 .labelStyle(.titleAndIcon)
-                .foregroundStyle(Color.green)
+                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
                 .font(.headline)
         }
-        .tint(.green)
+        .tint(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
         .opacity(0.76)
         .disabled(true)
         .accessibilityLabel("Answered with green checkmark")

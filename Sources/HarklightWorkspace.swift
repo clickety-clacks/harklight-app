@@ -994,10 +994,10 @@ struct InboxList: View {
                        workspaceTab == .inbox, selectedTab == .inbox {
                         Label("Basic order", systemImage: "arrow.down.circle")
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(designPalette.neutral.secondaryTextColor)
                             .padding(.horizontal, 9)
                             .padding(.vertical, 5)
-                            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                            .background(designPalette.neutral.replySurfaceColor, in: Capsule())
                             .accessibilityIdentifier("inbox-basic-order")
                     }
                     if isRefreshing {
@@ -1005,11 +1005,11 @@ struct InboxList: View {
                             ProgressView().controlSize(.small)
                             Text("Refreshing").font(.caption2.weight(.semibold))
                         }
-                        .foregroundStyle(Color.accentColor)
-                        .tint(Color.accentColor)
+                        .foregroundStyle(designPalette.accent.color)
+                        .tint(designPalette.accent.color)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
-                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                        .background(designPalette.accent.color.opacity(0.14), in: Capsule())
                         .accessibilityElement(children: .combine)
                         .accessibilityLabel("Refreshing")
                         .accessibilityIdentifier("inbox-refreshing-badge")
