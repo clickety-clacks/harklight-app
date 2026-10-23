@@ -807,7 +807,7 @@ struct LiveRequestDetail: View {
 
     @ViewBuilder
     private var detailChatButton: some View {
-        if context.openChat != nil || context.canInlineChat {
+        if context.canInlineChat {
             chatButton
         } else {
             chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
@@ -821,7 +821,7 @@ struct LiveRequestDetail: View {
     private var chatButton: some View {
         Button("Chat", systemImage: "bubble.left.and.bubble.right") {
             localExample?.chatRead = true
-            if let openChat = context.openChat { openChat() }
+            if context.canInlineChat { context.openChat?() }
             else { chatPresented = true }
         }
         .labelStyle(.iconOnly)
