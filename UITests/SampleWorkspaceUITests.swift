@@ -511,6 +511,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "Tapping the selected choice reopens the editor.")
+        XCTAssertLessThan(editor.frame.height, app.windows.firstMatch.frame.height * 0.15,
+                          "A short reply stays compact before the field needs to grow.")
         capture("reply-editor-reopened", app)
         app.buttons["request-reply-send"].tap()
         XCTAssertTrue(retainedSummary.waitForExistence(timeout: 5))

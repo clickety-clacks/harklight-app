@@ -103,18 +103,17 @@ private struct ReplyEditorComposer: View {
     }
 
     var body: some View {
-        let fieldMaximumHeight = max(28, maximumHeight - 16)
         HStack(alignment: .bottom, spacing: 10) {
             TextField("Reply", text: $text, axis: .vertical)
                 .lineLimit(1...maximumLineCount)
+                .fixedSize(horizontal: false, vertical: true)
                 .font(.body)
                 .foregroundStyle(textColor)
                 .tint(textColor)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, minHeight: 28, maxHeight: fieldMaximumHeight,
-                       alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
                 .background(fieldColor, in: RoundedRectangle(cornerRadius: 14))
                 .focused($focusedActionID, equals: target.actionIdentifier)
                 .accessibilityLabel("Reply")
