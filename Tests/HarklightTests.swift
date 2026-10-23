@@ -22,7 +22,7 @@ final class HarklightTests: XCTestCase {
         let view = InboxOrderView(revision: "view-1", algorithm: .jevSet, basis: .selected,
             entries: [
                 InboxOrderEntry(key: waitingB.key, reason: "Due soon"),
-                InboxOrderEntry(key: notHeld, reason: "Not loaded yet"),
+                InboxOrderEntry(key: notHeld),
                 InboxOrderEntry(key: waitingA.key)
             ])
 
