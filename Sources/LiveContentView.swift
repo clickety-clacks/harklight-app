@@ -100,8 +100,6 @@ struct LiveContentView: View {
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
                 showsLocalExamples: !store.isReadOnly,
-                prioritizationReasons: store.inboxOrderReasons,
-                showsBasicOrderMarker: store.showsBasicOrderMarker,
                 notificationNavigation: launch?.notificationNavigation)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in

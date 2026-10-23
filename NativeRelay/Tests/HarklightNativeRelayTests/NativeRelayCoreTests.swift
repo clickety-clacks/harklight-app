@@ -94,77 +94,10 @@ private final class DiagnosticEventCollector: @unchecked Sendable {
     }
 }
 
-private final class InboxOrderViewCapture: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: InboxOrderView?
-    private var waiters: [(String, CheckedContinuation<Void, Never>)] = []
-
-    func set(_ view: InboxOrderView?) {
-        let ready: [CheckedContinuation<Void, Never>]
-        lock.lock()
-        stored = view
-        ready = waiters.compactMap { $0.0 == view?.revision ? $0.1 : nil }
-        waiters.removeAll { $0.0 == view?.revision }
-        lock.unlock()
-        ready.forEach { $0.resume() }
-    }
-
-    func value() -> InboxOrderView? {
-        lock.lock(); defer { lock.unlock() }
-        return stored
-    }
-
-    func waitForRevision(_ revision: String) async {
-        await withCheckedContinuation { continuation in
-            var resume = false
-            lock.lock()
-            if stored?.revision == revision {
-                resume = true
-            } else {
-                waiters.append((revision, continuation))
-            }
-            lock.unlock()
-            if resume { continuation.resume() }
-        }
-    }
-}
-
-private actor RequestBarrier {
-    private var isStarted = false
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
-    private var releaseContinuation: CheckedContinuation<Void, Never>?
-
-    func suspendRequest() async {
-        isStarted = true
-        let waiters = startWaiters
-        startWaiters.removeAll()
-        waiters.forEach { $0.resume() }
-        await withCheckedContinuation { continuation in
-            releaseContinuation = continuation
-        }
-    }
-
-    func waitUntilStarted() async {
-        if isStarted { return }
-        await withCheckedContinuation { continuation in
-            startWaiters.append(continuation)
-        }
-    }
-
-    func release() {
-        releaseContinuation?.resume()
-        releaseContinuation = nil
-    }
-}
-
 final class NativeRelayCoreTests: XCTestCase {
-    private final class Session: AuthenticatedInboxPrioritizationSession, @unchecked Sendable {
+    private final class Session: AuthenticatedInboxEventStreamSession, @unchecked Sendable {
         var authenticatedIdentity: ProfileIdentity
         var supportsPostCheckpointInboxEvents = false
-        var supportsInboxPrioritization = false
-        var serverInboxOrderView: InboxOrderView?
-        var serverInboxOrderErrorReason: String?
-        var pageRequestBarrier: RequestBarrier?
         var frames: [Data] = []
         var requests: [Data] = []
         var acknowledgements: [Data] = []
@@ -214,7 +147,6 @@ final class NativeRelayCoreTests: XCTestCase {
                     ("receipt_cursor", .null)
                 ])
             case "inbox_page":
-                if let pageRequestBarrier { await pageRequestBarrier.suspendRequest() }
                 let cursor = value.uniqueValue(named: "cursor")?.stringValue?.rawValue ?? ""
                 let items = olderPages[cursor] ?? []
                 return response([
@@ -276,56 +208,6 @@ final class NativeRelayCoreTests: XCTestCase {
             default:
                 throw InstallationTransportError.unexpectedServerFrame
             }
-        }
-
-        func inboxViewRequest(_ request: Data, ref: String) async throws -> Data {
-            requests.append(request)
-            if let reason = serverInboxOrderErrorReason {
-                return response([
-                    ("v", .number(JSONNumber(lexeme: "1"))),
-                    ("type", .string(ExactText("error"))),
-                    ("ref", .string(ExactText(ref))),
-                    ("reason", .string(ExactText(reason)))
-                ])
-            }
-            guard let view = serverInboxOrderView else {
-                return response([
-                    ("v", .number(JSONNumber(lexeme: "1"))),
-                    ("type", .string(ExactText("error"))),
-                    ("ref", .string(ExactText(ref))),
-                    ("reason", .string(ExactText("unknown_type")))
-                ])
-            }
-            let requestValue = try JSONValue.parse(request)
-            let knownRevision = requestValue.uniqueValue(named: "known_view_rev")?.stringValue?.rawValue
-            if knownRevision == view.revision {
-                return response([
-                    ("v", .number(JSONNumber(lexeme: "1"))),
-                    ("type", .string(ExactText("ok"))),
-                    ("ref", .string(ExactText(ref))),
-                    ("view_rev", .string(ExactText(view.revision))),
-                    ("unchanged", .bool(true))
-                ])
-            }
-            let entries = view.entries.map { entry -> JSONValue in
-                var members = [
-                    JSONMember("sender_id", .string(entry.key.senderID)),
-                    JSONMember("message_id", .string(entry.key.messageID))
-                ]
-                if let reason = entry.reason {
-                    members.append(JSONMember("reason", .string(ExactText(reason))))
-                }
-                return .object(members)
-            }
-            return response([
-                ("v", .number(JSONNumber(lexeme: "1"))),
-                ("type", .string(ExactText("ok"))),
-                ("ref", .string(ExactText(ref))),
-                ("view_rev", .string(ExactText(view.revision))),
-                ("algorithm", .string(ExactText(view.algorithm.rawValue))),
-                ("basis", .string(ExactText(view.basis.rawValue))),
-                ("entries", .array(entries))
-            ])
         }
 
         func attachInboxReplay(_ request: Data, ref: String,
@@ -645,7 +527,7 @@ final class NativeRelayCoreTests: XCTestCase {
             let acceptance = try JSONValue.parse(data(#"{"v":1,"type":"delivery","seq":\#(sequence),"sender_id":"sender","message_id":"m\#(sequence)","origin":"source-device","as":"message","message":{"title":"Message \#(sequence)"}}"#))
             return .object([JSONMember("acceptance", acceptance)])
         }
-        session.initialItems = try (1...20).reversed().map(pageItem)
+        session.initialItems = try (1...20).map(pageItem)
         session.olderPages["cursor-20"] = [try pageItem(21)]
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
@@ -657,9 +539,6 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(afterStartup.cursor, 25)
         XCTAssertEqual(afterStartup.inboxCheckpoint?.loadedKeys.count, 20)
         XCTAssertEqual(afterStartup.inboxCurrentKeys?.count, 20)
-        XCTAssertEqual(afterStartup.inboxCheckpoint?.sourceOrder?.map(\.messageID.rawValue),
-                       (1...20).reversed().map { "m\($0)" },
-                       "Snapshot paging preserves server order even when acceptance sequences are not monotonic.")
         XCTAssertTrue(afterStartup.outbox.isEmpty)
         XCTAssertTrue(afterStartup.intents.isEmpty)
         let startupTypes = try session.requests.map(JSONValue.parse).compactMap {
@@ -684,196 +563,6 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue
         }, ["inbox_start", "inbox_checkpoint_ack", "inbox_attach", "inbox_page"])
-        XCTAssertEqual(afterScroll.inboxCheckpoint?.sourceOrder?.map(\.messageID.rawValue),
-                       (Array((1...20).reversed()) + [21]).map { "m\($0)" },
-                       "The next page stays behind the reordered snapshot without sequence sorting.")
-        XCTAssertEqual(Set(afterScroll.inboxCheckpoint?.sourceOrder ?? []).count, 21)
-    }
-
-    func testPrioritizationViewPagesUntilEveryNamedWaitingRowIsHeld() async throws {
-        let (context, store, session) = try setup()
-        session.snapshotHighWater = 25
-        session.nextItemCursor = "cursor-20"
-        session.frames = [data(#"{"v":1,"type":"resynced","seq":25}"#)]
-        session.supportsPostCheckpointInboxEvents = true
-        session.supportsInboxPrioritization = true
-
-        func pageItem(_ sequence: Int) throws -> JSONValue {
-            let acceptance = try JSONValue.parse(data(#"{"v":1,"type":"delivery","seq":\#(sequence),"sender_id":"sender","message_id":"m\#(sequence)","origin":"source-device","as":"message","message":{"title":"Message \#(sequence)"}}"#))
-            return .object([JSONMember("acceptance", acceptance)])
-        }
-        let orderedSequences = [21] + Array(1...20)
-        session.initialItems = try ([21] + Array(1...19)).map(pageItem)
-        session.olderPages["cursor-20"] = [try pageItem(20)]
-        let view = InboxOrderView(revision: "view-1", algorithm: .jevSet, basis: .selected,
-            entries: orderedSequences.map { sequence in
-                InboxOrderEntry(key: RequestKey(accountScope: context.identity.personID,
-                    senderID: ExactText("sender"), messageID: ExactText("m\(sequence)")),
-                    reason: sequence == 21 ? "Moved to the top" : nil)
-            })
-        session.serverInboxOrderView = view
-        let capture = InboxOrderViewCapture()
-        let core = try NativeRelayCore(store: store, context: context, session: session,
-            onInboxOrderViewChange: { capture.set($0) })
-
-        _ = try await core.resyncAndDrainOutbox()
-
-        let snapshot = try store.snapshot(context: context)
-        XCTAssertEqual(snapshot.inboxCheckpoint?.loadedKeys.count, 21)
-        XCTAssertEqual(snapshot.inboxCheckpoint?.sourceOrder?.map(\.messageID.rawValue),
-                       orderedSequences.map { "m\($0)" })
-        XCTAssertEqual(capture.value(), view)
-        XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
-            $0.uniqueValue(named: "type")?.stringValue?.rawValue
-        }, ["inbox_start", "inbox_checkpoint_ack", "inbox_attach", "view_get", "inbox_page"])
-
-        session.stopPostCheckpointInboxEvents()
-        await core.deactivate()
-    }
-
-    func testViewChangedNoticeFetchesTheNewViewWithoutAdvancingTheEventCursor() async throws {
-        let (context, store, session) = try setup()
-        session.initialItems = [try JSONValue.parse(data(#"{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"m1","origin":"source-device","as":"message","message":{"title":"Message"}}}"#))]
-        session.snapshotHighWater = 1
-        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
-        session.supportsPostCheckpointInboxEvents = true
-        session.supportsInboxPrioritization = true
-        let key = RequestKey(accountScope: context.identity.personID,
-                             senderID: ExactText("sender"), messageID: ExactText("m1"))
-        let first = InboxOrderView(revision: "view-1", algorithm: .jevSet, basis: .selected,
-                                   entries: [InboxOrderEntry(key: key, reason: "First reason")])
-        let second = InboxOrderView(revision: "view-2", algorithm: .jevSet, basis: .fallback,
-                                    entries: [InboxOrderEntry(key: key, reason: "Updated reason")])
-        session.serverInboxOrderView = first
-        let capture = InboxOrderViewCapture()
-        let core = try NativeRelayCore(store: store, context: context, session: session,
-            onInboxOrderViewChange: { capture.set($0) })
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(capture.value(), first)
-
-        session.serverInboxOrderView = second
-        let updatedView = Task { await capture.waitForRevision("view-2") }
-        session.publishPostCheckpointInboxEvent(data(#"{"v":1,"type":"view_changed","view_rev":"view-2"}"#))
-        await updatedView.value
-
-        XCTAssertEqual(capture.value(), second)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1,
-                       "A view notice changes presentation but is not a sequenced relay event.")
-        XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
-            $0.uniqueValue(named: "type")?.stringValue?.rawValue
-        }.filter { $0 == "view_get" }.count, 2)
-
-        session.stopPostCheckpointInboxEvents()
-        await core.deactivate()
-    }
-
-    func testViewFetchErrorClearsTheViewAndRetriesOnlyAfterANotice() async throws {
-        let (context, store, session) = try setup()
-        session.initialItems = [try JSONValue.parse(data(#"{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"m1","origin":"source-device","as":"message","message":{"title":"Message"}}}"#))]
-        session.snapshotHighWater = 1
-        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
-        session.supportsPostCheckpointInboxEvents = true
-        session.supportsInboxPrioritization = true
-        session.serverInboxOrderErrorReason = "invalid_field"
-        let key = RequestKey(accountScope: context.identity.personID,
-                             senderID: ExactText("sender"), messageID: ExactText("m1"))
-        let view = InboxOrderView(revision: "view-2", algorithm: .jevSet, basis: .selected,
-                                  entries: [InboxOrderEntry(key: key, reason: "Moved up")])
-        let capture = InboxOrderViewCapture()
-        let core = try NativeRelayCore(store: store, context: context, session: session,
-            onInboxOrderViewChange: { capture.set($0) })
-
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertNil(capture.value())
-        XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
-            $0.uniqueValue(named: "type")?.stringValue?.rawValue
-        }.filter { $0 == "view_get" }.count, 1)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1,
-                       "A view error leaves the delivery cursor and inbox usable.")
-
-        session.serverInboxOrderErrorReason = nil
-        session.serverInboxOrderView = view
-        let updatedView = Task { await capture.waitForRevision("view-2") }
-        session.publishPostCheckpointInboxEvent(data(#"{"v":1,"type":"view_changed","view_rev":"view-2"}"#))
-        await updatedView.value
-
-        XCTAssertEqual(capture.value(), view)
-        XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
-            $0.uniqueValue(named: "type")?.stringValue?.rawValue
-        }.filter { $0 == "view_get" }.count, 2)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        session.stopPostCheckpointInboxEvents()
-        await core.deactivate()
-    }
-
-    func testViewChangedIsHandledWhileAnInboxPageReplyIsPending() async throws {
-        let (context, store, session) = try setup()
-        func pageItem(_ sequence: Int) throws -> JSONValue {
-            let acceptance = try JSONValue.parse(data(#"{"v":1,"type":"delivery","seq":\#(sequence),"sender_id":"sender","message_id":"m\#(sequence)","origin":"source-device","as":"message","message":{"title":"Message \#(sequence)"}}"#))
-            return .object([JSONMember("acceptance", acceptance)])
-        }
-        session.initialItems = [try pageItem(1)]
-        session.snapshotHighWater = 2
-        session.nextItemCursor = "cursor-1"
-        session.olderPages["cursor-1"] = [try pageItem(2)]
-        session.frames = [data(#"{"v":1,"type":"resynced","seq":2}"#)]
-        session.supportsPostCheckpointInboxEvents = true
-        session.supportsInboxPrioritization = true
-        let key = RequestKey(accountScope: context.identity.personID,
-                             senderID: ExactText("sender"), messageID: ExactText("m1"))
-        let first = InboxOrderView(revision: "view-1", algorithm: .jevSet, basis: .selected,
-                                   entries: [InboxOrderEntry(key: key)])
-        let second = InboxOrderView(revision: "view-2", algorithm: .jevSet, basis: .selected,
-                                    entries: [InboxOrderEntry(key: key, reason: "Still first")])
-        session.serverInboxOrderView = first
-        let capture = InboxOrderViewCapture()
-        let core = try NativeRelayCore(store: store, context: context, session: session,
-            onInboxOrderViewChange: { capture.set($0) })
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(capture.value(), first)
-
-        let barrier = RequestBarrier()
-        session.pageRequestBarrier = barrier
-        let pageRead = Task { try await core.fetchNextInboxPage() }
-        await barrier.waitUntilStarted()
-
-        session.serverInboxOrderView = second
-        let updatedView = Task { await capture.waitForRevision("view-2") }
-        session.publishPostCheckpointInboxEvent(data(#"{"v":1,"type":"view_changed","view_rev":"view-2"}"#))
-        await updatedView.value
-
-        XCTAssertEqual(capture.value(), second,
-                       "A view notice must not be mistaken for the outstanding page reply.")
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
-        XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
-            $0.uniqueValue(named: "type")?.stringValue?.rawValue
-        }.filter { $0 == "view_get" }.count, 2)
-
-        await barrier.release()
-        let fetched = try await pageRead.value
-        XCTAssertTrue(fetched)
-        XCTAssertEqual(try store.snapshot(context: context).requests.count, 2)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 2,
-                       "Paging and view notices do not advance the event cursor.")
-        session.stopPostCheckpointInboxEvents()
-        await core.deactivate()
-    }
-
-    func testUnknownViewTypeDisablesFurtherFetchesOnTheConnection() async throws {
-        let (context, store, session) = try setup()
-        session.frames = [data(#"{"v":1,"type":"resynced","seq":0}"#)]
-        session.supportsPostCheckpointInboxEvents = true
-        session.supportsInboxPrioritization = true
-        let core = try NativeRelayCore(store: store, context: context, session: session)
-
-        _ = try await core.resyncAndDrainOutbox()
-        _ = try await core.resyncAndDrainOutbox()
-
-        XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
-            $0.uniqueValue(named: "type")?.stringValue?.rawValue
-        }.filter { $0 == "view_get" }.count, 1)
-        session.stopPostCheckpointInboxEvents()
-        await core.deactivate()
     }
 
     func testCheckpointKeepsCachedRowsAnswerableUntilTheirStablePageArrives() async throws {
@@ -1081,7 +770,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         let requestValues = try session.requests.map(JSONValue.parse)
         XCTAssertEqual(requestValues.compactMap { $0.uniqueValue(named: "type")?.stringValue?.rawValue }, [
-            "inbox_start", "inbox_checkpoint_ack", "inbox_attach"
+            "inbox_start", "inbox_attach"
         ])
         XCTAssertEqual(requestValues.dropFirst().compactMap {
             $0.uniqueValue(named: "since")?.integerValue
