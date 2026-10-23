@@ -1,8 +1,118 @@
 import XCTest
 @testable import Harklight
 import AttentionDomain
+import HarklightNativeRelay
 
 final class HarklightTests: XCTestCase {
+    @MainActor
+    func testInboxOrderUsesServerWaitingOrderThenLocalAndResolvedOrder() {
+        func row(_ id: String, isResolved: Bool = false) -> InboxRequestRow {
+            InboxRequestRow(
+                key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                messageID: ExactText(id)),
+                title: id, sender: "Assistant", status: isResolved ? "Answered" : "Open",
+                isResolved: isResolved)
+        }
+        let waitingA = row("a")
+        let waitingB = row("b")
+        let waitingC = row("c")
+        let resolved = row("resolved", isResolved: true)
+        let notHeld = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                 messageID: ExactText("not-held"))
+        let view = InboxOrderView(revision: "view-1", algorithm: .jevSet, basis: .selected,
+            entries: [
+                InboxOrderEntry(key: waitingB.key, reason: "Due soon"),
+                InboxOrderEntry(key: notHeld),
+                InboxOrderEntry(key: waitingA.key)
+            ])
+
+        let ordered = InboxOrderPresentationRules.ordered(
+            [waitingA, resolved, waitingB, waitingC], by: view)
+        XCTAssertEqual(ordered.map(\.key), [waitingB.key, waitingA.key, waitingC.key, resolved.key])
+        XCTAssertEqual(InboxOrderPresentationRules.reasons(in: view),
+                       [waitingB.key: .serverText("Due soon")])
+    }
+
+    func testInboxOrderDueDateTakesPrecedenceOverServerReason() {
+        let key = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                             messageID: ExactText("deadline"))
+        let view = InboxOrderView(revision: "view", algorithm: .baseline, basis: .selected,
+            entries: [InboxOrderEntry(key: key, reason: "server reason",
+                                      dueAtMilliseconds: 1_792_792_800_000)])
+
+        XCTAssertEqual(InboxOrderPresentationRules.reasons(in: view),
+                       [key: .dueAtMilliseconds(1_792_792_800_000)])
+    }
+
+    func testInboxDuePhraseUsesLocalCalendarAndClockPreferences() {
+        let timeZone = try! XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let locale = Locale(identifier: "en_US")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = locale
+        calendar.timeZone = timeZone
+        func date(_ day: Int, hour: Int, minute: Int = 0, year: Int = 2026) -> Date {
+            calendar.date(from: DateComponents(year: year, month: 10, day: day,
+                                               hour: hour, minute: minute))!
+        }
+        func milliseconds(_ date: Date) -> Int64 {
+            Int64(date.timeIntervalSince1970 * 1_000)
+        }
+
+        let now = date(23, hour: 16)
+        let today = InboxOrderPresentationRules.duePhrase(
+            dueAtMilliseconds: milliseconds(date(23, hour: 17)), now: now,
+            locale: locale, calendar: calendar, timeZone: timeZone)
+        XCTAssertTrue(today.hasPrefix("Due today at 5:00"), today)
+        XCTAssertTrue(today.localizedCaseInsensitiveContains("PM"), today)
+
+        let tomorrow = InboxOrderPresentationRules.duePhrase(
+            dueAtMilliseconds: milliseconds(date(24, hour: 0, minute: 30)), now: date(23, hour: 23),
+            locale: locale, calendar: calendar, timeZone: timeZone)
+        XCTAssertTrue(tomorrow.hasPrefix("Due tomorrow at 12:30"), tomorrow)
+
+        let pastToday = InboxOrderPresentationRules.duePhrase(
+            dueAtMilliseconds: milliseconds(date(23, hour: 15, minute: 30)), now: now,
+            locale: locale, calendar: calendar, timeZone: timeZone)
+        XCTAssertTrue(pastToday.hasPrefix("Was due today at 3:30"), pastToday)
+
+        let otherYear = InboxOrderPresentationRules.duePhrase(
+            dueAtMilliseconds: milliseconds(date(30, hour: 17, year: 2027)), now: now,
+            locale: locale, calendar: calendar, timeZone: timeZone)
+        XCTAssertTrue(otherYear.contains("2027"), otherYear)
+    }
+
+    func testInboxDuePhraseUsesTwentyFourHourLocaleAndYesterday() {
+        let timeZone = try! XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let locale = Locale(identifier: "en_GB")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = locale
+        calendar.timeZone = timeZone
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 23,
+                                                     hour: 10))!
+        let yesterday = calendar.date(from: DateComponents(year: 2026, month: 10, day: 22,
+                                                           hour: 17))!
+        let phrase = InboxOrderPresentationRules.duePhrase(
+            dueAtMilliseconds: Int64(yesterday.timeIntervalSince1970 * 1_000), now: now,
+            locale: locale, calendar: calendar, timeZone: timeZone)
+        XCTAssertTrue(phrase.hasPrefix("Was due yesterday at 17:00"), phrase)
+        XCTAssertFalse(phrase.localizedCaseInsensitiveContains("PM"), phrase)
+    }
+
+    @MainActor
+    func testBasicOrderMarkerFollowsOnlyTheServerReportedFallbackBasis() {
+        let fallback = InboxOrderView(revision: "fallback", algorithm: .jevSet, basis: .fallback,
+                                      entries: [])
+        let selectedJev = InboxOrderView(revision: "selected-jev", algorithm: .jevSet,
+                                         basis: .selected, entries: [])
+        let selectedBaseline = InboxOrderView(revision: "selected-baseline", algorithm: .baseline,
+                                              basis: .selected, entries: [])
+
+        XCTAssertTrue(InboxOrderPresentationRules.showsBasicOrder(in: fallback))
+        XCTAssertFalse(InboxOrderPresentationRules.showsBasicOrder(in: selectedJev))
+        XCTAssertFalse(InboxOrderPresentationRules.showsBasicOrder(in: selectedBaseline))
+        XCTAssertFalse(InboxOrderPresentationRules.showsBasicOrder(in: nil))
+    }
+
     @MainActor
     func testSearchProjectionUsesOnlyMatchingRowsInTheSelectedMessageTab() {
         let inboxMatch = InboxRequestRow(
