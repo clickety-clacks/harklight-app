@@ -133,7 +133,7 @@ public struct InboxPrioritizationWire: Sendable {
                 guard let milliseconds = rawDueAt.integerValue else {
                     throw InboxPrioritizationWireError.invalidFrame
                 }
-                dueAtMilliseconds = milliseconds
+                dueAtMilliseconds = Int64(milliseconds)
             } else {
                 dueAtMilliseconds = nil
             }
