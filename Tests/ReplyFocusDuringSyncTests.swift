@@ -46,7 +46,8 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         XCTAssertTrue(before.canEdit)
         XCTAssertTrue(before.canAnswer)
 
-        _ = try domain.beginInboxCandidate(startupID: "startup", since: 0, batches: [],
+        let since = try domain.snapshot(context: context).cursor
+        _ = try domain.beginInboxCandidate(startupID: "startup", since: since, batches: [],
                                            context: context)
         try visible.refreshFromDurableStore()
 
