@@ -2,10 +2,8 @@ import XCTest
 @testable import Harklight
 import AttentionDomain
 
-/// Every inbox snapshot begins by clearing the current keys, which briefly
-/// marks every request as not current. Disabling the focused reply editor in
-/// that window resigns the keyboard mid-typing, so drafting must stay enabled
-/// while submission keeps waiting for a current status.
+/// A refresh temporarily makes inbox freshness unknown. Reply editing and
+/// submission remain available against the exact request revision on screen.
 final class ReplyFocusDuringSyncTests: XCTestCase {
     private func makeContext() -> ProfileContext {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
@@ -56,12 +54,18 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         let detail = LiveRequestDetail(request: during, store: visible)
         XCTAssertTrue(detail.canEdit,
                       "The focused editor stays enabled while the snapshot runs.")
-        XCTAssertFalse(detail.canAnswer,
-                       "Sending still waits for a current inbox status.")
+        XCTAssertTrue(detail.canAnswer,
+                      "Freshness checks must not disable the answer controls.")
         XCTAssertEqual(visible.draft(for: key)?.compatibility.textByActionID[reply.id],
                        ExactText("Half-typed reply"),
                        "Typed text survives the inbox candidate.")
         XCTAssertEqual(visible.draft(for: key)?.compatibility.selectedActionID, reply.id)
+
+        XCTAssertTrue(visible.submitFromUser(key, requestRevision: during.requestRevision),
+                      "An answer can be submitted while the refresh candidate is pending.")
+        let submission = try XCTUnwrap(domain.snapshot(context: context).outbox.first)
+        XCTAssertEqual(submission.requestRevision, during.requestRevision,
+                       "The answer uses the exact revision the user saw.")
     }
 
     @MainActor

@@ -81,6 +81,59 @@ final class HarklightUITests: XCTestCase {
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
 
+    func testAnswerRemainsAvailableWhileRefreshIsRunning() throws {
+        let app = launchFreshApp(additionalArguments: ["--harklight-test-refreshing"])
+        selectFacilitiesRequest(in: app)
+        _ = setFacilitiesPoint(in: app, x: 240, y: 500)
+
+        let note = app.textFields["request-input-note"]
+        revealInCard(note, in: app)
+        note.tap()
+        note.typeText("Near the east entrance")
+
+        let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
+        XCTAssertTrue(refreshing.waitForExistence(timeout: 5), app.debugDescription)
+        let finish = app.buttons["request-finish"]
+        XCTAssertTrue(finish.isEnabled,
+                      "A refresh must not dim or disable the visible answer action.")
+        attachScreenshot("Answer available while inbox is refreshing", from: app)
+        finish.tap()
+
+        let lifecycle = app.staticTexts["request-lifecycle-status"]
+        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(lifecycle.label, "Pending")
+        XCTAssertTrue(refreshing.exists, "The answer can be submitted while the refresh remains active.")
+        attachScreenshot("Answer submitted while inbox is refreshing", from: app)
+    }
+
+    func testStaleAnswerDialogShowsChangedMessage() throws {
+        let app = launchFreshApp(additionalArguments: ["--harklight-test-stale-answer"])
+        let alert = app.alerts["The message changed"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 5), app.debugDescription)
+        let changedMessage = alert.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS %@", "Updated request:")).firstMatch
+        XCTAssertTrue(changedMessage.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(alert.buttons["Review message"].isHittable,
+                      "The person can open the new version and answer again.")
+        attachScreenshot("Stale answer shows updated message", from: app)
+    }
+
+    func testConnectionWarningButtonShowsTheObservedError() throws {
+        let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
+        let warningButton = app.buttons["inbox-warning-button"]
+        let message = app.staticTexts["inbox-warning-message"]
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        if message.waitForExistence(timeout: 1) {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.10)).tap()
+            XCTAssertFalse(message.waitForExistence(timeout: 1), app.debugDescription)
+        }
+        XCTAssertTrue(warningButton.isHittable, app.debugDescription)
+        warningButton.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(message.label, "The approved server could not be reached.")
+        attachScreenshot("Tapped connection warning shows its error", from: app)
+    }
+
     func testUntouchedRequestStartsInInbox() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
@@ -580,10 +633,12 @@ final class HarklightUITests: XCTestCase {
         return selectedPoint
     }
 
-    private func launchFreshApp(diagnostics: Bool = false) -> XCUIApplication {
+    private func launchFreshApp(diagnostics: Bool = false,
+                                additionalArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
         if diagnostics { app.launchArguments.append("--harklight-ui-diagnostics") }
+        app.launchArguments.append(contentsOf: additionalArguments)
         app.launch()
         return app
     }

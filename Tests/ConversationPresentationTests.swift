@@ -186,6 +186,10 @@ final class ConversationPresentationTests: XCTestCase {
         let liveAfterDecline = try LivePresentationStore(store: domain, context: context)
         XCTAssertEqual(liveAfterDecline.staleAnswerDialog?.currentRevision, 2)
         XCTAssertTrue(liveAfterDecline.staleAnswerDialog?.message.contains("Revised wording") == true)
+        let latestRequest = try XCTUnwrap(liveAfterDecline.request(for: key))
+        XCTAssertEqual(latestRequest.requestRevision, 2)
+        XCTAssertTrue(LiveRequestDetail(request: latestRequest, store: liveAfterDecline).canAnswer,
+                      "The changed request is available for another answer after the stale refusal.")
         liveAfterDecline.dismissStaleAnswerDialog()
         try liveAfterDecline.refreshFromDurableStore()
         XCTAssertNil(liveAfterDecline.staleAnswerDialog, "A dismissed stale-answer notice does not repeat in this session.")
@@ -200,12 +204,19 @@ final class ConversationPresentationTests: XCTestCase {
         let retained = try XCTUnwrap(domain.lookupIntent(old.intentID, context: context))
         XCTAssertEqual(retained.disposition, .lost)
         XCTAssertEqual(retained.answer, .string(ExactText("old")))
-        let newSelector = try XCTUnwrap(revised.selector)
-        let receipt = try port.submit(SubmitIntent(context: port.context, selector: newSelector,
-            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("new"))]))
-        let current = try XCTUnwrap(domain.lookupIntent(receipt.intentID, context: context))
+        guard case let .compatibility(actions) = latestRequest.projection,
+              let newAction = actions.first else {
+            return XCTFail("The revised request should expose its new answer action.")
+        }
+        liveAfterDecline.selectAction(newAction.id, input: nil, for: key,
+                                      requestRevision: latestRequest.requestRevision)
+        liveAfterDecline.updateCompatibilityText("new answer", action: newAction.id, for: key,
+                                                 requestRevision: latestRequest.requestRevision)
+        XCTAssertTrue(liveAfterDecline.submitFromUser(key,
+                                                      requestRevision: latestRequest.requestRevision))
+        let current = try XCTUnwrap(domain.snapshot(context: context).outbox.first)
         XCTAssertEqual(current.requestRevision, 2)
-        XCTAssertEqual(current.operation.uniqueValue(named: "request_revision")?.integerValue, 2)
+        XCTAssertTrue(String(decoding: current.wireFrame, as: UTF8.self).contains("\"request_revision\":2"))
         XCTAssertEqual(try domain.snapshot(context: context).intents.count, 2, "Both original facts remain inspectable")
     }
 
