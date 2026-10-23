@@ -1176,7 +1176,11 @@ private struct LiveProjectedInputView: View {
     private var textEditor: some View {
         TextField(input.label.rawValue, text: textBinding, axis: .vertical)
             .lineLimit(4...8)
-            .textFieldStyle(.roundedBorder)
+            .textFieldStyle(.plain)
+            .foregroundStyle(detailColors.textColor)
+            .tint(detailColors.textColor)
+            .padding(8)
+            .background(replyEditorSurface, in: RoundedRectangle(cornerRadius: 8))
             .accessibilityLabel(input.label.rawValue)
             .accessibilityIdentifier("request-input-" + input.id.rawValue)
             .disabled(readOnly)
