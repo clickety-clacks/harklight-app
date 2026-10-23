@@ -281,6 +281,8 @@ final class HarklightUITests: XCTestCase {
             .matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'"))
         XCTAssertTrue(examples.firstMatch.waitForExistence(timeout: 10),
                       "Local examples make the list long enough to scroll.")
+        let brand = app.descendants(matching: .any)["inbox-brand"]
+        XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(others.contains { $0.frame.minY > facilities.frame.minY },
                       "The request starts above other open requests in the Inbox.")
 
@@ -293,9 +295,9 @@ final class HarklightUITests: XCTestCase {
         let scrolledTop = top.frame.minY
         XCTAssertLessThan(scrolledTop, unscrolledTop - 10, "The list must be scrolled away from its top.")
 
-        let settings = app.buttons["inbox-settings"]
-        XCTAssertGreaterThan(review.frame.minY, settings.frame.maxY + 16,
-                             "The tapped request stays clear of the pinned header.")
+        let headerHidden = expectation(for: NSPredicate(format: "isHittable == false"),
+                                       evaluatedWith: brand)
+        wait(for: [headerHidden], timeout: 5)
         XCTAssertTrue(review.isHittable, app.debugDescription)
         review.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
