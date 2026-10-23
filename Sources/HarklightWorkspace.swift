@@ -751,7 +751,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 conversationStore?.dismissStaleAnswerDialog()
                 settings = false
                 chatOpen = false
-                conversationPresented = false
                 workspaceTab = .inbox
                 selectedTab = .inbox
                 search = ""
