@@ -446,7 +446,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func markSeen(_ id: InboxSelection) {
         switch id {
         case let .request(key):
-            guard let row = rows.first(where: { $0.id == id }), row.canMarkSeen else { return }
+            guard let item = rows.first(where: { $0.id == id }),
+                  case let .request(row) = item, row.canMarkSeen else { return }
             markSeenRequest(key, row.requestRevision)
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canMarkSeenLocally else { return }
@@ -457,7 +458,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func markNoComment(_ id: InboxSelection) {
         switch id {
         case let .request(key):
-            guard let row = rows.first(where: { $0.id == id }), row.canNoComment else { return }
+            guard let item = rows.first(where: { $0.id == id }),
+                  case let .request(row) = item, row.canNoComment else { return }
             markNoCommentRequest(key, row.requestRevision)
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canDeclineLocally else { return }
