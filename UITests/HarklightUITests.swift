@@ -114,9 +114,14 @@ final class HarklightUITests: XCTestCase {
         let changedMessage = alert.staticTexts.containing(
             NSPredicate(format: "label CONTAINS %@", "Updated request:")).firstMatch
         XCTAssertTrue(changedMessage.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(alert.buttons["Review message"].isHittable,
+        let reviewMessage = alert.buttons["Review message"]
+        XCTAssertTrue(reviewMessage.isHittable,
                       "The person can open the new version and answer again.")
         attachScreenshot("Stale answer shows updated message", from: app)
+        reviewMessage.tap()
+
+        XCTAssertTrue(app.buttons["request-finish"].waitForExistence(timeout: 5),
+                      "Reviewing the changed message returns to its answer control.\n\(app.debugDescription)")
     }
 
     func testConnectionWarningButtonShowsTheObservedError() throws {
