@@ -2,6 +2,41 @@ import AttentionDomain
 import CryptoKit
 import XCTest
 
+private final class SeededAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+    private let state: Data
+
+    init(state: Data) { self.state = state }
+
+    func load(identity: ProfileIdentity) throws -> Data? { state }
+    func commit(_ data: Data, identity: ProfileIdentity) throws {}
+}
+
+private func reversePersistedConversationTurnArrays(in value: inout Any) -> Int {
+    if var dictionary = value as? [String: Any] {
+        var changed = 0
+        if let turns = dictionary["turns"] as? [Any] {
+            dictionary["turns"] = Array(turns.reversed())
+            changed += 1
+        }
+        for key in Array(dictionary.keys) {
+            guard var child = dictionary[key] else { continue }
+            changed += reversePersistedConversationTurnArrays(in: &child)
+            dictionary[key] = child
+        }
+        value = dictionary
+        return changed
+    }
+    if var array = value as? [Any] {
+        var changed = 0
+        for index in array.indices {
+            changed += reversePersistedConversationTurnArrays(in: &array[index])
+        }
+        value = array
+        return changed
+    }
+    return 0
+}
+
 final class ConversationDomainTests: XCTestCase {
     private func context(_ mode: AttentionTransportMode = .relay) -> ProfileContext {
         ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("conversation-test"),
@@ -49,6 +84,80 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertEqual(thread.facts[person.id]?.delivered, true)
         XCTAssertEqual(thread.facts[person.id]?.actedBy, reply.id)
         XCTAssertEqual(thread.drafts[1], draft)
+    }
+
+    func testConversationTurnOrderFollowsProjectionSequenceAndPreservesReplyFacts() throws {
+        let context = context()
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let binding = binding(context)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+
+        // These identities descend even though their accepted conversation facts do not.
+        let prompt = ConversationTurn(id: ExactText("30"), binding: binding, author: .person,
+            sessionHandle: ExactText("session"), text: ExactText("Which option should we use?"))
+        let reply = ConversationTurn(id: ExactText("20"), binding: binding, author: .origin,
+            sessionHandle: ExactText("session"), text: ExactText("Use the reversible option."),
+            inReplyTo: prompt.id)
+        let agentReply = ConversationTurn(id: ExactText("10"), binding: binding, author: .agent,
+            sessionHandle: ExactText("session"), text: ExactText("I will use the reversible option."),
+            inReplyTo: reply.id, kind: .reply)
+
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(prompt)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .delivered(turn: prompt.id)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 4, binding: binding, fact: .turn(reply)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 5, binding: binding,
+            fact: .acted(turn: prompt.id, by: reply.id)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 6, binding: binding, fact: .turn(agentReply)), context: context)
+
+        let thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.turns.map(\.id), [prompt.id, reply.id, agentReply.id])
+        XCTAssertEqual(thread.turns.map(\.inReplyTo), [nil, prompt.id, reply.id])
+        XCTAssertEqual(thread.facts[prompt.id]?.delivered, true)
+        XCTAssertEqual(thread.facts[prompt.id]?.actedBy, reply.id)
+        XCTAssertNil(thread.facts[reply.id]?.actedBy, "A reply does not imply that its own prompt was acted on")
+    }
+
+    func testReloadRepairsLegacyTurnOrderFromProjectionSequenceWithoutDroppingHistory() throws {
+        let context = context()
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let binding = binding(context)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        let prompt = ConversationTurn(id: ExactText("30"), binding: binding, author: .person,
+            sessionHandle: ExactText("session"), text: ExactText("Which option should we use?"))
+        let reply = ConversationTurn(id: ExactText("20"), binding: binding, author: .origin,
+            sessionHandle: ExactText("session"), text: ExactText("Use the reversible option."),
+            inReplyTo: prompt.id)
+        let agentReply = ConversationTurn(id: ExactText("10"), binding: binding, author: .agent,
+            sessionHandle: ExactText("session"), text: ExactText("I will use the reversible option."),
+            inReplyTo: reply.id, kind: .reply)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(prompt)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .delivered(turn: prompt.id)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 4, binding: binding, fact: .turn(reply)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 5, binding: binding,
+            fact: .acted(turn: prompt.id, by: reply.id)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 6, binding: binding, fact: .turn(agentReply)), context: context)
+
+        // Recreate the legacy saved-array ordering while leaving the sequence journal intact.
+        let current = try XCTUnwrap(persistence.load(identity: context.identity))
+        var propertyList = try PropertyListSerialization.propertyList(from: current,
+            options: [.mutableContainersAndLeaves], format: nil)
+        XCTAssertEqual(reversePersistedConversationTurnArrays(in: &propertyList), 1)
+        let encoded = try PropertyListSerialization.data(fromPropertyList: propertyList,
+            format: .binary, options: 0)
+
+        let restoredStore = try AttentionDomainStore(context: context,
+            persistence: SeededAttentionStatePersistence(state: encoded))
+        let restored = try XCTUnwrap(restoredStore.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(restored.turns.map(\.id), [prompt.id, reply.id, agentReply.id])
+        XCTAssertEqual(restored.turns.map(\.inReplyTo), [nil, prompt.id, reply.id])
+        XCTAssertEqual(restored.facts[prompt.id]?.delivered, true)
+        XCTAssertEqual(restored.facts[prompt.id]?.actedBy, reply.id)
+        XCTAssertEqual(restored.turns.count, 3)
     }
 
     func testConversationCanArriveBeforeOrdinaryDeliveryWithoutCreatingOrphanedLegacyState() throws {
