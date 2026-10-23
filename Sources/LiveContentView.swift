@@ -495,7 +495,7 @@ struct LiveRequestDetail: View {
                     .font(.headline)
             } else {
                 Image(systemName: "checkmark")
-                    .foregroundStyle(detailColors.textColor)
+                    .foregroundStyle(Color.white)
                     .font(.headline)
             }
         }
