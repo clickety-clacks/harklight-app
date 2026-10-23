@@ -179,8 +179,9 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(currentAfterDecline.title, ExactText("Revised wording"))
         XCTAssertEqual(currentAfterDecline.staleAnswerRevision?.submittedRevision, 1)
         XCTAssertEqual(currentAfterDecline.staleAnswerRevision?.currentRevision, 2)
-        let viewedAgain = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 1).requests.first)
-        XCTAssertEqual(viewedAgain.draft.compatibility.selectedActionID, ExactText("old"))
+        let historical = try XCTUnwrap(port.inspectAnswerDraft(context: port.context,
+                                                               request: key, revision: 1))
+        XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
         let liveAfterDecline = try LivePresentationStore(store: domain, context: context)
         XCTAssertEqual(liveAfterDecline.staleAnswerDialog?.currentRevision, 2)
         XCTAssertTrue(liveAfterDecline.staleAnswerDialog?.message.contains("Revised wording") == true)
@@ -194,9 +195,7 @@ final class ConversationPresentationTests: XCTestCase {
         let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.answerDrafts?[1]?.compatibility.selectedActionID, ExactText("old"))
         XCTAssertEqual(thread.revisions[1], first)
-        let historical = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
         XCTAssertEqual(historical.title, ExactText("First wording"))
-        XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertNil(historical.selector, "Historical drafts cannot acquire a current answer selector")
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         let retained = try XCTUnwrap(domain.lookupIntent(old.intentID, context: context))
@@ -245,8 +244,8 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertNil(current.draft.compatibility.selectedActionID,
                      "Editing the version on screen must not apply its answer to the newer version.")
-        XCTAssertEqual(live.draft(for: key, revision: 1)?.compatibility.textByActionID[ExactText("old")],
-                       ExactText("Old-version draft"))
+        XCTAssertNil(live.draft(for: key, revision: 2)?.compatibility.textByActionID[ExactText("old")],
+                     "Text staged for the old request version must not appear under the revised message.")
         XCTAssertNil(live.draft(for: key, revision: 2)?.compatibility.textByActionID[ExactText("new")])
         XCTAssertNil(historical.selector,
                      "A new request version cannot issue an answer selector for the archived version.")
