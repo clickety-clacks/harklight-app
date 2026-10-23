@@ -770,10 +770,10 @@ final class NativeRelayCoreTests: XCTestCase {
             return .object([JSONMember("acceptance", acceptance)])
         }
         session.initialItems = [try pageItem(1)]
-        session.snapshotHighWater = 1
+        session.snapshotHighWater = 2
         session.nextItemCursor = "cursor-1"
         session.olderPages["cursor-1"] = [try pageItem(2)]
-        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":2}"#)]
         session.supportsPostCheckpointInboxEvents = true
         session.supportsInboxPrioritization = true
         let key = RequestKey(accountScope: context.identity.personID,
@@ -801,7 +801,7 @@ final class NativeRelayCoreTests: XCTestCase {
 
         XCTAssertEqual(capture.value(), second,
                        "A view notice must not be mistaken for the outstanding page reply.")
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue
         }.filter { $0 == "view_get" }.count, 2)
@@ -810,7 +810,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let fetched = try await pageRead.value
         XCTAssertTrue(fetched)
         XCTAssertEqual(try store.snapshot(context: context).requests.count, 2)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1,
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 2,
                        "Paging and view notices do not advance the event cursor.")
         session.stopPostCheckpointInboxEvents()
         await core.deactivate()
@@ -1040,7 +1040,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         let requestValues = try session.requests.map(JSONValue.parse)
         XCTAssertEqual(requestValues.compactMap { $0.uniqueValue(named: "type")?.stringValue?.rawValue }, [
-            "inbox_start", "inbox_attach"
+            "inbox_start", "inbox_checkpoint_ack", "inbox_attach"
         ])
         XCTAssertEqual(requestValues.dropFirst().compactMap {
             $0.uniqueValue(named: "since")?.integerValue

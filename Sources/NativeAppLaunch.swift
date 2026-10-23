@@ -1294,7 +1294,7 @@ final class LivePresentationStore {
     }
 
     var inboxRows: [InboxRequestRow] {
-        let rows = presentation.requests.compactMap { request in
+        let rows: [InboxRequestRow] = presentation.requests.compactMap { request -> InboxRequestRow? in
             let retracted = isRetracted(request.key)
             if retracted, clearedRetractions.contains(request.key) { return nil }
             let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
