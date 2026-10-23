@@ -1,16 +1,18 @@
 import UIKit
 import UserNotifications
 
-/// The icon badge is the Inbox count: the same rows the Inbox tab lists,
-/// judged by the same membership rule, so acting on a message moves the
-/// badge exactly when it moves the list. Zero clears the badge.
+/// The icon badge counts the Inbox rows that still need attention: the same
+/// rows the Inbox tab lists, judged by the same membership rule, so acting on
+/// a message moves the badge exactly when it moves the list. A retracted
+/// message stays listed with its Retracted marker but no longer needs an
+/// answer, so it does not count. Zero clears the badge.
 @MainActor
 enum InboxBadge {
     static func count(requests: [InboxRequestRow], samples: SampleLibrary,
                       showsLocalExamples: Bool) -> Int {
         let items = showsLocalExamples ? samples.inboxItems(appendingTo: requests)
             : requests.map(InboxItem.request)
-        return items.filter { !$0.belongsToReplied }.count
+        return items.filter { !$0.belongsToReplied && !$0.isRetracted }.count
     }
 }
 
