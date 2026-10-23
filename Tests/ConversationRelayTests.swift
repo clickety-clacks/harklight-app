@@ -173,6 +173,88 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         await core.deactivate()
     }
+    func testRelayRetractionWithoutSessionHandleDoesNotBlockLaterChat() async throws {
+        let (context, _, store, session) = try setup()
+        let earlier = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("earlier"))
+        let request = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"earlier","origin":"origin","as":"message","message":{"title":"Withdrawn"},"session_handle":"earlier-handle","request_revision":1,"availability":"not_listening","last_detached_at":null}"#),
+            data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        let support = #""listening_support":{"route":"claude-code","cli_version":"1","origin":"origin","reported_at":5,"unsupported_reason":null},"unsupported_reason":null"#
+        // The relay sends a retraction without a session handle. Every later
+        // presence, receipt and reply depends on the replay getting past it.
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"earlier","origin":"origin","request_revision":1,"kind":"retraction","author":"origin","event_id":"2","terminal_seq":7,"terminal_state":"retracted","retracted_at":1792643952343}"#),
+            event("availability", sequence: 2, fields: #""author":"server","availability":"not_listening","last_detached_at":null,"# + support),
+            event("availability", sequence: 3, fields: #""author":"server","availability":"listening","last_detached_at":null,"# + support),
+            event("discussion", sequence: 4, fields: #""author":"person","event_id":"5","op_id":"7eaac5c0-02a6-43a7-9934-8bbde62d7bde","text":"Hi there""#),
+            event("receipt", sequence: 5, fields: #""author":"origin","event_id":"5","delivered":true"#),
+            event("reply", sequence: 6, fields: #""author":"origin","event_id":"6","in_reply_to":"5","op_id":"7d76be3a-c45d-4cef-87c7-248982fe3b0d","text":"Hello""#),
+            event("acted", sequence: 7, fields: #""author":"origin","event_id":"5","acting_event_id":"6""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":7}"#)]
+        session.onConversationACK = {
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 7)
+        }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":7,"ref":"native-conversation-ack"}"# + "\n")])
+        let threads = try store.conversationSnapshot(context: context).threads
+        XCTAssertEqual(threads[earlier]?.isRetracted, true)
+        XCTAssertEqual(threads[earlier]?.retraction?.retractedAtMilliseconds, 1792643952343)
+        let thread = try XCTUnwrap(threads[request])
+        XCTAssertEqual(thread.availability, .listening)
+        let reply = try XCTUnwrap(thread.turns.first { $0.id == ExactText("6") })
+        XCTAssertEqual(reply.author, .origin)
+        XCTAssertEqual(reply.text, ExactText("Hello"))
+        XCTAssertEqual(reply.inReplyTo, ExactText("5"))
+        XCTAssertEqual(thread.facts[ExactText("5")]?.delivered, true)
+        XCTAssertEqual(thread.facts[ExactText("5")]?.actedBy, ExactText("6"))
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        await core.deactivate()
+    }
+    func testRetractionForAnUnloadedRequestDoesNotBlockLaterChatAndAppliesWhenItsDeliveryArrives() async throws {
+        let (context, _, store, session) = try setup()
+        let earlier = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("earlier"))
+        let request = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        // The retracted request is older than the loaded inbox page, so this
+        // device holds no thread for it when the replay reaches its retraction.
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"earlier","origin":"origin","request_revision":1,"kind":"retraction","author":"origin","event_id":"2","terminal_seq":7,"terminal_state":"retracted","retracted_at":1792643952343}"#),
+            event("discussion", sequence: 2, fields: #""author":"person","event_id":"5","op_id":"7eaac5c0-02a6-43a7-9934-8bbde62d7bde","text":"Hi there""#),
+            event("receipt", sequence: 3, fields: #""author":"origin","event_id":"5","delivered":true"#),
+            event("reply", sequence: 4, fields: #""author":"origin","event_id":"6","in_reply_to":"5","op_id":"7d76be3a-c45d-4cef-87c7-248982fe3b0d","text":"Hello""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":4,"ref":"native-conversation-ack"}"# + "\n")])
+        var threads = try store.conversationSnapshot(context: context).threads
+        XCTAssertNil(threads[earlier])
+        let thread = try XCTUnwrap(threads[request])
+        let reply = try XCTUnwrap(thread.turns.first { $0.id == ExactText("6") })
+        XCTAssertEqual(reply.text, ExactText("Hello"))
+        XCTAssertEqual(thread.facts[ExactText("5")]?.delivered, true)
+
+        // The earlier request loads afterwards and shows its held retraction.
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"earlier","origin":"origin","as":"message","message":{"title":"Withdrawn"},"session_handle":"earlier-handle","request_revision":1,"availability":"not_listening","last_detached_at":null}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#)]
+        _ = try await core.resyncAndDrainOutbox()
+
+        threads = try store.conversationSnapshot(context: context).threads
+        XCTAssertEqual(threads[earlier]?.isRetracted, true)
+        XCTAssertEqual(threads[earlier]?.retraction?.retractedAtMilliseconds, 1792643952343)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 4)
+        await core.deactivate()
+    }
     func testUnboundTierFactIsDurableBeforeACKAndAppliesWhenDeliveryArrives() async throws {
         let (context, persistence, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
