@@ -889,7 +889,9 @@ final class LivePresentationStore {
     }
     private(set) var isSendingDiscussion = false
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
-    private(set) var presentation: PresentationSnapshot
+    private(set) var presentation: PresentationSnapshot {
+        didSet { requestIndicesByKey = Self.requestIndex(for: presentation) }
+    }
     private(set) var selectedRequestKey: RequestKey?
     private var activeRefreshCount = 0
     var isRefreshing: Bool { activeRefreshCount > 0 }
@@ -946,6 +948,7 @@ final class LivePresentationStore {
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
+    @ObservationIgnored private var requestIndicesByKey: [RequestKey: Int] = [:]
     // Clearing a retracted row is list state on this device only: no frame is
     // sent and the retracted record stays intact in the durable store.
     private(set) var clearedRetractions: Set<RequestKey> = []
@@ -991,6 +994,7 @@ final class LivePresentationStore {
         let snapshot = try port.observe(context: port.context)
         self.port = port
         self.presentation = snapshot
+        self.requestIndicesByKey = Self.requestIndex(for: snapshot)
         self.conversationThreads = try port.conversations(context: port.context).threads
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
@@ -1028,6 +1032,22 @@ final class LivePresentationStore {
 
     func retractionLabel(_ key: RequestKey) -> String {
         guard let date = retractionDate(key) else { return "Retracted" }
+        return "Retracted · " + date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func retractionDate(for request: PresentedRequest) -> Date? {
+        let thread = conversationThreads[request.key]
+        let timestamp = thread?.retraction?.retractedAtMilliseconds ?? thread?.reportedRetractedAtMilliseconds ?? {
+            guard let outcome = request.intentReceipt?.relayOutcome,
+                  case let .refusedByRetraction(retractedAtMilliseconds) = outcome else { return nil }
+            return retractedAtMilliseconds
+        }()
+        guard let timestamp else { return nil }
+        return Date(timeIntervalSince1970: Double(timestamp) / 1_000)
+    }
+
+    private func retractionLabel(for request: PresentedRequest) -> String {
+        guard let date = retractionDate(for: request) else { return "Retracted" }
         return "Retracted · " + date.formatted(date: .abbreviated, time: .shortened)
     }
 
@@ -1326,73 +1346,80 @@ final class LivePresentationStore {
     }
 
     var inboxRows: [InboxRequestRow] {
-        presentation.requests.compactMap { request in
-            let retracted = isRetracted(request.key)
-            if retracted, clearedRetractions.contains(request.key) { return nil }
-            let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
-                request.receiptFacts?.ownOutcome == .unconfirmed &&
-                request.lifecycleStatus != .pending
-            let serverReportedFinalResponse = request.inboxStateIsCurrent &&
-                (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
-            let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
-            let receiptStatus = request.answerNotDelivered ? .some(.failed) :
-                InboxRequestRow.responseReceiptStatus(
-                request.intentReceipt,
-                hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission,
-                serverReportedFinalResponse: serverReportedFinalResponse,
-                hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
-            var statusParts: [String] = []
-            if request.inboxStateIsCurrent {
-                if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
-                let lifecycle = retracted ? retractionLabel(request.key) :
-                    String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
-                statusParts.append(lifecycle)
-                if request.answerNotDelivered { statusParts.append("Answer not delivered") }
-                if request.noCommentUnavailable, receiptStatus != .failed,
-                   !serverReportedFinalResponse {
-                    statusParts.append("No comment not delivered · unsupported by this server")
-                }
-                if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
-                    statusParts.append(informationalSeenRowStatus(seenStatus))
-                }
-            } else {
-                if let localStatus = cachedOperationStatus(request.intentReceipt?.localState) {
-                    statusParts.append(localStatus)
-                }
-                statusParts.append("Cached history · status not refreshed")
-            }
-            return InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
-                title: request.title?.rawValue ?? "Message",
-                sender: request.key.senderID.rawValue,
-                status: statusParts.joined(separator: " · "),
-                bodyText: request.body?.rawValue,
-                symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-                isResolved: request.answerNotDelivered || receiptStatus == .failed ? false :
-                    request.isResolved, createdAt: request.createdAt,
-                localStatus: request.answerNotDelivered ? "Answer not delivered" : receiptStatus == .failed
-                    ? (request.noCommentUnavailable
-                        ? "No comment not delivered · unsupported by this server"
-                        : request.receiptFacts?.ownOutcome == .unconfirmed
-                            ? "Answer sent · result not confirmed"
-                            : cachedOperationStatus(request.intentReceipt?.localState))
-                    : nil,
-                informationalSeenStatus: request.informationalSeenStatus,
-                canMarkSeen: !isReadOnly &&
-                    !retracted && request.lifecycleStatus == .open &&
-                    request.intentReceipt == nil && request.informationalSeenStatus == .available,
-                canNoComment: canNoComment(request),
-                noCommentUnavailable: request.noCommentUnavailable,
-                hasUserAction: receiptStatus == .pendingOrAccepted ||
-                    request.lifecycleStatus == .answered ||
-                    request.lifecycleStatus == .noComment,
-                hasFailedResponse: receiptStatus == .failed,
-                isRetracted: retracted,
-                tier: request.attentionTier.inboxRowStyleTier)
-        }
+        presentation.requests.compactMap { inboxRow(for: $0) }
     }
 
-    private func canNoComment(_ request: PresentedRequest) -> Bool {
-        guard !isReadOnly, !isRetracted(request.key),
+    func inboxRow(for key: RequestKey) -> InboxRequestRow? {
+        guard let request = request(for: key) else { return nil }
+        return inboxRow(for: request)
+    }
+
+    private func inboxRow(for request: PresentedRequest) -> InboxRequestRow? {
+        let retracted = isRetracted(request.key)
+        if retracted, clearedRetractions.contains(request.key) { return nil }
+        let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
+            request.receiptFacts?.ownOutcome == .unconfirmed &&
+            request.lifecycleStatus != .pending
+        let serverReportedFinalResponse = request.inboxStateIsCurrent &&
+            (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
+        let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
+        let receiptStatus = request.answerNotDelivered ? .some(.failed) :
+            InboxRequestRow.responseReceiptStatus(
+            request.intentReceipt,
+            hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission,
+            serverReportedFinalResponse: serverReportedFinalResponse,
+            hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
+        var statusParts: [String] = []
+        if request.inboxStateIsCurrent {
+            if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
+            let lifecycle = retracted ? retractionLabel(for: request) :
+                String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
+            statusParts.append(lifecycle)
+            if request.answerNotDelivered { statusParts.append("Answer not delivered") }
+            if request.noCommentUnavailable, receiptStatus != .failed,
+               !serverReportedFinalResponse {
+                statusParts.append("No comment not delivered · unsupported by this server")
+            }
+            if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
+                statusParts.append(informationalSeenRowStatus(seenStatus))
+            }
+        } else {
+            if let localStatus = cachedOperationStatus(request.intentReceipt?.localState) {
+                statusParts.append(localStatus)
+            }
+            statusParts.append("Cached history · status not refreshed")
+        }
+        return InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
+            title: request.title?.rawValue ?? "Message",
+            sender: request.key.senderID.rawValue,
+            status: statusParts.joined(separator: " · "),
+            bodyText: request.body?.rawValue,
+            symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
+            isResolved: request.answerNotDelivered || receiptStatus == .failed ? false :
+                request.isResolved, createdAt: request.createdAt,
+            localStatus: request.answerNotDelivered ? "Answer not delivered" : receiptStatus == .failed
+                ? (request.noCommentUnavailable
+                    ? "No comment not delivered · unsupported by this server"
+                    : request.receiptFacts?.ownOutcome == .unconfirmed
+                        ? "Answer sent · result not confirmed"
+                        : cachedOperationStatus(request.intentReceipt?.localState))
+                : nil,
+            informationalSeenStatus: request.informationalSeenStatus,
+            canMarkSeen: !isReadOnly &&
+                !retracted && request.lifecycleStatus == .open &&
+                request.intentReceipt == nil && request.informationalSeenStatus == .available,
+            canNoComment: canNoComment(request, isRetracted: retracted),
+            noCommentUnavailable: request.noCommentUnavailable,
+            hasUserAction: receiptStatus == .pendingOrAccepted ||
+                request.lifecycleStatus == .answered ||
+                request.lifecycleStatus == .noComment,
+            hasFailedResponse: receiptStatus == .failed,
+            isRetracted: retracted,
+            tier: request.attentionTier.inboxRowStyleTier)
+    }
+
+    private func canNoComment(_ request: PresentedRequest, isRetracted: Bool) -> Bool {
+        guard !isReadOnly, !isRetracted,
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil else { return false }
         // No comment is its own wire answer and does not depend on the
@@ -1431,11 +1458,14 @@ final class LivePresentationStore {
     }
 
     var selectedRequest: PresentedRequest? {
-        presentation.requests.first { $0.key == selectedRequestKey }
+        selectedRequestKey.flatMap { request(for: $0) }
     }
 
     func request(for key: RequestKey) -> PresentedRequest? {
-        presentation.requests.first { $0.key == key }
+        guard let index = requestIndicesByKey[key], presentation.requests.indices.contains(index) else {
+            return nil
+        }
+        return presentation.requests[index]
     }
 
     func draft(for key: RequestKey, revision: UInt64? = nil) -> RequestDraft? {
@@ -1452,7 +1482,7 @@ final class LivePresentationStore {
 
     func selectRequest(_ key: RequestKey?) {
         guard let key else { selectedRequestKey = nil; clearActionError(); return }
-        guard presentation.requests.contains(where: { $0.key == key }) else { return }
+        guard requestIndicesByKey[key] != nil else { return }
         if selectedRequestKey != key { clearActionError() }
         selectedRequestKey = key
     }
@@ -1972,17 +2002,26 @@ final class LivePresentationStore {
         presentation = snapshot
         presentStaleAnswerIfAvailable(in: snapshot)
         if let key = actionErrorRequest,
-           let current = snapshot.requests.first(where: { $0.key == key }),
+           let current = request(for: key),
            current.intentReceipt != nil || current.lifecycleStatus != .open {
             clearActionError()
         }
         if let selectedRequestKey,
-           !snapshot.requests.contains(where: { $0.key == selectedRequestKey }) {
+           requestIndicesByKey[selectedRequestKey] == nil {
             self.selectedRequestKey = snapshot.requests.first?.key
         } else if selectedRequestKey == nil {
             self.selectedRequestKey = snapshot.requests.first?.key
         }
         notificationProjectionDidChange?()
+    }
+
+    private static func requestIndex(for snapshot: PresentationSnapshot) -> [RequestKey: Int] {
+        var index: [RequestKey: Int] = [:]
+        index.reserveCapacity(snapshot.requests.count)
+        for (offset, request) in snapshot.requests.enumerated() where index[request.key] == nil {
+            index[request.key] = offset
+        }
+        return index
     }
 
     private func presentStaleAnswerIfAvailable(in snapshot: PresentationSnapshot) {

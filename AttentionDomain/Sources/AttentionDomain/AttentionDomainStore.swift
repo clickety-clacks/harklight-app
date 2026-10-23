@@ -1720,50 +1720,84 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    items: [InboxSnapshotItem],
                                    nextCursor: String?,
                                    context suppliedContext: ProfileContext) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay,
-              var checkpoint = state.inboxCheckpoint,
-              checkpoint.checkpointAccepted,
-              checkpoint.snapshotID == snapshotID,
-              checkpoint.highWater == highWater,
-              checkpoint.hasInitialPage,
-              checkpoint.nextCursor == cursor,
-              items.count <= 20,
-              (items.count > 0 || nextCursor == nil) else {
-            throw AttentionStoreError.inboxPageConflict
-        }
-        let keys = items.map(\.key)
-        guard Set(keys).count == keys.count,
-              keys.allSatisfy({ $0.accountScope == context.identity.personID }),
-              keys.allSatisfy({ !checkpoint.loadedKeys.contains($0) }),
-              nextCursor != cursor else { throw AttentionStoreError.inboxPageConflict }
-        var next = state
-        for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
-        let previousSourceOrder: [RequestKey]
-        if let sourceOrder = checkpoint.sourceOrder {
-            previousSourceOrder = sourceOrder
-        } else {
-            previousSourceOrder = checkpoint.loadedKeys.sorted { left, right in
-                let leftOrder = state.requests[left]?.acceptanceOrder ??
-                    state.remoteStates[left]?.eventSequence ?? state.inboxReferences?[left]?.eventSequence ?? 0
-                let rightOrder = state.requests[right]?.acceptanceOrder ??
-                    state.remoteStates[right]?.eventSequence ?? state.inboxReferences?[right]?.eventSequence ?? 0
-                if leftOrder != rightOrder { return leftOrder > rightOrder }
-                if left.senderID.rawValue != right.senderID.rawValue {
-                    return left.senderID.rawValue < right.senderID.rawValue
+        while true {
+            lock.lock()
+            let baseState: PersistedAttentionState
+            do {
+                try validate(suppliedContext)
+                baseState = state
+            } catch {
+                lock.unlock()
+                throw error
+            }
+            lock.unlock()
+
+            var next = baseState
+            guard suppliedContext.transportMode == .relay,
+                  var checkpoint = next.inboxCheckpoint,
+                  checkpoint.checkpointAccepted,
+                  checkpoint.snapshotID == snapshotID,
+                  checkpoint.highWater == highWater,
+                  checkpoint.hasInitialPage,
+                  checkpoint.nextCursor == cursor,
+                  items.count <= 20,
+                  (items.count > 0 || nextCursor == nil) else {
+                throw AttentionStoreError.inboxPageConflict
+            }
+            let keys = items.map(\.key)
+            guard Set(keys).count == keys.count,
+                  keys.allSatisfy({ $0.accountScope == context.identity.personID }),
+                  keys.allSatisfy({ !checkpoint.loadedKeys.contains($0) }),
+                  nextCursor != cursor else { throw AttentionStoreError.inboxPageConflict }
+            for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+            let previousSourceOrder: [RequestKey]
+            if let sourceOrder = checkpoint.sourceOrder {
+                previousSourceOrder = sourceOrder
+            } else {
+                previousSourceOrder = checkpoint.loadedKeys.sorted { left, right in
+                    let leftOrder = baseState.requests[left]?.acceptanceOrder ??
+                        baseState.remoteStates[left]?.eventSequence ?? baseState.inboxReferences?[left]?.eventSequence ?? 0
+                    let rightOrder = baseState.requests[right]?.acceptanceOrder ??
+                        baseState.remoteStates[right]?.eventSequence ?? baseState.inboxReferences?[right]?.eventSequence ?? 0
+                    if leftOrder != rightOrder { return leftOrder > rightOrder }
+                    if left.senderID.rawValue != right.senderID.rawValue {
+                        return left.senderID.rawValue < right.senderID.rawValue
+                    }
+                    return left.messageID.rawValue < right.messageID.rawValue
                 }
-                return left.messageID.rawValue < right.messageID.rawValue
+            }
+            checkpoint.sourceOrder = previousSourceOrder + keys
+            checkpoint.loadedKeys.formUnion(keys)
+            checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
+            checkpoint.nextCursor = nextCursor
+            next.inboxCheckpoint = checkpoint
+            next.revision = baseState.revision &+ 1
+
+            // Encoding can walk the entire retained account. Do it against this
+            // immutable snapshot without holding the lock shared by UI reads.
+            let bytes = try encodedState(next)
+
+            lock.lock()
+            do {
+                try validate(suppliedContext)
+            } catch {
+                lock.unlock()
+                throw error
+            }
+            guard state.revision == baseState.revision else {
+                lock.unlock()
+                continue
+            }
+            do {
+                try commit(next, encoded: bytes)
+                refreshAcceptedReplayIndexes(for: keys)
+                lock.unlock()
+                return
+            } catch {
+                lock.unlock()
+                throw error
             }
         }
-        checkpoint.sourceOrder = previousSourceOrder + keys
-        checkpoint.loadedKeys.formUnion(keys)
-        checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
-        checkpoint.nextCursor = nextCursor
-        next.inboxCheckpoint = checkpoint
-        try commit(next)
-        refreshAcceptedReplayIndexes(for: keys)
     }
 
     public func appendInboxReceiptBatches(_ batches: [InboxReceiptBatch],
@@ -2411,6 +2445,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard var conversation = next.conversation, var thread = conversation.threads[request] else { return [] }
         let committed = Set(thread.turns.compactMap(\.operationID))
         let groups = (thread.uploadGroups ?? [:]).values.filter { $0.cleanupID == nil && !committed.contains($0.operationID) }
+        guard !groups.isEmpty else {
+            return (thread.uploadCleanups ?? [:]).values.filter {
+                if case .acknowledged = $0.outcome { return false }; return true
+            }
+        }
         for revision in Set(groups.map { $0.binding.revision }) {
             let operations = groups.filter { $0.binding.revision == revision }.map(\.operationID)
                 .sorted { $0.uuidString < $1.uuidString }
@@ -2618,10 +2657,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
         // with conversation history.
         var next = proposed
         next.revision = state.revision &+ 1
+        try commit(next, encoded: encodedState(next))
+    }
+
+    private func encodedState(_ state: PersistedAttentionState) throws -> Data {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        return try encoder.encode(state)
+    }
+
+    private func commit(_ next: PersistedAttentionState, encoded bytes: Data) throws {
         do {
-            let encoder = PropertyListEncoder()
-            encoder.outputFormat = .binary
-            let bytes = try encoder.encode(next)
             try persistence.commit(bytes, identity: context.identity)
             state = next
             for observer in Array(changeObservers.values) {
