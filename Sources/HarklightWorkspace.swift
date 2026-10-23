@@ -1003,6 +1003,18 @@ struct InboxList: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     HarklightBrand().accessibilityIdentifier("inbox-brand")
+                    if isRefreshing {
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text("Refreshing").font(.caption2.weight(.semibold))
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .tint(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                        .accessibilityIdentifier("inbox-refreshing-badge")
+                    }
                     if !warnings.isEmpty {
                         Button {
                             isWarningPresented = true
@@ -1053,18 +1065,6 @@ struct InboxList: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .background(Color(uiColor: .systemBackground))
-                if isRefreshing {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Refreshing").font(.caption.weight(.medium))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.thinMaterial, in: Capsule())
-                    .accessibilityIdentifier("inbox-refreshing-badge")
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
-                }
             }
             .background(Color(uiColor: .systemBackground))
         }
