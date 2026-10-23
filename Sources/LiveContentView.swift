@@ -186,10 +186,6 @@ struct MessageHeading: View {
         HarklightDesignSystem.palette(for: colorScheme).neutral
     }
 
-    private var accentColor: Color {
-        HarklightDesignSystem.palette(for: colorScheme).accent.color
-    }
-
     private var mutedTextColor: Color {
         secondaryTextColor ?? neutralTokens.secondaryTextColor
     }
@@ -215,7 +211,7 @@ struct MessageHeading: View {
                 if let chatUnread {
                     Image(systemName: chatUnread ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
                         .font(.caption)
-                        .foregroundStyle(chatUnread ? accentColor : mutedTextColor)
+                        .foregroundStyle(chatUnread ? titleColor : mutedTextColor)
                         .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
                 }
             }
