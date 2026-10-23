@@ -1074,7 +1074,7 @@ struct InboxList: View {
                 }
             }
         }
-        .toolbarMinimizeBehavior(
+        .toolbarMinimizationBehavior(
             horizontalSizeClass == .regular && tab != .search ? .onScrollDown : .never,
             for: .navigationBar)
         .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
