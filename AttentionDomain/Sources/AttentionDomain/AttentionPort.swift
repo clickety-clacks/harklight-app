@@ -25,13 +25,38 @@ public struct PortContext: Equatable, Codable, Sendable {
 
 public struct BoundDocumentSelector: Equatable, Codable, Sendable {
     public let request: RequestKey
+    public let requestRevision: UInt64
     public let opaqueDocumentID: ExactText
     public let opaqueSubmissionID: ExactText
 
-    public init(request: RequestKey, opaqueDocumentID: ExactText, opaqueSubmissionID: ExactText) {
+    public init(request: RequestKey,
+                requestRevision: UInt64 = 1,
+                opaqueDocumentID: ExactText,
+                opaqueSubmissionID: ExactText) {
         self.request = request
+        self.requestRevision = requestRevision
         self.opaqueDocumentID = opaqueDocumentID
         self.opaqueSubmissionID = opaqueSubmissionID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case request, requestRevision, opaqueDocumentID, opaqueSubmissionID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        request = try values.decode(RequestKey.self, forKey: .request)
+        requestRevision = try values.decodeIfPresent(UInt64.self, forKey: .requestRevision) ?? 1
+        opaqueDocumentID = try values.decode(ExactText.self, forKey: .opaqueDocumentID)
+        opaqueSubmissionID = try values.decode(ExactText.self, forKey: .opaqueSubmissionID)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(request, forKey: .request)
+        try values.encode(requestRevision, forKey: .requestRevision)
+        try values.encode(opaqueDocumentID, forKey: .opaqueDocumentID)
+        try values.encode(opaqueSubmissionID, forKey: .opaqueSubmissionID)
     }
 }
 
@@ -239,6 +264,8 @@ public enum InformationalSeenStatus: Equatable, Sendable {
 
 public struct PresentedRequest: Equatable, Sendable {
     public let key: RequestKey
+    /// The exact sender-authored version represented by this projection.
+    public let requestRevision: UInt64
     /// Durable order assigned by C at first acceptance; consumers preserve this order.
     public let acceptanceOrder: UInt64
     public let title: ExactText?
@@ -260,6 +287,8 @@ public struct PresentedRequest: Equatable, Sendable {
     public let noCommentUnavailable: Bool
     /// The relay explicitly rejected the latest answer operation.
     public let answerNotDelivered: Bool
+    /// A server-declined stale answer whose newer revision is now available.
+    public let staleAnswerRevision: StaleAnswerRevision?
     /// Whether lifecycle and Seen state were established by the accepted
     /// bounded snapshot, a receipt, or later contiguous relay activity.
     public let inboxStateIsCurrent: Bool
@@ -269,6 +298,7 @@ public struct PresentedRequest: Equatable, Sendable {
     }
 
     public init(key: RequestKey,
+                requestRevision: UInt64 = 1,
                 acceptanceOrder: UInt64,
                 title: ExactText?,
                 body: ExactText?,
@@ -284,8 +314,10 @@ public struct PresentedRequest: Equatable, Sendable {
                 attentionTier: AttentionTier = .middle,
                 noCommentUnavailable: Bool = false,
                 answerNotDelivered: Bool = false,
+                staleAnswerRevision: StaleAnswerRevision? = nil,
                 inboxStateIsCurrent: Bool = true) {
         self.key = key
+        self.requestRevision = requestRevision
         self.acceptanceOrder = acceptanceOrder
         self.title = title
         self.body = body
@@ -301,7 +333,20 @@ public struct PresentedRequest: Equatable, Sendable {
         self.attentionTier = attentionTier
         self.noCommentUnavailable = noCommentUnavailable
         self.answerNotDelivered = answerNotDelivered
+        self.staleAnswerRevision = staleAnswerRevision
         self.inboxStateIsCurrent = inboxStateIsCurrent
+    }
+}
+
+public struct StaleAnswerRevision: Equatable, Sendable {
+    public let operationID: UUID
+    public let submittedRevision: UInt64
+    public let currentRevision: UInt64
+
+    public init(operationID: UUID, submittedRevision: UInt64, currentRevision: UInt64) {
+        self.operationID = operationID
+        self.submittedRevision = submittedRevision
+        self.currentRevision = currentRevision
     }
 }
 
@@ -354,7 +399,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
         guard let thread = snapshot.conversationThreads[key], let payload = thread.revisions[revision],
               let draft = thread.answerDrafts?[revision], let stored = snapshot.requests[key] else { return nil }
         return try present(StoredRequest(key: key, originalPayload: payload), acceptanceOrder: stored.acceptanceOrder ?? 0,
-            draft: draft, session: nil, remote: nil, submission: nil, selector: nil)
+            draft: draft, session: nil, remote: nil, submission: nil, selector: nil,
+            requestRevision: revision)
     }
 
     public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) throws {
@@ -404,14 +450,39 @@ public final class AttentionDomainPort: @unchecked Sendable {
     }
 
     public func inspect(context suppliedContext: PortContext, request key: RequestKey) throws -> PresentationSnapshot {
+        try inspect(context: suppliedContext, request: key, revision: nil)
+    }
+
+    public func inspect(context suppliedContext: PortContext,
+                        request key: RequestKey,
+                        revision: UInt64) throws -> PresentationSnapshot {
+        try inspect(context: suppliedContext, request: key, revision: Optional(revision))
+    }
+
+    private func inspect(context suppliedContext: PortContext,
+                         request key: RequestKey,
+                         revision requestedRevision: UInt64?) throws -> PresentationSnapshot {
         try validate(suppliedContext)
         let snapshot = try store.snapshot(context: profileContext)
-        if snapshot.conversationThreads[key]?.currentContentRedacted == true {
+        let revision = requestedRevision ?? snapshot.conversationThreads[key]?.currentRevision ?? 1
+        if snapshot.conversationThreads[key]?.redactedRevisions?.contains(revision) == true {
             return try presentation(from: snapshot, selectorFor: nil).filtering(to: key)
         }
-        let selector = try store.selector(for: key, context: profileContext)
+        let selector = try store.selector(for: key, requestRevision: revision, context: profileContext)
         return try presentation(from: store.snapshot(context: profileContext), selectorFor: [key: selector])
             .filtering(to: key)
+    }
+
+    private func request(for selector: BoundDocumentSelector,
+                         in snapshot: AttentionStoreSnapshot) -> StoredRequest? {
+        guard let accepted = snapshot.requests[selector.request] else { return nil }
+        guard let thread = snapshot.conversationThreads[selector.request] else {
+            return selector.requestRevision == 1 ? accepted : nil
+        }
+        guard let payload = thread.revisions[selector.requestRevision],
+              thread.redactedRevisions?.contains(selector.requestRevision) != true else { return nil }
+        let request = StoredRequest(key: selector.request, originalPayload: payload)
+        return accepted.acceptanceOrder.map { request.assigningAcceptanceOrder($0) } ?? request
     }
 
     public func saveDraft(context suppliedContext: PortContext,
@@ -424,7 +495,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
     public func cancelDraft(context suppliedContext: PortContext, selector: BoundDocumentSelector) throws {
         try validate(suppliedContext)
         let snapshot = try store.snapshot(context: profileContext)
-        guard let request = snapshot.requests[selector.request] else { throw AttentionStoreError.requestMissing }
+        guard let request = request(for: selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
         try store.saveDraft(RequestDraft(interface: request.interface), selector: selector, context: profileContext)
     }
 
@@ -433,7 +504,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         inputs: [TypedInputRecord]) throws -> JSONValue {
         try validate(suppliedContext)
         let snapshot = try store.snapshot(context: profileContext)
-        guard let request = snapshot.requests[selector.request] else { throw AttentionStoreError.requestMissing }
+        guard let request = request(for: selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
         let (typedSubmission, draft) = try makeSubmission(inputs, for: request.interface)
         return try store.previewSubmission(typedSubmission,
                                            draft: draft,
@@ -444,7 +515,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
     public func submit(_ intent: SubmitIntent) throws -> IntentReceipt {
         try validate(intent.context)
         let snapshot = try store.snapshot(context: profileContext)
-        guard let request = snapshot.requests[intent.selector.request] else { throw AttentionStoreError.requestMissing }
+        guard let request = request(for: intent.selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
         let (typedSubmission, draft) = try makeSubmission(intent.inputs, for: request.interface)
         let stored = try store.submit(intentID: intent.intentID,
                                       typedSubmission: typedSubmission,
@@ -525,6 +596,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
     private func receipt(_ stored: Submission, context: PortContext) -> IntentReceipt {
         let selector = BoundDocumentSelector(request: stored.requestKey,
+                                             requestRevision: stored.requestRevision ?? 1,
                                              opaqueDocumentID: stored.opaqueDocumentID,
                                              opaqueSubmissionID: stored.opaqueSubmissionID)
         let localState: LocalIntentState
@@ -540,6 +612,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
             localState = .terminalUnconfirmed
             relayOutcome = .unknown
         case .failed:
+            localState = .notDelivered
+            relayOutcome = .unknown
+        case .staleRevision:
             localState = .notDelivered
             relayOutcome = .unknown
         case let .terminal(state, sequence, authorizedAnswer):
@@ -635,33 +710,41 @@ public final class AttentionDomainPort: @unchecked Sendable {
         }
         let requests = try orderedRequests.map { item in
             let session = snapshot.fixtureSessions[item.request.key]
-            // Requests without a conversation thread are revision one on the
-            // wire, where requestRevision remains absent for legacy bindings.
-            // Treat that absent value as revision one only when no conversation
-            // revision history exists; versioned requests still require an exact
-            // revision match.
-            let conversationRevision = snapshot.conversationThreads[item.request.key]?.currentRevision
+            let thread = snapshot.conversationThreads[item.request.key]
+            let conversationRevision = thread?.currentRevision ?? 1
+            let presentedRevision = selectors?[item.request.key]?.requestRevision ?? conversationRevision
             let matchesCurrentRevision: (Submission) -> Bool = { candidate in
                 guard candidate.requestKey == item.request.key else { return false }
-                guard let conversationRevision else { return candidate.requestRevision == nil }
-                return candidate.requestRevision == conversationRevision
+                return (candidate.requestRevision ?? 1) == conversationRevision
             }
             let currentIntents = snapshot.intents.values.filter(matchesCurrentRevision)
-            let currentDraft = snapshot.drafts[item.request.key] ??
-                RequestDraft(interface: item.request.interface)
+            let projectedRequest: StoredRequest
+            if let selector = selectors?[item.request.key], selector.requestRevision != conversationRevision,
+               let payload = thread?.revisions[selector.requestRevision] {
+                let historical = StoredRequest(key: item.request.key, originalPayload: payload)
+                projectedRequest = historical.assigningAcceptanceOrder(item.order)
+            } else {
+                projectedRequest = item.request
+            }
+            let currentDraft = thread?.answerDrafts?[presentedRevision] ?? snapshot.drafts[item.request.key] ??
+                RequestDraft(interface: projectedRequest.interface)
             let hasUnsupportedNoComment = currentIntents.contains { candidate in
                 guard candidate.isNoComment else { return false }
                 if case .unsupported = candidate.disposition { return true }
                 return false
             }
             let hasFailedAnswer = currentIntents.contains { candidate in
-                if case .failed = candidate.disposition { return true }
-                return false
+                switch candidate.disposition {
+                case .failed, .staleRevision: true
+                default: false
+                }
             }
             let submission = currentIntents.first { candidate in
                 if candidate.isNoComment, case .unsupported = candidate.disposition { return false }
-                if case .failed = candidate.disposition { return false }
-                return true
+                switch candidate.disposition {
+                case .failed, .staleRevision: false
+                default: true
+                }
             }
                 ?? session?.lifecycle.submissionValue.flatMap { value in
                     matchesCurrentRevision(value) ? value : nil
@@ -671,13 +754,24 @@ public final class AttentionDomainPort: @unchecked Sendable {
             let noCommentUnavailable = hasUnsupportedNoComment && submission == nil
             let answerNotDelivered = hasFailedAnswer && submission == nil && !noCommentUnavailable &&
                 snapshot.remoteStates[item.request.key]?.isTerminal != true
-            return try present(item.request,
+            let staleAnswerRevision = snapshot.intents.values.compactMap { candidate -> StaleAnswerRevision? in
+                guard candidate.requestKey == item.request.key,
+                      case let .staleRevision(currentRevision) = candidate.disposition,
+                      conversationRevision >= currentRevision else { return nil }
+                let submittedRevision = candidate.requestRevision ?? 1
+                return StaleAnswerRevision(operationID: candidate.operationID,
+                                           submittedRevision: submittedRevision,
+                                           currentRevision: currentRevision)
+            }.sorted { $0.currentRevision < $1.currentRevision }.last
+            return try present(projectedRequest,
                         acceptanceOrder: item.order,
                         draft: currentDraft,
                         session: session,
                         remote: snapshot.remoteStates[item.request.key],
                         submission: submission,
                         selector: selectors?[item.request.key],
+                        requestRevision: presentedRevision,
+                        staleAnswerRevision: staleAnswerRevision,
                         noCommentUnavailable: noCommentUnavailable,
                         answerNotDelivered: answerNotDelivered,
                         inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
@@ -727,6 +821,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          remote: RemoteRequestState?,
                          submission: Submission?,
                          selector: BoundDocumentSelector?,
+                         requestRevision: UInt64 = 1,
+                         staleAnswerRevision: StaleAnswerRevision? = nil,
                          noCommentUnavailable: Bool = false,
                          answerNotDelivered: Bool = false,
                          inboxStateIsCurrent: Bool = true) throws -> PresentedRequest {
@@ -855,6 +951,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         }
 
         return PresentedRequest(key: request.key,
+                                requestRevision: requestRevision,
                                 acceptanceOrder: acceptanceOrder,
                                 title: request.originalPayload.uniqueValue(named: "title")?.stringValue,
                                 body: request.originalPayload.uniqueValue(named: "body")?.stringValue,
@@ -871,6 +968,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 attentionTier: remote?.attentionTier ?? .middle,
                                 noCommentUnavailable: noCommentUnavailable,
                                 answerNotDelivered: answerNotDelivered,
+                                staleAnswerRevision: staleAnswerRevision,
                                 inboxStateIsCurrent: inboxStateIsCurrent)
     }
 

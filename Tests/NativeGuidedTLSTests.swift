@@ -1045,7 +1045,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         await session.close()
     }
 
-    func testStaleNoCommentRevisionRefusalStaysUnresolvedForConversationReplay() async throws {
+    func testStaleNoCommentRevisionRefusalNamesTheCurrentRevision() async throws {
         let namespace = "Harklight.no-comment-stale-revision-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -1059,7 +1059,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             guard text.contains("\"request_revision\":2") else {
                 return ["{\"v\":1,\"type\":\"error\",\"reason\":\"unsupported_version\"}\n"]
             }
-            return ["{\"v\":1,\"type\":\"error\",\"reason\":\"stale_revision\",\"current_revision\":3}\n"]
+            return ["{\"v\":1,\"type\":\"error\",\"reason\":\"stale_revision\",\"field\":\"request_revision\",\"current_revision\":3}\n"]
         }
         defer { relay.close() }
         let port = try await relay.start()
@@ -1074,8 +1074,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             Data(#"{"type":"answer_no_comment","request_id":"request","request_revision":2}"#.utf8)
                 + Data([0x0A]),
             operationID: operationID)
-        XCTAssertEqual(result, .unresolved,
-                       "A stale revision is not acceptance; conversation replay supplies the current question.")
+        XCTAssertEqual(result, .staleRevision(operationID: operationID, currentRevision: 3),
+                       "The current revision lets the inbox show the changed question and release this answer for retry.")
         await session.close()
     }
 

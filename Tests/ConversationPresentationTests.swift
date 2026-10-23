@@ -147,7 +147,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(finalDiskBytes.range(of: bytes), "Duplicate replay leaves the normalized persisted state unchanged.")
     }
 
-    func testQuestionRevisionArchivesTheOldAnswerAndInvalidatesItsSelectorWithoutReusingIt() throws {
+    func testQuestionRevisionKeepsAnOldSelectorBoundToTheVersionThePersonSaw() throws {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("fictional-relay"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
@@ -170,8 +170,23 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(revised.title, ExactText("Revised wording"))
         XCTAssertNil(revised.intentReceipt, "The earlier answer must not become the new version's receipt")
         XCTAssertNil(revised.draft.compatibility.selectedActionID)
-        XCTAssertThrowsError(try port.submit(SubmitIntent(context: port.context, selector: oldSelector,
-            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("old"))])))
+        let stale = try port.submit(SubmitIntent(context: port.context, selector: oldSelector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("old"))]))
+        let staleSubmission = try XCTUnwrap(domain.lookupIntent(stale.intentID, context: context))
+        XCTAssertEqual(staleSubmission.requestRevision, 1)
+        XCTAssertEqual(staleSubmission.operation.uniqueValue(named: "request_revision")?.integerValue, 1)
+        try domain.recordAnswerStaleRevision(stale.intentID, operationID: stale.opID,
+            currentRevision: 2, context: context)
+        let currentAfterDecline = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        XCTAssertEqual(currentAfterDecline.title, ExactText("Revised wording"))
+        XCTAssertEqual(currentAfterDecline.staleAnswerRevision?.submittedRevision, 1)
+        XCTAssertEqual(currentAfterDecline.staleAnswerRevision?.currentRevision, 2)
+        let liveAfterDecline = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(liveAfterDecline.staleAnswerDialog?.currentRevision, 2)
+        XCTAssertTrue(liveAfterDecline.staleAnswerDialog?.message.contains("Revised wording") == true)
+        liveAfterDecline.dismissStaleAnswerDialog()
+        try liveAfterDecline.refreshFromDurableStore()
+        XCTAssertNil(liveAfterDecline.staleAnswerDialog, "A dismissed stale-answer notice does not repeat in this session.")
         let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.answerDrafts?[1]?.compatibility.selectedActionID, ExactText("old"))
         XCTAssertEqual(thread.revisions[1], first)

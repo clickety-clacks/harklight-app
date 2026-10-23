@@ -101,6 +101,23 @@ public struct RelayWire: Sendable {
                                     retractedAtMilliseconds: retractedAtMilliseconds)
     }
 
+    /// A stale answer is definite only when the server identifies the rejected
+    /// request_revision field and supplies the latest positive revision.
+    public func decodeStaleAnswerRevision(_ bytes: Data,
+                                          operationID: UUID) throws -> OriginalOperationResult? {
+        let value = try parseFrame(bytes)
+        guard try text(value, "type") == "error",
+              value.uniqueValue(named: "reason")?.stringValue?.rawValue == "stale_revision" else {
+            return nil
+        }
+        guard value.uniqueValue(named: "field")?.stringValue?.rawValue == "request_revision",
+              case let .number(revision)? = value.uniqueValue(named: "current_revision"),
+              let currentRevision = UInt64(revision.lexeme), currentRevision > 0 else {
+            throw RelayWireError.invalidFrame
+        }
+        return .staleRevision(operationID: operationID, currentRevision: currentRevision)
+    }
+
     public func isResyncAccepted(_ bytes: Data) throws -> Bool {
         let value = try parseFrame(bytes)
         return try text(value, "type") == "ok" &&

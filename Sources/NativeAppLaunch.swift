@@ -764,12 +764,18 @@ final class NativeAppLaunch {
 
     func refreshLive() async {
         guard case let .live(presentation) = state, !presentation.isLocalExample else { return }
+        presentation.beginRefresh()
+        defer { presentation.endRefresh() }
         let checkBlockedPush = takeForegroundActivationPushCheck()
         notificationSynchronized = false
         notificationRefreshFinished = false
         let result = await refreshOperation(checkBlockedPush)
         guard case let .live(current) = state, current === presentation else { return }
         presentation.applyRefreshResult(result)
+        if result.relayConfirmed, result.confirmedContext == presentation.notificationContext,
+           foregroundConnectProgress?.outcome != .confirmed {
+            clearForegroundConnectionDetails()
+        }
         notificationRefreshFinished = true
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
         resolveNotificationNavigation()
@@ -844,6 +850,21 @@ final class NativeAppLaunch {
 
 /// C's admitted presentation is the only live view feed. Its revision stream
 /// reflects replay visibility and durable edits without a second H journal.
+struct StaleAnswerDialog: Identifiable, Equatable {
+    var id: UUID { operationID }
+    let operationID: UUID
+    let requestKey: RequestKey
+    let submittedRevision: UInt64
+    let currentRevision: UInt64
+    let title: String
+    let body: String
+
+    var message: String {
+        let content = body.isEmpty ? title : "\(title)\n\n\(body)"
+        return "The message changed after you saw version \(submittedRevision). The new version (\(currentRevision)) is shown here:\n\n\(content)\n\nReview it and answer again."
+    }
+}
+
 @MainActor
 @Observable
 final class LivePresentationStore {
@@ -858,6 +879,9 @@ final class LivePresentationStore {
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
     private(set) var selectedRequestKey: RequestKey?
+    private var activeRefreshCount = 0
+    var isRefreshing: Bool { activeRefreshCount > 0 }
+    var staleAnswerDialog: StaleAnswerDialog?
     private(set) var observationError: String?
     private(set) var actionError: String?
     private var actionErrorRequest: RequestKey?
@@ -914,6 +938,7 @@ final class LivePresentationStore {
     private(set) var clearedRetractions: Set<RequestKey> = []
     @ObservationIgnored private let clearedRetractionDefaults: UserDefaults
     private static let clearedRetractionsDefaultsKey = "harklight.cleared-retracted-requests"
+    @ObservationIgnored private var presentedStaleAnswerOperationIDs = Set<UUID>()
 
     convenience init(store: AttentionDomainStore, context: ProfileContext,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
@@ -960,6 +985,7 @@ final class LivePresentationStore {
            let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
             clearedRetractions = cleared
         }
+        presentStaleAnswerIfAvailable(in: snapshot)
     }
 
     /// Read-only real account archives are offline relay data, not fictional
@@ -1322,7 +1348,8 @@ final class LivePresentationStore {
                 }
                 statusParts.append("Cached history · status not refreshed")
             }
-            return InboxRequestRow(key: request.key, title: request.title?.rawValue ?? "Message",
+            return InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
+                title: request.title?.rawValue ?? "Message",
                 sender: request.key.senderID.rawValue,
                 status: statusParts.joined(separator: " · "),
                 bodyText: request.body?.rawValue,
@@ -1337,7 +1364,7 @@ final class LivePresentationStore {
                             : cachedOperationStatus(request.intentReceipt?.localState))
                     : nil,
                 informationalSeenStatus: request.informationalSeenStatus,
-                canMarkSeen: !isReadOnly && request.inboxStateIsCurrent &&
+                canMarkSeen: !isReadOnly &&
                     !retracted && request.lifecycleStatus == .open &&
                     request.intentReceipt == nil && request.informationalSeenStatus == .available,
                 canNoComment: canNoComment(request),
@@ -1352,7 +1379,7 @@ final class LivePresentationStore {
     }
 
     private func canNoComment(_ request: PresentedRequest) -> Bool {
-        guard !isReadOnly, request.inboxStateIsCurrent, !isRetracted(request.key),
+        guard !isReadOnly, !isRetracted(request.key),
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil else { return false }
         // No comment is its own wire answer and does not depend on the
@@ -1499,19 +1526,21 @@ final class LivePresentationStore {
     /// C composes the exact answer and durably stores one original operation
     /// before any network send. A persisted receipt prevents a second intent.
     @discardableResult
-    func submit(_ key: RequestKey, explicitCompatibilityAction: ExactText? = nil) throws -> IntentReceipt {
+    func submit(_ key: RequestKey,
+                explicitCompatibilityAction: ExactText? = nil,
+                requestRevision: UInt64? = nil) throws -> IntentReceipt {
         guard !isReadOnly else { throw LiveReplyError.disconnected }
         guard permitsDelivery else { throw LiveReplyError.localExample }
-        let inspected = try inspectedRequest(key)
-        let answerDraft = draft(for: key) ?? inspected.draft
+        let inspected = try inspectedRequest(key, revision: requestRevision)
+        let answerDraft = pendingDrafts[key] ?? inspected.draft
         guard !isRetracted(key), inspected.lifecycleStatus == .open,
               inspected.intentReceipt == nil,
               let selector = inspected.selector else {
             throw LiveReplyError.notOpen
         }
         if answerDraft.noCommentSelected {
-            try persistPendingDraft(for: key)
-            return try submitNoComment(key)
+            try persistPendingDraft(for: key, revision: requestRevision)
+            return try submitNoComment(key, requestRevision: requestRevision)
         }
 
         let records = try typedInputs(for: inspected, draft: answerDraft,
@@ -1528,8 +1557,8 @@ final class LivePresentationStore {
         }
         guard hasAnswerContent else { throw LiveReplyError.incomplete }
 
-        try persistPendingDraft(for: key)
-        let request = try inspectedRequest(key)
+        try persistPendingDraft(for: key, revision: requestRevision)
+        let request = try inspectedRequest(key, revision: requestRevision)
         guard !isRetracted(key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else {
             throw LiveReplyError.notOpen
@@ -1547,13 +1576,22 @@ final class LivePresentationStore {
     /// Returns whether an intent for this request now exists, so callers can
     /// avoid treating a validation refusal as a submission.
     @discardableResult
-    func submitFromUser(_ key: RequestKey, explicitCompatibilityAction: ExactText? = nil) -> Bool {
+    func submitFromUser(_ key: RequestKey,
+                        explicitCompatibilityAction: ExactText? = nil,
+                        requestRevision: UInt64? = nil) -> Bool {
         guard permitsDelivery, !isReadOnly else { return false }
-        if draft(for: key)?.noCommentSelected == true {
-            return submitNoCommentFromUser(key)
+        let selectedNoComment: Bool
+        if let requestRevision, let request = try? inspectedRequest(key, revision: requestRevision) {
+            selectedNoComment = (pendingDrafts[key] ?? request.draft).noCommentSelected
+        } else {
+            selectedNoComment = draft(for: key)?.noCommentSelected == true
+        }
+        if selectedNoComment {
+            return submitNoCommentFromUser(key, requestRevision: requestRevision)
         }
         do {
-            _ = try submit(key, explicitCompatibilityAction: explicitCompatibilityAction)
+            _ = try submit(key, explicitCompatibilityAction: explicitCompatibilityAction,
+                           requestRevision: requestRevision)
             retryPendingDelivery()
             return true
         } catch {
@@ -1590,15 +1628,15 @@ final class LivePresentationStore {
     /// Returns whether an intent for this request now exists, so callers can
     /// avoid treating a validation refusal as a submission.
     @discardableResult
-    func submitNoCommentFromUser(_ key: RequestKey) -> Bool {
+    func submitNoCommentFromUser(_ key: RequestKey, requestRevision: UInt64? = nil) -> Bool {
         guard permitsDelivery, !isReadOnly,
-              let request = request(for: key), request.inboxStateIsCurrent,
+              let request = try? inspectedRequest(key, revision: requestRevision),
               !isRetracted(key), request.lifecycleStatus == .open,
               request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
         selectNoComment(for: key)
-        guard flushPendingDraft(for: key) else { return false }
+        guard flushPendingDraft(for: key, requestRevision: requestRevision) else { return false }
         do {
-            _ = try submitNoComment(key)
+            _ = try submitNoComment(key, requestRevision: requestRevision)
             retryPendingDelivery()
             return true
         } catch {
@@ -1624,9 +1662,9 @@ final class LivePresentationStore {
     }
 
     @discardableResult
-    private func submitNoComment(_ key: RequestKey) throws -> IntentReceipt {
-        let request = try inspectedRequest(key)
-        guard !isRetracted(key), request.inboxStateIsCurrent,
+    private func submitNoComment(_ key: RequestKey, requestRevision: UInt64? = nil) throws -> IntentReceipt {
+        let request = try inspectedRequest(key, revision: requestRevision)
+        guard !isRetracted(key),
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil,
               let selector = request.selector,
@@ -1647,6 +1685,8 @@ final class LivePresentationStore {
     func retryPendingDelivery() {
         guard permitsDelivery, !isReadOnly else { return }
         Task {
+            beginRefresh()
+            defer { endRefresh() }
             let result = await NativeRelayLifecycle.shared.refreshAfterAnswerStored()
             applyRefreshResult(result)
         }
@@ -1654,11 +1694,23 @@ final class LivePresentationStore {
 
     func applyRefreshResult(_ result: NativeRelayRefreshResult) {
         connectionWarning = result.relayConfirmed ? nil :
-            "The relay could not be refreshed. Saved requests, answers and confirmed receipts remain on this device."
+            result.failureMessage ??
+                "The relay could not be refreshed. Saved requests, answers and confirmed receipts remain on this device."
         if result.relayConfirmed {
             pushRegistrationWarning = result.pushRegistration == .unconfirmed ?
                 "Notification setup could not be confirmed. Your answer status is shown with each request." : nil
         }
+    }
+
+    func beginRefresh() { activeRefreshCount += 1 }
+
+    func endRefresh() { activeRefreshCount = max(0, activeRefreshCount - 1) }
+
+    func dismissStaleAnswerDialog() {
+        if let staleAnswerDialog {
+            presentedStaleAnswerOperationIDs.insert(staleAnswerDialog.operationID)
+        }
+        staleAnswerDialog = nil
     }
 
     private func editDraft(for key: RequestKey, _ change: (inout RequestDraft) -> Void) {
@@ -1712,9 +1764,9 @@ final class LivePresentationStore {
         }
     }
 
-    private func persistPendingDraft(for key: RequestKey) throws {
+    private func persistPendingDraft(for key: RequestKey, revision: UInt64? = nil) throws {
         guard let draft = pendingDrafts[key] else { return }
-        let request = try inspectedRequest(key)
+        let request = try inspectedRequest(key, revision: revision)
         guard !isRetracted(key), request.lifecycleStatus == .open,
               request.intentReceipt == nil,
               let selector = request.selector else { throw LiveReplyError.notOpen }
@@ -1734,11 +1786,11 @@ final class LivePresentationStore {
     }
 
     @discardableResult
-    func flushPendingDraft(for key: RequestKey) -> Bool {
+    func flushPendingDraft(for key: RequestKey, requestRevision: UInt64? = nil) -> Bool {
         pendingDraftSaveTasks[key]?.cancel()
         pendingDraftSaveTasks[key] = nil
         do {
-            try persistPendingDraft(for: key)
+            try persistPendingDraft(for: key, revision: requestRevision)
             return true
         } catch {
             recordDraftSaveFailure(error, for: key)
@@ -1762,8 +1814,14 @@ final class LivePresentationStore {
         observation = nil
     }
 
-    private func inspectedRequest(_ key: RequestKey) throws -> PresentedRequest {
-        guard let request = try port.inspect(context: port.context, request: key).requests.first else {
+    private func inspectedRequest(_ key: RequestKey, revision: UInt64? = nil) throws -> PresentedRequest {
+        let snapshot: PresentationSnapshot
+        if let revision {
+            snapshot = try port.inspect(context: port.context, request: key, revision: revision)
+        } else {
+            snapshot = try port.inspect(context: port.context, request: key)
+        }
+        guard let request = snapshot.requests.first else {
             throw LiveReplyError.notOpen
         }
         return request
@@ -1868,6 +1926,7 @@ final class LivePresentationStore {
             diagnose(.localStore, .projectionRefresh, .failed, error: error)
         }
         presentation = snapshot
+        presentStaleAnswerIfAvailable(in: snapshot)
         if let key = actionErrorRequest,
            let current = snapshot.requests.first(where: { $0.key == key }),
            current.intentReceipt != nil || current.lifecycleStatus != .open {
@@ -1880,6 +1939,20 @@ final class LivePresentationStore {
             self.selectedRequestKey = snapshot.requests.first?.key
         }
         notificationProjectionDidChange?()
+    }
+
+    private func presentStaleAnswerIfAvailable(in snapshot: PresentationSnapshot) {
+        guard staleAnswerDialog == nil,
+              let stale = snapshot.requests.first(where: { request in
+                  guard let stale = request.staleAnswerRevision else { return false }
+                  return !presentedStaleAnswerOperationIDs.contains(stale.operationID)
+              }),
+              let notice = stale.staleAnswerRevision else { return }
+            staleAnswerDialog = StaleAnswerDialog(operationID: notice.operationID,
+                requestKey: stale.key, submittedRevision: notice.submittedRevision,
+                currentRevision: notice.currentRevision,
+                title: stale.title?.rawValue ?? "Message",
+                body: stale.body?.rawValue ?? "")
     }
 
     private func discussionOperationID(for request: RequestKey, revision: UInt64) -> UUID? {

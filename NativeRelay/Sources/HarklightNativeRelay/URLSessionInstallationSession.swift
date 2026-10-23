@@ -417,10 +417,16 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     }
                 }
                 do {
-                    if let result = try RelayWire(profile: profileContext)
-                        .decodeAnswerRefusal(frame, operationID: operationID) {
+                    let wire = try RelayWire(profile: profileContext)
+                    if let result = try wire.decodeAnswerRefusal(frame, operationID: operationID) {
                         diagnose(.answer, .originalOperationDelivery, .rejected,
                                  causeCode: NativeDiagnosticCauseCode.serverReason("retracted"),
+                                 operationID: operationID, receipt: .terminal)
+                        return result
+                    }
+                    if let result = try wire.decodeStaleAnswerRevision(frame, operationID: operationID) {
+                        diagnose(.answer, .originalOperationDelivery, .rejected,
+                                 causeCode: "conversation_stale_revision",
                                  operationID: operationID, receipt: .terminal)
                         return result
                     }
@@ -431,10 +437,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     close()
                     return .unresolved
                 }
-                if reason == "closed" || reason == "stale_revision" || reason == nil {
+                if reason == "closed" || reason == nil {
                     // Closed can follow an earlier accepted send whose reply
-                    // was lost, and stale revisions need conversation replay.
-                    // Keep the original operation pending until reconciliation.
+                    // was lost. Keep the original operation pending until replay.
                     diagnose(.answer, .originalOperationDelivery, .unresolved,
                              causeCode: NativeDiagnosticCauseCode.serverReason(reason),
                              operationID: operationID, receipt: .unknown)
