@@ -1513,9 +1513,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.replayPublishedRequests = state.requests
         next.replayPublishedStates = state.remoteStates
         next.replayPublishedIntents = state.intents
-        next.replayPublishedInboxCurrentKeys = state.inboxCandidate != nil
-            ? []
-            : state.inboxCheckpoint.flatMap { $0.checkpointAccepted ? $0.currentKeys : nil }
+        // A replay barrier publishes the last accepted inbox view while fresh
+        // state is checked. A recoverable candidate must not dim every row.
+        next.replayPublishedInboxCurrentKeys = state.inboxCheckpoint.flatMap {
+            $0.checkpointAccepted ? $0.currentKeys : nil
+        }
         try commit(next)
     }
 

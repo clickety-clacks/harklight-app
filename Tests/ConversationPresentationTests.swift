@@ -152,8 +152,8 @@ final class ConversationPresentationTests: XCTestCase {
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
-        let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"value","value":"old"}]}}"#.utf8))
-        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"value","value":"new"}]}}"#.utf8))
+        let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
+        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
         try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
         let b1 = ConversationBinding(request: key, revision: 1)
         let b2 = ConversationBinding(request: key, revision: 2)
@@ -181,6 +181,8 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(currentAfterDecline.title, ExactText("Revised wording"))
         XCTAssertEqual(currentAfterDecline.staleAnswerRevision?.submittedRevision, 1)
         XCTAssertEqual(currentAfterDecline.staleAnswerRevision?.currentRevision, 2)
+        let viewedAgain = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 1).requests.first)
+        XCTAssertEqual(viewedAgain.draft.compatibility.selectedActionID, ExactText("old"))
         let liveAfterDecline = try LivePresentationStore(store: domain, context: context)
         XCTAssertEqual(liveAfterDecline.staleAnswerDialog?.currentRevision, 2)
         XCTAssertTrue(liveAfterDecline.staleAnswerDialog?.message.contains("Revised wording") == true)
@@ -205,6 +207,44 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(current.requestRevision, 2)
         XCTAssertEqual(current.operation.uniqueValue(named: "request_revision")?.integerValue, 2)
         XCTAssertEqual(try domain.snapshot(context: context).intents.count, 2, "Both original facts remain inspectable")
+    }
+
+    func testPendingDraftBuffersStayBoundToTheirRequestRevision() throws {
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("fictional-relay"),
+            personID: ExactText("draft-revision-person"), deviceID: ExactText("device")), transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("draft-revision"))
+        let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"value","value":"old"}]}}"#.utf8))
+        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"value","value":"new"}]}}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 2,
+            binding: ConversationBinding(request: key, revision: 2),
+            fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
+
+        let live = try LivePresentationStore(store: domain, context: context)
+        let port = AttentionDomainPort(store: domain)
+        live.selectAction(ExactText("old"), input: nil, for: key, requestRevision: 1)
+        live.stageCompatibilityText("Old-version draft", action: ExactText("old"),
+                                    for: key, requestRevision: 1)
+
+        let historical = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 1).requests.first)
+        let current = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 2).requests.first)
+        XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
+        XCTAssertNil(current.draft.compatibility.selectedActionID,
+                     "Editing the version on screen must not apply its answer to the newer version.")
+        XCTAssertEqual(live.draft(for: key, revision: 1)?.compatibility.textByActionID[ExactText("old")],
+                       ExactText("Old-version draft"))
+        XCTAssertNil(live.draft(for: key, revision: 2)?.compatibility.textByActionID[ExactText("new")])
+
+        let receipt = try live.submit(key, requestRevision: 1)
+        XCTAssertEqual(receipt.selector.requestRevision, 1)
+        XCTAssertEqual(receipt.exactAnswerJSON, #""Old-version draft"#)
+        XCTAssertEqual(try domain.snapshot(context: context).outbox.first?.requestRevision, 1)
     }
 
     func testShakeConversationUsesTheDomainAndOrdinaryViewModelAndCannotPrepareDelivery() throws {

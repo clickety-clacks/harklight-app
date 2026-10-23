@@ -294,7 +294,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let requests: [InboxRequestRow]
     let samples: SampleLibrary
     let selectRequest: (RequestKey) -> Void
-    var markSeenRequest: (RequestKey) -> Void = { _ in }
+    var markSeenRequest: (RequestKey, UInt64) -> Void = { _, _ in }
     var markNoCommentRequest: (RequestKey, UInt64) -> Void = { _, _ in }
     var clearRetractedRequest: (RequestKey) -> Void = { _ in }
     @ViewBuilder let requestDetail: (RequestKey, InboxCardContext) -> RequestDetail
@@ -336,6 +336,15 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         Binding(
             get: { workspaceTab == tab && isWarningPresented && !visibleWarnings.isEmpty },
             set: { isWarningPresented = $0 }
+        )
+    }
+
+    private var staleAnswerPresentation: Binding<Bool> {
+        Binding(
+            get: { conversationStore?.staleAnswerDialog != nil },
+            set: { isPresented in
+                if !isPresented { conversationStore?.dismissStaleAnswerDialog() }
+            }
         )
     }
 
@@ -432,8 +441,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func markSeen(_ id: InboxSelection) {
         switch id {
         case let .request(key):
-            guard rows.first(where: { $0.id == id })?.canMarkSeen == true else { return }
-            markSeenRequest(key)
+            guard let row = rows.first(where: { $0.id == id }), row.canMarkSeen else { return }
+            markSeenRequest(key, row.requestRevision)
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canMarkSeenLocally else { return }
             response.finishLocally()
@@ -775,6 +784,25 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         .background(WorkspaceWindowReader { windowSize = $0 })
         .sheet(isPresented: $settings, content: settingsContent)
+        .alert("The message changed", isPresented: staleAnswerPresentation,
+               presenting: conversationStore?.staleAnswerDialog) { dialog in
+            Button("Review message") {
+                conversationStore?.dismissStaleAnswerDialog()
+                settings = false
+                chatOpen = false
+                conversationPresented = false
+                workspaceTab = .inbox
+                selectedTab = .inbox
+                search = ""
+                searchPath = []
+                navigate(to: .request(dialog.requestKey))
+            }
+            Button("Dismiss", role: .cancel) {
+                conversationStore?.dismissStaleAnswerDialog()
+            }
+        } message: { dialog in
+            Text(dialog.localizedMessage)
+        }
         .tint(.blue)
     }
 }
@@ -964,16 +992,6 @@ struct InboxList: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     HarklightBrand().accessibilityIdentifier("inbox-brand")
-                    if isRefreshing {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
-                            Text("Refreshing").font(.caption.weight(.medium))
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.thinMaterial, in: Capsule())
-                        .accessibilityIdentifier("inbox-refreshing-badge")
-                    }
                     if !warnings.isEmpty {
                         Button {
                             isWarningPresented = true
@@ -1024,7 +1042,20 @@ struct InboxList: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .background(Color(uiColor: .systemBackground))
+                if isRefreshing {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Refreshing").font(.caption.weight(.medium))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
+                    .accessibilityIdentifier("inbox-refreshing-badge")
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                }
             }
+            .background(Color(uiColor: .systemBackground))
         }
         .toolbar {
             if let triggerNotification {

@@ -231,6 +231,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var outcome: Outcome
     var attemptID: UUID? = nil
     var failureClass: FailureClass? = nil
+    var observedErrorMessage: String? = nil
     var transportAttemptID: UUID? = nil
     var nativeSyncReplayRequested = false
     var previousTransportAttempt: PreviousTransportAttempt? = nil
@@ -243,7 +244,10 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var terminalReason: TerminalReason? = nil
 
     private var observedCauseText: String {
-        failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? "Cause was not observed. "
+        if let observedErrorMessage, !observedErrorMessage.isEmpty {
+            return "Observed error: \(observedErrorMessage). "
+        }
+        return failureClass.map { "Observed error class: \($0.diagnosticValue). " } ?? "Cause was not observed. "
     }
 
     mutating func markGenerationInvalidated() {
@@ -555,6 +559,7 @@ final class ForegroundConnectDeadline {
         progress.nativeSyncReplayRequested = false
         progress.issue = nil
         progress.failureClass = nil
+        progress.observedErrorMessage = nil
         progress.outcome = .connecting
         progress.lastCompletedPostAckBoundary = .none
         progress.postAckRelayRefresh = .notChecked
@@ -717,6 +722,7 @@ final class ForegroundConnectDeadline {
     func recordFailure(_ error: Error) {
         guard acceptsEvents, attempt != nil else { return }
         progress.failureClass = NativeForegroundConnectProgress.FailureClass.classify(error)
+        progress.observedErrorMessage = error.localizedDescription
         if progress.failureClass == .cancelled { progress.terminalReason = .cancelled }
         publishProgress()
     }

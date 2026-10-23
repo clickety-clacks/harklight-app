@@ -726,8 +726,14 @@ public final class AttentionDomainPort: @unchecked Sendable {
             } else {
                 projectedRequest = item.request
             }
-            let currentDraft = thread?.answerDrafts?[presentedRevision] ?? snapshot.drafts[item.request.key] ??
-                RequestDraft(interface: projectedRequest.interface)
+            let currentDraft: RequestDraft
+            if presentedRevision == conversationRevision {
+                currentDraft = snapshot.drafts[item.request.key] ??
+                    thread?.answerDrafts?[presentedRevision] ?? RequestDraft(interface: projectedRequest.interface)
+            } else {
+                currentDraft = thread?.answerDrafts?[presentedRevision] ??
+                    RequestDraft(interface: projectedRequest.interface)
+            }
             let hasUnsupportedNoComment = currentIntents.contains { candidate in
                 guard candidate.isNoComment else { return false }
                 if case .unsupported = candidate.disposition { return true }
