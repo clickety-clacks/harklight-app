@@ -409,6 +409,10 @@ struct ConversationState: Codable {
                 let key = event.binding.request
                 let old = turnSequences[key]?[turn.id]
                 turnSequences[key, default: [:]][turn.id] = min(old ?? event.sequence, event.sequence)
+            case let .terminal(turn, _, _):
+                let key = event.binding.request
+                let old = turnSequences[key]?[turn]
+                turnSequences[key, default: [:]][turn] = min(old ?? event.sequence, event.sequence)
             case let .retraction(turn, _):
                 let key = event.binding.request
                 let old = retractionSequences[key]?[turn]

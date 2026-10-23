@@ -160,6 +160,47 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertEqual(restored.turns.count, 3)
     }
 
+    func testReloadOrdersOrdinaryTerminalTurnFromItsConversationProjectionSequence() throws {
+        let context = context()
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let binding = binding(context)
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: binding.request, originalPayload: .null), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+
+        // The ordinary lifecycle event contributes this terminal row without borrowing
+        // the conversation cursor. Its matching projection fact is the ordering evidence.
+        let terminalID = ExactText("20")
+        try store.apply(RelayEvent(sequence: 2, body: .terminal(binding.request, .expired, nil),
+            conversation: RelayConversationMetadata(revision: 1, eventID: terminalID, author: .server)),
+            context: context)
+
+        let prompt = ConversationTurn(id: ExactText("30"), binding: binding, author: .person,
+            sessionHandle: ExactText("session"), text: ExactText("Which option should we use?"))
+        let reply = ConversationTurn(id: ExactText("40"), binding: binding, author: .agent,
+            sessionHandle: ExactText("session"), text: ExactText("Use the reversible option."),
+            inReplyTo: prompt.id, kind: .reply)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .turn(prompt)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(reply)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .terminal(turn: terminalID, author: .server, state: .expired)), context: context)
+
+        // This matches the legacy numeric-ID ordering that placed the terminal first.
+        let beforeReload = try XCTUnwrap(store.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(beforeReload.turns.map(\.id), [terminalID, prompt.id, reply.id])
+
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.turns.map(\.id), [prompt.id, reply.id, terminalID])
+        XCTAssertEqual(thread.turns.map(\.inReplyTo), [nil, prompt.id, nil])
+        XCTAssertEqual(thread.turns.last?.kind, .terminal)
+        XCTAssertEqual(thread.terminal, .expired)
+    }
+
     func testConversationCanArriveBeforeOrdinaryDeliveryWithoutCreatingOrphanedLegacyState() throws {
         let context = context()
         let persistence = MemoryAttentionStatePersistence()
