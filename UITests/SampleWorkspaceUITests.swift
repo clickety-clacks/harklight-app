@@ -666,10 +666,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
         for _ in 0..<8 {
             let chat = app.buttons["Chat"]
-            let later = app.buttons["Later"]
-            let toolbarTop = chat.exists ? chat.frame.minY
-                : later.exists ? later.frame.minY : scrollView.frame.maxY - 72
-            if element.isHittable && element.frame.maxY < toolbarTop - 8 { return }
+            let controlTop = chat.exists ? chat.frame.minY : scrollView.frame.maxY - 72
+            if element.isHittable && element.frame.maxY < controlTop - 8 { return }
             let start = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
             let end = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast,

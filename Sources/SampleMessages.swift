@@ -136,8 +136,6 @@ final class SampleResponse {
                 : request.informationalSeenStatus == nil
                     ? "Answered locally · nothing sent"
                     : "Seen selected locally · nothing sent"
-        } else if deferred {
-            localStatus = "Deferred locally"
         } else {
             localStatus = nil
         }
@@ -176,7 +174,7 @@ final class SampleResponse {
     }
 
     var canDeclineLocally: Bool {
-        guard !finished, !deferred, !viewModel.isReadOnly,
+        guard !finished, !viewModel.isReadOnly,
               let request = viewModel.request(for: key),
               request.inboxStateIsCurrent, !viewModel.isRetracted(key), request.lifecycleStatus == .open,
               request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
@@ -191,7 +189,6 @@ final class SampleResponse {
         guard canDeclineLocally else { return }
         viewModel.selectNoComment(for: key)
         finished = true
-        deferred = false
     }
 
     var clearedFromList: Bool {
@@ -208,7 +205,7 @@ final class SampleResponse {
               request.lifecycleStatus == .open,
               request.intentReceipt == nil,
               request.informationalSeenStatus == .available else { return false }
-        return !finished && !deferred
+        return !finished
     }
 
     var canFinishLocally: Bool {
@@ -265,7 +262,6 @@ final class SampleResponse {
     func finishLocally() {
         guard canFinishLocally else { return }
         finished = true
-        deferred = false
     }
 
     var isClosed: Bool {
@@ -356,7 +352,6 @@ final class SampleResponse {
             }
         }
     }
-    var deferred = false
     var chatRead = false
     private var conversationRevision: UInt64 { viewModel.conversation(for: key)?.currentRevision ?? 1 }
     var chatDraft: String {
