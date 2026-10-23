@@ -205,6 +205,14 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         sequence == old.sequence && binding == old.binding && fact == old.fact &&
             (old.retractedAtMilliseconds == nil || old.retractedAtMilliseconds == retractedAtMilliseconds)
     }
+
+    var requiresLoadedThread: Bool {
+        switch fact {
+        case .request, .attentionTier: return false
+        case .revision: return binding.revision > 1
+        default: return true
+        }
+    }
 }
 
 public struct ConversationThread: Equatable, Codable, Sendable {
@@ -406,147 +414,179 @@ struct ConversationState: Codable {
             throw ConversationError.gap(expected: cursor == UInt64.max ? cursor : cursor + 1, received: event.sequence)
         }
         let binding = event.binding
-        if case let .redactedRevision(turn) = event.fact {
-            guard var thread = threads[binding.request], turn.contentRedacted == true,
-                  turn.sessionHandle == thread.sessionHandle, turn.author == .origin,
-                  binding.revision == thread.currentRevision + 1 else { throw ConversationError.invalidBinding }
-            thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
-            thread.currentRevision = binding.revision
-            threads[binding.request] = thread
+        if threads[binding.request] == nil && event.requiresLoadedThread {
+            // Keep facts for requests outside the initial inbox page. The journal
+            // and cursor commit together, so the relay can be acknowledged now.
+            events[event.sequence] = event
+            cursor = event.sequence
+            return
         }
-        let question: (ExactText, JSONValue)?
+
         switch event.fact {
-        case let .request(handle, payload): question = (handle, payload)
-        case let .revision(turn, payload): question = (turn.sessionHandle, payload)
-        default: question = nil
-        }
-        if let (handle, payload) = question {
-            guard !handle.rawValue.isEmpty else { throw ConversationError.invalidBinding }
-            if var thread = threads[binding.request] {
-                guard thread.sessionHandle == handle else { throw ConversationError.conflict }
-                if let old = thread.revisions[binding.revision] {
-                    guard old == payload else { throw ConversationError.conflict }
-                } else {
-                    guard binding.revision == thread.currentRevision + 1 else {
-                        throw ConversationError.staleRevision(current: thread.currentRevision)
-                    }
-                    thread.revisions[binding.revision] = payload
-                    thread.currentRevision = binding.revision
-                }
-                threads[binding.request] = thread
-            } else {
-                guard binding.revision == 1 else { throw ConversationError.invalidBinding }
-                for prior in events.values where prior.binding.request == binding.request {
-                    guard case let .attentionTier(_, _, _, priorSessionHandle) = prior.fact,
-                          let priorSessionHandle else { continue }
-                    guard priorSessionHandle == handle else { throw ConversationError.conflict }
-                }
-                threads[binding.request] = ConversationThread(request: binding.request,
-                    sessionHandle: handle, revision: binding.revision, payload: payload)
-            }
-        }
-        // A revision also carries its immutable turn, but never consumes a second sequence.
-        let appliesTurn: Bool
-        switch event.fact {
-        case .attentionTier: appliesTurn = false
-        case .revision: appliesTurn = true
-        default: appliesTurn = question == nil
-        }
-        if appliesTurn {
-            if case .retraction = event.fact, threads[binding.request] == nil {
-                // Bootstrap reads only the first inbox page, so a retraction can name a
-                // request this device has not loaded. Hold it for when the request
-                // arrives; refusing it would stall every later event.
-                events[event.sequence] = event
-                cursor = event.sequence
-                return
-            }
-            guard var thread = threads[binding.request], thread.revisionNumbers.contains(binding.revision) else {
-                throw ConversationError.missingRequest
-            }
-            switch event.fact {
-            case .request: break
-            case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
-                guard turn.binding == binding, turn.sessionHandle == thread.sessionHandle,
-                      !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
-                // Ordinary replay can close the request before its result turn
-                // arrives. The exact matching identity enriches one retained
-                // row; authoritative historical entries remain applicable.
-                try thread.merge(turn)
-                // Only an exact accepted operation clears its frozen draft.
-                if let draft = thread.drafts[binding.revision], let operationID = turn.operationID,
-                   turn.kind != .result {
-                    if case let .acceptedPendingReplay(savedID, savedTurn) = draft.disposition,
-                       savedID == operationID, savedTurn != turn.id { throw ConversationError.conflict }
-                    switch draft.disposition {
-                    case let .submitting(savedID) where savedID == operationID,
-                         let .outcomeUnknown(savedID) where savedID == operationID,
-                         let .acceptedPendingReplay(savedID, _) where savedID == operationID:
-                        guard turn.contentRedacted != true, draft.text == turn.text,
-                              Self.sameOriginalFiles(draft.files, turn.files) else { throw ConversationError.conflict }
-                        thread.drafts.removeValue(forKey: binding.revision)
-                    default: break
-                    }
-                }
-            case let .availability(handle, availability):
-                guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
-                thread.availability = availability
-            case let .availabilityRecord(handle, availability, support):
-                guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
-                thread.availability = availability
-                thread.listeningSupport = support
-            case .attentionTier:
+        case let .request(handle, payload):
+            try applyRequest(handle: handle, payload: payload, binding: binding)
+        case .attentionTier:
+            break
+        case let .revision(turn, payload) where threads[binding.request] == nil:
+            guard binding.revision == 1, !turn.sessionHandle.rawValue.isEmpty else {
                 throw ConversationError.invalidBinding
-            case let .terminal(turn, author, state):
-                if let terminal = thread.terminal {
-                    guard terminal == state, thread.terminalTurn == turn else { throw ConversationError.conflict }
-                }
-                thread.terminal = state
-                thread.terminalTurn = turn
-                thread.terminalAuthor = author
-                for revision in thread.drafts.keys {
-                    guard var draft = thread.drafts[revision] else { continue }
-                    // Ambiguous submissions stay reconcilable with their original operation identity.
-                    if case .saved = draft.disposition {
-                        draft.disposition = .rejected(ExactText("Not delivered: request closed"))
-                        thread.drafts[revision] = draft
-                    }
-                }
-            case let .retraction(turn, sequence):
-                try thread.recordRetraction(turn: turn, sequence: sequence, revision: binding.revision,
-                    retractedAtMilliseconds: event.retractedAtMilliseconds)
-            case let .delivered(turn):
-                try requireTurn(turn, binding: binding, in: thread)
-                thread.facts[turn, default: ConversationTurnFacts()].delivered = true
-            case let .acted(turn, by):
-                try requireTurn(turn, binding: binding, in: thread)
-                guard !by.rawValue.isEmpty else { throw ConversationError.invalidBinding }
-                if let old = thread.facts[turn]?.actedBy, old != by { throw ConversationError.conflict }
-                thread.facts[turn, default: ConversationTurnFacts()].actedBy = by
-            case let .fileTransfer(turn, file, outcome):
-                try requireFile(file, turn: turn, binding: binding, in: thread)
-                let old = thread.facts[turn]?.fileTransfers[file] ?? .unknown
-                guard old == .unknown || old == outcome else { throw ConversationError.conflict }
-                thread.facts[turn, default: ConversationTurnFacts()].fileTransfers[file] = outcome
-            case let .fileUse(turn, file, outcome):
-                try requireFile(file, turn: turn, binding: binding, in: thread)
-                let old = thread.facts[turn]?.fileUses[file] ?? .unknown
-                guard old == .unknown || old == outcome else { throw ConversationError.conflict }
-                thread.facts[turn, default: ConversationTurnFacts()].fileUses[file] = outcome
             }
+            try validateUnloadedSessionHandle(turn.sessionHandle, for: binding.request)
+            var thread = ConversationThread(request: binding.request, sessionHandle: turn.sessionHandle,
+                revision: binding.revision, payload: payload)
+            try applyHeldEvents(to: &thread)
+            threads[binding.request] = thread
+            try applyThreadFact(event, to: &thread)
+            threads[binding.request] = thread
+        default:
+            guard var thread = threads[binding.request] else { throw ConversationError.missingRequest }
+            try applyThreadFact(event, to: &thread)
             threads[binding.request] = thread
         }
         events[event.sequence] = event
         cursor = event.sequence
     }
 
-    /// Applies retractions replayed before this device held their request.
-    func applyHeldRetractions(to thread: inout ConversationThread) throws {
-        let held = events.values.filter { $0.binding.request == thread.request }.sorted { $0.sequence < $1.sequence }
-        for event in held {
-            guard case let .retraction(turn, terminalSequence) = event.fact else { continue }
-            try thread.recordRetraction(turn: turn, sequence: terminalSequence, revision: event.binding.revision,
+    private mutating func applyRequest(handle: ExactText, payload: JSONValue,
+                                       binding: ConversationBinding) throws {
+        guard !handle.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+        if var thread = threads[binding.request] {
+            guard thread.sessionHandle == handle else { throw ConversationError.conflict }
+            if let old = thread.revisions[binding.revision] {
+                guard old == payload else { throw ConversationError.conflict }
+            } else {
+                guard binding.revision == thread.currentRevision + 1 else {
+                    throw ConversationError.staleRevision(current: thread.currentRevision)
+                }
+                thread.revisions[binding.revision] = payload
+                thread.currentRevision = binding.revision
+            }
+            threads[binding.request] = thread
+        } else {
+            guard binding.revision == 1 else { throw ConversationError.invalidBinding }
+            try validateUnloadedSessionHandle(handle, for: binding.request)
+            var thread = ConversationThread(request: binding.request, sessionHandle: handle,
+                revision: binding.revision, payload: payload)
+            try applyHeldEvents(to: &thread)
+            threads[binding.request] = thread
+        }
+    }
+
+    private func validateUnloadedSessionHandle(_ handle: ExactText, for request: RequestKey) throws {
+        for prior in events.values where prior.binding.request == request {
+            guard case let .attentionTier(_, _, _, priorSessionHandle) = prior.fact,
+                  let priorSessionHandle else { continue }
+            guard priorSessionHandle == handle else { throw ConversationError.conflict }
+        }
+    }
+
+    private func applyThreadFact(_ event: ConversationEvent, to thread: inout ConversationThread) throws {
+        let binding = event.binding
+        switch event.fact {
+        case let .revision(turn, payload):
+            guard !turn.sessionHandle.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+            guard turn.sessionHandle == thread.sessionHandle else { throw ConversationError.conflict }
+            if let old = thread.revisions[binding.revision] {
+                guard old == payload else { throw ConversationError.conflict }
+            } else {
+                guard binding.revision == thread.currentRevision + 1 else {
+                    throw ConversationError.staleRevision(current: thread.currentRevision)
+                }
+                thread.revisions[binding.revision] = payload
+                thread.currentRevision = binding.revision
+            }
+        case let .redactedRevision(turn):
+            guard turn.contentRedacted == true, turn.sessionHandle == thread.sessionHandle,
+                  turn.author == .origin, binding.revision == thread.currentRevision + 1 else {
+                throw ConversationError.invalidBinding
+            }
+            thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
+            thread.currentRevision = binding.revision
+        default:
+            break
+        }
+        guard thread.revisionNumbers.contains(binding.revision) else { throw ConversationError.missingRequest }
+
+        switch event.fact {
+        case .request, .attentionTier:
+            throw ConversationError.invalidBinding
+        case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
+            guard turn.binding == binding, turn.sessionHandle == thread.sessionHandle,
+                  !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+            // Ordinary replay can close the request before its result turn
+            // arrives. The exact matching identity enriches one retained row;
+            // authoritative historical entries remain applicable.
+            try thread.merge(turn)
+            // Only an exact accepted operation clears its frozen draft.
+            if let draft = thread.drafts[binding.revision], let operationID = turn.operationID,
+               turn.kind != .result {
+                if case let .acceptedPendingReplay(savedID, savedTurn) = draft.disposition,
+                   savedID == operationID, savedTurn != turn.id { throw ConversationError.conflict }
+                switch draft.disposition {
+                case let .submitting(savedID) where savedID == operationID,
+                     let .outcomeUnknown(savedID) where savedID == operationID,
+                     let .acceptedPendingReplay(savedID, _) where savedID == operationID:
+                    guard turn.contentRedacted != true, draft.text == turn.text,
+                          Self.sameOriginalFiles(draft.files, turn.files) else { throw ConversationError.conflict }
+                    thread.drafts.removeValue(forKey: binding.revision)
+                default: break
+                }
+            }
+        case let .availability(handle, availability):
+            guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
+            thread.availability = availability
+        case let .availabilityRecord(handle, availability, support):
+            guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
+            thread.availability = availability
+            thread.listeningSupport = support
+        case let .terminal(turn, author, state):
+            if let terminal = thread.terminal {
+                guard terminal == state, thread.terminalTurn == turn else { throw ConversationError.conflict }
+            }
+            thread.terminal = state
+            thread.terminalTurn = turn
+            thread.terminalAuthor = author
+            for revision in thread.drafts.keys {
+                guard var draft = thread.drafts[revision] else { continue }
+                // Ambiguous submissions stay reconcilable with their original operation identity.
+                if case .saved = draft.disposition {
+                    draft.disposition = .rejected(ExactText("Not delivered: request closed"))
+                    thread.drafts[revision] = draft
+                }
+            }
+        case let .retraction(turn, sequence):
+            try thread.recordRetraction(turn: turn, sequence: sequence, revision: binding.revision,
                 retractedAtMilliseconds: event.retractedAtMilliseconds)
+        case let .delivered(turn):
+            try requireTurn(turn, binding: binding, in: thread)
+            thread.facts[turn, default: ConversationTurnFacts()].delivered = true
+        case let .acted(turn, by):
+            try requireTurn(turn, binding: binding, in: thread)
+            guard !by.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+            if let old = thread.facts[turn]?.actedBy, old != by { throw ConversationError.conflict }
+            thread.facts[turn, default: ConversationTurnFacts()].actedBy = by
+        case let .fileTransfer(turn, file, outcome):
+            try requireFile(file, turn: turn, binding: binding, in: thread)
+            let old = thread.facts[turn]?.fileTransfers[file] ?? .unknown
+            guard old == .unknown || old == outcome else { throw ConversationError.conflict }
+            thread.facts[turn, default: ConversationTurnFacts()].fileTransfers[file] = outcome
+        case let .fileUse(turn, file, outcome):
+            try requireFile(file, turn: turn, binding: binding, in: thread)
+            let old = thread.facts[turn]?.fileUses[file] ?? .unknown
+            guard old == .unknown || old == outcome else { throw ConversationError.conflict }
+            thread.facts[turn, default: ConversationTurnFacts()].fileUses[file] = outcome
+        }
+    }
+
+    /// A missing thread means these journaled facts have not been applied yet.
+    /// Threads are retained once seeded, so the first local request or delivery
+    /// can apply all held facts in their original sequence.
+    func applyHeldEvents(to thread: inout ConversationThread) throws {
+        let held = events.values.filter {
+            $0.binding.request == thread.request && $0.requiresLoadedThread
+        }.sorted { $0.sequence < $1.sequence }
+        for event in held {
+            try applyThreadFact(event, to: &thread)
         }
     }
 
