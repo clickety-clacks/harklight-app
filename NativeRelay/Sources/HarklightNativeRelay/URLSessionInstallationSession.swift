@@ -46,11 +46,10 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
 public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession,
-    AuthenticatedInboxPrioritizationSession, AuthenticatedConversationEventSession {
+    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
     public nonisolated let supportsPostCheckpointInboxEvents = true
-    public nonisolated let supportsInboxPrioritization = true
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
@@ -163,10 +162,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             close()
             throw error
         }
-    }
-
-    public func inboxViewRequest(_ request: Data, ref: String) async throws -> Data {
-        try await inboxRequest(request, ref: ref)
     }
 
     /// Opens only the explicit replay half of a confirmed paging checkpoint.
@@ -776,7 +771,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     }
                     guard conversationReplayReading else { continue }
                 }
-                if kind == "delivery" || kind == "lifecycle" || kind == "view_changed" {
+                if kind == "delivery" || kind == "lifecycle" {
                     try await enqueuePostCheckpointInboxEvent(frame)
                 } else if !responseWaiters.isEmpty {
                     responseWaiters.removeFirst().resume(returning: frame)
