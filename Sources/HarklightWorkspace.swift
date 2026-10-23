@@ -324,7 +324,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var navigatedBetweenMessages = false
     @State private var restoreLastViewedOnReturn = false
     @State private var chatOpen = false
-    @State private var conversationPresented = false
     @State private var windowSize: CGSize = .zero
 
     private var rows: [InboxItem] {
@@ -507,7 +506,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         return [
             "selection=\(UIDiagnostics.describe(selection)) tab=\(selectedTab.rawValue) entryTab=\(listTabOnMessageEntry?.rawValue ?? "nil") lastViewed=\(UIDiagnostics.describe(lastViewedSelection))",
-            "betweenMessages=\(navigatedBetweenMessages) restoreOnReturn=\(restoreLastViewedOnReturn) chatOpen=\(chatOpen) sheet=\(conversationPresented)",
+            "betweenMessages=\(navigatedBetweenMessages) restoreOnReturn=\(restoreLastViewedOnReturn) chatOpen=\(chatOpen)",
             "visibility=\(visibility) sizeClass=\(horizontalSizeClass.map { "\($0)" } ?? "nil") window=\(Int(windowSize.width))x\(Int(windowSize.height)) landscape=\(landscape)",
             "samples.selected=\(samples.selectedID ?? "nil") samples.lastViewed=\(samples.lastViewedID ?? "nil") loadError=\(samples.loadError ?? "nil")",
             "rows=\(rowSummary)",
@@ -529,11 +528,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
                         canInlineChat: wideChat,
                         openChat: {
-                            if wideChat {
-                                chatOpen.toggle()
-                            } else {
-                                conversationPresented = true
-                            }
+                            chatOpen.toggle()
                         }))
                         .id(key)
                 case let .sample(id)?:
@@ -544,11 +539,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             context: cardContext(for: .sample(id), inlineChat: inlineChat,
                                 canInlineChat: wideChat,
                                 openChat: {
-                                    if wideChat {
-                                        chatOpen.toggle()
-                                    } else {
-                                        conversationPresented = true
-                                    }
+                                    chatOpen.toggle()
                                 }))
                             .id(id)
                     }
@@ -663,42 +654,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
     }
 
-    @ViewBuilder
-    private var conversationPresentation: some View {
-        NavigationStack {
-            Group {
-                switch selection {
-                case let .request(key):
-                    if let conversationStore,
-                       let request = conversationStore.request(for: key) {
-                        ConversationPanel(store: conversationStore, key: key,
-                                          sender: key.senderID.rawValue,
-                                          title: request.title?.rawValue ?? "")
-                    } else {
-                        ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right")
-                    }
-                case let .sample(id):
-                    if let message = samples.messages.first(where: { $0.id == id }),
-                       let response = samples.responses[id] {
-                        ConversationPanel(store: response.viewModel, key: response.key,
-                                          sender: message.sender, title: message.title)
-                            .onAppear { response.chatRead = true }
-                    } else {
-                        ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right")
-                    }
-                case nil:
-                    ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right")
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close", systemImage: "xmark") { conversationPresented = false }
-                        .labelStyle(.iconOnly)
-                }
-            }
-        }
-    }
-
     var body: some View {
         GeometryReader { geometry in
             let landscape = windowSize.width > windowSize.height
@@ -750,15 +705,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 if !focused { updateWarningPresentation(with: visibleWarnings) }
             }
             tabs
-            .sheet(isPresented: $conversationPresented) {
-                conversationPresentation
-                    .presentationDetents([.medium, .large])
-            }
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route else { return }
                 settings = false
                 chatOpen = false
-                conversationPresented = false
                 // Notification routing changes presentation only. Keep it out
                 // of ordinary navigation cleanup so a tap cannot mutate the domain.
                 let destination = InboxNotificationDestination(route: route, rows: rows)
