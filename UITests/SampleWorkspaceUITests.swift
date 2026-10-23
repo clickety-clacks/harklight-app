@@ -747,6 +747,69 @@ final class SampleWorkspaceUITests: XCTestCase {
         }
     }
 
+    func testNativeInboxHeaderMinimizesAndRestoresOnIPad() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The sidebar header layout is specific to iPad.")
+        }
+        defer { XCUIDevice.shared.orientation = .portrait }
+
+        let orientations: [(String, UIDeviceOrientation)] = [
+            ("portrait", .portrait),
+            ("landscape", .landscapeLeft)
+        ]
+        for (name, orientation) in orientations {
+            XCUIDevice.shared.orientation = orientation
+            let app = XCUIApplication()
+            app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+            app.launch()
+
+            let brand = app.descendants(matching: .any)["inbox-brand"]
+            let settings = app.buttons["inbox-settings"]
+            let sidebarToggle = app.buttons.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", "sidebar")).firstMatch
+            let list = app.scrollViews.firstMatch.exists
+                ? app.scrollViews.firstMatch : app.collectionViews.firstMatch
+            let firstRow = app.descendants(matching: .any)["request-row-review-01"]
+
+            XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(sidebarToggle.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(list.exists, app.debugDescription)
+            XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(app.frame.width > app.frame.height, orientation == .landscapeLeft,
+                           app.debugDescription)
+            XCTAssertEqual(brand.frame.midY, settings.frame.midY, accuracy: 5,
+                           "Brand and Settings share the navigation row.")
+            XCTAssertEqual(settings.frame.midY, sidebarToggle.frame.midY, accuracy: 5,
+                           "Settings and the sidebar toggle share the navigation row.")
+            XCTAssertLessThan(settings.frame.maxX, sidebarToggle.frame.minX,
+                              "Settings sits immediately before the trailing sidebar toggle.")
+            XCTAssertLessThan(abs(list.frame.maxX - sidebarToggle.frame.maxX), 80,
+                              "The sidebar toggle is aligned with the sidebar edge.")
+            print("NATIVE_HEADER_\(name) brand=\(brand.frame) settings=\(settings.frame) toggle=\(sidebarToggle.frame) list=\(list.frame)")
+            capture("native-header-\(name)-top", app)
+
+            list.swipeUp()
+            let hidden = expectation(for: NSPredicate(format: "isHittable == false"),
+                                     evaluatedWith: brand)
+            wait(for: [hidden], timeout: 5)
+            capture("native-header-\(name)-scrolled", app)
+
+            list.swipeDown()
+            let restored = expectation(for: NSPredicate(format: "isHittable == true"),
+                                       evaluatedWith: brand)
+            wait(for: [restored], timeout: 5)
+            for _ in 0..<3 {
+                if firstRow.isHittable { break }
+                list.swipeDown()
+            }
+            XCTAssertTrue(firstRow.isHittable, "The list returns to its top row.")
+            XCTAssertTrue(brand.isHittable, "The header is restored at the top.")
+            capture("native-header-\(name)-restored", app)
+            app.terminate()
+        }
+    }
+
     func testBoundaryPullAndAdaptiveChat() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
