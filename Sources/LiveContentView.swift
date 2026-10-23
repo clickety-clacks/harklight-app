@@ -2,6 +2,18 @@ import AttentionDomain
 import SwiftUI
 import UIKit
 
+/// True while a reply editor below has keyboard focus. Auto-presented surfaces
+/// (the warning popover, the connection alert) defer while this is set, because
+/// presenting over the editor resigns first responder mid-typing. They present
+/// once focus clears; the underlying one-shot state stays pending until then.
+struct ReplyEditorFocusKey: PreferenceKey {
+    static let defaultValue = false
+
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
 @MainActor
 struct LiveContentView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -10,6 +22,7 @@ struct LiveContentView: View {
     let launch: NativeAppLaunch?
     let archiveDeparture: NativeAccountDeparture?
     let fixtureStore: PrototypeStore?
+    @State private var replyEditorFocused = false
 
     init(store: LivePresentationStore,
          samples: SampleLibrary,
@@ -41,7 +54,7 @@ struct LiveContentView: View {
         let presentsFailureDetails = !store.isReadOnly && diagnostic != nil &&
             (failureKey.map { launch?.shouldPresentForegroundConnectFailure($0) ?? false } ?? false)
         let failureAlertPresented = Binding<Bool>(
-            get: { presentsFailureDetails },
+            get: { presentsFailureDetails && !replyEditorFocused },
             set: { isPresented in
                 guard !isPresented, let launch, let failureKey else { return }
                 launch.dismissForegroundConnectFailure(failureKey)
@@ -101,6 +114,7 @@ struct LiveContentView: View {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background { store.flushPendingDrafts() }
             }
+            .onPreferenceChange(ReplyEditorFocusKey.self) { replyEditorFocused = $0 }
         }
     }
 
@@ -371,6 +385,14 @@ struct LiveRequestDetail: View {
             return store.isReadOnly || request.lifecycleStatus != .open ||
                 request.intentReceipt != nil || store.isRetracted(request.key) || localExample.finished
         }
+        return !canEdit
+    }
+
+    /// The old controlsReadOnly gate, kept for send-type controls: submitting
+    /// Seen is a send, so it still waits for a current inbox status even while
+    /// drafting stays enabled.
+    private var sendControlsDisabled: Bool {
+        if localExample != nil { return controlsReadOnly }
         return !canAnswer
     }
 
@@ -424,8 +446,8 @@ struct LiveRequestDetail: View {
             }
         }
         .tint(seenActionIsComplete ? .green : .blue)
-        .opacity(seenActionIsComplete ? 0.76 : (controlsReadOnly ? 0.48 : 1))
-        .disabled(controlsReadOnly || !canFinishSeenAction || seenActionIsComplete)
+        .opacity(seenActionIsComplete ? 0.76 : (sendControlsDisabled ? 0.48 : 1))
+        .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
         .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
         .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
         .accessibilityIdentifier("request-finish-seen")
@@ -549,7 +571,16 @@ struct LiveRequestDetail: View {
     }
 
     var canAnswer: Bool {
-        guard request.inboxStateIsCurrent, !store.isReadOnly, !store.isRetracted(request.key), request.lifecycleStatus == .open,
+        request.inboxStateIsCurrent && canEdit
+    }
+
+    /// Editing eligibility independent of inboxStateIsCurrent: every inbox
+    /// snapshot briefly clears the current keys, and disabling a focused
+    /// editor during that window resigns the keyboard mid-typing. Drafting
+    /// stays enabled for an open, unretracted, unanswered request; submission
+    /// still waits for a current status via canAnswer.
+    var canEdit: Bool {
+        guard !store.isReadOnly, !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         switch request.projection {
         case .sender: return true
@@ -667,6 +698,7 @@ struct LiveRequestDetail: View {
                                              actions: actions,
                                              store: store,
                                              readOnly: controlsReadOnly,
+                                             sendDisabled: sendControlsDisabled,
                                              localExample: localExample,
                                              onSeen: submitSeenAction,
                                              canOfferNoComment: canOfferNoComment,
@@ -847,6 +879,7 @@ struct LiveRequestDetail: View {
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
         }
+        .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
     }
 
     private var chatButton: some View {
@@ -1020,6 +1053,7 @@ struct HistoricalAnswerDraftView: View {
             case let .compatibility(actions):
                 LiveCompatibilityActions(request: request, actions: actions, store: store,
                                          readOnly: true,
+                                         sendDisabled: true,
                                          focusedReplyActionID: $focusedReplyActionID)
             case .unsupported:
                 Text("This saved answer format cannot be displayed.").font(.caption)
@@ -1367,6 +1401,9 @@ private struct LiveCompatibilityActions: View {
     let actions: [ProjectedAction]
     let store: LivePresentationStore
     let readOnly: Bool
+    /// Submitting Seen is a send: it stays gated on a current inbox status
+    /// even while drafting (readOnly) stays enabled during a snapshot.
+    let sendDisabled: Bool
     var localExample: SampleResponse? = nil
     var onSeen: ((ExactText) -> Void)? = nil
     var canOfferNoComment = false
@@ -1473,8 +1510,8 @@ private struct LiveCompatibilityActions: View {
                 }
                 .buttonStyle(.plain)
                 .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 14))
-                .disabled(readOnly || seenStatus != .available)
-                .opacity(seenActionIsComplete ? 0.76 : (readOnly ? 0.48 : 1))
+                .disabled(sendDisabled || seenStatus != .available)
+                .opacity(seenActionIsComplete ? 0.76 : (sendDisabled ? 0.48 : 1))
                 .accessibilityIdentifier("request-seen-action")
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")

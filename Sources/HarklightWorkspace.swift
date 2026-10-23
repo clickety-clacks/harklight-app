@@ -306,6 +306,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var visibility: NavigationSplitViewVisibility = .all
     @State private var isWarningPresented = false
     @State private var automaticallyPresentedWarnings = Set<String>()
+    @State private var replyEditorFocused = false
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
@@ -340,6 +341,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             isWarningPresented = false
             return
         }
+        // Auto-presenting over a focused reply editor resigns the keyboard
+        // mid-typing. Defer, leaving fresh warnings unmarked so they present
+        // when focus clears; the header warning button stays available.
+        guard !replyEditorFocused else { return }
         let freshWarnings = Set(newWarnings).subtracting(automaticallyPresentedWarnings)
         automaticallyPresentedWarnings.formUnion(newWarnings)
         if !freshWarnings.isEmpty && !isWarningPresented {
@@ -702,6 +707,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .onChange(of: visibleWarnings, initial: true) { _, newWarnings in
                 updateWarningPresentation(with: newWarnings)
+            }
+            .onPreferenceChange(ReplyEditorFocusKey.self) { focused in
+                replyEditorFocused = focused
+                if !focused { updateWarningPresentation(with: visibleWarnings) }
             }
             tabs
             .sheet(isPresented: $conversationPresented) {
