@@ -51,5 +51,14 @@ final class DetailChatButtonUITests: XCTestCase {
 
         chat.tap()
         XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.sheets.firstMatch.exists,
+                       "The chat panel should be a button-anchored popover, not a sheet. \(app.debugDescription)")
+
+        let close = app.buttons["Close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5), app.debugDescription)
+        close.tap()
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+        XCTAssertFalse(app.textFields["sample-chat-composer"].exists, app.debugDescription)
     }
 }
