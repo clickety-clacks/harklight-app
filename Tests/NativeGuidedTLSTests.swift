@@ -1045,7 +1045,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         await session.close()
     }
 
-    func testStaleNoCommentRevisionRefusalStaysUnresolvedForConversationReplay() async throws {
+    func testStaleNoCommentRevisionRefusalNamesTheCurrentRevision() async throws {
         let namespace = "Harklight.no-comment-stale-revision-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -1059,7 +1059,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             guard text.contains("\"request_revision\":2") else {
                 return ["{\"v\":1,\"type\":\"error\",\"reason\":\"unsupported_version\"}\n"]
             }
-            return ["{\"v\":1,\"type\":\"error\",\"reason\":\"stale_revision\",\"current_revision\":3}\n"]
+            return ["{\"v\":1,\"type\":\"error\",\"reason\":\"stale_revision\",\"field\":\"request_revision\",\"current_revision\":3}\n"]
         }
         defer { relay.close() }
         let port = try await relay.start()
@@ -1074,8 +1074,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             Data(#"{"type":"answer_no_comment","request_id":"request","request_revision":2}"#.utf8)
                 + Data([0x0A]),
             operationID: operationID)
-        XCTAssertEqual(result, .unresolved,
-                       "A stale revision is not acceptance; conversation replay supplies the current question.")
+        XCTAssertEqual(result, .staleRevision(operationID: operationID, currentRevision: 3),
+                       "The current revision lets the inbox show the changed question and release this answer for retry.")
         await session.close()
     }
 
@@ -1097,6 +1097,59 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNotNil(presentation.connectionWarning, "A real refresh failure must still warn even when chat is unavailable.")
         availability.unavailableContext = nil
         XCTAssertNil(presentation.conversationUnavailableMessage, "A replacement connection clears the old refusal.")
+    }
+
+    func testConnectionWarningNamesTheErrorAndClearsOnlyAfterMatchingConfirmation() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let otherContext = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("other-relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let presentation = try LivePresentationStore(store: domain, context: context)
+        let failure = NSError(domain: "RelayConnection", code: 7,
+                              userInfo: [NSLocalizedDescriptionKey: "approved server could not be reached"])
+
+        presentation.applyRefreshResult(.failed(error: failure))
+        XCTAssertTrue(presentation.connectionWarning?.contains("approved server could not be reached") == true)
+
+        presentation.applyRefreshResult(NativeRelayRefreshResult(relayConfirmed: true,
+            pushRegistration: .confirmed, confirmedContext: otherContext,
+            confirmedTransportAttemptID: UUID()))
+        XCTAssertNotNil(presentation.connectionWarning,
+                        "A confirmation for another profile cannot clear this connection warning.")
+
+        presentation.applyRefreshResult(NativeRelayRefreshResult(relayConfirmed: true,
+            pushRegistration: .confirmed, confirmedContext: context,
+            confirmedTransportAttemptID: nil))
+        XCTAssertNotNil(presentation.connectionWarning,
+                        "A refresh without a confirmed transport attempt cannot clear this connection warning.")
+
+        presentation.applyRefreshResult(NativeRelayRefreshResult(relayConfirmed: true,
+            pushRegistration: .confirmed, confirmedContext: context,
+            confirmedTransportAttemptID: UUID()))
+        XCTAssertNil(presentation.connectionWarning)
+    }
+
+    @MainActor
+    func testForegroundConnectionWarningIncludesObservedTransportError() async {
+        let deadline = ForegroundConnectDeadline()
+        deadline.beginSession(transportAttemptID: UUID())
+        let error = NSError(domain: "RelayConnection", code: 7,
+                            userInfo: [NSLocalizedDescriptionKey: "The approved relay could not be reached."])
+
+        let progress = await deadline.run(deadline: .seconds(1), operation: {
+            deadline.recordFailure(error)
+            return false
+        }, onTimeout: {}) { _ in }
+
+        XCTAssertTrue(progress.message.contains("The approved relay could not be reached."))
+        let diagnostic = NativeForegroundConnectDiagnostic(
+            progress: progress, operationSnapshot: .unavailable,
+            appVersion: "1", buildNumber: "1", executableSHA256: "unavailable")
+        XCTAssertFalse(diagnostic.shareText.contains("The approved relay could not be reached."),
+                       "The connection warning may name the error without adding it to shareable diagnostics.")
     }
 
     func testLiveConversationFrameDuringInboxPagingKeepsTheRelayOpen() async throws {

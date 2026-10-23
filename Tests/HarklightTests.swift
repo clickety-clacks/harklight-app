@@ -217,6 +217,41 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testAnswerControlsRemainAvailableWhileInboxFreshnessIsUnknown() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("refresh-answer-\(UUID().uuidString)"),
+                                       deviceID: ExactText("device-A"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("app:test"), messageID: ExactText("refresh-answer"))
+        let payload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"refresh-answer","title":"Refresh answer","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        let acceptance = RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message))
+        _ = try store.beginInboxCandidate(startupID: "first", since: 0, batches: [], context: context)
+        try store.saveInboxInitialPage(snapshotID: "accepted-snapshot", highWater: 1,
+            items: [InboxSnapshotItem(acceptance: acceptance)],
+            nextCursor: nil, receiptCursor: nil, context: context)
+        _ = try store.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try store.acceptInboxCheckpoint(snapshotID: "accepted-snapshot", highWater: 1, context: context)
+        _ = try store.beginInboxCandidate(startupID: "refresh", since: 1, batches: [], context: context)
+        let visible = try LivePresentationStore(store: store, context: context)
+        let request = try XCTUnwrap(visible.request(for: key))
+
+        visible.beginRefresh()
+        defer { visible.endRefresh() }
+        let row = try XCTUnwrap(visible.inboxRows.first { $0.key == key })
+        XCTAssertTrue(request.inboxStateIsCurrent,
+                      "A pending refresh keeps rows from the last accepted inbox snapshot current.")
+        XCTAssertTrue(visible.isRefreshing)
+        XCTAssertFalse(row.isResolved, "Unknown freshness must not gray an otherwise open message.")
+        XCTAssertTrue(row.canNoComment)
+        XCTAssertTrue(LiveRequestDetail(request: request, store: visible).canAnswer,
+                      "A freshness check must not dim or disable an answer for the version on screen.")
+    }
+
+    @MainActor
     func testLiveAnswerUsesSenderChoiceAndStaysPendingAcrossRestart() throws {
         let fixture = try XCTUnwrap(loadFixtures().requests.first(where: { $0.key.messageID == ExactText("review-01") }))
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),

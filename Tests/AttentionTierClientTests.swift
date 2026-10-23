@@ -256,4 +256,37 @@ final class AttentionTierClientTests: XCTestCase {
         XCTAssertEqual(checkpoint?.highWater, 2, "The live tier fact must not move the frozen page high water.")
         XCTAssertEqual(try restored.snapshot(context: profile).cursor, 3)
     }
+
+    func testPendingInboxRefreshKeepsLastAcceptedRowsCurrentAndAnswerable() throws {
+        let profile = context()
+        let store = try AttentionDomainStore(context: profile, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: profile.identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let payload = try JSONValue.parse(data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#))
+        let acceptance = RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            origin: ExactText("origin"))
+        _ = try store.beginInboxCandidate(startupID: "first", since: 0, batches: [], context: profile)
+        try store.saveInboxInitialPage(snapshotID: "first-snapshot", highWater: 1,
+            items: [InboxSnapshotItem(acceptance: acceptance)], nextCursor: nil,
+            receiptCursor: nil, context: profile)
+        _ = try store.prepareInboxCheckpointAcknowledgement(context: profile)
+        _ = try store.acceptInboxCheckpoint(snapshotID: "first-snapshot", highWater: 1, context: profile)
+
+        _ = try store.beginInboxCandidate(startupID: "retry", since: 1, batches: [], context: profile)
+        XCTAssertEqual(try XCTUnwrap(store.snapshot(context: profile).inboxCurrentKeys), Set([key]))
+        let port = AttentionDomainPort(store: store)
+        let request = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        XCTAssertTrue(request.inboxStateIsCurrent,
+                      "A pending refresh keeps the last accepted message set active.")
+        let selector = try XCTUnwrap(request.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        XCTAssertEqual(receipt.selector.requestRevision, 1)
+        XCTAssertEqual(try store.snapshot(context: profile).outbox.first?.requestRevision, 1)
+
+        try store.beginReplay(through: 1, context: profile)
+        XCTAssertEqual(try XCTUnwrap(store.snapshot(context: profile).inboxCurrentKeys), Set([key]),
+                       "The replay barrier must publish the same accepted rows while the candidate recovers.")
+    }
 }

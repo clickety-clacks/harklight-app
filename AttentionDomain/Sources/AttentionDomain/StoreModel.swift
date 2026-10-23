@@ -128,6 +128,8 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     /// The relay explicitly rejected this operation, so it is safe to remove
     /// its active outbox lock and let the person choose another answer.
     case failed
+    /// The relay declined the submitted revision and named the current one.
+    case staleRevision(currentRevision: UInt64)
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case unsupported
