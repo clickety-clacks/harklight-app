@@ -1151,6 +1151,11 @@ private struct LiveProjectedInputView: View {
     @GestureState private var pointGestureActive = false
     @FocusState.Binding var focusedReplyActionID: String?
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var detailColors: HarklightDesignSource.MessageType {
+        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    }
 
     private var draft: InputDraft? {
         readOnly ? request.draft.inputs[input.id]
@@ -1178,9 +1183,7 @@ private struct LiveProjectedInputView: View {
     }
 
     private var replyEditorSurface: Color {
-        colorScheme == .dark
-            ? Color(uiColor: .secondarySystemBackground)
-            : Color(red: 0.96, green: 0.975, blue: 1)
+        HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
     }
 
     private func activate(_ action: ProjectedAction) {
@@ -1225,7 +1228,7 @@ private struct LiveProjectedInputView: View {
                 }
             ))
             .font(.body)
-            .foregroundStyle(.primary)
+            .foregroundStyle(detailColors.textColor)
             .scrollContentBackground(.hidden)
             .frame(minHeight: 120)
             .padding(8)
@@ -1450,9 +1453,7 @@ private struct LiveCompatibilityActions: View {
     }
 
     private var replyEditorSurface: Color {
-        colorScheme == .dark
-            ? Color(uiColor: .secondarySystemBackground)
-            : Color(red: 0.96, green: 0.975, blue: 1)
+        HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
     }
 
     private func activate(_ action: ProjectedAction) {
@@ -1490,7 +1491,7 @@ private struct LiveCompatibilityActions: View {
                 }
             ))
             .font(.body)
-            .foregroundStyle(.primary)
+            .foregroundStyle(detailColors.textColor)
             .scrollContentBackground(.hidden)
             .frame(minHeight: 120)
             .padding(8)
