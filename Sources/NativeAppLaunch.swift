@@ -909,13 +909,20 @@ final class LivePresentationStore {
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var pendingDrafts: [RequestKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [RequestKey: Task<Void, Never>] = [:]
+    // Clearing a retracted row is list state on this device only: no frame is
+    // sent and the retracted record stays intact in the durable store.
+    private(set) var clearedRetractions: Set<RequestKey> = []
+    @ObservationIgnored private let clearedRetractionDefaults: UserDefaults
+    private static let clearedRetractionsDefaultsKey = "harklight.cleared-retracted-requests"
 
     convenience init(store: AttentionDomainStore, context: ProfileContext,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
-                     diagnostics: NativeClientDiagnosticJournal? = nil) throws {
+                     diagnostics: NativeClientDiagnosticJournal? = nil,
+                     clearedRetractionDefaults: UserDefaults = .standard) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
-                      conversationAvailability: conversationAvailability)
+                      conversationAvailability: conversationAvailability,
+                      clearedRetractionDefaults: clearedRetractionDefaults)
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
@@ -933,7 +940,9 @@ final class LivePresentationStore {
     private init(store: AttentionDomainStore, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
-                 conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability) throws {
+                 conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
+                 clearedRetractionDefaults: UserDefaults = .standard) throws {
+        self.clearedRetractionDefaults = clearedRetractionDefaults
         self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
@@ -947,6 +956,10 @@ final class LivePresentationStore {
         self.conversationThreads = try port.conversations(context: port.context).threads
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
+        if let data = clearedRetractionDefaults.data(forKey: Self.clearedRetractionsDefaultsKey),
+           let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
+            clearedRetractions = cleared
+        }
     }
 
     /// Read-only real account archives are offline relay data, not fictional
@@ -977,6 +990,18 @@ final class LivePresentationStore {
     func retractionLabel(_ key: RequestKey) -> String {
         guard let date = retractionDate(key) else { return "Retracted" }
         return "Retracted · " + date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    func isRetractionCleared(_ key: RequestKey) -> Bool {
+        clearedRetractions.contains(key)
+    }
+
+    func clearRetracted(_ key: RequestKey) {
+        guard isRetracted(key), !clearedRetractions.contains(key) else { return }
+        clearedRetractions.insert(key)
+        if let data = try? JSONEncoder().encode(clearedRetractions) {
+            clearedRetractionDefaults.set(data, forKey: Self.clearedRetractionsDefaultsKey)
+        }
     }
 
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
@@ -1262,7 +1287,9 @@ final class LivePresentationStore {
     }
 
     var inboxRows: [InboxRequestRow] {
-        presentation.requests.map { request in
+        presentation.requests.compactMap { request in
+            let retracted = isRetracted(request.key)
+            if retracted, clearedRetractions.contains(request.key) { return nil }
             let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
                 request.receiptFacts?.ownOutcome == .unconfirmed &&
                 request.lifecycleStatus != .pending
@@ -1278,7 +1305,7 @@ final class LivePresentationStore {
             var statusParts: [String] = []
             if request.inboxStateIsCurrent {
                 if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
-                let lifecycle = isRetracted(request.key) ? retractionLabel(request.key) :
+                let lifecycle = retracted ? retractionLabel(request.key) :
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
                 statusParts.append(lifecycle)
                 if request.answerNotDelivered { statusParts.append("Answer not delivered") }
@@ -1311,7 +1338,7 @@ final class LivePresentationStore {
                     : nil,
                 informationalSeenStatus: request.informationalSeenStatus,
                 canMarkSeen: !isReadOnly && request.inboxStateIsCurrent &&
-                    !isRetracted(request.key) && request.lifecycleStatus == .open &&
+                    !retracted && request.lifecycleStatus == .open &&
                     request.intentReceipt == nil && request.informationalSeenStatus == .available,
                 canNoComment: canNoComment(request),
                 noCommentUnavailable: request.noCommentUnavailable,
@@ -1319,6 +1346,7 @@ final class LivePresentationStore {
                     request.lifecycleStatus == .answered ||
                     request.lifecycleStatus == .noComment,
                 hasFailedResponse: receiptStatus == .failed,
+                isRetracted: retracted,
                 tier: request.attentionTier.inboxRowStyleTier)
         }
     }

@@ -41,6 +41,13 @@ enum InboxItem: Identifiable {
         }
     }
 
+    @MainActor var isRetracted: Bool {
+        switch self {
+        case let .request(row): row.isRetracted
+        case let .example(_, response): response.inboxRow?.isRetracted == true
+        }
+    }
+
     @MainActor var noCommentUnavailable: Bool {
         switch self {
         case let .request(row): row.noCommentUnavailable

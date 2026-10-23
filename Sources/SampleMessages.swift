@@ -162,6 +162,7 @@ final class SampleResponse {
             hasUserAction: finished || receiptStatus == .pendingOrAccepted ||
                 request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment,
             hasFailedResponse: receiptStatus == .failed,
+            isRetracted: viewModel.isRetracted(key),
             chatUnread: message.hasChat ? message.chatUnread && !chatRead : nil,
             initials: message.initials,
             emphasis: emphasis,
@@ -191,6 +192,14 @@ final class SampleResponse {
         viewModel.selectNoComment(for: key)
         finished = true
         deferred = false
+    }
+
+    var clearedFromList: Bool {
+        viewModel.isRetracted(key) && viewModel.isRetractionCleared(key)
+    }
+
+    func clearRetractedLocally() {
+        viewModel.clearRetracted(key)
     }
 
     var canMarkSeenLocally: Bool {
@@ -461,7 +470,8 @@ final class SampleLibrary {
     /// Composition happens after domain projection, before ordinary inbox rendering.
     func inboxItems(appendingTo requests: [InboxRequestRow]) -> [InboxItem] {
         requests.map(InboxItem.request) + messages.compactMap { message in
-            responses[message.id].map { InboxItem.example(message, $0) }
+            guard let response = responses[message.id], !response.clearedFromList else { return nil }
+            return InboxItem.example(message, response)
         }
     }
 
