@@ -455,7 +455,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("seen-response-in-replied", app)
     }
 
-    func testReplyChoiceKeepsItsEditorWhenDeselectedAndReopensOnTap() {
+    func testReplyChoiceUsesFloatingComposerAndReopensAfterSending() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
@@ -468,11 +468,20 @@ final class SampleWorkspaceUITests: XCTestCase {
         let replyChoice = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
         XCTAssertTrue(replyChoice.waitForExistence(timeout: 5), app.debugDescription)
         replyChoice.tap()
-        let editor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
+        let editor = app.textFields.matching(identifier: "request-input-answer-response").firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
-                      "Selecting Reply focuses its editor.")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "Selecting Reply focuses its editor.")
+        XCTAssertLessThanOrEqual(editor.frame.maxY, keyboard.frame.minY + 2,
+                                 "The floating reply field sits above the keyboard.")
         editor.typeText("Keep the smaller first step.")
+        let sendReply = app.buttons["request-reply-send"]
+        XCTAssertTrue(sendReply.waitForExistence(timeout: 5), app.debugDescription)
+        sendReply.tap()
+        let collapsedReply = app.buttons["request-input-answer-reply-own"]
+        XCTAssertTrue(collapsedReply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(collapsedReply.label.contains("Keep the smaller first step."))
+        capture("reply-choice-after-composer-send", app)
 
         showList(app)
         clearSearch(in: app)
@@ -492,13 +501,24 @@ final class SampleWorkspaceUITests: XCTestCase {
         enterSearch("Which approach", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
-        let retainedEditor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
-        XCTAssertEqual(retainedEditor.value as? String, "Keep the smaller first step.")
+        let retainedSummary = app.buttons["request-input-answer-reply-own"]
+        XCTAssertTrue(retainedSummary.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(editor.exists, "Returning to the request keeps the reply collapsed.")
+        XCTAssertTrue(retainedSummary.label.contains("Keep the smaller first step."))
+
+        retainedSummary.tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Tapping the selected choice reopens the editor.")
+        capture("reply-editor-reopened", app)
+        app.buttons["request-reply-send"].tap()
+        XCTAssertTrue(retainedSummary.waitForExistence(timeout: 5))
 
         let otherChoice = app.buttons.containing(.staticText, identifier: "Start small").firstMatch
         XCTAssertTrue(otherChoice.waitForExistence(timeout: 5), app.debugDescription)
         otherChoice.tap()
-        let ghostedReply = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
+        let ghostedReply = app.buttons["request-input-answer-reply-own"]
         XCTAssertTrue(ghostedReply.waitForExistence(timeout: 5), app.debugDescription)
         capture("reply-editor-deselected-with-draft", app)
 
@@ -509,6 +529,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "Reselecting Reply focuses its editor.")
         capture("reply-editor-reselected", app)
+        app.buttons["request-reply-send"].tap()
         app.descendants(matching: .any)["sample-finish"].tap()
         capture("text-response-submitted", app)
         showList(app)
@@ -520,6 +541,38 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The text response appears in Replied after the user switches tabs.")
         capture("text-response-in-replied", app)
+    }
+
+    func testReplyComposerGrowsAndScrollsWithinThirtyPercentOfScreenHeight() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        enterSearch("Which approach", in: app)
+        let row = app.descendants(matching: .any)["sample-textChoice-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let replyChoice = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
+        XCTAssertTrue(replyChoice.waitForExistence(timeout: 5), app.debugDescription)
+        replyChoice.tap()
+        let editor = app.textFields["request-input-answer-response"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+
+        let longDraft = (1...48).map { "Reply line \($0) keeps growing across the field." }
+            .joined(separator: " ")
+        editor.typeText(longDraft)
+        capture("reply-composer-at-height-cap", app)
+
+        let screenHeight = app.windows.firstMatch.frame.height
+        let retainedText = editor.value as? String ?? ""
+        XCTAssertTrue(retainedText.contains("Reply line 48"),
+                      "The full reply remains available after the field reaches its cap.")
+        XCTAssertGreaterThan(editor.frame.height, screenHeight * 0.2,
+                             "The field expands as the reply grows.")
+        XCTAssertLessThanOrEqual(editor.frame.height, screenHeight * 0.3 + 2,
+                                 "The field stops at 30% of the screen and scrolls internally.")
     }
 
     func testDesignedControlsAndComponentScreenshots() {
@@ -596,11 +649,13 @@ final class SampleWorkspaceUITests: XCTestCase {
                 let ownAnswer = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
                 reveal(ownAnswer, in: app.scrollViews["message-card-scroll"], app: app)
                 ownAnswer.tap()
-                let answer = app.textViews["request-input-answer-response"]
+                let answer = app.textFields["request-input-answer-response"]
                 XCTAssertTrue(answer.waitForExistence(timeout: 5))
-                reveal(answer, in: app.scrollViews["message-card-scroll"], app: app)
-                answer.tap(); answer.typeText("Leave room for a quiet corner.")
-                capture("component-own-answer", app)
+                answer.tap()
+                answer.typeText("Leave room for a quiet corner.")
+                capture("component-own-answer-editing", app)
+                app.buttons["request-reply-send"].tap()
+                capture("component-own-answer-collapsed", app)
                 app.descendants(matching: .any)["sample-finish"].tap()
             }
             if kind == "pictureChoice" {
