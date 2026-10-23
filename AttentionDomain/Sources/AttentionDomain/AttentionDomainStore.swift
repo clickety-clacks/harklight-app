@@ -132,9 +132,6 @@ public final class FileAttentionStatePersistence: AttentionStatePersistence, @un
 }
 
 public final class AttentionDomainStore: @unchecked Sendable {
-    // Writers take this gate before the state lock, so a queued writer never
-    // keeps readers from the last committed state while an older page is saved.
-    private let writerLock = NSRecursiveLock()
     private let lock = NSRecursiveLock()
     private let context: ProfileContext
     private let persistence: any AttentionStatePersistence
@@ -233,8 +230,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func invalidate() {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         isInvalidated = true
@@ -242,8 +237,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func registerFixtureRequests(_ requests: [StoredRequest], context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -276,8 +269,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func resetFixtureState(_ requests: [StoredRequest], context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -339,8 +330,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func saveDraft(_ draft: RequestDraft,
                           selector: BoundDocumentSelector,
                           context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -379,8 +368,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                        draft: RequestDraft,
                        selector: BoundDocumentSelector,
                        context suppliedContext: ProfileContext) throws -> Submission {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -457,8 +444,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func submitNoComment(intentID: UUID,
                                 selector: BoundDocumentSelector,
                                 context suppliedContext: ProfileContext) throws -> Submission {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -539,8 +524,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func fenceUncommittedIntent(_ intentID: UUID,
                                        requestKey: RequestKey,
                                        context suppliedContext: ProfileContext) throws -> Submission? {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -577,8 +560,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                         operationID: UUID,
                                         terminalSequence: UInt64,
                                         context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -602,8 +583,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func recordNoCommentUnsupported(_ intentID: UUID,
                                            operationID: UUID,
                                            context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -637,8 +616,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func recordAnswerNotDelivered(_ intentID: UUID,
                                          operationID: UUID,
                                          context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -673,8 +650,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                           operationID: UUID,
                                           currentRevision: UInt64,
                                           context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -710,8 +685,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                                 operationID: UUID,
                                                 retractedAtMilliseconds: UInt64,
                                                 context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -755,8 +728,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       state terminalState: TerminalState,
                                       authorizedOriginAnswer: JSONValue?,
                                       context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -802,8 +773,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func recordFixtureTerminal(_ terminal: FixtureTerminal,
                                       for requestKey: RequestKey,
                                       context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -817,8 +786,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func apply(_ event: RelayEvent, context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1490,8 +1457,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     private func deferUnloadedContiguousFact(_ event: RelayEvent,
                                              context suppliedContext: ProfileContext) -> ApplyEventResult? {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         do {
@@ -1528,8 +1493,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func beginReplay(through highWaterSequence: UInt64,
                             context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1562,8 +1525,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func finishReplay(at resyncedSequence: UInt64,
                              context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1584,8 +1545,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func resolveOriginReference(sequence: UInt64,
                                        request: StoredRequest,
                                        context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1644,8 +1603,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                     since: UInt64,
                                     batches: [InboxReceiptBatch],
                                     context suppliedContext: ProfileContext) throws -> InboxPagingCheckpoint {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1674,8 +1631,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func discardInboxCandidate(context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1691,8 +1646,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// operation record, but allow a new bounded candidate from the durable C.
     public func discardReplacedInboxCandidate(snapshotID: String,
                                               context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1711,8 +1664,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                      nextCursor: String?,
                                      receiptCursor: String?,
                                      context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1768,8 +1719,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    items: [InboxSnapshotItem],
                                    nextCursor: String?,
                                    context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1812,15 +1761,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
         checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
         checkpoint.nextCursor = nextCursor
         next.inboxCheckpoint = checkpoint
-        try commit(next, allowingCommittedReads: true)
+        try commit(next)
         refreshAcceptedReplayIndexes(for: keys)
     }
 
     public func appendInboxReceiptBatches(_ batches: [InboxReceiptBatch],
                                          context suppliedContext: ProfileContext) throws {
         guard !batches.isEmpty else { return }
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1848,8 +1795,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func saveInboxReceiptBatch(_ batchID: String,
                                       results: [InboxOperationReceipt],
                                       context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1931,8 +1876,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       events: [RelayEvent],
                                       nextCursor: String?,
                                       context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -1972,8 +1915,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     /// Durably freezes the exact manifest immediately before the distinct server checkpoint ACK.
     public func prepareInboxCheckpointAcknowledgement(context suppliedContext: ProfileContext) throws -> InboxPagingCheckpoint {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2005,8 +1946,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func acceptInboxCheckpoint(snapshotID: String,
                                       highWater: UInt64,
                                       context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2125,8 +2064,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// Neither it nor its ACK can advance ordinary delivery/lifecycle replay.
     @discardableResult
     public func applyConversation(_ event: ConversationEvent, context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2247,8 +2184,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2279,8 +2214,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func updateConversationDraftText(_ text: ExactText, for binding: ConversationBinding,
                                            context suppliedContext: ProfileContext) throws -> ConversationDraft {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2309,8 +2242,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     /// Records that Chat has shown the request's latest agent reply.
     public func markConversationRead(_ request: RequestKey, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2326,8 +2257,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2350,8 +2279,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// A typed local upload example, with no delivery operation or transport.
     public func stageFixtureConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
         text: ExactText, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2379,8 +2306,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// Freeze a durable operation before transport. Local examples may edit drafts,
     /// but cannot enter this submission path or acquire a delivery operation.
     public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws -> UUID {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2428,8 +2353,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// happen while the transfer is suspended or its result is unknown.
     public func registerConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
         operation: UUID, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2455,8 +2378,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func recordConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
         operation: UUID, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2482,8 +2403,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// its uncommitted upload groups; retries preserve that command identity.
     public func abandonConversationUploads(for request: RequestKey,
         context suppliedContext: ProfileContext) throws -> [ConversationUploadCleanup] {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2509,8 +2428,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func recordConversationCleanup(_ id: UUID, request: RequestKey,
         outcome: ConversationUploadCleanup.Outcome, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2529,8 +2446,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func markDiscussionOutcome(_ binding: ConversationBinding, operation: UUID,
                                       rejection: ExactText?, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2554,8 +2469,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func markDiscussionAccepted(_ binding: ConversationBinding, operation: UUID, turn: ExactText,
                                         context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2697,29 +2610,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard requestKey.accountScope == identity.personID else { throw AttentionStoreError.wrongAccount }
     }
 
-    private func commit(_ proposed: PersistedAttentionState,
-                        allowingCommittedReads: Bool = false) throws {
+    private func commit(_ proposed: PersistedAttentionState) throws {
         // File payloads are normalized when events and drafts enter the state,
         // and loaded state is normalized during initialization. Rewalking every
         // retained conversation value here makes an unrelated text edit grow
         // with conversation history.
         var next = proposed
         next.revision = state.revision &+ 1
-        // Only saveInboxOlderPage opts in, with exactly one state-lock hold.
-        // The writer gate stays held through persistence, recovery, publication
-        // and the caller's index updates. No other writer can derive stale state.
-        var stateLockReleased = allowingCommittedReads
-        if stateLockReleased { lock.unlock() }
-        defer { if stateLockReleased { lock.lock() } }
         do {
             let encoder = PropertyListEncoder()
             encoder.outputFormat = .binary
             let bytes = try encoder.encode(next)
             try persistence.commit(bytes, identity: context.identity)
-            if stateLockReleased {
-                lock.lock()
-                stateLockReleased = false
-            }
             state = next
             for observer in Array(changeObservers.values) {
                 observer.yield(state.revision)
@@ -2735,13 +2637,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 // inline form. Keep the in-memory invariant used by text-only
                 // edits when recovering that older durable snapshot. This scan
                 // runs only after a failed commit, never on the normal edit path.
-                let recoveredIndex = Self.acceptedAwaitingTerminalReplay(in: normalized)
-                if stateLockReleased {
-                    lock.lock()
-                    stateLockReleased = false
-                }
                 state = normalized
-                acceptedAwaitingTerminalReplay = recoveredIndex
+                acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: normalized)
             }
             if let storeError = error as? AttentionStoreError { throw storeError }
             throw AttentionStoreError.persistence(error.localizedDescription)
