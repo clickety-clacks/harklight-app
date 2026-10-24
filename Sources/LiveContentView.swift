@@ -703,10 +703,24 @@ struct LiveRequestDetail: View {
         seenActionPresentation.isPending
     }
 
+    private var seenToolbarTint: Color? {
+        guard !seenActionIsComplete, !seenActionIsPending else { return nil }
+        return HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
+    }
+
     private var finishSeenButton: some View {
         Button(action: finishSeenAction) {
-            Image(systemName: seenActionIsPending ? "clock" : "checkmark")
+            if seenActionIsComplete {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark")
+                    Text("Seen")
+                }
+                    .padding(.horizontal, 6)
+            } else {
+                Image(systemName: seenActionIsPending ? "clock" : "checkmark")
+            }
         }
+        .tint(seenToolbarTint)
         .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
         .accessibilityLabel(seenActionIsComplete ? "Seen"
                             : seenActionIsPending ? "Seen pending confirmation" : "Mark as seen")
@@ -714,6 +728,9 @@ struct LiveRequestDetail: View {
                                  ? "Completed"
                                  : seenActionPresentation.accessibilityValue))
         .accessibilityIdentifier("request-finish-seen")
+        // A fresh native glass host avoids retaining the pressed button's
+        // oversized background when confirmation expands the label.
+        .id(seenActionIsComplete ? "seen-complete" : "seen-action")
     }
 
     private var answerIsComplete: Bool {
@@ -781,7 +798,14 @@ struct LiveRequestDetail: View {
     }
 
     private var answeredStatusButton: some View {
-        Button("Answered", systemImage: "checkmark", action: {})
+        Button(action: {}) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                Text("Replied")
+            }
+                .padding(.horizontal, 6)
+        }
+        .tint(nil)
         .disabled(true)
         .accessibilityLabel("Answered")
         .accessibilityValue("Completed")
