@@ -2,15 +2,15 @@ import XCTest
 
 @MainActor
 final class DetailChatButtonUITests: XCTestCase {
-    func testDetailChatButtonFloatsBottomTrailingInLightMode() {
-        verifyFloatingChatButton(appearance: "Light")
+    func testDetailChatUsesNativeToolbarInLightMode() {
+        verifyToolbarChatButton(appearance: "Light")
     }
 
-    func testDetailChatButtonFloatsBottomTrailingInDarkMode() {
-        verifyFloatingChatButton(appearance: "Dark")
+    func testDetailChatUsesNativeToolbarInDarkMode() {
+        verifyToolbarChatButton(appearance: "Dark")
     }
 
-    private func verifyFloatingChatButton(appearance: String) {
+    private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples",
                                "-uiUserInterfaceStyle", appearance]
@@ -29,13 +29,12 @@ final class DetailChatButtonUITests: XCTestCase {
         sample.tap()
 
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5), app.debugDescription)
-        let chat = app.buttons["Chat"]
+        let chat = app.toolbars.buttons["Chat"].exists
+            ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
-        XCTAssertGreaterThan(chat.frame.midX, app.frame.midX,
-                            "Chat is placed on the trailing side of request detail.")
-        XCTAssertGreaterThan(chat.frame.midY, app.frame.midY,
-                            "Chat is placed near the bottom of request detail.")
+        XCTAssertFalse(app.scrollViews["message-card-scroll"].buttons["Chat"].exists,
+                       "Chat belongs to the navigation container, not the message card.")
         XCTAssertFalse(app.buttons["Later"].exists, app.debugDescription)
         XCTAssertFalse(app.staticTexts["Not now"].exists, app.debugDescription)
 

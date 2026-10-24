@@ -527,7 +527,16 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private var navigationSelection: Binding<InboxSelection?> {
-        Binding(get: { selection }, set: { navigate(to: $0) })
+        Binding(get: { selection }, set: { next in
+            navigate(to: next)
+            // In portrait the phone's master is an overlay. A row tap must
+            // return to its detail even when that row was already selected.
+            if next != nil, visibility == .all,
+               UIDevice.current.userInterfaceIdiom == .phone,
+               windowSize.width <= windowSize.height {
+                visibility = .detailOnly
+            }
+        })
     }
 
     @ViewBuilder
