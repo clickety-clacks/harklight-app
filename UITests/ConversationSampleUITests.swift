@@ -52,7 +52,6 @@ final class ConversationSampleUITests: XCTestCase {
     func testChatPanelRemovesHeaderAndKeepsComposerControlsAlignedAsPromptGrows() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
         enterSearch("Thursday", in: app)
@@ -200,7 +199,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
         capture("upload-before-message-departure", app)
-        app.buttons["Chat"].tap()
+        dismissChatPopover(app)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
         showInbox(app)
         let other = app.descendants(matching: .any)["request-row-sample-review-0"]
