@@ -7,30 +7,52 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    func testBuildEightHeaderRemainsVisibleAcrossScrollStates() {
+    func testNativeHeaderMinimizesOnDownScrollAndRestoresOnUpScroll() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
         let brand = app.descendants(matching: .any)["inbox-brand"]
         let settings = app.buttons["inbox-settings"]
+        let firstRow = app.descendants(matching: .any)["request-row-unknown-01"]
         XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
-        attachScreenshot("Build 8 header at top", from: app)
+        XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(brand.isHittable, "The native title is visible at the list top.")
+        attachScreenshot("Native header at top", from: app)
 
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-        let dragStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
-        let dragEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.68))
-        dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
-        XCTAssertTrue(brand.exists, app.debugDescription)
-        XCTAssertTrue(settings.exists, app.debugDescription)
-        attachScreenshot("Build 8 header mid-scroll", from: app)
+        list.swipeUp()
+        let hidden = expectation(for: NSPredicate(format: "isHittable == false"),
+                                 evaluatedWith: brand)
+        wait(for: [hidden], timeout: 5)
+        XCTAssertFalse(settings.isHittable, "Settings minimizes with the native header.")
+        attachScreenshot("Native header scrolled", from: app)
 
-        app.swipeUp()
-        XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(settings.exists, app.debugDescription)
-        attachScreenshot("Build 8 header after scrolling", from: app)
+        let upwardStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        upwardStart.press(forDuration: 0.05,
+                          thenDragTo: upwardStart.withOffset(CGVector(dx: 0, dy: 90)),
+                          withVelocity: .slow, thenHoldForDuration: 0.25)
+        let restoredOnUpScroll = expectation(for: NSPredicate(format: "isHittable == true"),
+                                            evaluatedWith: brand)
+        wait(for: [restoredOnUpScroll], timeout: 5)
+        XCTAssertTrue(settings.isHittable, "The native header restores when scrolling up.")
+        XCTAssertFalse(firstRow.isHittable,
+                       "The header restores while the list remains below its top edge.")
+        attachScreenshot("Native header restored while scrolling up", from: app)
+
+        for _ in 0..<12 {
+            if firstRow.isHittable && firstRow.frame.minY >= settings.frame.maxY { break }
+            list.swipeDown()
+        }
+        XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY,
+                                    "The list returns to its top row.")
+        let restored = expectation(for: NSPredicate(format: "isHittable == true"),
+                                   evaluatedWith: brand)
+        wait(for: [restored], timeout: 5)
+        XCTAssertTrue(settings.isHittable, "Settings returns with the native title.")
+        attachScreenshot("Native header restored at top", from: app)
     }
 
     func testStockTabsAndSearchKeepInboxAndRepliedResults() {
@@ -49,7 +71,6 @@ final class InboxStockTabsUITests: XCTestCase {
                        "The Inbox tab keeps the outline envelope and solid dot in both appearance states.")
         XCTAssertFalse(app.searchFields.firstMatch.exists, app.debugDescription)
         assertListHeader(in: app)
-        let inboxHeaderY = app.descendants(matching: .any)["inbox-brand"].frame.minY
         attachScreenshot("Inbox tab", from: app)
 
         repliedTab.tap()
@@ -60,9 +81,6 @@ final class InboxStockTabsUITests: XCTestCase {
 
         inboxTab.tap()
         searchTab.tap()
-        assertListHeader(in: app)
-        XCTAssertEqual(app.descendants(matching: .any)["inbox-brand"].frame.minY, inboxHeaderY,
-                       accuracy: 3, "Search keeps the header at the same height as Inbox.")
         attachScreenshot("Search tab selected", from: app)
         let searchField = app.searchFields.firstMatch
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
@@ -77,10 +95,6 @@ final class InboxStockTabsUITests: XCTestCase {
             predicate: NSPredicate(format: "exists == false"), object: keyboard)
         XCTAssertEqual(XCTWaiter.wait(for: [keyboardDismissed], timeout: 5), .completed,
                        "Submitting a whitespace-only query with the stock Search key dismisses the keyboard.")
-        XCTAssertGreaterThan(searchField.frame.midY, app.frame.height * 0.65,
-                             "The idle Search tab field returns to the bottom area.")
-        XCTAssertEqual(app.descendants(matching: .any)["inbox-brand"].frame.minY, inboxHeaderY,
-                       accuracy: 3, "Search keeps the header aligned after the field returns to the bottom.")
         attachScreenshot("Search idle", from: app)
 
         searchField.tap()
@@ -91,7 +105,6 @@ final class InboxStockTabsUITests: XCTestCase {
         searchField.typeText("Archive")
         attachScreenshot("Search keyboard with Archive", from: app)
         searchField.typeText("\n")
-        XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription)
         attachScreenshot("Search results for Archive", from: app)
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
@@ -117,10 +130,6 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(searchField.isHittable, app.debugDescription)
         XCTAssertFalse(approval.waitForExistence(timeout: 2),
                        "Search remains scoped to Inbox after the response moves out of Inbox.")
-        XCTAssertEqual(app.descendants(matching: .any)["inbox-brand"].frame.minY, inboxHeaderY,
-                       accuracy: 3, "Returning from a Search detail keeps the header in place.")
-        XCTAssertGreaterThan(searchField.frame.midY, app.frame.height * 0.65,
-                             "Returning from a Search detail leaves Search in the bottom tab area.")
         attachScreenshot("Answered request leaves Inbox search", from: app)
 
         selectMessageTab("Replied", in: app)
@@ -135,7 +144,6 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(repliedSearchField.waitForExistence(timeout: 5), app.debugDescription)
         repliedSearchField.tap()
         repliedSearchField.typeText("Archive\n")
-        XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription)
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered message in Replied.")
         attachScreenshot("Replied search for Archive in use", from: app)
@@ -196,8 +204,18 @@ final class InboxStockTabsUITests: XCTestCase {
         let brand = app.descendants(matching: .any)["inbox-brand"]
         XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription,
                       file: file, line: line)
-        XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription,
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription,
                       file: file, line: line)
+        XCTAssertTrue(brand.isHittable,
+                      "The native title is reachable when Search is inactive.",
+                      file: file, line: line)
+        XCTAssertTrue(settings.isHittable,
+                      "Settings is reachable when Search is inactive.",
+                      file: file, line: line)
+        XCTAssertEqual(brand.frame.midY, settings.frame.midY, accuracy: 5,
+                       "Brand and Settings share the native header line when Search is inactive.",
+                       file: file, line: line)
     }
 
     private func attachScreenshot(_ name: String, from app: XCUIApplication) {
