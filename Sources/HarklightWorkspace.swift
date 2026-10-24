@@ -732,6 +732,7 @@ struct InboxList: View {
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
     let triggerNotification: (() -> Void)?
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @State private var scrollMetrics = InboxScrollMetrics.empty
     @State private var isUserScrolling = false
@@ -970,11 +971,18 @@ struct InboxList: View {
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .principal) {
+            ToolbarItemGroup(placement: .principal) {
                 brandAndStatusHeader
+                // In a compact split sidebar, trailing items move to a side rail.
+                // Settings belongs with the title and minimizes with that header.
+                if horizontalSizeClass == .compact {
+                    settingsButton
+                }
             }
-            ToolbarItem(placement: .topBarPinnedTrailing) {
-                settingsButton
+            if horizontalSizeClass != .compact {
+                ToolbarItem(placement: .topBarTrailing) {
+                    settingsButton
+                }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 warningButton
