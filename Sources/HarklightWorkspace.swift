@@ -971,12 +971,16 @@ struct InboxList: View {
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItemGroup(placement: .principal) {
-                brandAndStatusHeader
-                // In a compact split sidebar, trailing items move to a side rail.
-                // Settings belongs with the title and minimizes with that header.
+            ToolbarItem(placement: .principal) {
                 if horizontalSizeClass == .compact {
-                    settingsButton
+                    // Compact split sidebars move trailing items to a side rail.
+                    // A single principal item keeps both controls in the header.
+                    HStack(spacing: 16) {
+                        brandAndStatusHeader
+                        settingsButton
+                    }
+                } else {
+                    brandAndStatusHeader
                 }
             }
             if horizontalSizeClass != .compact {
