@@ -423,7 +423,11 @@ final class NativeAppLaunch {
         let serial = max(notificationNavigation?.serial ?? 0,
                          notificationRouter.intent?.serial ?? 0) &+ 1
         notificationNavigation = NativeInboxNavigation(serial: serial, request: key)
-        presentation.selectRequest(key)
+        if presentation.request(for: key) != nil {
+            presentation.selectRequest(key)
+        } else {
+            presentation.selectRequest(nil)
+        }
     }
 
     var canReturnToDisconnectedAccount: Bool {
@@ -852,6 +856,9 @@ final class NativeAppLaunch {
             pendingMessageDeepLink = nil
             notificationNavigationMessage = nil
         } else {
+            // A missing linked message must not leave the previously selected
+            // request active while the exact target is still catching up.
+            presentation.selectRequest(nil)
             if notificationNavigation?.request != key {
                 navigateToMessage(key, in: presentation)
             }
@@ -879,6 +886,7 @@ final class NativeAppLaunch {
                     notificationNavigationMessage = nil
                     return
                 }
+                presentation.selectRequest(nil)
                 pageAvailability = presentation.inboxPageAvailability()
                 guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
             }
