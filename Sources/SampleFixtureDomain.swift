@@ -23,7 +23,7 @@ final class SampleFixtureDomain {
         let requests = try domain.snapshot(context: context).requests
         let existing = try domain.conversationSnapshot(context: context)
         var sequence = existing.cursor
-        for message in SampleCatalog.messages where existing.threads[key(for: message)] == nil {
+        for message in SampleCatalog.messages where message.hasChat && existing.threads[key(for: message)] == nil {
             let key = key(for: message)
             let binding = ConversationBinding(request: key, revision: 1)
             let handle = ExactText("local-session-" + message.id)

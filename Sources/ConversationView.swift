@@ -97,8 +97,8 @@ struct ConversationPanel: View {
                         .padding(verticalSizeClass == .compact ? 4 : 12)
                 }
             } else {
-                ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right",
-                    description: Text("This request has no conversation record. Its existing answer remains available."))
+                ContentUnavailableView("No chat", systemImage: "bubble.left.and.bubble.right",
+                    description: Text("The agent that sent this didn’t open a chat for it. You can still respond to the message itself."))
             }
         }
         .onAppear { if selectedRevision == nil { selectedRevision = thread?.currentRevision } }
