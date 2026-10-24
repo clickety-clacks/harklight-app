@@ -728,6 +728,9 @@ struct LiveRequestDetail: View {
                                  ? "Completed"
                                  : seenActionPresentation.accessibilityValue))
         .accessibilityIdentifier("request-finish-seen")
+        // A fresh native glass host avoids retaining the pressed button's
+        // oversized background when confirmation expands the label.
+        .id(seenActionIsComplete ? "seen-complete" : "seen-action")
     }
 
     private var answerIsComplete: Bool {
