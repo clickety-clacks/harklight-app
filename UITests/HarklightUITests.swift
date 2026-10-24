@@ -442,6 +442,9 @@ final class HarklightUITests: XCTestCase {
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [compactSeenControl], timeout: 3), .completed,
                        "The confirmed Seen label must settle into one compact toolbar button.")
+        // The accessibility frame reaches its final size before the glass
+        // background finishes animating; capture the completed visual state.
+        Thread.sleep(forTimeInterval: 2)
         attachScreenshot("Notice detail Seen completed", from: app)
     }
 
