@@ -26,10 +26,7 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
         sample.tap()
 
-        let chatLabel = NSPredicate(format: "label == %@", "Chat")
-        let toolbarChat = app.toolbars.buttons.matching(chatLabel).firstMatch
-        let navigationBarChat = app.navigationBars.buttons.matching(chatLabel).firstMatch
-        let chat = toolbarChat.exists ? toolbarChat : navigationBarChat
+        let chat = app.buttons["bubble.left.and.bubble.right"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(chat.value as? String, "1 item",
                        "The native toolbar badge must expose the unread chat count.")
