@@ -806,7 +806,7 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     func testNativeInboxHeaderMinimizesAndRestoresOnIPad() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
-            throw XCTSkip("The sidebar header layout is specific to iPad.")
+            throw XCTSkip("The native sidebar-column capture matrix is specific to iPad.")
         }
         defer { XCUIDevice.shared.orientation = .portrait }
 
