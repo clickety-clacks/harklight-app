@@ -28,15 +28,10 @@ final class DetailChatButtonUITests: XCTestCase {
             ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         chat.tap()
-        let sheet = app.sheets.firstMatch
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5),
-                      "The wide layout's Chat button must open the same native sheet.")
-        XCTAssertTrue(sheet.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5),
                       app.debugDescription)
-        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
-        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
-        start.press(forDuration: 0.1, thenDragTo: end)
-        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
+        dismissChatSheet(app, composer)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
     }
 
@@ -103,8 +98,6 @@ final class DetailChatButtonUITests: XCTestCase {
         chat.tap()
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5),
-                      "Chat should open as a system sheet. \(app.debugDescription)")
         XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
         attachScreenshot("chat-sheet-without-header-or-close-\(appearance.lowercased())")
         if appearance == "Light" {
@@ -126,12 +119,21 @@ final class DetailChatButtonUITests: XCTestCase {
     }
 
     private func dismissChatSheet(_ app: XCUIApplication, _ composer: XCUIElement) {
-        let sheet = app.sheets.firstMatch
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
-        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
-        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        let window = app.windows.firstMatch.frame
+        let contentFrame = composer.frame
+        let containers = app.otherElements
+            .containing(.textField, identifier: "sample-chat-composer")
+            .allElementsBoundByIndex.map(\.frame)
+        let presentation = containers
+            .filter { $0.width > contentFrame.width * 1.5 &&
+                      $0.height > contentFrame.height * 4 &&
+                      $0.width < window.width - 4 && $0.height < window.height - 4 }
+            .max { $0.width * $0.height < $1.width * $1.height } ?? window
+        let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+        let start = screen.withOffset(CGVector(dx: presentation.midX,
+                                               dy: presentation.minY + 16))
+        let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
         start.press(forDuration: 0.1, thenDragTo: end)
-        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 

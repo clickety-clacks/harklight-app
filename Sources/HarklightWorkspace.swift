@@ -900,8 +900,9 @@ struct InboxList: View {
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let messageTab = tab.messageTab
+        let visibleRows = filteredRows(in: tab)
         List(selection: listSelection) {
-            ForEach(filteredRows(in: tab)) { row in
+            ForEach(visibleRows) { row in
                 rowContent(for: row)
                 .tag(row.id)
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -952,6 +953,10 @@ struct InboxList: View {
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
             }
+            if visibleRows.isEmpty, let triggerNotification {
+                Button("Open notification", action: triggerNotification)
+                    .accessibilityIdentifier("harklight-test-notification")
+            }
             if isFetchingOlderPage {
                 ProgressView().frame(maxWidth: .infinity).padding()
                     .listRowSeparator(.hidden)
@@ -968,17 +973,14 @@ struct InboxList: View {
             ToolbarItem(placement: .principal) {
                 brandAndStatusHeader
             }
+            ToolbarItem(placement: .topBarPinnedTrailing) {
+                settingsButton
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 warningButton
-                settingsButton
-                if let triggerNotification {
-                    Button("Open notification", action: triggerNotification)
-                        .accessibilityIdentifier("harklight-test-notification")
-                }
             }
         }
         .toolbarMinimizationBehavior(.onScrollDown, for: .navigationBar)
-        .toolbarMinimizationSafeAreaAdjustment(.disabled, for: .navigationBar)
         .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
         .onAppear {
             guard workspaceTab == tab else { return }
