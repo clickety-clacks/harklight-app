@@ -509,6 +509,29 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertLessThan(editor.frame.height, app.windows.firstMatch.frame.height * 0.15,
                           "A short reply stays compact before the field needs to grow.")
         capture("reply-editor-reopened", app)
+        let card = app.scrollViews["message-card-scroll"]
+        let replyContent = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Pick an approach, or describe your own.")
+        ).firstMatch
+        XCTAssertTrue(replyContent.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(replyContent.isHittable, app.debugDescription)
+        replyContent.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Tapping visible message content must leave the reply keyboard open.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        card.swipeUp()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Scrolling to the latest message keeps the reply keyboard focused.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        card.swipeDown()
+        XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
+                       "A downward swipe on the message content dismisses the reply keyboard.")
+        XCTAssertTrue(editor.exists, "Interactive dismissal keeps the reply editor open.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
+                       "Interactive dismissal preserves the unsent reply draft.")
+        editor.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
+                      "The reply editor can be focused again after interactive dismissal.")
         app.buttons["request-reply-send"].tap()
         XCTAssertTrue(retainedSummary.waitForExistence(timeout: 5))
 

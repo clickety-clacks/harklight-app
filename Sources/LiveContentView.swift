@@ -880,7 +880,12 @@ struct LiveRequestDetail: View {
     }
 
     var body: some View {
-        MessageCardSurface(context: context) {
+        MessageCardSurface(context: context,
+                           bottomAccessoryIsFocused: activeReplyEditor != nil,
+                           onDownwardContentSwipe: {
+                               guard activeReplyEditor != nil else { return }
+                               focusedReplyActionID = nil
+                           }) {
             VStack(alignment: .leading, spacing: 12) {
                 Button {
                     requestDetailsPresented = true
@@ -1045,18 +1050,7 @@ struct LiveRequestDetail: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .foregroundStyle(detailColors.textColor)
             .tint(detailColors.textColor)
-        }
-        .background {
-            GeometryReader { geometry in
-                Color.clear
-                    .onAppear { replyComposerContainerHeight = geometry.size.height }
-                    .onChange(of: geometry.size.height) { _, height in
-                        replyComposerContainerHeight = height
-                    }
-            }
-            .ignoresSafeArea(.keyboard)
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        } bottomAccessory: {
             if let target = activeReplyEditor {
                 ReplyEditorComposer(text: replyTextBinding(for: target),
                                     focusedActionID: $focusedReplyActionID,
@@ -1067,6 +1061,16 @@ struct LiveRequestDetail: View {
                                     maximumHeight: replyComposerMaximumHeight,
                                     onSend: closeReplyEditor)
             }
+        }
+        .background {
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { replyComposerContainerHeight = geometry.size.height }
+                    .onChange(of: geometry.size.height) { _, height in
+                        replyComposerContainerHeight = height
+                    }
+            }
+            .ignoresSafeArea(.keyboard)
         }
         .toolbar {
             if activeReplyEditor == nil {

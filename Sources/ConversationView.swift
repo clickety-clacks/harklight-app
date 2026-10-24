@@ -3,6 +3,19 @@ import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
 
+private struct ConversationBottomAccessoryHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct ConversationScrollMetrics: Equatable {
+    var verticalOffset: CGFloat = 0
+    var contentHeight: CGFloat = 0
+}
+
 enum ConversationPanelEmptyState: Equatable {
     case noChat
     case checkingAvailability
@@ -42,6 +55,8 @@ struct ConversationPanel: View {
     @State private var previewURL: URL?
     @State private var openingFile = false
     @State private var fileError: String?
+    @State private var composerFooterHeight: CGFloat = 0
+    @State private var scrollMetrics = ConversationScrollMetrics()
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     private var thread: ConversationThread? { store.conversation(for: key) }
@@ -58,70 +73,100 @@ struct ConversationPanel: View {
                     }
                     }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
                 }
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 18) {
-                            if let earlier = store.historicalAnswerDraft(for: key, revision: revision) {
-                                DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
-                                    HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
-                                }.accessibilityIdentifier("conversation-earlier-answer")
+                GeometryReader { viewport in
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                LazyVStack(alignment: .leading, spacing: 18) {
+                                    if let earlier = store.historicalAnswerDraft(for: key, revision: revision) {
+                                        DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
+                                            HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
+                                        }.accessibilityIdentifier("conversation-earlier-answer")
+                                    }
+                                    ForEach(thread.turns) { turn in
+                                        ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
+                                            sender: sender, local: store.isLocalExample,
+                                            replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue },
+                                            retracted: thread.isRetracted && thread.terminalTurn == turn.id,
+                                            inspect: { file, fileRevision in
+                                                fileError = nil
+                                                inspectedFile = file
+                                                inspectedFileRevision = fileRevision
+                                            })
+                                            .id(turn.id)
+                                    }
+                                }
+                                .padding(.horizontal)
+                                .padding(.bottom, composerFooterHeight)
+                                .frame(minHeight: viewport.size.height, alignment: .top)
+                                .overlay(alignment: .bottom) {
+                                    VStack(spacing: 0) {
+                                    if let terminal = thread.terminal {
+                                        Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
+                                            .font(.caption).padding(8)
+                                    }
+                                    HStack {
+                                        Spacer(minLength: 0)
+                                        Text(store.isLocalExample ? "Local conversation · nothing sent" : "Discussion · version \(revision)")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }.padding(.horizontal)
+                                    ConversationDraftStatus(disposition: draft.disposition)
+                                    ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
+                                    if let error = store.conversationError {
+                                        Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                                    }
+                                    if let message = store.conversationUnavailableMessage {
+                                        Text(message)
+                                            .font(.callout)
+                                            .foregroundStyle(.secondary)
+                                            .padding()
+                                            .accessibilityIdentifier("conversation-unavailable")
+                                    } else if store.isReadOnly {
+                                        ReadOnlyConversationDraftView(draft: draft) { file in
+                                            fileError = nil
+                                            inspectedFile = file
+                                            inspectedFileRevision = revision
+                                        }
+                                        .padding(verticalSizeClass == .compact ? 4 : 12)
+                                    } else {
+                                        ConversationComposer(store: store, key: key, revision: revision,
+                                            inspect: { file, fileRevision in
+                                                fileError = nil
+                                                inspectedFile = file
+                                                inspectedFileRevision = fileRevision
+                                            })
+                                        .padding(verticalSizeClass == .compact ? 4 : 12)
+                                    }
+                                    }
+                                    .background {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(key: ConversationBottomAccessoryHeightKey.self,
+                                                                   value: geometry.size.height)
+                                        }
+                                        .allowsHitTesting(false)
+                                    }
+                                    .offset(y: scrollMetrics.verticalOffset + viewport.size.height - scrollMetrics.contentHeight)
+                                }
                             }
-                            ForEach(thread.turns) { turn in
-                                ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
-                                    sender: sender, local: store.isLocalExample,
-                                    replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue },
-                                    retracted: thread.isRetracted && thread.terminalTurn == turn.id,
-                                    inspect: { file, fileRevision in
-                                        fileError = nil
-                                        inspectedFile = file
-                                        inspectedFileRevision = fileRevision
-                                    })
-                                    .id(turn.id)
-                            }
-                        }.padding(.horizontal)
+                        }
+                        .accessibilityIdentifier("conversation-history-scroll")
+                        .scrollBounceBehavior(.always)
+                        .scrollDismissesKeyboard(.interactively)
+                        .onPreferenceChange(ConversationBottomAccessoryHeightKey.self) { composerFooterHeight = $0 }
+                        .onScrollGeometryChange(for: ConversationScrollMetrics.self) { geometry in
+                            ConversationScrollMetrics(
+                                verticalOffset: geometry.contentOffset.y + geometry.contentInsets.top,
+                                contentHeight: geometry.contentSize.height)
+                        } action: { _, metrics in
+                            scrollMetrics = metrics
+                        }
+                        .onChange(of: thread.turns.count) { _, _ in
+                            if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                        }
+                        .onChange(of: thread.latestAgentReply?.id, initial: true) { _, _ in
+                            store.markConversationRead(key)
+                        }
                     }
-                    .onChange(of: thread.turns.count) { _, _ in
-                        if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
-                    .onChange(of: thread.latestAgentReply?.id, initial: true) { _, _ in
-                        store.markConversationRead(key)
-                    }
-                }
-                if let terminal = thread.terminal {
-                    Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
-                        .font(.caption).padding(8)
-                }
-                HStack {
-                    Spacer(minLength: 0)
-                    Text(store.isLocalExample ? "Local conversation · nothing sent" : "Discussion · version \(revision)")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }.padding(.horizontal)
-                ConversationDraftStatus(disposition: draft.disposition)
-                ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
-                if let error = store.conversationError {
-                    Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                }
-                if let message = store.conversationUnavailableMessage {
-                    Text(message)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .padding()
-                        .accessibilityIdentifier("conversation-unavailable")
-                } else if store.isReadOnly {
-                    ReadOnlyConversationDraftView(draft: draft) { file in
-                        fileError = nil
-                        inspectedFile = file
-                        inspectedFileRevision = revision
-                    }
-                        .padding(verticalSizeClass == .compact ? 4 : 12)
-                } else {
-                    ConversationComposer(store: store, key: key, revision: revision,
-                        inspect: { file, fileRevision in
-                            fileError = nil
-                            inspectedFile = file
-                            inspectedFileRevision = fileRevision
-                        })
-                        .padding(verticalSizeClass == .compact ? 4 : 12)
                 }
             } else {
                 switch ConversationPanelEmptyState.resolve(

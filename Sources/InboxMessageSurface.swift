@@ -12,6 +12,19 @@ private struct MessageCardContentHeightKey: PreferenceKey {
     }
 }
 
+private struct MessageCardBottomAccessoryHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct MessageCardScrollMetrics: Equatable {
+    var verticalOffset: CGFloat = 0
+    var contentHeight: CGFloat = 0
+}
+
 struct InboxCardPreview {
     let sender: String
     let title: String
@@ -34,15 +47,34 @@ struct InboxCardContext {
 }
 
 /// Native scroll and toolbar host shared by admitted messages and local examples.
-struct MessageCardSurface<Content: View>: View {
+struct MessageCardSurface<Content: View, BottomAccessory: View>: View {
     let context: InboxCardContext
-    @ViewBuilder let content: () -> Content
+    let bottomAccessoryIsFocused: Bool
+    private let onDownwardContentSwipe: () -> Void
+    private let content: () -> Content
+    private let bottomAccessory: () -> BottomAccessory
     @Environment(\.colorScheme) private var colorScheme
     @State private var pull: CGFloat = 0
     @State private var armedDirection = 0
     @State private var contentHeight: CGFloat = 0
+    @State private var bottomAccessoryHeight: CGFloat = 0
+    @State private var scrollMetrics = MessageCardScrollMetrics()
+    @State private var scrollIsInteracting = false
+    @State private var movedContentDownDuringInteraction = false
 
     private let bottomControlClearance: CGFloat = 72
+
+    init(context: InboxCardContext,
+         bottomAccessoryIsFocused: Bool,
+         onDownwardContentSwipe: @escaping () -> Void = {},
+         @ViewBuilder content: @escaping () -> Content,
+         @ViewBuilder bottomAccessory: @escaping () -> BottomAccessory) {
+        self.context = context
+        self.bottomAccessoryIsFocused = bottomAccessoryIsFocused
+        self.onDownwardContentSwipe = onDownwardContentSwipe
+        self.content = content
+        self.bottomAccessory = bottomAccessory
+    }
 
     var body: some View {
         GeometryReader { viewport in
@@ -61,25 +93,45 @@ struct MessageCardSurface<Content: View>: View {
                         }
                         .allowsHitTesting(false)
                     }
+                    .padding(.bottom, bottomAccessoryIsFocused ? bottomAccessoryHeight : 0)
+                    .frame(minHeight: viewport.size.height, alignment: .top)
+                    .overlay(alignment: .bottom) {
+                        if bottomAccessoryIsFocused {
+                            bottomAccessory()
+                                .background {
+                                    GeometryReader { geometry in
+                                        Color.clear.preference(key: MessageCardBottomAccessoryHeightKey.self,
+                                                               value: geometry.size.height)
+                                    }
+                                    .allowsHitTesting(false)
+                                }
+                                .offset(y: scrollMetrics.verticalOffset + viewport.size.height - scrollMetrics.contentHeight)
+                        }
+                    }
             }
             .accessibilityIdentifier("message-card-scroll")
             .scrollBounceBehavior(.always)
             .scrollDismissesKeyboard(.interactively)
             .onPreferenceChange(MessageCardContentHeightKey.self) { contentHeight = $0 }
+            .onPreferenceChange(MessageCardBottomAccessoryHeightKey.self) { bottomAccessoryHeight = $0 }
             // Only add scroll room when the card is taller than the usable area.
             // Short cards stay at the true boundary for the next/previous pull gesture.
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if needsBottomControlClearance {
+                if needsBottomControlClearance && !bottomAccessoryIsFocused {
                     Color.clear.frame(height: bottomControlClearance).accessibilityHidden(true)
                 }
             }
-            .background {
-                HarklightDesignSystem.palette(for: colorScheme)
-                    .messageType(context.messageType).backgroundColor
-                    .ignoresSafeArea()
+            .onScrollGeometryChange(for: MessageCardScrollMetrics.self) { geometry in
+                MessageCardScrollMetrics(
+                    verticalOffset: geometry.contentOffset.y + geometry.contentInsets.top,
+                    contentHeight: geometry.contentSize.height)
+            } action: { previousMetrics, metrics in
+                if scrollIsInteracting,
+                   metrics.verticalOffset < previousMetrics.verticalOffset - 1 {
+                    movedContentDownDuringInteraction = true
+                }
+                scrollMetrics = metrics
             }
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .navigationBarTitleDisplayMode(.inline)
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 let top = geometry.contentOffset.y + geometry.contentInsets.top
                 let extent = max(0, geometry.contentSize.height - geometry.containerSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom)
@@ -94,10 +146,29 @@ struct MessageCardSurface<Content: View>: View {
                 armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
             }
             .onScrollPhaseChange { oldPhase, newPhase in
+                if newPhase == .interacting {
+                    scrollIsInteracting = true
+                    movedContentDownDuringInteraction = false
+                } else if oldPhase == .interacting {
+                    scrollIsInteracting = false
+                    if movedContentDownDuringInteraction && bottomAccessoryIsFocused {
+                        onDownwardContentSwipe()
+                    }
+                    movedContentDownDuringInteraction = false
+                } else {
+                    scrollIsInteracting = false
+                }
                 if oldPhase == .interacting && newPhase != .interacting && armedDirection != 0 {
                     context.move(armedDirection)
                 }
             }
+            .background {
+                HarklightDesignSystem.palette(for: colorScheme)
+                    .messageType(context.messageType).backgroundColor
+                    .ignoresSafeArea()
+            }
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .navigationBarTitleDisplayMode(.inline)
             .overlay(alignment: pull > 0 ? .top : .bottom) {
                 if abs(pull) > 8, let neighbor = pull > 0 ? context.previous : context.next {
                     MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0, armed: armedDirection != 0)
