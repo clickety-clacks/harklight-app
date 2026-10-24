@@ -15,9 +15,6 @@ final class DetailChatButtonUITests: XCTestCase {
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let searchTab = workspaceTab("Search", in: app)
-        XCTAssertTrue(searchTab.waitForExistence(timeout: 10), app.debugDescription)
-        searchTab.tap()
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
         search.tap()
@@ -49,8 +46,6 @@ final class DetailChatButtonUITests: XCTestCase {
         app.launch()
 
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
-        let searchTab = workspaceTab("Search", in: app)
-        if searchTab.exists && !searchTab.isSelected { searchTab.tap() }
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
         search.tap()

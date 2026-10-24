@@ -153,18 +153,16 @@ final class SampleWorkspaceUITests: XCTestCase {
         if !destination.isSelected { destination.tap() }
     }
 
-    private func assertSearchTabSelected(_ app: XCUIApplication, file: StaticString = #filePath,
+    private func assertListSearchAvailable(_ app: XCUIApplication, file: StaticString = #filePath,
                                         line: UInt = #line) {
         let field = app.searchFields.firstMatch
-        let tab = workspaceTab("Search", in: app)
-        XCTAssertTrue(field.waitForExistence(timeout: 1) || (tab.exists && tab.isSelected),
+        XCTAssertTrue(field.waitForExistence(timeout: 5),
                       app.debugDescription, file: file, line: line)
     }
 
     private func showList(_ app: XCUIApplication) {
         let card = app.scrollViews["message-card-scroll"]
         guard card.exists else { return }
-        let searchButton = workspaceTab("Search", in: app)
         let searchField = app.searchFields.firstMatch
         let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
@@ -173,13 +171,11 @@ final class SampleWorkspaceUITests: XCTestCase {
             let sidebar = app.buttons["Show Sidebar"]
             if sidebar.exists && sidebar.isHittable { sidebar.tap() }
         }
-        XCTAssertTrue(searchButton.waitForExistence(timeout: 5) || searchField.waitForExistence(timeout: 5),
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5),
                       app.debugDescription)
     }
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
-        let searchButton = workspaceTab("Search", in: app)
-        if searchButton.exists && !searchButton.isSelected { searchButton.tap() }
         let field = app.searchFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         let clearText = field.buttons["Clear text"]
@@ -272,7 +268,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let inboxTab = workspaceTab("Inbox", in: app)
         let repliedTab = workspaceTab("Replied", in: app)
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         enterSearch("A note for", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         clearSearch(in: app)
@@ -292,7 +288,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             .waitForExistence(timeout: 5), app.debugDescription)
         showList(app)
         clearSearch(in: app)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         enterSearch("A note for", in: app)
         XCTAssertFalse(row.waitForExistence(timeout: 1),
                        "A submitted No comment leaves the Inbox.")
@@ -445,7 +441,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("seen-response-detail", app)
 
         showList(app)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "The Seen response leaves the current Inbox Search results.")
         capture("seen-response-leaves-search-results", app)
@@ -487,7 +483,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         let inboxTab = workspaceTab("Inbox", in: app)
         let repliedTab = workspaceTab("Replied", in: app)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         enterSearch("Which approach", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "A typed but unsent reply stays in Inbox.")
@@ -535,7 +531,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.descendants(matching: .any)["sample-finish"].tap()
         capture("text-response-submitted", app)
         showList(app)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A submitted text reply leaves the current Inbox Search results.")
         capture("text-response-leaves-search-results", app)

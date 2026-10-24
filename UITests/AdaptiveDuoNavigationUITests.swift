@@ -19,10 +19,8 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Facilities desk"].exists, app.debugDescription)
         let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
         XCTAssertTrue(diagnostic.waitForExistence(timeout: 5), app.debugDescription)
-        let visibility = diagnostic.label.components(separatedBy: " | ")
-            .first(where: { $0.hasPrefix("visibility=") })
-        XCTAssertTrue(visibility?.contains("detailOnly") == true,
-                      "Selecting one row should close the portrait master overlay. \(diagnostic.label)")
+        XCTAssertFalse(row.isHittable,
+                       "Selecting one row should close the portrait master overlay. \(diagnostic.label)")
 
         attachScreenshot("portrait-detail-after-selection")
         let hierarchy = XCTAttachment(string: app.debugDescription)
@@ -44,9 +42,6 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let searchTab = workspaceTab("Search", in: app)
-        XCTAssertTrue(searchTab.waitForExistence(timeout: 10), app.debugDescription)
-        searchTab.tap()
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
         let keyboard = app.keyboards.firstMatch

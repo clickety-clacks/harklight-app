@@ -372,8 +372,6 @@ final class ConversationSampleUITests: XCTestCase {
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
         let field = app.searchFields.firstMatch
-        let searchTab = workspaceTab("Search", in: app)
-        if searchTab.exists && !searchTab.isSelected { searchTab.tap() }
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         let clearText = field.buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }
@@ -383,7 +381,6 @@ final class ConversationSampleUITests: XCTestCase {
 
     private func showInbox(_ app: XCUIApplication) {
         guard app.scrollViews["message-card-scroll"].exists else { return }
-        let searchTab = workspaceTab("Search", in: app)
         let searchField = app.searchFields.firstMatch
         let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
@@ -394,7 +391,6 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 5) ||
                       workspaceTab("Replied", in: app).waitForExistence(timeout: 5) ||
-                      searchTab.waitForExistence(timeout: 5) ||
                       searchField.waitForExistence(timeout: 5), app.debugDescription)
     }
 
@@ -467,7 +463,6 @@ final class ConversationSampleUITests: XCTestCase {
         let tabButtons = [
             workspaceTab("Inbox", in: app),
             workspaceTab("Replied", in: app),
-            workspaceTab("Search", in: app),
         ].filter(\.exists)
         if let tabTop = tabButtons.map(\.frame.minY).min() { return tabTop }
         let searchField = app.searchFields.firstMatch
