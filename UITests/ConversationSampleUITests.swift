@@ -69,8 +69,8 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inputSurface.exists, app.debugDescription)
         XCTAssertTrue(add.exists && send.exists, app.debugDescription)
-        XCTAssertFalse(app.sheets.firstMatch.exists,
-                       "The existing Chat button must continue to present its popover.")
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5),
+                      "The Chat button presents the native dismissible sheet.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "About ")).firstMatch.exists,
                        "The conversation panel no longer shows request-context title text.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Agent listening")).firstMatch.exists,
@@ -163,11 +163,11 @@ final class ConversationSampleUITests: XCTestCase {
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
-        dismissChatPopover(app)
+        dismissChatSheet(app)
         app.buttons["Chat"].tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Closing chat alone does not leave its message")
-        dismissChatPopover(app)
+        dismissChatSheet(app)
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
@@ -200,8 +200,14 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
         capture("upload-before-message-departure", app)
-        dismissChatPopover(app)
+        XCUIDevice.shared.orientation = .portrait
+        // A wide landscape layout may reveal its passive inline panel and
+        // dismiss the sheet during rotation. Reopen the button presentation.
+        if !app.sheets.firstMatch.exists { app.buttons["Chat"].tap() }
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        dismissChatSheet(app)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCUIDevice.shared.orientation = .landscapeLeft
         showInbox(app)
         let other = app.descendants(matching: .any)["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
@@ -349,9 +355,14 @@ final class ConversationSampleUITests: XCTestCase {
         add(attachment)
     }
 
-    private func dismissChatPopover(_ app: XCUIApplication) {
+    private func dismissChatSheet(_ app: XCUIApplication) {
         let composer = app.textFields["sample-chat-composer"]
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.08)).tap()
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 

@@ -321,7 +321,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
     @State private var restoreLastViewedOnReturn = false
-    @State private var chatOpen = false
 
     private var rows: [InboxItem] {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
@@ -422,7 +421,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         selectionDidChange(from: previous, to: next)
         if previous != nil, next == nil {
             restoreLastViewedListPosition()
-            chatOpen = false
         }
     }
 
@@ -503,7 +501,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         return [
             "selection=\(UIDiagnostics.describe(selection)) tab=\(selectedTab.rawValue) entryTab=\(listTabOnMessageEntry?.rawValue ?? "nil") lastViewed=\(UIDiagnostics.describe(lastViewedSelection))",
-            "betweenMessages=\(navigatedBetweenMessages) restoreOnReturn=\(restoreLastViewedOnReturn) chatOpen=\(chatOpen)",
+            "betweenMessages=\(navigatedBetweenMessages) restoreOnReturn=\(restoreLastViewedOnReturn)",
             "compactColumn=\(preferredCompactColumn) sizeClass=\(horizontalSizeClass.map { "\($0)" } ?? "nil") landscape=\(landscape)",
             "samples.selected=\(samples.selectedID ?? "nil") samples.lastViewed=\(samples.lastViewedID ?? "nil") loadError=\(samples.loadError ?? "nil")",
             "rows=\(rowSummary)",
@@ -519,28 +517,20 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     @ViewBuilder
-    private func detailContent(for item: InboxSelection?, wideChat: Bool, inlineChat: Bool,
+    private func detailContent(for item: InboxSelection?, inlineChat: Bool,
                                geometry: GeometryProxy) -> some View {
         HStack(spacing: 0) {
             Group {
                 switch item {
                 case let .request(key)?:
-                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat,
-                        canInlineChat: wideChat,
-                        openChat: {
-                            chatOpen.toggle()
-                        }))
+                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
                         .id(key)
                 case let .sample(id)?:
                     if showsLocalExamples,
                        samples.messages.contains(where: { $0.id == id }),
                        let response = samples.responses[id] {
                         SampleCardScreen(response: response,
-                            context: cardContext(for: .sample(id), inlineChat: inlineChat,
-                                canInlineChat: wideChat,
-                                openChat: {
-                                    chatOpen.toggle()
-                                }))
+                            context: cardContext(for: .sample(id), inlineChat: inlineChat))
                             .id(id)
                     }
                 case nil:
@@ -568,7 +558,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                  for: .tabBar)
     }
 
-    private func inboxSplitView(for tab: InboxWorkspaceTab, wideChat: Bool, inlineChat: Bool,
+    private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
@@ -587,15 +577,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           ? { triggerNotificationTestAction() } : nil)
             .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
         } detail: {
-            detailContent(for: selection, wideChat: wideChat, inlineChat: inlineChat,
+            detailContent(for: selection, inlineChat: inlineChat,
                           geometry: geometry)
         }
         .navigationSplitViewStyle(.balanced)
         .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
     }
 
-    private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
-                             canInlineChat: Bool = false, openChat: (() -> Void)? = nil) -> InboxCardContext {
+    private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
         let ids = cardNavigationIDs
         let index = ids.firstIndex(of: id)
         let previous = index.flatMap { position in
@@ -607,7 +596,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return InboxCardContext(position: (index ?? 0) + 1, total: ids.count,
             previous: previous,
             next: next,
-            inlineChat: inlineChat, canInlineChat: canInlineChat, openChat: openChat,
+            inlineChat: inlineChat,
             dismissToList: { navigate(to: nil) },
             messageType: rows.first(where: { $0.id == id })?.resolvedMessageType ?? .request) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
@@ -624,10 +613,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         GeometryReader { geometry in
             let landscape = geometry.size.width > geometry.size.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
-            let inlineChat = wideChat && (landscape || chatOpen)
+            // Wide landscape retains its passive inline thread. The Chat
+            // toolbar button presents a sheet independently at every size.
+            let inlineChat = wideChat && landscape
             let tabs = TabView(selection: $workspaceTab) {
                 Tab(value: .inbox) {
-                    inboxSplitView(for: .inbox, wideChat: wideChat, inlineChat: inlineChat,
+                    inboxSplitView(for: .inbox, inlineChat: inlineChat,
                                    geometry: geometry)
                 } label: {
                     // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
@@ -639,7 +630,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
 
                 Tab("Replied", systemImage: "envelope.open", value: .replied) {
-                    inboxSplitView(for: .replied, wideChat: wideChat, inlineChat: inlineChat,
+                    inboxSplitView(for: .replied, inlineChat: inlineChat,
                                    geometry: geometry)
                 }
 
@@ -663,7 +654,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route else { return }
                 settings = false
-                chatOpen = false
                 // Notification routing changes presentation only. Keep it out
                 // of ordinary navigation cleanup so a tap cannot mutate the domain.
                 let destination = InboxNotificationDestination(route: route, rows: rows)
@@ -689,7 +679,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: showsLocalExamples) { _, visible in
                 if !visible, case .sample = selection {
                     navigate(to: nil)
-                    chatOpen = false
                 }
             }
             .onAppear {
@@ -708,7 +697,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Button("Review message") {
                 conversationStore?.dismissStaleAnswerDialog()
                 settings = false
-                chatOpen = false
                 workspaceTab = .inbox
                 selectedTab = .inbox
                 search = ""

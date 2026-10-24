@@ -1103,24 +1103,16 @@ struct LiveRequestDetail: View {
         .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
     }
 
-    @ViewBuilder
     private var detailChatButton: some View {
-        if context.canInlineChat {
-            chatButton
-        } else {
-            chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                conversationPanel
-                    .frame(idealWidth: 380, idealHeight: 560)
-                    .presentationCompactAdaptation(.popover)
-            }
+        chatButton.sheet(isPresented: $chatPresented) {
+            conversationPanel
         }
     }
 
     private var chatButton: some View {
         Button("Chat", systemImage: "bubble.left.and.bubble.right") {
             localExample?.chatRead = true
-            if context.canInlineChat { context.openChat?() }
-            else { chatPresented = true }
+            chatPresented = true
         }
         .labelStyle(.iconOnly)
         .badge(conversationIndicator == true ? 1 : 0)

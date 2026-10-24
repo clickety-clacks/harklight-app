@@ -784,11 +784,14 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-card", app)
             app.buttons["Chat"].tap()
-            let composer = app.textFields["sample-chat-composer"]
+            let sheet = app.sheets.firstMatch
+            XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+            let composer = sheet.textFields["sample-chat-composer"]
             XCTAssertTrue(composer.waitForExistence(timeout: 5))
             composer.tap(); composer.typeText("Local orientation " + name)
-            XCTAssertTrue(app.buttons["Send locally"].isHittable)
-            app.buttons["Send locally"].tap()
+            let send = sheet.buttons["Send locally"]
+            XCTAssertTrue(send.isHittable)
+            send.tap()
             XCTAssertTrue(app.staticTexts["Local orientation " + name].waitForExistence(timeout: 5))
             let hierarchy = XCTAttachment(string: app.debugDescription)
             hierarchy.name = "corrected-duo-" + name + "-hierarchy"
