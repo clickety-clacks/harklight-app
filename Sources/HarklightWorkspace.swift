@@ -365,6 +365,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private var orderedIDs: [InboxSelection] { rows.map(\.id) }
     private var cardNavigationIDs: [InboxSelection] {
+        // A Seen or answered card may leave this tab while it remains open.
+        guard !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return orderedIDs
+        }
         return InboxListProjection.filteredRows(rows, in: workspaceTab,
             search: search).map(\.id)
     }
