@@ -788,7 +788,9 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-card", app)
             app.buttons["Chat"].tap()
-            let composer = app.textFields["sample-chat-composer"]
+            let sheet = app.sheets.firstMatch
+            XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+            let composer = sheet.textFields["sample-chat-composer"]
             XCTAssertTrue(composer.waitForExistence(timeout: 5))
             composer.tap(); composer.typeText("Local orientation " + name)
             XCTAssertTrue(app.buttons["Send locally"].isHittable)

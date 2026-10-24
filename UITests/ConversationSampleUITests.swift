@@ -201,6 +201,9 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
         capture("upload-before-message-departure", app)
         XCUIDevice.shared.orientation = .portrait
+        // A wide landscape layout may reveal its passive inline panel and
+        // dismiss the sheet during rotation. Reopen the button presentation.
+        if !app.sheets.firstMatch.exists { app.buttons["Chat"].tap() }
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         dismissChatSheet(app)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)

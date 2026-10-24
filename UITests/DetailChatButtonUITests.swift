@@ -10,6 +10,42 @@ final class DetailChatButtonUITests: XCTestCase {
         verifyToolbarChatButton(appearance: "Dark")
     }
 
+    func testWideDetailChatButtonAlsoPresentsDismissibleSheet() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The wide detail presentation requires an iPad layout.")
+        }
+        defer { XCUIDevice.shared.orientation = .portrait }
+        XCUIDevice.shared.orientation = .landscapeLeft
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        let searchTab = workspaceTab("Search", in: app)
+        XCTAssertTrue(searchTab.waitForExistence(timeout: 10), app.debugDescription)
+        searchTab.tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+        search.tap()
+        search.typeText("Thursday\n")
+        let sample = app.descendants(matching: .any)["sample-information-0"]
+        XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
+        sample.tap()
+
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5),
+                      "The wide layout's Chat button must open the same native sheet.")
+        XCTAssertTrue(sheet.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+    }
+
     func testUnreadChatIsExposedAndClearedFromToolbar() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
