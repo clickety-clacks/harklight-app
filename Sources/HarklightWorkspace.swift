@@ -615,33 +615,53 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         .navigationSplitViewStyle(.balanced)
     }
 
-    private func searchStack(wideChat: Bool, inlineChat: Bool,
-                             geometry: GeometryProxy) -> some View {
-        NavigationStack(path: $searchPath) {
-            InboxList(tab: .search, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
-                  isWarningPresented: warningPresentationBinding(for: .search),
-                  selected: navigationSelection,
-                      selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
-                      lastViewedSelection: lastViewedSelection,
-                      restoreLastViewed: restoreLastViewedOnReturn,
-                      didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                      showSettings: { settings = true }, markSeen: markSeen,
-                      markNoComment: markNoComment,
-                      clearRetracted: clearRetracted,
-                      fetchOlderInboxPage: fetchOlderInboxPage,
-                      notificationNavigation: activeNotificationNavigation,
-                      triggerNotification: exposesNotificationTestAction
-                          ? { triggerNotificationTestAction() } : nil)
-                .searchable(text: $search, prompt: "Search")
-                .toolbar(exposesNotificationTestAction ? .visible : .hidden, for: .navigationBar)
-                .navigationDestination(for: InboxSelection.self) { destination in
-                    detailContent(for: destination, wideChat: wideChat,
-                                  inlineChat: inlineChat, geometry: geometry)
-                        .toolbar(.visible, for: .navigationBar)
+    private var searchList: some View {
+        InboxList(tab: .search, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
+              isWarningPresented: warningPresentationBinding(for: .search),
+              selected: navigationSelection,
+              selectedTab: $selectedTab, workspaceTab: $workspaceTab, search: $search,
+              searchUsesSplitSelection: hasBookDivision,
+              lastViewedSelection: lastViewedSelection,
+              restoreLastViewed: restoreLastViewedOnReturn,
+              didRestoreLastViewed: { restoreLastViewedOnReturn = false },
+              showSettings: { settings = true }, markSeen: markSeen,
+              markNoComment: markNoComment,
+              clearRetracted: clearRetracted,
+              fetchOlderInboxPage: fetchOlderInboxPage,
+              notificationNavigation: activeNotificationNavigation,
+              triggerNotification: exposesNotificationTestAction
+                  ? { triggerNotificationTestAction() } : nil)
+            .searchable(text: $search, prompt: "Search")
+            .toolbar(hasBookDivision || exposesNotificationTestAction ? .visible : .hidden,
+                     for: .navigationBar)
+    }
+
+    @ViewBuilder
+    private func searchNavigation(wideChat: Bool, inlineChat: Bool,
+                                  geometry: GeometryProxy) -> some View {
+        Group {
+            if hasBookDivision {
+                NavigationSplitView(columnVisibility: $visibility) {
+                    searchList
+                        .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
+                } detail: {
+                    detailContent(for: selection, wideChat: wideChat, inlineChat: inlineChat,
+                                  geometry: geometry)
                 }
+                .navigationSplitViewStyle(.balanced)
+            } else {
+                NavigationStack(path: $searchPath) {
+                    searchList
+                        .navigationDestination(for: InboxSelection.self) { destination in
+                            detailContent(for: destination, wideChat: wideChat,
+                                          inlineChat: inlineChat, geometry: geometry)
+                                .toolbar(.visible, for: .navigationBar)
+                        }
+                }
+            }
         }
         .onChange(of: searchPath) { _, path in
-            guard workspaceTab == .search else { return }
+            guard workspaceTab == .search, !hasBookDivision else { return }
             navigate(to: path.last)
         }
     }
@@ -696,8 +716,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
 
                 Tab(value: .search, role: .search) {
-                    searchStack(wideChat: wideChat, inlineChat: inlineChat,
-                                geometry: geometry)
+                    searchNavigation(wideChat: wideChat, inlineChat: inlineChat,
+                                     geometry: geometry)
                 }
             }
             .tabViewSearchActivation(.searchTabSelection)
@@ -779,6 +799,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 guard hasBookDivision != bookDivision else { return }
                 UIDiagnostics.shared.record("inbox.bookDivision \(bookDivision) selection=\(UIDiagnostics.describe(selection))")
                 hasBookDivision = bookDivision
+                if !bookDivision && workspaceTab == .search {
+                    // A split selection becomes the compact stack destination
+                    // again without changing the selected message or its draft.
+                    searchPath = selection.map { [$0] } ?? []
+                }
                 // Keep both native split columns on opposite sides of a book fold.
                 // The selected identity and its draft are independent of visibility.
                 visibility = bookDivision || landscape || selection == nil ? .all : .detailOnly
@@ -824,6 +849,7 @@ struct InboxList: View {
     @Binding var selectedTab: InboxMessageTab
     @Binding var workspaceTab: InboxWorkspaceTab
     @Binding var search: String
+    var searchUsesSplitSelection = false
     let lastViewedSelection: InboxSelection?
     let restoreLastViewed: Bool
     let didRestoreLastViewed: () -> Void
@@ -910,7 +936,7 @@ struct InboxList: View {
     }
 
     private var listSelection: Binding<InboxSelection?>? {
-        tab == .search ? nil : $selected
+        tab == .search && !searchUsesSplitSelection ? nil : $selected
     }
 
     @ViewBuilder
