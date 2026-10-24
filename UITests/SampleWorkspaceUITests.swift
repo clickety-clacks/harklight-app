@@ -523,8 +523,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
                       "Scrolling to the latest message keeps the reply keyboard focused.")
         XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
-        let dismissStart = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05))
-        let dismissEnd = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
+        let dismissStart = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+        let dismissEnd = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
         dismissStart.press(forDuration: 0.1, thenDragTo: dismissEnd,
                            withVelocity: .slow, thenHoldForDuration: 0.2)
         XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
