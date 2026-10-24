@@ -49,6 +49,60 @@ final class ConversationSampleUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testChatPanelRemovesHeaderAndKeepsComposerControlsAlignedAsPromptGrows() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+
+        let composer = app.textFields["sample-chat-composer"]
+        let inputSurface = app.otherElements["sample-chat-input-surface"]
+        let add = app.buttons["sample-chat-add-attachment"]
+        let send = app.buttons["sample-chat-send"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inputSurface.exists, app.debugDescription)
+        XCTAssertTrue(add.exists && send.exists, app.debugDescription)
+        XCTAssertFalse(app.sheets.firstMatch.exists,
+                       "The existing Chat button must continue to present its popover.")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "About ")).firstMatch.exists,
+                       "The conversation panel no longer shows request-context title text.")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Agent listening")).firstMatch.exists,
+                       "Listening status belongs to the removed panel header.")
+        XCTAssertFalse(app.buttons["Close"].exists,
+                       "The conversation panel no longer needs a large toolbar X.")
+
+        let singleLineHeight = composer.frame.height
+        XCTAssertGreaterThanOrEqual(singleLineHeight, 44)
+        XCTAssertEqual(inputSurface.frame.height, singleLineHeight, accuracy: 1,
+                       "The single-line prompt surface and field share one height.")
+        XCTAssertEqual(add.frame.height, singleLineHeight, accuracy: 1,
+                       "The plus control matches the single-line prompt height.")
+        XCTAssertEqual(send.frame.height, singleLineHeight, accuracy: 1,
+                       "The send control matches the single-line prompt height.")
+        capture("chat-panel-headerless-equal-composer", app)
+
+        composer.tap()
+        composer.typeText("This prompt grows onto multiple lines inside the native chat panel.")
+        let multilineHeight = composer.frame.height
+        XCTAssertGreaterThan(multilineHeight, singleLineHeight + 8,
+                             "The vertical prompt expands to show its wrapped text.")
+        XCTAssertEqual(inputSurface.frame.height, multilineHeight, accuracy: 1,
+                       "The glass input surface grows with the multiline prompt.")
+        XCTAssertEqual(add.frame.height, singleLineHeight, accuracy: 1,
+                       "Multiline growth does not stretch the plus button.")
+        XCTAssertEqual(send.frame.height, singleLineHeight, accuracy: 1,
+                       "Multiline growth does not stretch the send button.")
+        capture("chat-panel-multiline-prompt", app)
+    }
+
     func testAcceptedSenderUpdateIsVisibleInTheSameOrdinaryRequestAndHistory() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -109,11 +163,11 @@ final class ConversationSampleUITests: XCTestCase {
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
-        app.buttons["Close"].tap()
+        dismissChatPopover(app)
         app.buttons["Chat"].tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Closing chat alone does not leave its message")
-        app.buttons["Close"].tap()
+        dismissChatPopover(app)
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
@@ -146,7 +200,8 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
         capture("upload-before-message-departure", app)
-        app.buttons["Close"].tap()
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
         showInbox(app)
         let other = app.descendants(matching: .any)["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
@@ -292,6 +347,12 @@ final class ConversationSampleUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func dismissChatPopover(_ app: XCUIApplication) {
+        let composer = app.textFields["sample-chat-composer"]
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.08)).tap()
+        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
     /// Reads the app's diagnostics probes (enabled by `--harklight-ui-diagnostics`)

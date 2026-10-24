@@ -1171,15 +1171,8 @@ struct LiveRequestDetail: View {
     }
 
     private var conversationPanel: some View {
-        NavigationStack {
-            ConversationPanel(store: store, key: request.key,
-                sender: request.key.senderID.rawValue, title: request.title?.rawValue ?? "")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close", systemImage: "xmark") { chatPresented = false }.labelStyle(.iconOnly)
-                    }
-                }
-        }
+        ConversationPanel(store: store, key: request.key,
+            sender: request.key.senderID.rawValue, title: request.title?.rawValue ?? "")
     }
 
     static func informationalSeenText(_ status: InformationalSeenStatus) -> String {

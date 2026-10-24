@@ -33,9 +33,11 @@ final class DetailChatButtonUITests: XCTestCase {
                        "The native toolbar badge must expose the unread chat count.")
         attachScreenshot("unread-chat-toolbar-badge")
         chat.tap()
-        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5),
                       app.debugDescription)
-        app.buttons["Close"].tap()
+        XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
+        dismissChatPopover(app, composer)
         XCTAssertNotEqual(chat.value as? String, "1 item",
                           "Opening the conversation clears its unread indicator.")
         attachScreenshot("chat-toolbar-after-reading")
@@ -80,16 +82,25 @@ final class DetailChatButtonUITests: XCTestCase {
         add(hierarchy)
 
         chat.tap()
-        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5), app.debugDescription)
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(app.sheets.firstMatch.exists,
                        "The chat panel should be a button-anchored popover, not a sheet. \(app.debugDescription)")
-
-        let close = app.buttons["Close"]
-        XCTAssertTrue(close.waitForExistence(timeout: 5), app.debugDescription)
-        close.tap()
+        XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
+        attachScreenshot("chat-popover-without-header-or-close-\(appearance.lowercased())")
+        dismissChatPopover(app, composer)
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
-        XCTAssertFalse(app.textFields["sample-chat-composer"].exists, app.debugDescription)
+        XCTAssertFalse(composer.exists, app.debugDescription)
+        chat.tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5),
+                      "The toolbar Chat button must keep reopening its popover. \(app.debugDescription)")
+        attachScreenshot("chat-popover-reopened-\(appearance.lowercased())")
+    }
+
+    private func dismissChatPopover(_ app: XCUIApplication, _ composer: XCUIElement) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.08)).tap()
+        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
     private func attachScreenshot(_ name: String) {
