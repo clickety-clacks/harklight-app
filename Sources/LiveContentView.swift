@@ -711,8 +711,10 @@ struct LiveRequestDetail: View {
     private var finishSeenButton: some View {
         Button(action: finishSeenAction) {
             if seenActionIsComplete {
-                Label("Seen", systemImage: "checkmark")
-                    .labelStyle(.titleAndIcon)
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark")
+                    Text("Seen")
+                }
                     .padding(.horizontal, 6)
             } else {
                 Image(systemName: seenActionIsPending ? "clock" : "checkmark")
@@ -794,8 +796,10 @@ struct LiveRequestDetail: View {
 
     private var answeredStatusButton: some View {
         Button(action: {}) {
-            Label("Replied", systemImage: "checkmark")
-                .labelStyle(.titleAndIcon)
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                Text("Replied")
+            }
                 .padding(.horizontal, 6)
         }
         .tint(nil)
