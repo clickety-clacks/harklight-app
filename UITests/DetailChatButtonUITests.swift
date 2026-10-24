@@ -39,6 +39,33 @@ final class DetailChatButtonUITests: XCTestCase {
         attachScreenshot("chat-toolbar-after-reading")
     }
 
+    func testWideDetailChatOpensInlineFromNativeToolbar() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        try XCTSkipUnless(app.windows.firstMatch.frame.width >= 820,
+                          "Inline Chat requires a wide presentation.")
+
+        let sample = app.descendants(matching: .any)["sample-information-2"]
+        XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
+        sample.tap()
+
+        let chat = app.toolbars.buttons["Chat"].exists
+            ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+
+        let detail = app.scrollViews["message-card-scroll"]
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertGreaterThan(composer.frame.midX, detail.frame.midX,
+                             "Wide Chat should appear beside the message detail.")
+        XCTAssertFalse(app.popovers.firstMatch.exists,
+                       "Wide Chat uses the inline panel instead of a popover.")
+        attachScreenshot("wide-inline-chat-from-native-toolbar")
+    }
+
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
