@@ -800,7 +800,6 @@ final class NativeRelayLifecycle {
     static let shared = NativeRelayLifecycle()
 
     let conversationAvailability = NativeConversationAvailability()
-    let inboxOrderPresentation = InboxOrderPresentation()
     private var core: NativeRelayCore? {
         didSet { conversationAvailability.unavailableContext = nil }
     }
@@ -827,13 +826,6 @@ final class NativeRelayLifecycle {
     }
     private let enrollment = NativeEnrollmentStore()
 
-    private func inboxOrderViewObserver() -> InboxOrderViewObserver {
-        let presentation = inboxOrderPresentation
-        return { [weak presentation] view in
-            presentation?.replace(with: view)
-        }
-    }
-
     init() {}
 
     func activate(store: AttentionDomainStore,
@@ -842,7 +834,6 @@ final class NativeRelayLifecycle {
                   clientIdentity: SecIdentity,
                   trustedRootDER: Data,
                   diagnostics: NativeClientDiagnosticJournal? = nil) async throws {
-        inboxOrderPresentation.prepare(for: context.identity)
         _ = try store.snapshot(context: context)
         let generation = UUID()
         let transportAttemptID = UUID()
@@ -871,9 +862,7 @@ final class NativeRelayLifecycle {
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink(),
-                                           initialInboxOrderView: inboxOrderPresentation.view,
-                                           onInboxOrderViewChange: inboxOrderViewObserver())
+                                           onDiagnostic: diagnosticSink())
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -926,9 +915,7 @@ final class NativeRelayLifecycle {
                                                               trustedRootDER: current.rootDER)
         var nextCore: NativeRelayCore?
         do {
-            nextCore = try NativeRelayCore(store: current.store, context: current.context, session: nextTransport,
-                initialInboxOrderView: inboxOrderPresentation.view,
-                onInboxOrderViewChange: inboxOrderViewObserver())
+            nextCore = try NativeRelayCore(store: current.store, context: current.context, session: nextTransport)
             try await nextTransport.verifyEndpoint()
             guard refreshGeneration == expectedGeneration,
                   core === priorCore, transport === priorTransport,
@@ -1483,9 +1470,7 @@ final class NativeRelayLifecycle {
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink(),
-                                           initialInboxOrderView: inboxOrderPresentation.view,
-                                           onInboxOrderViewChange: inboxOrderViewObserver())
+                                           onDiagnostic: diagnosticSink())
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
