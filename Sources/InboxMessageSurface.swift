@@ -34,9 +34,11 @@ struct InboxCardContext {
 }
 
 /// Native scroll and toolbar host shared by admitted messages and local examples.
-struct MessageCardSurface<Content: View>: View {
+struct MessageCardSurface<Content: View, BottomAccessory: View>: View {
     let context: InboxCardContext
-    @ViewBuilder let content: () -> Content
+    let bottomAccessoryIsFocused: Bool
+    private let content: () -> Content
+    private let bottomAccessory: () -> BottomAccessory
     @Environment(\.colorScheme) private var colorScheme
     @State private var pull: CGFloat = 0
     @State private var armedDirection = 0
@@ -44,78 +46,102 @@ struct MessageCardSurface<Content: View>: View {
 
     private let bottomControlClearance: CGFloat = 72
 
+    init(context: InboxCardContext,
+         bottomAccessoryIsFocused: Bool,
+         @ViewBuilder content: @escaping () -> Content,
+         @ViewBuilder bottomAccessory: @escaping () -> BottomAccessory) {
+        self.context = context
+        self.bottomAccessoryIsFocused = bottomAccessoryIsFocused
+        self.content = content
+        self.bottomAccessory = bottomAccessory
+    }
+
     var body: some View {
         GeometryReader { viewport in
             let availableHeight = max(0, viewport.size.height - bottomControlClearance)
             let needsBottomControlClearance = contentHeight > availableHeight + 1
 
-            ScrollView {
-                content()
-                    .environment(\.harklightMessageType, context.messageType)
-                    .frame(maxWidth: 680)
-                    .frame(maxWidth: .infinity)
-                    .background {
-                        GeometryReader { geometry in
-                            Color.clear.preference(key: MessageCardContentHeightKey.self,
-                                                   value: geometry.size.height)
-                        }
-                        .allowsHitTesting(false)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        content()
+                            .environment(\.harklightMessageType, context.messageType)
+                            .frame(maxWidth: 680)
+                            .frame(maxWidth: .infinity)
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(key: MessageCardContentHeightKey.self,
+                                                           value: geometry.size.height)
+                                }
+                                .allowsHitTesting(false)
+                            }
+                        Spacer(minLength: 0)
+                        bottomAccessory()
+                            .id("message-card-bottom-accessory")
                     }
-            }
-            .accessibilityIdentifier("message-card-scroll")
-            .scrollBounceBehavior(.always)
-            .scrollDismissesKeyboard(.interactively)
-            .onPreferenceChange(MessageCardContentHeightKey.self) { contentHeight = $0 }
-            // Only add scroll room when the card is taller than the usable area.
-            // Short cards stay at the true boundary for the next/previous pull gesture.
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if needsBottomControlClearance {
-                    Color.clear.frame(height: bottomControlClearance).accessibilityHidden(true)
+                    .frame(minHeight: viewport.size.height, alignment: .top)
                 }
-            }
-            .background {
-                HarklightDesignSystem.palette(for: colorScheme)
-                    .messageType(context.messageType).backgroundColor
-                    .ignoresSafeArea()
-            }
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .navigationBarTitleDisplayMode(.inline)
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                let top = geometry.contentOffset.y + geometry.contentInsets.top
-                let extent = max(0, geometry.contentSize.height - geometry.containerSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom)
-                let bottom = top - extent
-                if top < 0 { return -top }
-                if bottom > 0 { return -bottom }
-                return 0
-            } action: { _, value in
-                pull = value
-                let direction = value > 0 ? -1 : 1
-                let neighbor = direction < 0 ? context.previous : context.next
-                armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
-            }
-            .onScrollPhaseChange { oldPhase, newPhase in
-                if oldPhase == .interacting && newPhase != .interacting && armedDirection != 0 {
-                    context.move(armedDirection)
+                .accessibilityIdentifier("message-card-scroll")
+                .scrollBounceBehavior(.always)
+                .scrollDismissesKeyboard(.interactively)
+                .onPreferenceChange(MessageCardContentHeightKey.self) { contentHeight = $0 }
+                // Only add scroll room when the card is taller than the usable area.
+                // Short cards stay at the true boundary for the next/previous pull gesture.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if needsBottomControlClearance && !bottomAccessoryIsFocused {
+                        Color.clear.frame(height: bottomControlClearance).accessibilityHidden(true)
+                    }
                 }
-            }
-            .overlay(alignment: pull > 0 ? .top : .bottom) {
-                if abs(pull) > 8, let neighbor = pull > 0 ? context.previous : context.next {
-                    MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0, armed: armedDirection != 0)
-                        .frame(height: armedDirection != 0 ? 104 : min(80, abs(pull)), alignment: pull > 0 ? .bottom : .top)
-                        .clipped().allowsHitTesting(false)
-                        .animation(.snappy, value: armedDirection)
+                .onChange(of: bottomAccessoryIsFocused) { _, focused in
+                    guard focused else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo("message-card-bottom-accessory", anchor: .bottom)
+                    }
                 }
-            }
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Text("\(context.position) of \(context.total)").font(.subheadline.monospacedDigit())
-                        .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme)
-                            .messageType(context.messageType).textColor)
-                        .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
+                .background {
+                    HarklightDesignSystem.palette(for: colorScheme)
+                        .messageType(context.messageType).backgroundColor
+                        .ignoresSafeArea()
                 }
+                .toolbarBackground(.hidden, for: .navigationBar)
+                .navigationBarTitleDisplayMode(.inline)
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    let top = geometry.contentOffset.y + geometry.contentInsets.top
+                    let extent = max(0, geometry.contentSize.height - geometry.containerSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom)
+                    let bottom = top - extent
+                    if top < 0 { return -top }
+                    if bottom > 0 { return -bottom }
+                    return 0
+                } action: { _, value in
+                    pull = value
+                    let direction = value > 0 ? -1 : 1
+                    let neighbor = direction < 0 ? context.previous : context.next
+                    armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
+                }
+                .onScrollPhaseChange { oldPhase, newPhase in
+                    if oldPhase == .interacting && newPhase != .interacting && armedDirection != 0 {
+                        context.move(armedDirection)
+                    }
+                }
+                .overlay(alignment: pull > 0 ? .top : .bottom) {
+                    if abs(pull) > 8, let neighbor = pull > 0 ? context.previous : context.next {
+                        MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0, armed: armedDirection != 0)
+                            .frame(height: armedDirection != 0 ? 104 : min(80, abs(pull)), alignment: pull > 0 ? .bottom : .top)
+                            .clipped().allowsHitTesting(false)
+                            .animation(.snappy, value: armedDirection)
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Text("\(context.position) of \(context.total)").font(.subheadline.monospacedDigit())
+                            .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme)
+                                .messageType(context.messageType).textColor)
+                            .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
+                        }
+                    }
+                .accessibilityAction(named: "Previous message") { if context.previous != nil { context.move(-1) } }
+                .accessibilityAction(named: "Next message") { if context.next != nil { context.move(1) } }
             }
-            .accessibilityAction(named: "Previous message") { if context.previous != nil { context.move(-1) } }
-            .accessibilityAction(named: "Next message") { if context.next != nil { context.move(1) } }
         }
     }
 }

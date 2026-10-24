@@ -58,73 +58,88 @@ struct ConversationPanel: View {
                     }
                     }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
                 }
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 18) {
-                            if let earlier = store.historicalAnswerDraft(for: key, revision: revision) {
-                                DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
-                                    HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
-                                }.accessibilityIdentifier("conversation-earlier-answer")
+                GeometryReader { viewport in
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                LazyVStack(alignment: .leading, spacing: 18) {
+                                    if let earlier = store.historicalAnswerDraft(for: key, revision: revision) {
+                                        DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
+                                            HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
+                                        }.accessibilityIdentifier("conversation-earlier-answer")
+                                    }
+                                    ForEach(thread.turns) { turn in
+                                        ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
+                                            sender: sender, local: store.isLocalExample,
+                                            replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue },
+                                            retracted: thread.isRetracted && thread.terminalTurn == turn.id,
+                                            inspect: { file, fileRevision in
+                                                fileError = nil
+                                                inspectedFile = file
+                                                inspectedFileRevision = fileRevision
+                                            })
+                                            .id(turn.id)
+                                    }
+                                }.padding(.horizontal)
+                                Spacer(minLength: 0)
+                                VStack(spacing: 0) {
+                                    if let terminal = thread.terminal {
+                                        Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
+                                            .font(.caption).padding(8)
+                                    }
+                                    HStack {
+                                        Spacer(minLength: 0)
+                                        Text(store.isLocalExample ? "Local conversation · nothing sent" : "Discussion · version \(revision)")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }.padding(.horizontal)
+                                    ConversationDraftStatus(disposition: draft.disposition)
+                                    ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
+                                    if let error = store.conversationError {
+                                        Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                                    }
+                                    if let message = store.conversationUnavailableMessage {
+                                        Text(message)
+                                            .font(.callout)
+                                            .foregroundStyle(.secondary)
+                                            .padding()
+                                            .accessibilityIdentifier("conversation-unavailable")
+                                    } else if store.isReadOnly {
+                                        ReadOnlyConversationDraftView(draft: draft) { file in
+                                            fileError = nil
+                                            inspectedFile = file
+                                            inspectedFileRevision = revision
+                                        }
+                                        .padding(verticalSizeClass == .compact ? 4 : 12)
+                                    } else {
+                                        ConversationComposer(store: store, key: key, revision: revision,
+                                            inspect: { file, fileRevision in
+                                                fileError = nil
+                                                inspectedFile = file
+                                                inspectedFileRevision = fileRevision
+                                            }, focusChanged: { focused in
+                                                guard focused else { return }
+                                                withAnimation(.easeOut(duration: 0.2)) {
+                                                    proxy.scrollTo("conversation-composer-footer", anchor: .bottom)
+                                                }
+                                            })
+                                        .padding(verticalSizeClass == .compact ? 4 : 12)
+                                    }
+                                }
+                                }
+                                .id("conversation-composer-footer")
                             }
-                            ForEach(thread.turns) { turn in
-                                ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
-                                    sender: sender, local: store.isLocalExample,
-                                    replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue },
-                                    retracted: thread.isRetracted && thread.terminalTurn == turn.id,
-                                    inspect: { file, fileRevision in
-                                        fileError = nil
-                                        inspectedFile = file
-                                        inspectedFileRevision = fileRevision
-                                    })
-                                    .id(turn.id)
-                            }
-                        }.padding(.horizontal)
+                            .frame(minHeight: viewport.size.height, alignment: .top)
+                        }
+                        .accessibilityIdentifier("conversation-history-scroll")
+                        .scrollBounceBehavior(.always)
+                        .scrollDismissesKeyboard(.interactively)
+                        .onChange(of: thread.turns.count) { _, _ in
+                            if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                        }
+                        .onChange(of: thread.latestAgentReply?.id, initial: true) { _, _ in
+                            store.markConversationRead(key)
+                        }
                     }
-                    .accessibilityIdentifier("conversation-history-scroll")
-                    .scrollBounceBehavior(.always)
-                    .scrollDismissesKeyboard(.interactively)
-                    .onChange(of: thread.turns.count) { _, _ in
-                        if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
-                    .onChange(of: thread.latestAgentReply?.id, initial: true) { _, _ in
-                        store.markConversationRead(key)
-                    }
-                }
-                if let terminal = thread.terminal {
-                    Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
-                        .font(.caption).padding(8)
-                }
-                HStack {
-                    Spacer(minLength: 0)
-                    Text(store.isLocalExample ? "Local conversation · nothing sent" : "Discussion · version \(revision)")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }.padding(.horizontal)
-                ConversationDraftStatus(disposition: draft.disposition)
-                ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
-                if let error = store.conversationError {
-                    Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                }
-                if let message = store.conversationUnavailableMessage {
-                    Text(message)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .padding()
-                        .accessibilityIdentifier("conversation-unavailable")
-                } else if store.isReadOnly {
-                    ReadOnlyConversationDraftView(draft: draft) { file in
-                        fileError = nil
-                        inspectedFile = file
-                        inspectedFileRevision = revision
-                    }
-                        .padding(verticalSizeClass == .compact ? 4 : 12)
-                } else {
-                    ConversationComposer(store: store, key: key, revision: revision,
-                        inspect: { file, fileRevision in
-                            fileError = nil
-                            inspectedFile = file
-                            inspectedFileRevision = fileRevision
-                        })
-                        .padding(verticalSizeClass == .compact ? 4 : 12)
                 }
             } else {
                 switch ConversationPanelEmptyState.resolve(
@@ -255,8 +270,10 @@ private struct ConversationComposer: View {
     let key: RequestKey
     let revision: UInt64
     let inspect: (ConversationFile, UInt64) -> Void
+    let focusChanged: (Bool) -> Void
     @State private var pickingFiles = false
     @State private var attachmentChoices = false
+    @FocusState private var textFieldFocused: Bool
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var frozen: Bool {
@@ -314,6 +331,8 @@ private struct ConversationComposer: View {
                 }), axis: .vertical)
                     .lineLimit(1...5).disabled(frozen || thread?.terminal != nil)
                     .padding(.vertical, 11)
+                    .focused($textFieldFocused)
+                    .onChange(of: textFieldFocused) { _, focused in focusChanged(focused) }
                     .accessibilityIdentifier("sample-chat-composer")
             }
             .padding(.horizontal, 12)
