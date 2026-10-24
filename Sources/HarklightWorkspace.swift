@@ -322,6 +322,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var selection: InboxSelection?
     @State private var visibility: NavigationSplitViewVisibility = .all
+    @State private var hasBookDivision = false
     @State private var isWarningPresented = false
     @State private var automaticallyPresentedWarnings = Set<String>()
     @State private var replyEditorFocused = false
@@ -519,7 +520,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return [
             "selection=\(UIDiagnostics.describe(selection)) tab=\(selectedTab.rawValue) entryTab=\(listTabOnMessageEntry?.rawValue ?? "nil") lastViewed=\(UIDiagnostics.describe(lastViewedSelection))",
             "betweenMessages=\(navigatedBetweenMessages) restoreOnReturn=\(restoreLastViewedOnReturn) chatOpen=\(chatOpen)",
-            "visibility=\(visibility) sizeClass=\(horizontalSizeClass.map { "\($0)" } ?? "nil") window=\(Int(windowSize.width))x\(Int(windowSize.height)) landscape=\(landscape)",
+            "visibility=\(visibility) sizeClass=\(horizontalSizeClass.map { "\($0)" } ?? "nil") window=\(Int(windowSize.width))x\(Int(windowSize.height)) landscape=\(landscape) bookDivision=\(hasBookDivision)",
             "samples.selected=\(samples.selectedID ?? "nil") samples.lastViewed=\(samples.lastViewedID ?? "nil") loadError=\(samples.loadError ?? "nil")",
             "rows=\(rowSummary)",
             UIDiagnostics.shared.eventSummary,
@@ -533,6 +534,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             // return to its detail even when that row was already selected.
             if next != nil, visibility == .all,
                UIDevice.current.userInterfaceIdiom == .phone,
+               !hasBookDivision,
                windowSize.width <= windowSize.height {
                 visibility = .detailOnly
             }
@@ -738,7 +740,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     lastViewedSelection = .request(key)
                     selectRequest(key)
                 }
-                visibility = destination.selection == nil ? .all : .detailOnly
+                visibility = destination.selection == nil || hasBookDivision ? .all : .detailOnly
             }
             .onChange(of: samples.selectedID) { _, id in
                 let sampleIDDescription: String = id ?? "nil"
@@ -766,9 +768,24 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 // Populate the existing list; never present a second navigation stack.
                 visibility = .all
             }
+            .onGeometryChange(for: Bool.self) { geometry in
+                if #available(iOS 27.1, *) {
+                    // The fold can activate without changing the window's aspect ratio.
+                    return geometry.reservedRegions(kind: .division)
+                        .contains { $0.frame.height > $0.frame.width }
+                }
+                return false
+            } action: { bookDivision in
+                guard hasBookDivision != bookDivision else { return }
+                UIDiagnostics.shared.record("inbox.bookDivision \(bookDivision) selection=\(UIDiagnostics.describe(selection))")
+                hasBookDivision = bookDivision
+                // Keep both native split columns on opposite sides of a book fold.
+                // The selected identity and its draft are independent of visibility.
+                visibility = bookDivision || landscape || selection == nil ? .all : .detailOnly
+            }
             .onChange(of: landscape) { _, isLandscape in
                 UIDiagnostics.shared.record("inbox.landscape \(isLandscape) selection=\(UIDiagnostics.describe(selection))")
-                visibility = isLandscape || selection == nil ? .all : .detailOnly
+                visibility = isLandscape || hasBookDivision || selection == nil ? .all : .detailOnly
             }
             .uiDiagnostics("inbox-ui-diagnostics", diagnosticSummary(landscape: landscape))
         }
