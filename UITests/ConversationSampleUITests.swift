@@ -125,8 +125,19 @@ final class ConversationSampleUITests: XCTestCase {
                        "The send control matches the single-line prompt height.")
         capture("chat-panel-headerless-equal-composer", app)
 
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        history.swipeUp()
+        let latestMessage = history.staticTexts[
+            "Agent example: the shorter path is faster, while the longer path is easier to revise."
+        ]
+        XCTAssertTrue(latestMessage.isHittable, app.debugDescription)
+
         composer.tap()
-        composer.typeText("This prompt grows onto multiple lines inside the native chat panel.")
+        let chatDraft = "This prompt grows onto multiple lines inside the native chat panel."
+        composer.typeText(chatDraft)
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), app.debugDescription)
         let multilineTextHeight = composer.frame.height
         let multilineSurfaceHeight = inputSurface.frame.height
         XCTAssertGreaterThan(multilineTextHeight, singleLineTextHeight + 8,
@@ -138,6 +149,26 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertEqual(send.frame.height, singleLineControlHeight, accuracy: 1,
                        "Multiline growth does not stretch the send button.")
         capture("chat-panel-multiline-prompt", app)
+
+        latestMessage.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Tapping conversation content leaves the composer keyboard open.")
+        XCTAssertEqual(composer.value as? String, chatDraft,
+                       "Tapping conversation content preserves the unsent prompt.")
+        history.swipeUp()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Scrolling toward the latest message keeps the keyboard open.")
+        let dismissStart = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02))
+        let dismissEnd = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
+        dismissStart.press(forDuration: 0.1, thenDragTo: dismissEnd,
+                           withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
+                       "A downward swipe on conversation history dismisses the keyboard.")
+        XCTAssertEqual(composer.value as? String, chatDraft,
+                       "Interactive dismissal preserves the unsent chat draft.")
+        composer.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
+                      "The composer can be focused again after interactive dismissal.")
     }
 
     func testAcceptedSenderUpdateIsVisibleInTheSameOrdinaryRequestAndHistory() {
