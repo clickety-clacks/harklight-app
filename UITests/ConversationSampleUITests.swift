@@ -77,7 +77,11 @@ final class ConversationSampleUITests: XCTestCase {
                        "A missing chat thread must not show a chat composer.")
         capture("conversation-no-chat-empty-state", app)
 
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.08)).tap()
+        let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+        let frame = app.windows.firstMatch.frame
+        let start = screen.withOffset(CGVector(dx: frame.midX, dy: frame.minY + 20))
+        let end = start.withOffset(CGVector(dx: 0, dy: min(400, frame.height * 0.8)))
+        start.press(forDuration: 0.1, thenDragTo: end)
         XCTAssertTrue(noChatTitle.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(seenAction.exists, "The message's Seen response remains available outside the no-chat view.")
     }
@@ -102,8 +106,8 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inputSurface.exists, app.debugDescription)
         XCTAssertTrue(add.exists && send.exists, app.debugDescription)
-        XCTAssertFalse(app.sheets.firstMatch.exists,
-                       "The existing Chat button must continue to present its popover.")
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5),
+                      "The Chat button presents the native dismissible sheet.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "About ")).firstMatch.exists,
                        "The conversation panel no longer shows request-context title text.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Agent listening")).firstMatch.exists,
@@ -196,11 +200,11 @@ final class ConversationSampleUITests: XCTestCase {
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
-        dismissChatPopover(app)
+        dismissChatSheet(app)
         app.buttons["Chat"].tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Closing chat alone does not leave its message")
-        dismissChatPopover(app)
+        dismissChatSheet(app)
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
@@ -233,8 +237,14 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Adaptive reconstruction is not message departure")
         capture("upload-before-message-departure", app)
-        dismissChatPopover(app)
+        XCUIDevice.shared.orientation = .portrait
+        // A wide landscape layout may reveal its passive inline panel and
+        // dismiss the sheet during rotation. Reopen the button presentation.
+        if !app.sheets.firstMatch.exists { app.buttons["Chat"].tap() }
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        dismissChatSheet(app)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCUIDevice.shared.orientation = .landscapeLeft
         showInbox(app)
         let other = app.descendants(matching: .any)["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
@@ -382,9 +392,14 @@ final class ConversationSampleUITests: XCTestCase {
         add(attachment)
     }
 
-    private func dismissChatPopover(_ app: XCUIApplication) {
+    private func dismissChatSheet(_ app: XCUIApplication) {
         let composer = app.textFields["sample-chat-composer"]
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.08)).tap()
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
@@ -404,9 +419,7 @@ final class ConversationSampleUITests: XCTestCase {
     }
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
-        let field = app.searchFields.firstMatch
-        let searchTab = workspaceTab("Search", in: app)
-        if searchTab.exists && !searchTab.isSelected { searchTab.tap() }
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         let clearText = field.buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }
@@ -416,7 +429,6 @@ final class ConversationSampleUITests: XCTestCase {
 
     private func showInbox(_ app: XCUIApplication) {
         guard app.scrollViews["message-card-scroll"].exists else { return }
-        let searchTab = workspaceTab("Search", in: app)
         let searchField = app.searchFields.firstMatch
         let back = app.navigationBars.buttons.firstMatch
         if back.exists && back.isHittable {
@@ -427,7 +439,6 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 5) ||
                       workspaceTab("Replied", in: app).waitForExistence(timeout: 5) ||
-                      searchTab.waitForExistence(timeout: 5) ||
                       searchField.waitForExistence(timeout: 5), app.debugDescription)
     }
 
@@ -500,7 +511,6 @@ final class ConversationSampleUITests: XCTestCase {
         let tabButtons = [
             workspaceTab("Inbox", in: app),
             workspaceTab("Replied", in: app),
-            workspaceTab("Search", in: app),
         ].filter(\.exists)
         if let tabTop = tabButtons.map(\.frame.minY).min() { return tabTop }
         let searchField = app.searchFields.firstMatch
@@ -513,4 +523,18 @@ private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIEleme
     let tabBarButton = app.tabBars.buttons[title]
     if tabBarButton.exists { return tabBarButton }
     return app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
+}
+
+@MainActor
+private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
+    let field = app.searchFields.firstMatch
+    if field.exists { return field }
+    let list = app.collectionViews.firstMatch
+    if list.exists {
+        for _ in 0..<3 {
+            list.swipeDown()
+            if field.waitForExistence(timeout: 1) { break }
+        }
+    }
+    return field
 }

@@ -23,24 +23,16 @@ final class HarklightTests: XCTestCase {
         let rows: [InboxItem] = [.request(inboxMatch), .request(inboxOther), .request(repliedMatch)]
 
         let inboxResults = InboxListProjection.filteredRows(
-            rows, in: .search, selectedTab: .inbox, search: " archive ")
+            rows, in: .inbox, search: " archive ")
         XCTAssertEqual(inboxResults.map(\.id), [.request(inboxMatch.key)])
 
         let repliedResults = InboxListProjection.filteredRows(
-            rows, in: .search, selectedTab: .replied, search: "archive")
+            rows, in: .replied, search: "archive")
         XCTAssertEqual(repliedResults.map(\.id), [.request(repliedMatch.key)])
     }
 
-    func testSearchCardMoveReplacesItsCurrentNavigationDestination() {
-        let current = InboxSelection.sample("sample-approval-0")
-        let next = InboxSelection.sample("sample-approval-1")
-        XCTAssertEqual(InboxSearchNavigation.replacingDestination(in: [current], with: next), [next])
-        XCTAssertEqual(InboxSearchNavigation.replacingDestination(in: [current], with: nil), [])
-        XCTAssertEqual(InboxSearchNavigation.replacingDestination(in: [], with: next), [])
-    }
-
     @MainActor
-    func testNotificationDestinationLeavesSearchAndSelectsTheRequestTab() {
+    func testNotificationDestinationSelectsTheRequestTabAndClearsSearch() {
         let replied = InboxRequestRow(
             key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
                             messageID: ExactText("answered")),
@@ -54,7 +46,6 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(destination.selectedTab, .replied)
         XCTAssertEqual(destination.workspaceTab, .replied)
         XCTAssertEqual(destination.search, "")
-        XCTAssertEqual(destination.searchPath, [])
     }
 
     func testNoCommentDraftSelectionRoundTripsAndLegacyDraftsDefaultToUnselected() throws {

@@ -10,15 +10,37 @@ final class DetailChatButtonUITests: XCTestCase {
         verifyToolbarChatButton(appearance: "Dark")
     }
 
+    func testWideDetailChatButtonAlsoPresentsDismissibleSheet() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The wide detail presentation requires an iPad layout.")
+        }
+        defer { XCUIDevice.shared.orientation = .portrait }
+        XCUIDevice.shared.orientation = .landscapeLeft
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let sample = app.descendants(matching: .any)["sample-information-2"]
+        XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
+        sample.tap()
+
+        let chat = app.toolbars.buttons["Chat"].exists
+            ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5),
+                      app.debugDescription)
+        dismissChatSheet(app, composer)
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+    }
+
     func testUnreadChatIsExposedAndClearedFromToolbar() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let searchTab = workspaceTab("Search", in: app)
-        XCTAssertTrue(searchTab.waitForExistence(timeout: 10), app.debugDescription)
-        searchTab.tap()
-        let search = app.searchFields.firstMatch
+        let search = workspaceSearchField(in: app)
         XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
         search.tap()
         search.typeText("studio collection\n")
@@ -36,7 +58,7 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5),
                       app.debugDescription)
         XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
-        dismissChatPopover(app, composer)
+        dismissChatSheet(app, composer)
         XCTAssertNotEqual(chat.value as? String, "1 item",
                           "Opening the conversation clears its unread indicator.")
         attachScreenshot("chat-toolbar-after-reading")
@@ -44,19 +66,12 @@ final class DetailChatButtonUITests: XCTestCase {
 
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples",
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "-uiUserInterfaceStyle", appearance]
         app.launch()
 
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
-        let searchTab = workspaceTab("Search", in: app)
-        if searchTab.exists && !searchTab.isSelected { searchTab.tap() }
-        let search = app.searchFields.firstMatch
-        XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
-        search.tap()
-        search.typeText("Thursday\n")
-
-        let sample = app.descendants(matching: .any)["sample-information-0"]
+        let sample = app.descendants(matching: .any)["sample-information-2"]
         XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
         sample.tap()
 
@@ -83,22 +98,42 @@ final class DetailChatButtonUITests: XCTestCase {
         chat.tap()
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(app.sheets.firstMatch.exists,
-                       "The chat panel should be a button-anchored popover, not a sheet. \(app.debugDescription)")
         XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
-        attachScreenshot("chat-popover-without-header-or-close-\(appearance.lowercased())")
-        dismissChatPopover(app, composer)
+        attachScreenshot("chat-sheet-without-header-or-close-\(appearance.lowercased())")
+        if appearance == "Light" {
+            composer.tap()
+            composer.typeText("Draft survives dismissal")
+        }
+        dismissChatSheet(app, composer)
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         XCTAssertFalse(composer.exists, app.debugDescription)
         chat.tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5),
-                      "The toolbar Chat button must keep reopening its popover. \(app.debugDescription)")
-        attachScreenshot("chat-popover-reopened-\(appearance.lowercased())")
+                      "The toolbar Chat button must keep reopening its sheet. \(app.debugDescription)")
+        if appearance == "Light" {
+            XCTAssertEqual(composer.value as? String, "Draft survives dismissal",
+                           "Swiping the sheet away must preserve the unsent chat draft.")
+        }
+        attachScreenshot("chat-sheet-reopened-\(appearance.lowercased())")
     }
 
-    private func dismissChatPopover(_ app: XCUIApplication, _ composer: XCUIElement) {
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.08)).tap()
+    private func dismissChatSheet(_ app: XCUIApplication, _ composer: XCUIElement) {
+        let window = app.windows.firstMatch.frame
+        let contentFrame = composer.frame
+        let containers = app.otherElements
+            .containing(.textField, identifier: "sample-chat-composer")
+            .allElementsBoundByIndex.map(\.frame)
+        let presentation = containers
+            .filter { $0.width > contentFrame.width * 1.5 &&
+                      $0.height > contentFrame.height * 4 &&
+                      $0.width < window.width - 4 && $0.height < window.height - 4 }
+            .max { $0.width * $0.height < $1.width * $1.height } ?? window
+        let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+        let start = screen.withOffset(CGVector(dx: presentation.midX,
+                                               dy: presentation.minY + 16))
+        let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
+        start.press(forDuration: 0.1, thenDragTo: end)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 

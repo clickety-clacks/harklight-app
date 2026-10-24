@@ -153,34 +153,29 @@ final class SampleWorkspaceUITests: XCTestCase {
         if !destination.isSelected { destination.tap() }
     }
 
-    private func assertSearchTabSelected(_ app: XCUIApplication, file: StaticString = #filePath,
+    private func assertListSearchAvailable(_ app: XCUIApplication, file: StaticString = #filePath,
                                         line: UInt = #line) {
-        let field = app.searchFields.firstMatch
-        let tab = workspaceTab("Search", in: app)
-        XCTAssertTrue(field.waitForExistence(timeout: 1) || (tab.exists && tab.isSelected),
+        let field = workspaceSearchField(in: app)
+        XCTAssertTrue(field.waitForExistence(timeout: 5),
                       app.debugDescription, file: file, line: line)
     }
 
     private func showList(_ app: XCUIApplication) {
         let card = app.scrollViews["message-card-scroll"]
         guard card.exists else { return }
-        let searchButton = workspaceTab("Search", in: app)
-        let searchField = app.searchFields.firstMatch
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable {
             back.tap()
         } else {
             let sidebar = app.buttons["Show Sidebar"]
             if sidebar.exists && sidebar.isHittable { sidebar.tap() }
         }
-        XCTAssertTrue(searchButton.waitForExistence(timeout: 5) || searchField.waitForExistence(timeout: 5),
+        XCTAssertTrue(workspaceSearchField(in: app).waitForExistence(timeout: 5),
                       app.debugDescription)
     }
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
-        let searchButton = workspaceTab("Search", in: app)
-        if searchButton.exists && !searchButton.isSelected { searchButton.tap() }
-        let field = app.searchFields.firstMatch
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         let clearText = field.buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }
@@ -189,7 +184,7 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func clearSearch(in app: XCUIApplication) {
-        let clearText = app.searchFields.firstMatch.buttons["Clear text"]
+        let clearText = workspaceSearchField(in: app).buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }
     }
 
@@ -272,7 +267,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let inboxTab = workspaceTab("Inbox", in: app)
         let repliedTab = workspaceTab("Replied", in: app)
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         enterSearch("A note for", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         clearSearch(in: app)
@@ -292,7 +287,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             .waitForExistence(timeout: 5), app.debugDescription)
         showList(app)
         clearSearch(in: app)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         enterSearch("A note for", in: app)
         XCTAssertFalse(row.waitForExistence(timeout: 1),
                        "A submitted No comment leaves the Inbox.")
@@ -445,7 +440,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("seen-response-detail", app)
 
         showList(app)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "The Seen response leaves the current Inbox Search results.")
         capture("seen-response-leaves-search-results", app)
@@ -487,7 +482,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         let inboxTab = workspaceTab("Inbox", in: app)
         let repliedTab = workspaceTab("Replied", in: app)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         enterSearch("Which approach", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "A typed but unsent reply stays in Inbox.")
@@ -535,7 +530,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.descendants(matching: .any)["sample-finish"].tap()
         capture("text-response-submitted", app)
         showList(app)
-        assertSearchTabSelected(app)
+        assertListSearchAvailable(app)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A submitted text reply leaves the current Inbox Search results.")
         capture("text-response-leaves-search-results", app)
@@ -788,11 +783,14 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-card", app)
             app.buttons["Chat"].tap()
-            let composer = app.textFields["sample-chat-composer"]
+            let sheet = app.sheets.firstMatch
+            XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+            let composer = sheet.textFields["sample-chat-composer"]
             XCTAssertTrue(composer.waitForExistence(timeout: 5))
             composer.tap(); composer.typeText("Local orientation " + name)
-            XCTAssertTrue(app.buttons["Send locally"].isHittable)
-            app.buttons["Send locally"].tap()
+            let send = sheet.buttons["Send locally"]
+            XCTAssertTrue(send.isHittable)
+            send.tap()
             XCTAssertTrue(app.staticTexts["Local orientation " + name].waitForExistence(timeout: 5))
             let hierarchy = XCTAttachment(string: app.debugDescription)
             hierarchy.name = "corrected-duo-" + name + "-hierarchy"

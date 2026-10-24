@@ -348,7 +348,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.waitForExistence(timeout: 5), app.debugDescription)
     }
 
-    func testNativeInteractiveBackReturnsToListAndSearchRisesAboveKeyboard() throws {
+    func testNativeInteractiveBackReturnsToSearchableList() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -363,7 +363,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
         attachScreenshot("Request detail", from: app)
 
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["harklight-detail-back"].exists,
                        "Detail uses the native navigation back control.")
@@ -382,21 +382,13 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
 
-        let search = workspaceTab("Search", in: app)
-        XCTAssertTrue(search.waitForExistence(timeout: 5))
-        search.tap()
-        for frame in 0..<5 {
-            attachScreenshot("Search transition frame \(frame)", from: app)
-        }
-        let field = app.searchFields.firstMatch
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
-                      "Search should expand directly above the keyboard.")
-        XCTAssertTrue(settings.isHittable, "Header settings must remain visible during search.")
-        XCTAssertLessThan(settings.frame.maxY, field.frame.minY,
-                          "Settings belong in the header, not beside expanded search.")
-        attachScreenshot("Expanded search above keyboard", from: app)
+                      "The native list search should focus and show the keyboard.")
+        // Native active search may collapse the title and trailing actions.
+        attachScreenshot("Native list search with keyboard", from: app)
 
         field.typeText("preview could not\n")
         let notice = app.descendants(matching: .any)["sample-error-0"]
@@ -433,7 +425,6 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(finishSeen.exists,
                       "The Seen button stays in place after the action.")
         XCTAssertTrue(finishSeen.label.contains("Seen"), finishSeen.label)
-        XCTAssertTrue(finishSeen.label.contains("green checkmark"), finishSeen.label)
         XCTAssertEqual(finishSeen.value as? String, "Completed")
         XCTAssertFalse(finishSeen.isEnabled,
                        "The completed toolbar Seen button cannot be tapped again.")
@@ -452,10 +443,7 @@ final class HarklightUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
-        let search = workspaceTab("Search", in: app)
-        XCTAssertTrue(search.waitForExistence(timeout: 10))
-        search.tap()
-        let field = app.searchFields.firstMatch
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         field.typeText("Which approach\n")

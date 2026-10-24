@@ -703,42 +703,13 @@ struct LiveRequestDetail: View {
         seenActionPresentation.isPending
     }
 
-    private var seenActionColor: Color {
-        if seenActionIsComplete {
-            return HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
-        }
-        if seenActionIsPending { return detailColors.secondaryTextColor }
-        return detailColors.textColor
-    }
-
     private var finishSeenButton: some View {
         Button(action: finishSeenAction) {
-            if seenActionIsComplete {
-                Label("Seen", systemImage: "checkmark")
-                    .labelStyle(.titleAndIcon)
-                    .foregroundStyle(seenActionColor)
-                    .font(.headline)
-            } else if seenActionIsPending {
-                Label {
-                    Text(seenActionPresentation.title)
-                } icon: {
-                    Image(systemName: seenActionPresentation.symbolName)
-                }
-                    .labelStyle(.titleAndIcon)
-                    .foregroundStyle(seenActionColor)
-                    .font(.headline)
-            } else {
-                Image(systemName: "checkmark")
-                    .foregroundStyle(seenActionColor)
-                    .font(.headline)
-            }
+            Image(systemName: seenActionIsPending ? "clock" : "checkmark")
         }
-        .tint(seenActionColor)
-        .opacity(seenActionIsComplete ? 0.76 : (sendControlsDisabled ? 0.48 : 1))
         .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
-        .accessibilityLabel(Text(localExample?.localSeenSelected == true
-                                 ? "Seen with green checkmark"
-                                 : seenActionPresentation.accessibilityLabel))
+        .accessibilityLabel(seenActionIsComplete ? "Seen"
+                            : seenActionIsPending ? "Seen pending confirmation" : "Mark as seen")
         .accessibilityValue(Text(localExample?.localSeenSelected == true
                                  ? "Completed"
                                  : seenActionPresentation.accessibilityValue))
@@ -810,16 +781,9 @@ struct LiveRequestDetail: View {
     }
 
     private var answeredStatusButton: some View {
-        Button(action: {}) {
-            Label("Answered", systemImage: "checkmark")
-                .labelStyle(.titleAndIcon)
-                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
-                .font(.headline)
-        }
-        .tint(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
-        .opacity(0.76)
+        Button("Answered", systemImage: "checkmark", action: {})
         .disabled(true)
-        .accessibilityLabel("Answered with green checkmark")
+        .accessibilityLabel("Answered")
         .accessibilityValue("Completed")
         .accessibilityIdentifier("request-answered")
     }
@@ -1056,6 +1020,7 @@ struct LiveRequestDetail: View {
             .padding(.horizontal, 16).padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
             .foregroundStyle(detailColors.textColor)
+            .tint(detailColors.textColor)
         }
         .background {
             GeometryReader { geometry in
@@ -1079,33 +1044,25 @@ struct LiveRequestDetail: View {
                                     onSend: closeReplyEditor)
             }
         }
-        .tint(detailColors.textColor)
         .toolbar {
             if activeReplyEditor == nil {
-                ToolbarItem(placement: .bottomBar) {
-                    detailChatButton
+                ToolbarItem(placement: .topBarTrailing) {
+                    chatButton
                 }
             }
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
-                    if seenActionIsComplete {
-                        finishSeenButton.buttonStyle(.plain)
-                    } else {
-                        finishSeenButton.buttonStyle(.glass)
-                    }
+                    finishSeenButton
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         closeReplyEditor()
                         localExample.finishLocally()
                     }
                     .labelStyle(.iconOnly)
-                    .buttonStyle(.glassProminent)
-                    .tint(detailColors.textColor)
-                    .foregroundStyle(detailColors.backgroundColor)
                     .disabled(!localExample.canFinishLocally || localExample.finished)
                     .accessibilityIdentifier("sample-finish")
                 } else if answerIsComplete {
-                    answeredStatusButton.buttonStyle(.plain)
+                    answeredStatusButton
                 } else {
                     Button(submitLabel, systemImage: "checkmark") {
                         if let fixtureStore {
@@ -1125,9 +1082,6 @@ struct LiveRequestDetail: View {
                         }
                     }
                         .labelStyle(.iconOnly)
-                        .buttonStyle(.glassProminent)
-                        .tint(detailColors.textColor)
-                        .foregroundStyle(detailColors.backgroundColor)
                         .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
@@ -1143,30 +1097,19 @@ struct LiveRequestDetail: View {
         .sheet(isPresented: $requestDetailsPresented) {
             requestDetailsSheet
         }
+        .sheet(isPresented: $chatPresented) {
+            conversationPanel
+        }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
         }
         .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
     }
 
-    @ViewBuilder
-    private var detailChatButton: some View {
-        if context.canInlineChat {
-            chatButton
-        } else {
-            chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
-                conversationPanel
-                    .frame(idealWidth: 380, idealHeight: 560)
-                    .presentationCompactAdaptation(.popover)
-            }
-        }
-    }
-
     private var chatButton: some View {
         Button("Chat", systemImage: "bubble.left.and.bubble.right") {
             localExample?.chatRead = true
-            if context.canInlineChat { context.openChat?() }
-            else { chatPresented = true }
+            chatPresented = true
         }
         .labelStyle(.iconOnly)
         .badge(conversationIndicator == true ? 1 : 0)

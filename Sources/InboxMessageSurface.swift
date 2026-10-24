@@ -24,8 +24,6 @@ struct InboxCardContext {
     let previous: InboxCardPreview?
     let next: InboxCardPreview?
     var inlineChat = false
-    var canInlineChat = false
-    var openChat: (() -> Void)? = nil
     var dismissToList: (() -> Void)? = nil
     var messageType: HarklightMessageType = .request
     let move: (Int) -> Void

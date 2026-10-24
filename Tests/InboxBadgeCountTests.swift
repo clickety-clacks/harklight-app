@@ -60,7 +60,7 @@ final class InboxBadgeCountTests: XCTestCase {
             row("retracted", status: "Retracted", isRetracted: true),
         ]
         let listed = InboxListProjection.filteredRows(requests.map(InboxItem.request),
-                                                      in: .inbox, selectedTab: .inbox, search: "")
+                                                      in: .inbox, search: "")
         XCTAssertEqual(listed.count, 2)
         XCTAssertEqual(InboxBadge.count(requests: requests, samples: SampleLibrary(),
                                         showsLocalExamples: true), 1)
@@ -88,7 +88,7 @@ final class InboxBadgeCountTests: XCTestCase {
             let items = showsLocalExamples ? samples.inboxItems(appendingTo: requests)
                 : requests.map(InboxItem.request)
             let listed = InboxListProjection.filteredRows(items, in: .inbox,
-                                                          selectedTab: .inbox, search: "")
+                                                          search: "")
             XCTAssertTrue(listed.contains { $0.isRetracted },
                           "A retracted row must stay visible in the Inbox list")
             XCTAssertEqual(InboxBadge.count(requests: requests, samples: samples,
