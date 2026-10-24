@@ -39,6 +39,33 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachScreenshot("portrait-master-after-native-back")
     }
 
+    func testNativeToolbarCheckPerformsSeenAction() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let searchTab = workspaceTab("Search", in: app)
+        XCTAssertTrue(searchTab.waitForExistence(timeout: 10), app.debugDescription)
+        searchTab.tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+        search.tap()
+        search.typeText("Thursday\n")
+        let row = app.descendants(matching: .any)["sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let check = app.buttons["request-finish-seen"]
+        XCTAssertTrue(check.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(check.isEnabled, app.debugDescription)
+        attachScreenshot("native-toolbar-check-before-seen")
+        check.tap()
+        XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(check.isEnabled, "The Seen action must not repeat after completion.")
+        attachScreenshot("native-toolbar-check-after-seen")
+    }
+
     private func attachScreenshot(_ name: String) {
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         screenshot.name = name
