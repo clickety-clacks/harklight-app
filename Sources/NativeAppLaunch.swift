@@ -79,6 +79,7 @@ final class NativeAppLaunch {
     @ObservationIgnored private var didFinishRestoring = false
     @ObservationIgnored private var foregroundActivationPushCheckPending = false
     @ObservationIgnored private let refreshOperation: @MainActor (Bool) async -> NativeRelayRefreshResult
+    @ObservationIgnored private let fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)?
 
     private var dismissedForegroundConnectFailure: NativeForegroundConnectFailureKey?
 
@@ -98,7 +99,8 @@ final class NativeAppLaunch {
          refreshOperation: @escaping @MainActor (Bool) async -> NativeRelayRefreshResult = { checkBlockedPush in
              await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay(
                 checkBlockedPush: checkBlockedPush)
-         }) {
+         },
+         fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil) {
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
         let enrollment = enrollmentStore ?? NativeEnrollmentStore()
         let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
@@ -110,6 +112,7 @@ final class NativeAppLaunch {
         self.diagnostics = diagnostics
         self.notificationRouter = notificationRouter
         self.refreshOperation = refreshOperation
+        self.fetchInboxPageOperation = fetchInboxPageOperation
         didFinishRestoring = initialState != nil
         activeEnrollmentRecord = initialEnrollmentRecord
         archivedAccountDepartures = initialArchivedDepartures
@@ -832,10 +835,10 @@ final class NativeAppLaunch {
         notificationRefreshFinished = true
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
         resolveNotificationNavigation()
-        resolveMessageDeepLink(synchronized: notificationSynchronized)
+        await resolveMessageDeepLink(synchronized: notificationSynchronized)
     }
 
-    private func resolveMessageDeepLink(synchronized: Bool) {
+    private func resolveMessageDeepLink(synchronized: Bool) async {
         guard let deepLink = pendingMessageDeepLink,
               case let .live(presentation) = state,
               !presentation.isReadOnly, !presentation.isLocalExample else { return }
@@ -852,7 +855,35 @@ final class NativeAppLaunch {
             if notificationNavigation?.request != key {
                 navigateToMessage(key, in: presentation)
             }
-            notificationNavigationMessage = synchronized
+            var pageAvailability = presentation.inboxPageAvailability()
+            while synchronized, pageAvailability == .more {
+                guard pendingMessageDeepLink == deepLink else { return }
+                let revisionBeforePage = presentation.presentation.revision
+                let fetched: Bool
+                if let fetchInboxPageOperation {
+                    fetched = await fetchInboxPageOperation(presentation)
+                } else {
+                    fetched = await presentation.fetchNextInboxPage()
+                }
+                guard pendingMessageDeepLink == deepLink,
+                      case let .live(current) = state, current === presentation else { return }
+                if presentation.isRetracted(key) {
+                    navigateToMessage(key, in: presentation)
+                    pendingMessageDeepLink = nil
+                    notificationNavigationMessage = "The sender retracted this message."
+                    return
+                }
+                if presentation.request(for: key) != nil {
+                    navigateToMessage(key, in: presentation)
+                    pendingMessageDeepLink = nil
+                    notificationNavigationMessage = nil
+                    return
+                }
+                pageAvailability = presentation.inboxPageAvailability()
+                guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
+            }
+            let confirmed = synchronized && notificationSynchronized
+            notificationNavigationMessage = confirmed && pageAvailability == .exhausted
                 ? "This message was never sent to this Harklight inbox."
                 : "This message hasn't arrived yet. Harklight will keep checking while it's open."
         }
@@ -951,6 +982,12 @@ struct StaleAnswerDialog: Identifiable, Equatable {
 @MainActor
 @Observable
 final class LivePresentationStore {
+    enum InboxPageAvailability: Equatable {
+        case more
+        case exhausted
+        case unknown
+    }
+
     private struct DraftBufferKey: Hashable {
         let request: RequestKey
         let revision: UInt64
@@ -1017,6 +1054,7 @@ final class LivePresentationStore {
     }
 
     @ObservationIgnored private let port: AttentionDomainPort
+    @ObservationIgnored private let attentionStore: AttentionDomainStore
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
@@ -1072,6 +1110,7 @@ final class LivePresentationStore {
         let port = AttentionDomainPort(store: store)
         let snapshot = try port.observe(context: port.context)
         self.port = port
+        self.attentionStore = store
         self.presentation = snapshot
         self.conversationThreads = try port.conversations(context: port.context).threads
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
@@ -1281,6 +1320,12 @@ final class LivePresentationStore {
             catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
         }
         return fetched
+    }
+
+    func inboxPageAvailability() -> InboxPageAvailability {
+        guard let checkpoint = try? attentionStore.snapshot(context: profileContext).inboxCheckpoint,
+              checkpoint.checkpointAccepted, checkpoint.hasInitialPage else { return .unknown }
+        return checkpoint.nextCursor == nil ? .exhausted : .more
     }
 
     func uploadNeedsReselection(_ file: ConversationFile, for key: RequestKey, revision: UInt64) -> Bool {
