@@ -883,6 +883,12 @@ final class LivePresentationStore {
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     private(set) var conversationError: String?
     @ObservationIgnored private let conversationAvailability: NativeConversationAvailability
+    var conversationAvailabilityState: NativeConversationAvailability.State {
+        if isLocalExample { return .available }
+        guard permitsDelivery, !isReadOnly else { return .unconfirmed }
+        return conversationAvailability.state(for: profileContext)
+    }
+    var canCheckConversationAvailability: Bool { permitsDelivery && !isReadOnly }
     var conversationUnavailableMessage: String? {
         guard permitsDelivery, !isReadOnly else { return nil }
         return conversationAvailability.message(for: profileContext)

@@ -71,6 +71,8 @@ final class ConversationSampleUITests: XCTestCase {
         ]
         XCTAssertTrue(noChatTitle.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(noChatDescription.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Chat unavailable"].exists,
+                       "A confirmed local no-chat example must not be presented as a server failure.")
         XCTAssertFalse(app.textFields["sample-chat-composer"].exists,
                        "A missing chat thread must not show a chat composer.")
         capture("conversation-no-chat-empty-state", app)

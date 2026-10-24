@@ -6,6 +6,57 @@ import XCTest
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testConversationAvailabilityMustBeConfirmedBeforeShowingNoChatState() {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("availability-person"),
+            deviceID: ExactText("availability-device")), transportMode: .relay)
+        let otherContext = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("other-person"),
+            deviceID: ExactText("availability-device")), transportMode: .relay)
+        let availability = NativeConversationAvailability()
+
+        XCTAssertEqual(availability.state(for: context), .unconfirmed)
+        availability.confirm(for: context, conversationsUnavailable: false)
+        XCTAssertEqual(availability.state(for: context), .available)
+        XCTAssertEqual(availability.state(for: otherContext), .unconfirmed,
+                       "A successful refresh for another profile cannot confirm this profile's chat state.")
+
+        availability.confirm(for: context, conversationsUnavailable: true)
+        XCTAssertEqual(availability.state(for: context), .unavailable)
+        XCTAssertNotNil(availability.message(for: context))
+
+        availability.reset()
+        XCTAssertEqual(availability.state(for: context), .unconfirmed)
+        XCTAssertNil(availability.message(for: context))
+    }
+
+    func testConversationPanelSeparatesNoChatFromLoadingAndUnavailableStates() {
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .available,
+            isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .noChat)
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unavailable,
+            isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .chatUnavailable)
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .available,
+            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .checkingAvailability)
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .available,
+            isRefreshing: false, hasConnectionWarning: true, canCheckAvailability: true), .connectionUnavailable,
+            "A later connection failure must not turn a missing thread into a sender-attributed no-chat claim.")
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
+            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .checkingAvailability)
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
+            isRefreshing: false, hasConnectionWarning: true, canCheckAvailability: true), .connectionUnavailable)
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unavailable,
+            isRefreshing: false, hasConnectionWarning: true, canCheckAvailability: true), .connectionUnavailable,
+            "A later relay failure supersedes a previous server capability response.")
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unavailable,
+            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .checkingAvailability)
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
+            isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: false), .offline)
+        XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
+            isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .availabilityUnconfirmed)
+    }
+
     func testNotListeningShowsTheDetachTimeAsADateNotEpochMilliseconds() {
         let date = Date(timeIntervalSince1970: 1_792_701_232.529)
         XCTAssertEqual(ConversationAvailabilityLabel.notListeningText(since: ExactText("1792701232529")),
