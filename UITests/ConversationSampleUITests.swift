@@ -172,10 +172,7 @@ final class ConversationSampleUITests: XCTestCase {
         history.swipeUp()
         XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
                       "Scrolling toward the latest message keeps the keyboard open.")
-        let dismissStart = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
-        let dismissEnd = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
-        dismissStart.press(forDuration: 0.1, thenDragTo: dismissEnd,
-                           withVelocity: .slow, thenHoldForDuration: 0.2)
+        history.swipeDown()
         XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
                        "A downward swipe on conversation history dismisses the keyboard.")
         XCTAssertEqual(composer.value as? String, chatDraft,
