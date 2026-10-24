@@ -7,7 +7,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    func testBuildEightHeaderRemainsVisibleAcrossScrollStates() {
+    func testNativeHeaderIsReachableAtTheListScrollEdge() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -16,21 +16,24 @@ final class InboxStockTabsUITests: XCTestCase {
         let settings = app.buttons["inbox-settings"]
         XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
-        attachScreenshot("Build 8 header at top", from: app)
+        XCTAssertTrue(settings.isHittable, app.debugDescription)
+        XCTAssertLessThan(abs(brand.frame.midY - settings.frame.midY), 30,
+                          "The title and Settings belong on the same native header line.")
+        attachScreenshot("Native header at list top", from: app)
 
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
         let dragStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
         let dragEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.68))
         dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
-        XCTAssertTrue(brand.exists, app.debugDescription)
-        XCTAssertTrue(settings.exists, app.debugDescription)
-        attachScreenshot("Build 8 header mid-scroll", from: app)
+        XCTAssertTrue(list.exists, app.debugDescription)
+        attachScreenshot("List after scroll", from: app)
 
-        app.swipeUp()
+        list.swipeDown()
         XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(settings.exists, app.debugDescription)
-        attachScreenshot("Build 8 header after scrolling", from: app)
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(settings.isHittable, app.debugDescription)
+        attachScreenshot("Native header restored at list top", from: app)
     }
 
     func testNativeListSearchKeepsInboxAndRepliedResults() {
@@ -77,7 +80,6 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered request in Replied.")
-        assertListHeader(in: app)
         attachScreenshot("Replied results for Archive", from: app)
     }
 
