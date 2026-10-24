@@ -125,7 +125,6 @@ struct ConversationPanel: View {
                                         .padding(verticalSizeClass == .compact ? 4 : 12)
                                     }
                                 }
-                                }
                                 .id("conversation-composer-footer")
                             }
                             .frame(minHeight: viewport.size.height, alignment: .top)
