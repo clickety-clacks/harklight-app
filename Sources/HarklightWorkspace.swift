@@ -581,7 +581,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           geometry: geometry)
         }
         .navigationSplitViewStyle(.balanced)
-        .searchable(text: $search, prompt: "Search messages")
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
@@ -964,6 +963,7 @@ struct InboxList: View {
             }
         }
         .listStyle(.plain)
+        .searchable(text: $search, prompt: "Search messages")
         .scrollContentBackground(.hidden)
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
@@ -971,7 +971,6 @@ struct InboxList: View {
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
-            DefaultToolbarItem(kind: .search, placement: .bottomBar)
             ToolbarItem(placement: .principal) {
                 if horizontalSizeClass == .compact {
                     // Compact split sidebars move trailing items to a side rail.
