@@ -1154,10 +1154,8 @@ struct LiveRequestDetail: View {
         if context.canInlineChat {
             chatButton
         } else {
-            chatButton.popover(isPresented: $chatPresented, arrowEdge: .bottom) {
+            chatButton.sheet(isPresented: $chatPresented) {
                 conversationPanel
-                    .frame(idealWidth: 380, idealHeight: 560)
-                    .presentationCompactAdaptation(.popover)
             }
         }
     }

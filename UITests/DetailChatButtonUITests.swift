@@ -36,7 +36,7 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5),
                       app.debugDescription)
         XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
-        dismissChatPopover(app, composer)
+        dismissChatSheet(app, composer)
         XCTAssertNotEqual(chat.value as? String, "1 item",
                           "Opening the conversation clears its unread indicator.")
         attachScreenshot("chat-toolbar-after-reading")
@@ -83,22 +83,35 @@ final class DetailChatButtonUITests: XCTestCase {
         chat.tap()
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(app.sheets.firstMatch.exists,
-                       "The chat panel should be a button-anchored popover, not a sheet. \(app.debugDescription)")
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5),
+                      "Chat should open as a system sheet. \(app.debugDescription)")
         XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
-        attachScreenshot("chat-popover-without-header-or-close-\(appearance.lowercased())")
-        dismissChatPopover(app, composer)
+        attachScreenshot("chat-sheet-without-header-or-close-\(appearance.lowercased())")
+        if appearance == "Light" {
+            composer.tap()
+            composer.typeText("Draft survives dismissal")
+        }
+        dismissChatSheet(app, composer)
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         XCTAssertFalse(composer.exists, app.debugDescription)
         chat.tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5),
-                      "The toolbar Chat button must keep reopening its popover. \(app.debugDescription)")
-        attachScreenshot("chat-popover-reopened-\(appearance.lowercased())")
+                      "The toolbar Chat button must keep reopening its sheet. \(app.debugDescription)")
+        if appearance == "Light" {
+            XCTAssertEqual(composer.value as? String, "Draft survives dismissal",
+                           "Swiping the sheet away must preserve the unsent chat draft.")
+        }
+        attachScreenshot("chat-sheet-reopened-\(appearance.lowercased())")
     }
 
-    private func dismissChatPopover(_ app: XCUIApplication, _ composer: XCUIElement) {
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.08)).tap()
+    private func dismissChatSheet(_ app: XCUIApplication, _ composer: XCUIElement) {
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
