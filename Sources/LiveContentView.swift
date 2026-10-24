@@ -1072,7 +1072,8 @@ struct LiveRequestDetail: View {
         }
         .toolbar {
             if activeReplyEditor == nil {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .bottomBar) {
+                    Spacer()
                     chatButton
                 }
             }

@@ -968,7 +968,15 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(returnedToFirst, app.debugDescription)
         XCTAssertTrue(app.buttons["request-heading"].label.contains("The library review moved to Thursday"),
                       "Previous returns to the first visible Search result.")
-        app.buttons["Chat"].tap()
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        let screen = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(chat.frame.midY, screen.midY,
+                             "Chat is an action in the message screen's bottom toolbar.")
+        XCTAssertGreaterThan(chat.frame.midX, screen.midX,
+                             "Chat is trailing in the bottom toolbar.")
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+        chat.tap()
         XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5))
         capture("adaptive-portrait-chat", app)
         let composer = app.textFields["sample-chat-composer"]
