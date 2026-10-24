@@ -703,10 +703,22 @@ struct LiveRequestDetail: View {
         seenActionPresentation.isPending
     }
 
+    private var seenToolbarTint: Color? {
+        guard !seenActionIsComplete, !seenActionIsPending else { return nil }
+        return HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
+    }
+
     private var finishSeenButton: some View {
         Button(action: finishSeenAction) {
-            Image(systemName: seenActionIsPending ? "clock" : "checkmark")
+            if seenActionIsComplete {
+                Label("Seen", systemImage: "checkmark")
+                    .labelStyle(.titleAndIcon)
+                    .padding(.horizontal, 6)
+            } else {
+                Image(systemName: seenActionIsPending ? "clock" : "checkmark")
+            }
         }
+        .tint(seenToolbarTint)
         .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
         .accessibilityLabel(seenActionIsComplete ? "Seen"
                             : seenActionIsPending ? "Seen pending confirmation" : "Mark as seen")
@@ -781,7 +793,12 @@ struct LiveRequestDetail: View {
     }
 
     private var answeredStatusButton: some View {
-        Button("Answered", systemImage: "checkmark", action: {})
+        Button(action: {}) {
+            Label("Replied", systemImage: "checkmark")
+                .labelStyle(.titleAndIcon)
+                .padding(.horizontal, 6)
+        }
+        .tint(nil)
         .disabled(true)
         .accessibilityLabel("Answered")
         .accessibilityValue("Completed")

@@ -507,6 +507,7 @@ final class HarklightUITests: XCTestCase {
         let answeredControl = app.buttons["request-answered"]
         XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
                       "An accepted answer shows Answered on the toolbar checkmark.")
+        attachScreenshot("Replied toolbar confirmed", from: app)
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
