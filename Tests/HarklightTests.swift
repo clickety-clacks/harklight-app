@@ -57,6 +57,16 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(destination.searchPath, [])
     }
 
+    func testMessageDeepLinkDecodesEachIdentityAsOnePathSegment() {
+        let url = URL(string: "harklight://message/app%3Aone/message%2Fwith%25")!
+        let deepLink = NativeMessageDeepLink(url: url)
+
+        XCTAssertEqual(deepLink?.senderID, "app:one")
+        XCTAssertEqual(deepLink?.messageID, "message/with%")
+        XCTAssertNil(NativeMessageDeepLink(url: URL(string: "harklight://message/app%3Aone/message/extra")!))
+        XCTAssertNil(NativeMessageDeepLink(url: URL(string: "harklight://join#invitation")!))
+    }
+
     func testNoCommentDraftSelectionRoundTripsAndLegacyDraftsDefaultToUnselected() throws {
         struct LegacyDraft: Encodable {
             let inputs: [ExactText: InputDraft]

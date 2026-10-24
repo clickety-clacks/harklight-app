@@ -74,6 +74,7 @@ final class NativeAppLaunch {
     @ObservationIgnored private var notificationSynchronized = false
     @ObservationIgnored private var notificationRefreshFinished = false
     @ObservationIgnored private var handledNotificationSerial: UInt64?
+    @ObservationIgnored private var pendingMessageDeepLink: NativeMessageDeepLink?
     @ObservationIgnored private var didFinishRestoring = false
     @ObservationIgnored private var foregroundActivationPushCheckPending = false
     @ObservationIgnored private let refreshOperation: @MainActor (Bool) async -> NativeRelayRefreshResult
@@ -362,6 +363,16 @@ final class NativeAppLaunch {
     }
 
     func receiveInvitation(_ url: URL) async {
+        if NativeMessageDeepLink.recognizes(url) {
+            notificationRouter.consumed()
+            guard let deepLink = NativeMessageDeepLink(url: url) else {
+                pendingMessageDeepLink = nil
+                notificationNavigationMessage = "This message link couldn't be opened."
+                return
+            }
+            await receiveMessageDeepLink(deepLink)
+            return
+        }
         if case .disconnected = state, let departure = disconnectedAccount {
             guard departure.removed else {
                 disconnectMessage = "Removal is still unconfirmed. Retry it with the original server before connecting again."
@@ -370,6 +381,42 @@ final class NativeAppLaunch {
             guidedJoin.beginReconnect()
         }
         await guidedJoin.receive(url)
+    }
+
+    private func receiveMessageDeepLink(_ deepLink: NativeMessageDeepLink) async {
+        pendingMessageDeepLink = deepLink
+        notificationSynchronized = false
+        notificationRefreshFinished = false
+        notificationNavigationMessage = nil
+        guard case let .live(presentation) = state,
+              !presentation.isReadOnly, !presentation.isLocalExample else { return }
+
+        let key = messageKey(for: deepLink, in: presentation)
+        navigateToMessage(key, in: presentation)
+        if presentation.isRetracted(key) {
+            pendingMessageDeepLink = nil
+            notificationNavigationMessage = "The sender retracted this message."
+        } else if presentation.request(for: key) != nil {
+            pendingMessageDeepLink = nil
+            notificationNavigationMessage = nil
+        } else {
+            notificationNavigationMessage = "Looking for this message."
+            await refreshLive()
+        }
+    }
+
+    private func messageKey(for deepLink: NativeMessageDeepLink,
+                            in presentation: LivePresentationStore) -> RequestKey {
+        RequestKey(accountScope: presentation.notificationContext.identity.personID,
+                   senderID: ExactText(deepLink.senderID),
+                   messageID: ExactText(deepLink.messageID))
+    }
+
+    private func navigateToMessage(_ key: RequestKey, in presentation: LivePresentationStore) {
+        let serial = max(notificationNavigation?.serial ?? 0,
+                         notificationRouter.intent?.serial ?? 0) &+ 1
+        notificationNavigation = NativeInboxNavigation(serial: serial, request: key)
+        presentation.selectRequest(key)
     }
 
     var canReturnToDisconnectedAccount: Bool {
@@ -781,6 +828,30 @@ final class NativeAppLaunch {
         notificationRefreshFinished = true
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
         resolveNotificationNavigation()
+        resolveMessageDeepLink(synchronized: notificationSynchronized)
+    }
+
+    private func resolveMessageDeepLink(synchronized: Bool) {
+        guard let deepLink = pendingMessageDeepLink,
+              case let .live(presentation) = state,
+              !presentation.isReadOnly, !presentation.isLocalExample else { return }
+        let key = messageKey(for: deepLink, in: presentation)
+        if presentation.isRetracted(key) {
+            navigateToMessage(key, in: presentation)
+            pendingMessageDeepLink = nil
+            notificationNavigationMessage = "The sender retracted this message."
+        } else if presentation.request(for: key) != nil {
+            navigateToMessage(key, in: presentation)
+            pendingMessageDeepLink = nil
+            notificationNavigationMessage = nil
+        } else {
+            if notificationNavigation?.request != key {
+                navigateToMessage(key, in: presentation)
+            }
+            notificationNavigationMessage = synchronized
+                ? "This message was never sent to this Harklight inbox."
+                : "This message hasn't arrived yet. Harklight will keep checking while it's open."
+        }
     }
 
     private func takeForegroundActivationPushCheck() -> Bool {
@@ -793,6 +864,7 @@ final class NativeAppLaunch {
         guard didFinishRestoring, let intent = notificationRouter.intent,
               handledNotificationSerial != intent.serial else { return }
         handledNotificationSerial = intent.serial
+        pendingMessageDeepLink = nil
         notificationSynchronized = false
         // Leave any archive surface; never activate an archive from a locator.
         selectedArchivedAccount = nil
