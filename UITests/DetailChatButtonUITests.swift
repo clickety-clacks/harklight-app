@@ -29,13 +29,13 @@ final class DetailChatButtonUITests: XCTestCase {
         let chat = app.toolbars.buttons["Chat"].exists
             ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(chat.value as? String, "Unread conversation",
-                       "The unread chat state must remain accessible in the toolbar.")
+        XCTAssertEqual(chat.value as? String, "1 item",
+                       "The native toolbar badge must expose the unread chat count.")
         chat.tap()
         XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
                       app.debugDescription)
         app.buttons["Close"].tap()
-        XCTAssertNotEqual(chat.value as? String, "Unread conversation",
+        XCTAssertNotEqual(chat.value as? String, "1 item",
                           "Opening the conversation clears its unread indicator.")
     }
 

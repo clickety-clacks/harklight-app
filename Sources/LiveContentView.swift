@@ -1107,7 +1107,7 @@ struct LiveRequestDetail: View {
         .labelStyle(.iconOnly)
         .badge(conversationIndicator == true ? 1 : 0)
         .accessibilityLabel("Chat")
-        .accessibilityValue(conversationIndicator == true ? "Unread conversation" : "")
+        .accessibilityHint(conversationIndicator == true ? "Unread conversation" : "")
     }
 
     private var requestDetailsSheet: some View {
