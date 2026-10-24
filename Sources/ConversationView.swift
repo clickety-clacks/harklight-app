@@ -23,15 +23,6 @@ struct ConversationPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if verticalSizeClass != .compact {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(sender).font(.headline)
-                    Text("About \(title)").font(.caption).foregroundStyle(.secondary)
-                    if let thread, store.conversationUnavailableMessage == nil {
-                        ConversationAvailabilityLabel(availability: thread.availability, local: store.isLocalExample)
-                    }
-                }.padding().frame(maxWidth: .infinity, alignment: .leading)
-            }
             if let thread {
                 if thread.revisionNumbers.count > 1 {
                     Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
@@ -214,12 +205,18 @@ private struct ConversationComposer: View {
     }
 
     var body: some View {
+        // Each regular glass button adds 7 points around its label, for a 44-point target.
         HStack(alignment: .bottom, spacing: 10) {
             Button {
                 if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
-            } label: { Image(systemName: "plus") }
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 30, height: 30)
+                    .contentShape(Circle())
+            }
                 .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
                 .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
+                .accessibilityIdentifier("sample-chat-add-attachment")
                 .disabled(frozen || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision))
                 .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
                     Button("Sample photo") { addExample("Photo") }
@@ -251,20 +248,27 @@ private struct ConversationComposer: View {
                             }
                         }
                     }
+                    .padding(.top, 8)
                 }
                 TextField("Write a message…", text: Binding(get: { draft.text.rawValue }, set: {
                     store.updateConversation(for: key, revision: revision, text: $0)
                 }), axis: .vertical)
                     .lineLimit(1...5).disabled(frozen || thread?.terminal != nil)
+                    .padding(.vertical, 11)
                     .accessibilityIdentifier("sample-chat-composer")
             }
-            .padding(12).glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
+            .padding(.horizontal, 12)
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
             .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
             Button { store.sendDiscussion(for: key, revision: revision) } label: {
-                Image(systemName: frozen ? "arrow.clockwise" : "arrow.up").font(.headline)
+                Image(systemName: frozen ? "arrow.clockwise" : "arrow.up")
+                    .font(.headline)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Circle())
             }
             .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
             .accessibilityLabel(store.isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
+            .accessibilityIdentifier("sample-chat-send")
             .disabled(store.isSendingDiscussion || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || store.hasUnreadyUploadReference(for: key, revision: revision) || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
         }
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
