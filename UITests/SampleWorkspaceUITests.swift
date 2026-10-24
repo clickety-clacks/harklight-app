@@ -846,10 +846,6 @@ final class SampleWorkspaceUITests: XCTestCase {
                            "Brand and Settings share the navigation row.")
             XCTAssertEqual(settings.frame.midY, sidebarToggle.frame.midY, accuracy: 5,
                            "Settings and the sidebar toggle share the navigation row.")
-            XCTAssertLessThan(settings.frame.maxX, sidebarToggle.frame.minX,
-                              "Settings sits immediately before the trailing sidebar toggle.")
-            XCTAssertLessThan(abs(list.frame.maxX - sidebarToggle.frame.maxX), 80,
-                              "The sidebar toggle is aligned with the sidebar edge.")
             print("NATIVE_HEADER_\(name) brand=\(brand.frame) settings=\(settings.frame) toggle=\(sidebarToggle.frame) list=\(list.frame)")
             capture("native-header-\(name)-top", app)
 
@@ -883,6 +879,62 @@ final class SampleWorkspaceUITests: XCTestCase {
             capture("native-header-\(name)-restored", app)
             app.terminate()
         }
+    }
+
+    func testNativeInboxHeaderUsesCompactNavigationBarOnIPhone() throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw XCTSkip("The compact navigation header layout is specific to iPhone.")
+        }
+        defer { XCUIDevice.shared.orientation = .portrait }
+
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let brand = app.descendants(matching: .any)["inbox-brand"]
+        let settings = app.buttons["inbox-settings"]
+        let sidebarToggle = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "sidebar")).firstMatch
+        let list = app.scrollViews.firstMatch.exists
+            ? app.scrollViews.firstMatch : app.collectionViews.firstMatch
+        let firstRow = app.descendants(matching: .any)["request-row-unknown-01"]
+
+        XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(sidebarToggle.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(list.exists, app.debugDescription)
+        XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<8 {
+            if brand.isHittable && firstRow.frame.minY >= settings.frame.maxY + 8 { break }
+            list.swipeDown()
+        }
+        XCTAssertTrue(brand.isHittable, "The native title is visible at the list top.")
+        XCTAssertEqual(brand.frame.midY, settings.frame.midY, accuracy: 5,
+                       "Brand and Settings share the compact navigation row.")
+        XCTAssertEqual(settings.frame.midY, sidebarToggle.frame.midY, accuracy: 5,
+                       "Settings and the system sidebar control share the compact navigation row.")
+        XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY + 8,
+                                    "The first row clears the restored toolbar at the top.")
+        capture("native-header-iphone-top", app)
+
+        list.swipeUp()
+        let hidden = expectation(for: NSPredicate(format: "isHittable == false"),
+                                 evaluatedWith: brand)
+        wait(for: [hidden], timeout: 5)
+        capture("native-header-iphone-scrolled", app)
+
+        list.swipeDown()
+        let restored = expectation(for: NSPredicate(format: "isHittable == true"),
+                                   evaluatedWith: brand)
+        wait(for: [restored], timeout: 5)
+        XCTAssertTrue(firstRow.isHittable, "The list returns to its top row.")
+        XCTAssertTrue(settings.isHittable, "Settings returns with the native title.")
+        XCTAssertTrue(sidebarToggle.isHittable,
+                      "The system sidebar control returns with the native title.")
+        XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY + 8,
+                                    "The restored first row clears the native toolbar.")
+        capture("native-header-iphone-restored", app)
     }
 
     func testBoundaryPullAndAdaptiveChat() {

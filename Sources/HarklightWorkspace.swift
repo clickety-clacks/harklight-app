@@ -595,7 +595,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(columnVisibility: $visibility) {
             InboxList(tab: tab,
-                      usesSidebarToolbarHeader: horizontalSizeClass == .regular,
                       rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
@@ -621,7 +620,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                              geometry: GeometryProxy) -> some View {
         NavigationStack(path: $searchPath) {
             InboxList(tab: .search,
-                      usesSidebarToolbarHeader: horizontalSizeClass == .regular,
                       rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
                   isWarningPresented: warningPresentationBinding(for: .search),
                   selected: navigationSelection,
@@ -820,7 +818,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 @MainActor
 struct InboxList: View {
     let tab: InboxWorkspaceTab
-    let usesSidebarToolbarHeader: Bool
     let rows: [InboxItem]
     let warnings: [String]
     var isRefreshing = false
@@ -1073,43 +1070,22 @@ struct InboxList: View {
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if !usesSidebarToolbarHeader {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        brandAndStatusHeader
-                        warningButton
-                        Spacer(minLength: 16)
-                        settingsButton.buttonStyle(.glass)
-                    }
-                    .frame(height: 52)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(designPalette.neutral.backgroundColor)
-                }
-                .background(designPalette.neutral.backgroundColor)
-            }
-        }
+        .navigationTitle("Harklight")
+        .toolbarTitleDisplayMode(.inline)
         .toolbar {
-            if usesSidebarToolbarHeader {
-                ToolbarItem(placement: .topBarLeading) {
-                    brandAndStatusHeader
-                }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    warningButton
-                    settingsButton
-                }
+            ToolbarItem(placement: .principal) {
+                brandAndStatusHeader
             }
-            if let triggerNotification {
-                ToolbarItem(placement: .topBarLeading) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                warningButton
+                settingsButton
+                if let triggerNotification {
                     Button("Open notification", action: triggerNotification)
                         .accessibilityIdentifier("harklight-test-notification")
                 }
             }
         }
-        .toolbarMinimizationBehavior(
-            usesSidebarToolbarHeader && tab != .search ? .onScrollDown : .never,
-            for: .navigationBar)
+        .toolbarMinimizationBehavior(.onScrollDown, for: .navigationBar)
         .toolbarMinimizationRestoration(.atScrollEdge, for: .navigationBar)
         .onAppear {
             guard workspaceTab == tab else { return }
