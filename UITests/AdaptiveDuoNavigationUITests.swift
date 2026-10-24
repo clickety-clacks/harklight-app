@@ -29,6 +29,14 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         hierarchy.name = "portrait-selection-hierarchy"
         hierarchy.lifetime = .keepAlways
         add(hierarchy)
+
+        let back = app.toolbars.buttons["BackButton"].exists
+            ? app.toolbars.buttons["BackButton"] : app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "The system Back control must reopen the message list.")
+        attachScreenshot("portrait-master-after-native-back")
     }
 
     private func attachScreenshot(_ name: String) {

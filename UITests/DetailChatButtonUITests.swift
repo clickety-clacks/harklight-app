@@ -31,12 +31,14 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(chat.value as? String, "1 item",
                        "The native toolbar badge must expose the unread chat count.")
+        attachScreenshot("unread-chat-toolbar-badge")
         chat.tap()
         XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
                       app.debugDescription)
         app.buttons["Close"].tap()
         XCTAssertNotEqual(chat.value as? String, "1 item",
                           "Opening the conversation clears its unread indicator.")
+        attachScreenshot("chat-toolbar-after-reading")
     }
 
     private func verifyToolbarChatButton(appearance: String) {
@@ -88,5 +90,12 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         XCTAssertFalse(app.textFields["sample-chat-composer"].exists, app.debugDescription)
+    }
+
+    private func attachScreenshot(_ name: String) {
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 }
