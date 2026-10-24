@@ -33,6 +33,8 @@ final class DetailChatButtonUITests: XCTestCase {
             ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
+        XCTAssertEqual(chat.value as? String, "Unread conversation",
+                       "The unread chat state must remain accessible in the toolbar.")
         XCTAssertFalse(app.scrollViews["message-card-scroll"].buttons["Chat"].exists,
                        "Chat belongs to the navigation container, not the message card.")
         XCTAssertFalse(app.buttons["Later"].exists, app.debugDescription)
@@ -58,6 +60,8 @@ final class DetailChatButtonUITests: XCTestCase {
         close.tap()
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
+        XCTAssertNotEqual(chat.value as? String, "Unread conversation",
+                          "Opening the conversation clears its unread indicator.")
         XCTAssertFalse(app.textFields["sample-chat-composer"].exists, app.debugDescription)
     }
 }
