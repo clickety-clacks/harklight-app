@@ -587,6 +587,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                           geometry: geometry)
         }
         .navigationSplitViewStyle(.balanced)
+        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
@@ -901,7 +902,6 @@ struct InboxList: View {
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
-        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
