@@ -96,6 +96,11 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
     }
 }
 
+@MainActor
+private final class MessageLinkRefreshPlan {
+    var step = 0
+}
+
 /// Actual pinned TLS exercises certificate-free enrollment and the explicit
 /// identity proof required for own-device removal. The iOS listener cannot
 /// request an optional certificate; that server seam needs server integration.
@@ -644,19 +649,19 @@ final class NativeGuidedTLSTests: XCTestCase {
             context: context)
         let live = try LivePresentationStore(store: domain, context: context)
         try live.refreshFromDurableStore()
-        var refreshStep = 0
+        let refreshPlan = MessageLinkRefreshPlan()
         let app = NativeAppLaunch(arguments: [],
             joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
             initialState: .live(live),
             notificationRouter: NativeNotificationRouter(defaults: defaults),
             refreshOperation: { _ in
-                if refreshStep == 2 {
+                if refreshPlan.step == 2 {
                     try! domain.apply(RelayEvent(sequence: 2,
                         body: .delivery(StoredRequest(key: targetKey, originalPayload: payload), .message)),
                         context: context)
                     try! live.refreshFromDurableStore()
                 }
-                guard refreshStep > 0 else { return .unavailable }
+                guard refreshPlan.step > 0 else { return .unavailable }
                 return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
                     confirmedContext: context, confirmedTransportAttemptID: UUID())
             })
@@ -668,12 +673,12 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNotEqual(live.selectedRequestKey, otherKey,
                           "A similar title cannot stand in for the linked sender/message identity.")
 
-        refreshStep = 1
+        refreshPlan.step = 1
         await app.refreshLive()
         XCTAssertEqual(app.notificationNavigationMessage,
                        "This message was never sent to this Harklight inbox.")
 
-        refreshStep = 2
+        refreshPlan.step = 2
         await app.refreshLive()
         XCTAssertEqual(live.selectedRequestKey, targetKey)
         XCTAssertEqual(app.notificationNavigation?.request, targetKey)
