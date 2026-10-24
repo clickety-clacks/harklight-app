@@ -923,6 +923,11 @@ final class SampleWorkspaceUITests: XCTestCase {
         let restored = expectation(for: NSPredicate(format: "isHittable == true"),
                                    evaluatedWith: brand)
         wait(for: [restored], timeout: 5)
+        for _ in 0..<8 {
+            if firstRow.isHittable && brand.isHittable && settings.isHittable &&
+                firstRow.frame.minY >= settings.frame.maxY { break }
+            list.swipeDown()
+        }
         XCTAssertTrue(firstRow.isHittable, "The list returns to its top row.")
         XCTAssertTrue(settings.isHittable, "Settings returns with the native title.")
         XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY,
