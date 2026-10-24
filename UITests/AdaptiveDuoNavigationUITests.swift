@@ -11,6 +11,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
 
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+        attachScreenshot("portrait-master-before-selection")
         row.tap()
 
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
@@ -18,11 +19,21 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Facilities desk"].exists, app.debugDescription)
         let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
         XCTAssertTrue(diagnostic.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(diagnostic.label.contains("visibility=detailOnly"),
+        let visibility = diagnostic.label.components(separatedBy: " | ")
+            .first(where: { $0.hasPrefix("visibility=") })
+        XCTAssertTrue(visibility?.contains("detailOnly") == true,
                       "Selecting one row should close the portrait master overlay. \(diagnostic.label)")
 
+        attachScreenshot("portrait-detail-after-selection")
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "portrait-selection-hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+    }
+
+    private func attachScreenshot(_ name: String) {
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        screenshot.name = "portrait-selection-detail"
+        screenshot.name = name
         screenshot.lifetime = .keepAlways
         add(screenshot)
     }
