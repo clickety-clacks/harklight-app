@@ -42,7 +42,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let row = app.descendants(matching: .any)["sample-information-0"]
+        let row = app.descendants(matching: .any)["sample-information-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
 
