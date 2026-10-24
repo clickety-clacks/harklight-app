@@ -10,6 +10,35 @@ final class DetailChatButtonUITests: XCTestCase {
         verifyToolbarChatButton(appearance: "Dark")
     }
 
+    func testUnreadChatIsExposedAndClearedFromToolbar() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let searchTab = workspaceTab("Search", in: app)
+        XCTAssertTrue(searchTab.waitForExistence(timeout: 10), app.debugDescription)
+        searchTab.tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+        search.tap()
+        search.typeText("studio collection\n")
+        let sample = app.descendants(matching: .any)["sample-warning-0"]
+        XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
+        sample.tap()
+
+        let chat = app.toolbars.buttons["Chat"].exists
+            ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(chat.value as? String, "Unread conversation",
+                       "The unread chat state must remain accessible in the toolbar.")
+        chat.tap()
+        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        app.buttons["Close"].tap()
+        XCTAssertNotEqual(chat.value as? String, "Unread conversation",
+                          "Opening the conversation clears its unread indicator.")
+    }
+
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples",
@@ -33,8 +62,6 @@ final class DetailChatButtonUITests: XCTestCase {
             ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
-        XCTAssertEqual(chat.value as? String, "Unread conversation",
-                       "The unread chat state must remain accessible in the toolbar.")
         XCTAssertFalse(app.scrollViews["message-card-scroll"].buttons["Chat"].exists,
                        "Chat belongs to the navigation container, not the message card.")
         XCTAssertFalse(app.buttons["Later"].exists, app.debugDescription)
@@ -60,8 +87,6 @@ final class DetailChatButtonUITests: XCTestCase {
         close.tap()
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
-        XCTAssertNotEqual(chat.value as? String, "Unread conversation",
-                          "Opening the conversation clears its unread indicator.")
         XCTAssertFalse(app.textFields["sample-chat-composer"].exists, app.debugDescription)
     }
 }
