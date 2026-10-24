@@ -205,12 +205,13 @@ private struct ConversationComposer: View {
     }
 
     var body: some View {
+        // Each regular glass button adds 7 points around its label, for a 44-point target.
         HStack(alignment: .bottom, spacing: 10) {
             Button {
                 if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
             } label: {
                 Image(systemName: "plus")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 30, height: 30)
                     .contentShape(Circle())
             }
                 .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
@@ -262,7 +263,7 @@ private struct ConversationComposer: View {
             Button { store.sendDiscussion(for: key, revision: revision) } label: {
                 Image(systemName: frozen ? "arrow.clockwise" : "arrow.up")
                     .font(.headline)
-                    .frame(width: 44, height: 44)
+                    .frame(width: 30, height: 30)
                     .contentShape(Circle())
             }
             .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)

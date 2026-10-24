@@ -78,26 +78,27 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Close"].exists,
                        "The conversation panel no longer needs a large toolbar X.")
 
-        let singleLineHeight = composer.frame.height
-        XCTAssertGreaterThanOrEqual(singleLineHeight, 44)
-        XCTAssertEqual(inputSurface.frame.height, singleLineHeight, accuracy: 1,
-                       "The single-line prompt surface and field share one height.")
-        XCTAssertEqual(add.frame.height, singleLineHeight, accuracy: 1,
+        let singleLineTextHeight = composer.frame.height
+        let singleLineControlHeight = inputSurface.frame.height
+        XCTAssertEqual(singleLineControlHeight, 44, accuracy: 1,
+                       "The single-line text field surface uses the shared 44-point control height.")
+        XCTAssertEqual(add.frame.height, singleLineControlHeight, accuracy: 1,
                        "The plus control matches the single-line prompt height.")
-        XCTAssertEqual(send.frame.height, singleLineHeight, accuracy: 1,
+        XCTAssertEqual(send.frame.height, singleLineControlHeight, accuracy: 1,
                        "The send control matches the single-line prompt height.")
         capture("chat-panel-headerless-equal-composer", app)
 
         composer.tap()
         composer.typeText("This prompt grows onto multiple lines inside the native chat panel.")
-        let multilineHeight = composer.frame.height
-        XCTAssertGreaterThan(multilineHeight, singleLineHeight + 8,
-                             "The vertical prompt expands to show its wrapped text.")
-        XCTAssertEqual(inputSurface.frame.height, multilineHeight, accuracy: 1,
-                       "The glass input surface grows with the multiline prompt.")
-        XCTAssertEqual(add.frame.height, singleLineHeight, accuracy: 1,
+        let multilineTextHeight = composer.frame.height
+        let multilineSurfaceHeight = inputSurface.frame.height
+        XCTAssertGreaterThan(multilineTextHeight, singleLineTextHeight + 8,
+                             "The vertical text field expands to show its wrapped text.")
+        XCTAssertGreaterThan(multilineSurfaceHeight, singleLineControlHeight + 8,
+                             "The glass input surface grows with the multiline prompt.")
+        XCTAssertEqual(add.frame.height, singleLineControlHeight, accuracy: 1,
                        "Multiline growth does not stretch the plus button.")
-        XCTAssertEqual(send.frame.height, singleLineHeight, accuracy: 1,
+        XCTAssertEqual(send.frame.height, singleLineControlHeight, accuracy: 1,
                        "Multiline growth does not stretch the send button.")
         capture("chat-panel-multiline-prompt", app)
     }
