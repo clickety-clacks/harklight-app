@@ -1003,26 +1003,6 @@ struct LiveRequestDetail: View {
             }
             .ignoresSafeArea(.keyboard)
         }
-        .overlay(alignment: .bottomTrailing) {
-            if activeReplyEditor == nil {
-                Group {
-                    if conversationIndicator == true {
-                        detailChatButton
-                            .buttonStyle(.glassProminent)
-                            .foregroundStyle(detailColors.backgroundColor)
-                    } else {
-                        detailChatButton
-                            .buttonStyle(.glass)
-                            .foregroundStyle(detailColors.textColor)
-                    }
-                }
-                .tint(detailColors.textColor)
-                .buttonBorderShape(.circle)
-                .controlSize(.large)
-                .padding(.trailing, 16)
-                .padding(.bottom, 16)
-            }
-        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let target = activeReplyEditor {
                 ReplyEditorComposer(text: replyTextBinding(for: target),
@@ -1037,6 +1017,11 @@ struct LiveRequestDetail: View {
         }
         .tint(detailColors.textColor)
         .toolbar {
+            if activeReplyEditor == nil {
+                ToolbarItem(placement: .bottomBar) {
+                    detailChatButton
+                }
+            }
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
                     if seenActionIsComplete {
@@ -1120,18 +1105,9 @@ struct LiveRequestDetail: View {
             else { chatPresented = true }
         }
         .labelStyle(.iconOnly)
-        .overlay(alignment: .topTrailing) {
-            if conversationIndicator == true {
-                Circle()
-                    .fill(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
-                    .frame(width: 12, height: 12)
-                    .overlay {
-                        Circle().strokeBorder(detailColors.textColor, lineWidth: 2)
-                    }
-                    .offset(x: -6, y: 6)
-                    .accessibilityHidden(true)
-            }
-        }
+        .badge(conversationIndicator == true ? 1 : 0)
+        .accessibilityLabel("Chat")
+        .accessibilityHint(conversationIndicator == true ? "Unread conversation" : "")
     }
 
     private var requestDetailsSheet: some View {

@@ -2,15 +2,46 @@ import XCTest
 
 @MainActor
 final class DetailChatButtonUITests: XCTestCase {
-    func testDetailChatButtonFloatsBottomTrailingInLightMode() {
-        verifyFloatingChatButton(appearance: "Light")
+    func testDetailChatUsesNativeToolbarInLightMode() {
+        verifyToolbarChatButton(appearance: "Light")
     }
 
-    func testDetailChatButtonFloatsBottomTrailingInDarkMode() {
-        verifyFloatingChatButton(appearance: "Dark")
+    func testDetailChatUsesNativeToolbarInDarkMode() {
+        verifyToolbarChatButton(appearance: "Dark")
     }
 
-    private func verifyFloatingChatButton(appearance: String) {
+    func testUnreadChatIsExposedAndClearedFromToolbar() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let searchTab = workspaceTab("Search", in: app)
+        XCTAssertTrue(searchTab.waitForExistence(timeout: 10), app.debugDescription)
+        searchTab.tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+        search.tap()
+        search.typeText("studio collection\n")
+        let sample = app.descendants(matching: .any)["sample-warning-0"]
+        XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
+        sample.tap()
+
+        let chat = app.toolbars.buttons["Chat"].exists
+            ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(chat.value as? String, "1 item",
+                       "The native toolbar badge must expose the unread chat count.")
+        attachScreenshot("unread-chat-toolbar-badge")
+        chat.tap()
+        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        app.buttons["Close"].tap()
+        XCTAssertNotEqual(chat.value as? String, "1 item",
+                          "Opening the conversation clears its unread indicator.")
+        attachScreenshot("chat-toolbar-after-reading")
+    }
+
+    private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples",
                                "-uiUserInterfaceStyle", appearance]
@@ -29,13 +60,12 @@ final class DetailChatButtonUITests: XCTestCase {
         sample.tap()
 
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5), app.debugDescription)
-        let chat = app.buttons["Chat"]
+        let chat = app.toolbars.buttons["Chat"].exists
+            ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
-        XCTAssertGreaterThan(chat.frame.midX, app.frame.midX,
-                            "Chat is placed on the trailing side of request detail.")
-        XCTAssertGreaterThan(chat.frame.midY, app.frame.midY,
-                            "Chat is placed near the bottom of request detail.")
+        XCTAssertFalse(app.scrollViews["message-card-scroll"].buttons["Chat"].exists,
+                       "Chat belongs to the navigation container, not the message card.")
         XCTAssertFalse(app.buttons["Later"].exists, app.debugDescription)
         XCTAssertFalse(app.staticTexts["Not now"].exists, app.debugDescription)
 
@@ -60,5 +90,12 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         XCTAssertFalse(app.textFields["sample-chat-composer"].exists, app.debugDescription)
+    }
+
+    private func attachScreenshot(_ name: String) {
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 }
