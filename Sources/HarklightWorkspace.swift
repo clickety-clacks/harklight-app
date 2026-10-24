@@ -635,7 +635,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
                 .searchable(text: $search, prompt: "Search")
-                .toolbar(exposesNotificationTestAction ? .visible : .hidden, for: .navigationBar)
+                .toolbar(.visible, for: .navigationBar)
                 .navigationDestination(for: InboxSelection.self) { destination in
                     detailContent(for: destination, wideChat: wideChat,
                                   inlineChat: inlineChat, geometry: geometry)
@@ -1086,7 +1086,8 @@ struct InboxList: View {
             }
         }
         .toolbarMinimizationBehavior(.onScrollDown, for: .navigationBar)
-        .toolbarMinimizationRestoration(.atScrollEdge, for: .navigationBar)
+        .toolbarMinimizationSafeAreaAdjustment(.disabled, for: .navigationBar)
+        .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
         .onAppear {
             guard workspaceTab == tab else { return }
             restoreLastViewed(using: proxy, in: tab)

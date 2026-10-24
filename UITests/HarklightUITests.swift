@@ -288,12 +288,13 @@ final class HarklightUITests: XCTestCase {
 
         // Scroll part of a row so the position Back must keep is not the list's top.
         let top = ([facilities] + others).min { $0.frame.minY < $1.frame.minY }!
-        let unscrolledTop = top.frame.minY
+        let unscrolledAnchor = review.frame.minY - list.frame.minY
         let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
         start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -(top.frame.height * 0.5 + 20))),
                     withVelocity: .slow, thenHoldForDuration: 0.5)
-        let scrolledTop = top.frame.minY
-        XCTAssertLessThan(scrolledTop, unscrolledTop - 10, "The list must be scrolled away from its top.")
+        let scrolledAnchor = review.frame.minY - list.frame.minY
+        XCTAssertLessThan(scrolledAnchor, unscrolledAnchor - 10,
+                          "The tapped request must be scrolled within the list.")
 
         let headerHidden = expectation(for: NSPredicate(format: "isHittable == false"),
                                        evaluatedWith: brand)
@@ -309,15 +310,18 @@ final class HarklightUITests: XCTestCase {
         XCTAssertFalse(app.buttons["harklight-detail-back"].exists,
                        "Detail uses the native navigation back control.")
         back.tap()
-        XCTAssertTrue(top.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(review.isHittable, "Back returns the tapped request to the visible list.")
         XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected)
         XCTAssertTrue(review.exists, "The tapped untouched request remains in Inbox after native Back.")
         XCTAssertTrue(facilities.exists, "The other untouched request remains in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
-        let kept = NSPredicate { _, _ in abs(top.frame.minY - scrolledTop) <= 1 }
+        let kept = NSPredicate { _, _ in
+            abs((review.frame.minY - list.frame.minY) - scrolledAnchor) <= 1
+        }
         let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
         XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
-                       "Back without switching messages must return to the exact list position: top row at \(top.frame.minY), expected \(scrolledTop).\n\(app.debugDescription)")
+                       "Back without switching messages must preserve the tapped row's position within the list: \(review.frame.minY - list.frame.minY), expected \(scrolledAnchor).\n\(app.debugDescription)")
     }
 
     func testSplitViewAdaptationKeepsTheSelectedMessage() {

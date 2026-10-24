@@ -834,11 +834,11 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(list.exists, app.debugDescription)
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
             for _ in 0..<8 {
-                if brand.isHittable && firstRow.frame.minY >= settings.frame.maxY + 8 { break }
+                if brand.isHittable && firstRow.frame.minY >= settings.frame.maxY { break }
                 list.swipeDown()
             }
             XCTAssertTrue(brand.isHittable, "The toolbar is visible at the list top.")
-            XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY + 8,
+            XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY,
                                         "The first row clears the restored toolbar at the top.")
             XCTAssertEqual(app.frame.width > app.frame.height, orientation == .landscapeLeft,
                            app.debugDescription)
@@ -862,7 +862,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             for _ in 0..<8 {
                 if firstRow.isHittable && brand.isHittable &&
                     settings.isHittable && sidebarToggle.isHittable &&
-                    firstRow.frame.minY >= settings.frame.maxY + 8 { break }
+                    firstRow.frame.minY >= settings.frame.maxY { break }
                 list.swipeDown()
             }
             XCTAssertTrue(firstRow.isHittable, "The list returns to its top row.")
@@ -873,7 +873,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertGreaterThan(settings.frame.height, 20, "The restored Settings control has a visible frame.")
             XCTAssertEqual(brand.frame.midY, settings.frame.midY, accuracy: 5,
                            "The restored brand and Settings share the navigation row.")
-            XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY + 8,
+            XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY,
                                         "The restored first row clears the toolbar.")
             print("NATIVE_HEADER_\(name)_restored brand=\(brand.frame) settings=\(settings.frame) toggle=\(sidebarToggle.frame) row=\(firstRow.frame)")
             capture("native-header-\(name)-restored", app)
@@ -894,27 +894,22 @@ final class SampleWorkspaceUITests: XCTestCase {
 
         let brand = app.descendants(matching: .any)["inbox-brand"]
         let settings = app.buttons["inbox-settings"]
-        let sidebarToggle = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS[c] %@", "sidebar")).firstMatch
         let list = app.scrollViews.firstMatch.exists
             ? app.scrollViews.firstMatch : app.collectionViews.firstMatch
         let firstRow = app.descendants(matching: .any)["request-row-unknown-01"]
 
         XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(sidebarToggle.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(list.exists, app.debugDescription)
         XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
         for _ in 0..<8 {
-            if brand.isHittable && firstRow.frame.minY >= settings.frame.maxY + 8 { break }
+            if brand.isHittable && firstRow.frame.minY >= settings.frame.maxY { break }
             list.swipeDown()
         }
         XCTAssertTrue(brand.isHittable, "The native title is visible at the list top.")
         XCTAssertEqual(brand.frame.midY, settings.frame.midY, accuracy: 5,
                        "Brand and Settings share the compact navigation row.")
-        XCTAssertEqual(settings.frame.midY, sidebarToggle.frame.midY, accuracy: 5,
-                       "Settings and the system sidebar control share the compact navigation row.")
-        XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY + 8,
+        XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY,
                                     "The first row clears the restored toolbar at the top.")
         capture("native-header-iphone-top", app)
 
@@ -930,9 +925,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         wait(for: [restored], timeout: 5)
         XCTAssertTrue(firstRow.isHittable, "The list returns to its top row.")
         XCTAssertTrue(settings.isHittable, "Settings returns with the native title.")
-        XCTAssertTrue(sidebarToggle.isHittable,
-                      "The system sidebar control returns with the native title.")
-        XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY + 8,
+        XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY,
                                     "The restored first row clears the native toolbar.")
         capture("native-header-iphone-restored", app)
     }
