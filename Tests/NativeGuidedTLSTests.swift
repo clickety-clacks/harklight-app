@@ -1087,7 +1087,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let availability = NativeConversationAvailability()
         let presentation = try LivePresentationStore(store: domain, context: context,
                                                      conversationAvailability: availability)
-        availability.unavailableContext = context
+        availability.confirm(for: context, conversationsUnavailable: true)
         presentation.applyRefreshResult(NativeRelayRefreshResult(relayConfirmed: true,
             pushRegistration: .confirmed, confirmedContext: context, confirmedTransportAttemptID: UUID()))
         XCTAssertEqual(presentation.conversationUnavailableMessage, "Chat is not available on this server yet.")
@@ -1095,7 +1095,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNil(presentation.pushRegistrationWarning)
         presentation.applyRefreshResult(.unavailable)
         XCTAssertNotNil(presentation.connectionWarning, "A real refresh failure must still warn even when chat is unavailable.")
-        availability.unavailableContext = nil
+        availability.confirm(for: context, conversationsUnavailable: false)
         XCTAssertNil(presentation.conversationUnavailableMessage, "A replacement connection clears the old refusal.")
     }
 
