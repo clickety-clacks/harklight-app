@@ -740,7 +740,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     lastViewedSelection = .request(key)
                     selectRequest(key)
                 }
-                visibility = destination.selection == nil ? .all : .detailOnly
+                visibility = destination.selection == nil || hasBookDivision ? .all : .detailOnly
             }
             .onChange(of: samples.selectedID) { _, id in
                 let sampleIDDescription: String = id ?? "nil"

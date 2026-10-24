@@ -49,8 +49,10 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         searchTab.tap()
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
-        search.tap()
-        search.typeText("Thursday\n")
+        let keyboard = app.keyboards.firstMatch
+        if !keyboard.waitForExistence(timeout: 5) { search.tap() }
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), app.debugDescription)
+        app.typeText("Thursday\n")
         let row = app.descendants(matching: .any)["sample-information-0"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
