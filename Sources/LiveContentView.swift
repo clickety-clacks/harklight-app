@@ -1047,7 +1047,7 @@ struct LiveRequestDetail: View {
         .toolbar {
             if activeReplyEditor == nil {
                 ToolbarItem(placement: .topBarTrailing) {
-                    detailChatButton
+                    chatButton
                 }
             }
             ToolbarItem(placement: .confirmationAction) {
@@ -1097,16 +1097,13 @@ struct LiveRequestDetail: View {
         .sheet(isPresented: $requestDetailsPresented) {
             requestDetailsSheet
         }
+        .sheet(isPresented: $chatPresented) {
+            conversationPanel
+        }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
         }
         .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
-    }
-
-    private var detailChatButton: some View {
-        chatButton.sheet(isPresented: $chatPresented) {
-            conversationPanel
-        }
     }
 
     private var chatButton: some View {

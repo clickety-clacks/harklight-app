@@ -155,7 +155,7 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     private func assertListSearchAvailable(_ app: XCUIApplication, file: StaticString = #filePath,
                                         line: UInt = #line) {
-        let field = app.searchFields.firstMatch
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5),
                       app.debugDescription, file: file, line: line)
     }
@@ -163,20 +163,19 @@ final class SampleWorkspaceUITests: XCTestCase {
     private func showList(_ app: XCUIApplication) {
         let card = app.scrollViews["message-card-scroll"]
         guard card.exists else { return }
-        let searchField = app.searchFields.firstMatch
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable {
             back.tap()
         } else {
             let sidebar = app.buttons["Show Sidebar"]
             if sidebar.exists && sidebar.isHittable { sidebar.tap() }
         }
-        XCTAssertTrue(searchField.waitForExistence(timeout: 5),
+        XCTAssertTrue(workspaceSearchField(in: app).waitForExistence(timeout: 5),
                       app.debugDescription)
     }
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
-        let field = app.searchFields.firstMatch
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         let clearText = field.buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }
@@ -185,7 +184,7 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func clearSearch(in app: XCUIApplication) {
-        let clearText = app.searchFields.firstMatch.buttons["Clear text"]
+        let clearText = workspaceSearchField(in: app).buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }
     }
 

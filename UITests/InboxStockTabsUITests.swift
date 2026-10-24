@@ -70,7 +70,7 @@ final class InboxStockTabsUITests: XCTestCase {
         assertListHeader(in: app)
         attachScreenshot("Inbox with native list search", from: app)
 
-        let searchField = app.searchFields.firstMatch
+        let searchField = workspaceSearchField(in: app)
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
         searchField.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
@@ -90,7 +90,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
         finish.tap()
 
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         XCTAssertFalse(approval.waitForExistence(timeout: 2),
@@ -110,7 +110,7 @@ final class InboxStockTabsUITests: XCTestCase {
         let inboxTab = workspaceTab("Inbox", in: app)
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
 
-        let searchField = app.searchFields.firstMatch
+        let searchField = workspaceSearchField(in: app)
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
         searchField.tap()
         searchField.typeText("no-matching-request\n")
@@ -124,13 +124,13 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(targetHeading.label.contains("Unfamiliar interface"),
                       "The notification target is presented in the visible detail: \(targetHeading.label)")
 
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected,
                       "Returning from a notification opened in Search returns to its Inbox tab.")
-        XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(workspaceSearchField(in: app).waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["request-row-facilities-01"]
             .waitForExistence(timeout: 5),
                       "Returning to Inbox shows its cleared list query.")

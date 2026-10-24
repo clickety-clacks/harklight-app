@@ -420,7 +420,7 @@ final class ConversationSampleUITests: XCTestCase {
     }
 
     private func enterSearch(_ query: String, in app: XCUIApplication) {
-        let field = app.searchFields.firstMatch
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         let clearText = field.buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }

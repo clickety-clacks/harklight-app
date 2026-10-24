@@ -45,7 +45,7 @@ final class DetailChatButtonUITests: XCTestCase {
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
 
-        let search = app.searchFields.firstMatch
+        let search = workspaceSearchField(in: app)
         XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
         search.tap()
         search.typeText("studio collection\n")

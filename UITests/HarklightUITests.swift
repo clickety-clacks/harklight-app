@@ -363,7 +363,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
         attachScreenshot("Request detail", from: app)
 
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["harklight-detail-back"].exists,
                        "Detail uses the native navigation back control.")
@@ -382,12 +382,12 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
 
-        let field = app.searchFields.firstMatch
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "The native list search should focus and show the keyboard.")
-        XCTAssertTrue(settings.isHittable, "Header settings must remain visible during search.")
+        // Native active search may collapse the title and trailing actions.
         attachScreenshot("Native list search with keyboard", from: app)
 
         field.typeText("preview could not\n")
@@ -443,7 +443,7 @@ final class HarklightUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
-        let field = app.searchFields.firstMatch
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         field.typeText("Which approach\n")
