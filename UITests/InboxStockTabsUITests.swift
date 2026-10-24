@@ -7,33 +7,52 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    func testNativeHeaderIsReachableAtTheListScrollEdge() {
+    func testNativeHeaderMinimizesOnDownScrollAndRestoresOnUpScroll() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
         let brand = app.descendants(matching: .any)["inbox-brand"]
         let settings = app.buttons["inbox-settings"]
+        let firstRow = app.descendants(matching: .any)["request-row-unknown-01"]
         XCTAssertTrue(brand.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(settings.isHittable, app.debugDescription)
-        XCTAssertLessThan(abs(brand.frame.midY - settings.frame.midY), 30,
-                          "The title and Settings belong on the same native header line.")
-        attachScreenshot("Native header at list top", from: app)
+        XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(brand.isHittable, "The native title is visible at the list top.")
+        attachScreenshot("Native header at top", from: app)
 
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-        let dragStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
-        let dragEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.68))
-        dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
-        XCTAssertTrue(list.exists, app.debugDescription)
-        attachScreenshot("List after scroll", from: app)
+        list.swipeUp()
+        let hidden = expectation(for: NSPredicate(format: "isHittable == false"),
+                                 evaluatedWith: brand)
+        wait(for: [hidden], timeout: 5)
+        XCTAssertFalse(settings.isHittable, "Settings minimizes with the native header.")
+        attachScreenshot("Native header scrolled", from: app)
 
-        list.swipeDown()
-        XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(settings.isHittable, app.debugDescription)
-        attachScreenshot("Native header restored at list top", from: app)
+        let upwardStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        upwardStart.press(forDuration: 0.05,
+                          thenDragTo: upwardStart.withOffset(CGVector(dx: 0, dy: 90)),
+                          withVelocity: .slow, thenHoldForDuration: 0.25)
+        let restoredOnUpScroll = expectation(for: NSPredicate(format: "isHittable == true"),
+                                            evaluatedWith: brand)
+        wait(for: [restoredOnUpScroll], timeout: 5)
+        XCTAssertTrue(settings.isHittable, "The native header restores when scrolling up.")
+        XCTAssertFalse(firstRow.isHittable,
+                       "The header restores while the list remains below its top edge.")
+        attachScreenshot("Native header restored while scrolling up", from: app)
+
+        for _ in 0..<12 {
+            if firstRow.isHittable && firstRow.frame.minY >= settings.frame.maxY { break }
+            list.swipeDown()
+        }
+        XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY,
+                                    "The list returns to its top row.")
+        let restored = expectation(for: NSPredicate(format: "isHittable == true"),
+                                   evaluatedWith: brand)
+        wait(for: [restored], timeout: 5)
+        XCTAssertTrue(settings.isHittable, "Settings returns with the native title.")
+        attachScreenshot("Native header restored at top", from: app)
     }
 
     func testNativeListSearchKeepsInboxAndRepliedResults() {
@@ -135,8 +154,18 @@ final class InboxStockTabsUITests: XCTestCase {
         let brand = app.descendants(matching: .any)["inbox-brand"]
         XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription,
                       file: file, line: line)
-        XCTAssertTrue(app.buttons["inbox-settings"].exists, app.debugDescription,
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription,
                       file: file, line: line)
+        XCTAssertTrue(brand.isHittable,
+                      "The native title is reachable when Search is inactive.",
+                      file: file, line: line)
+        XCTAssertTrue(settings.isHittable,
+                      "Settings is reachable when Search is inactive.",
+                      file: file, line: line)
+        XCTAssertEqual(brand.frame.midY, settings.frame.midY, accuracy: 5,
+                       "Brand and Settings share the native header line when Search is inactive.",
+                       file: file, line: line)
     }
 
     private func attachScreenshot(_ name: String, from app: XCUIApplication) {
