@@ -39,7 +39,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
 
     func testNativeToolbarCheckPerformsSeenAction() {
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
         let row = app.descendants(matching: .any)["sample-information-0"]
