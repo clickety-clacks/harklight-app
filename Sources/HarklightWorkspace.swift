@@ -635,7 +635,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
                 .searchable(text: $search, prompt: "Search")
-                .toolbar(.visible, for: .navigationBar)
                 .navigationDestination(for: InboxSelection.self) { destination in
                     detailContent(for: destination, wideChat: wideChat,
                                   inlineChat: inlineChat, geometry: geometry)
@@ -703,7 +702,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .tabViewSearchActivation(.searchTabSelection)
-            .searchPresentationToolbarBehavior(.avoidHidingContent)
             .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
             .onChange(of: workspaceTab) { oldTab, newTab in
                 if oldTab != newTab { isWarningPresented = false }
