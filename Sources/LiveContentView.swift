@@ -880,7 +880,12 @@ struct LiveRequestDetail: View {
     }
 
     var body: some View {
-        MessageCardSurface(context: context, bottomAccessoryIsFocused: activeReplyEditor != nil) {
+        MessageCardSurface(context: context,
+                           bottomAccessoryIsFocused: activeReplyEditor != nil,
+                           onDownwardContentSwipe: {
+                               guard activeReplyEditor != nil else { return }
+                               focusedReplyActionID = nil
+                           }) {
             VStack(alignment: .leading, spacing: 12) {
                 Button {
                     requestDetailsPresented = true

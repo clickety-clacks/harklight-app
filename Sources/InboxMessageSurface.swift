@@ -50,6 +50,7 @@ struct InboxCardContext {
 struct MessageCardSurface<Content: View, BottomAccessory: View>: View {
     let context: InboxCardContext
     let bottomAccessoryIsFocused: Bool
+    private let onDownwardContentSwipe: () -> Void
     private let content: () -> Content
     private let bottomAccessory: () -> BottomAccessory
     @Environment(\.colorScheme) private var colorScheme
@@ -58,15 +59,19 @@ struct MessageCardSurface<Content: View, BottomAccessory: View>: View {
     @State private var contentHeight: CGFloat = 0
     @State private var bottomAccessoryHeight: CGFloat = 0
     @State private var scrollMetrics = MessageCardScrollMetrics()
+    @State private var scrollIsInteracting = false
+    @State private var movedContentDownDuringInteraction = false
 
     private let bottomControlClearance: CGFloat = 72
 
     init(context: InboxCardContext,
          bottomAccessoryIsFocused: Bool,
+         onDownwardContentSwipe: @escaping () -> Void = {},
          @ViewBuilder content: @escaping () -> Content,
          @ViewBuilder bottomAccessory: @escaping () -> BottomAccessory) {
         self.context = context
         self.bottomAccessoryIsFocused = bottomAccessoryIsFocused
+        self.onDownwardContentSwipe = onDownwardContentSwipe
         self.content = content
         self.bottomAccessory = bottomAccessory
     }
@@ -120,7 +125,11 @@ struct MessageCardSurface<Content: View, BottomAccessory: View>: View {
                 MessageCardScrollMetrics(
                     verticalOffset: geometry.contentOffset.y + geometry.contentInsets.top,
                     contentHeight: geometry.contentSize.height)
-            } action: { _, metrics in
+            } action: { previousMetrics, metrics in
+                if scrollIsInteracting,
+                   metrics.verticalOffset < previousMetrics.verticalOffset - 1 {
+                    movedContentDownDuringInteraction = true
+                }
                 scrollMetrics = metrics
             }
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
@@ -137,6 +146,18 @@ struct MessageCardSurface<Content: View, BottomAccessory: View>: View {
                 armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
             }
             .onScrollPhaseChange { oldPhase, newPhase in
+                if newPhase == .interacting {
+                    scrollIsInteracting = true
+                    movedContentDownDuringInteraction = false
+                } else if oldPhase == .interacting {
+                    scrollIsInteracting = false
+                    if movedContentDownDuringInteraction && bottomAccessoryIsFocused {
+                        onDownwardContentSwipe()
+                    }
+                    movedContentDownDuringInteraction = false
+                } else {
+                    scrollIsInteracting = false
+                }
                 if oldPhase == .interacting && newPhase != .interacting && armedDirection != 0 {
                     context.move(armedDirection)
                 }
