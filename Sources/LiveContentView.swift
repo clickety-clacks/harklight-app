@@ -660,23 +660,10 @@ struct LiveRequestDetail: View {
 
     private var finishSeenButton: some View {
         Button(action: finishSeenAction) {
-            if seenActionIsComplete {
-                Label("Seen", systemImage: "checkmark")
-                    .labelStyle(.titleAndIcon)
-                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
-                    .font(.headline)
-            } else {
-                Image(systemName: "checkmark")
-                    .foregroundStyle(detailColors.textColor)
-                    .font(.headline)
-            }
+            Image(systemName: "checkmark")
         }
-        .tint(seenActionIsComplete
-              ? HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
-              : detailColors.textColor)
-        .opacity(seenActionIsComplete ? 0.76 : (sendControlsDisabled ? 0.48 : 1))
         .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
-        .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
+        .accessibilityLabel(seenActionIsComplete ? "Seen" : "Mark as seen")
         .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
         .accessibilityIdentifier("request-finish-seen")
     }
@@ -746,16 +733,9 @@ struct LiveRequestDetail: View {
     }
 
     private var answeredStatusButton: some View {
-        Button(action: {}) {
-            Label("Answered", systemImage: "checkmark")
-                .labelStyle(.titleAndIcon)
-                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
-                .font(.headline)
-        }
-        .tint(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
-        .opacity(0.76)
+        Button("Answered", systemImage: "checkmark", action: {})
         .disabled(true)
-        .accessibilityLabel("Answered with green checkmark")
+        .accessibilityLabel("Answered")
         .accessibilityValue("Completed")
         .accessibilityIdentifier("request-answered")
     }
@@ -992,6 +972,7 @@ struct LiveRequestDetail: View {
             .padding(.horizontal, 16).padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
             .foregroundStyle(detailColors.textColor)
+            .tint(detailColors.textColor)
         }
         .background {
             GeometryReader { geometry in
@@ -1015,33 +996,25 @@ struct LiveRequestDetail: View {
                                     onSend: closeReplyEditor)
             }
         }
-        .tint(detailColors.textColor)
         .toolbar {
             if activeReplyEditor == nil {
-                ToolbarItem(placement: .bottomBar) {
+                ToolbarItem(placement: .topBarTrailing) {
                     detailChatButton
                 }
             }
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
-                    if seenActionIsComplete {
-                        finishSeenButton.buttonStyle(.plain)
-                    } else {
-                        finishSeenButton.buttonStyle(.glass)
-                    }
+                    finishSeenButton
                 } else if let localExample {
                     Button("Finish locally", systemImage: "checkmark") {
                         closeReplyEditor()
                         localExample.finishLocally()
                     }
                     .labelStyle(.iconOnly)
-                    .buttonStyle(.glassProminent)
-                    .tint(detailColors.textColor)
-                    .foregroundStyle(detailColors.backgroundColor)
                     .disabled(!localExample.canFinishLocally || localExample.finished)
                     .accessibilityIdentifier("sample-finish")
                 } else if answerIsComplete {
-                    answeredStatusButton.buttonStyle(.plain)
+                    answeredStatusButton
                 } else {
                     Button(submitLabel, systemImage: "checkmark") {
                         if let fixtureStore {
@@ -1061,9 +1034,6 @@ struct LiveRequestDetail: View {
                         }
                     }
                         .labelStyle(.iconOnly)
-                        .buttonStyle(.glassProminent)
-                        .tint(detailColors.textColor)
-                        .foregroundStyle(detailColors.backgroundColor)
                         .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
