@@ -41,17 +41,12 @@ final class DetailChatButtonUITests: XCTestCase {
 
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples",
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "-uiUserInterfaceStyle", appearance]
         app.launch()
 
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
-        let search = app.searchFields.firstMatch
-        XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
-        search.tap()
-        search.typeText("Thursday\n")
-
-        let sample = app.descendants(matching: .any)["sample-information-0"]
+        let sample = app.descendants(matching: .any)["sample-information-2"]
         XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
         sample.tap()
 
