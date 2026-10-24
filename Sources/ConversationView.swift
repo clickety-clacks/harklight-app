@@ -3,6 +3,19 @@ import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
 
+private struct ConversationBottomAccessoryHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct ConversationScrollMetrics: Equatable {
+    var verticalOffset: CGFloat = 0
+    var contentHeight: CGFloat = 0
+}
+
 enum ConversationPanelEmptyState: Equatable {
     case noChat
     case checkingAvailability
@@ -42,6 +55,8 @@ struct ConversationPanel: View {
     @State private var previewURL: URL?
     @State private var openingFile = false
     @State private var fileError: String?
+    @State private var composerFooterHeight: CGFloat = 0
+    @State private var scrollMetrics = ConversationScrollMetrics()
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     private var thread: ConversationThread? { store.conversation(for: key) }
@@ -80,9 +95,12 @@ struct ConversationPanel: View {
                                             })
                                             .id(turn.id)
                                     }
-                                }.padding(.horizontal)
-                                Spacer(minLength: 0)
-                                VStack(spacing: 0) {
+                                }
+                                .padding(.horizontal)
+                                .padding(.bottom, composerFooterHeight)
+                                .frame(minHeight: viewport.size.height, alignment: .top)
+                                .overlay(alignment: .bottom) {
+                                    VStack(spacing: 0) {
                                     if let terminal = thread.terminal {
                                         Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                                             .font(.caption).padding(8)
@@ -116,22 +134,32 @@ struct ConversationPanel: View {
                                                 fileError = nil
                                                 inspectedFile = file
                                                 inspectedFileRevision = fileRevision
-                                            }, focusChanged: { focused in
-                                                guard focused else { return }
-                                                withAnimation(.easeOut(duration: 0.2)) {
-                                                    proxy.scrollTo("conversation-composer-footer", anchor: .bottom)
-                                                }
                                             })
                                         .padding(verticalSizeClass == .compact ? 4 : 12)
                                     }
+                                    }
+                                    .background {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(key: ConversationBottomAccessoryHeightKey.self,
+                                                                   value: geometry.size.height)
+                                        }
+                                        .allowsHitTesting(false)
+                                    }
+                                    .offset(y: scrollMetrics.verticalOffset + viewport.size.height - scrollMetrics.contentHeight)
                                 }
-                                .id("conversation-composer-footer")
                             }
-                            .frame(minHeight: viewport.size.height, alignment: .top)
                         }
                         .accessibilityIdentifier("conversation-history-scroll")
                         .scrollBounceBehavior(.always)
                         .scrollDismissesKeyboard(.interactively)
+                        .onPreferenceChange(ConversationBottomAccessoryHeightKey.self) { composerFooterHeight = $0 }
+                        .onScrollGeometryChange(for: ConversationScrollMetrics.self) { geometry in
+                            ConversationScrollMetrics(
+                                verticalOffset: geometry.contentOffset.y + geometry.contentInsets.top,
+                                contentHeight: geometry.contentSize.height)
+                        } action: { _, metrics in
+                            scrollMetrics = metrics
+                        }
                         .onChange(of: thread.turns.count) { _, _ in
                             if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
                         }
@@ -269,10 +297,8 @@ private struct ConversationComposer: View {
     let key: RequestKey
     let revision: UInt64
     let inspect: (ConversationFile, UInt64) -> Void
-    let focusChanged: (Bool) -> Void
     @State private var pickingFiles = false
     @State private var attachmentChoices = false
-    @FocusState private var textFieldFocused: Bool
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var frozen: Bool {
@@ -330,8 +356,6 @@ private struct ConversationComposer: View {
                 }), axis: .vertical)
                     .lineLimit(1...5).disabled(frozen || thread?.terminal != nil)
                     .padding(.vertical, 11)
-                    .focused($textFieldFocused)
-                    .onChange(of: textFieldFocused) { _, focused in focusChanged(focused) }
                     .accessibilityIdentifier("sample-chat-composer")
             }
             .padding(.horizontal, 12)
