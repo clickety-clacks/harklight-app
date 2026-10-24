@@ -509,6 +509,26 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertLessThan(editor.frame.height, app.windows.firstMatch.frame.height * 0.15,
                           "A short reply stays compact before the field needs to grow.")
         capture("reply-editor-reopened", app)
+        let replyContent = app.staticTexts["Your own answer"]
+        XCTAssertTrue(replyContent.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(replyContent.isHittable, app.debugDescription)
+        replyContent.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Tapping the selected reply content must leave the reply keyboard open.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        let card = app.scrollViews["message-card-scroll"]
+        let dismissStart = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        let dismissEnd = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+        dismissStart.press(forDuration: 0.1, thenDragTo: dismissEnd,
+                           withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
+                       "A downward swipe on the message content dismisses the reply keyboard.")
+        XCTAssertTrue(editor.exists, "Interactive dismissal keeps the reply editor open.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
+                       "Interactive dismissal preserves the unsent reply draft.")
+        editor.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
+                      "The reply editor can be focused again after interactive dismissal.")
         app.buttons["request-reply-send"].tap()
         XCTAssertTrue(retainedSummary.waitForExistence(timeout: 5))
 
@@ -969,6 +989,28 @@ final class SampleWorkspaceUITests: XCTestCase {
         let composer = app.textFields["sample-chat-composer"]
         composer.tap(); composer.typeText("Local keyboard check")
         XCTAssertTrue(app.buttons["Send locally"].isHittable, "Keyboard must leave the send control usable")
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        let transcript = history.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "This is an example conversation.")
+        ).firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(transcript.isHittable, app.debugDescription)
+        transcript.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 2),
+                      "Tapping conversation content must leave the composer keyboard open.")
+        XCTAssertEqual(composer.value as? String, "Local keyboard check")
+        let dismissStart = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+        let dismissEnd = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+        dismissStart.press(forDuration: 0.1, thenDragTo: dismissEnd,
+                           withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertFalse(app.keyboards.firstMatch.waitForExistence(timeout: 1.5),
+                       "A downward swipe on conversation history dismisses the keyboard.")
+        XCTAssertEqual(composer.value as? String, "Local keyboard check",
+                       "Interactive dismissal preserves the unsent conversation draft.")
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "The composer can be focused again after interactive dismissal.")
         capture("adaptive-portrait-keyboard", app)
         app.buttons["Send locally"].tap()
         XCTAssertTrue(app.staticTexts["Local keyboard check"].waitForExistence(timeout: 5))
