@@ -436,6 +436,12 @@ final class HarklightUITests: XCTestCase {
                        "The restored body Seen control remains singular after completion.")
         XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1,
                        "The completed toolbar Seen control stays in place by itself.")
+        let compactSeenControl = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let frame = finishSeen.frame
+            return frame.width > 70 && frame.width < 160 && frame.height < 60
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [compactSeenControl], timeout: 3), .completed,
+                       "The confirmed Seen label must settle into one compact toolbar button.")
         attachScreenshot("Notice detail Seen completed", from: app)
     }
 
