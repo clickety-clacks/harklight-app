@@ -208,9 +208,12 @@ private struct ConversationComposer: View {
         HStack(alignment: .bottom, spacing: 10) {
             Button {
                 if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
-            } label: { Image(systemName: "plus") }
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
+            }
                 .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
-                .frame(width: 44, height: 44)
                 .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
                 .accessibilityIdentifier("sample-chat-add-attachment")
                 .disabled(frozen || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision))
@@ -250,17 +253,19 @@ private struct ConversationComposer: View {
                     store.updateConversation(for: key, revision: revision, text: $0)
                 }), axis: .vertical)
                     .lineLimit(1...5).disabled(frozen || thread?.terminal != nil)
-                    .frame(minHeight: 44)
+                    .padding(.vertical, 11)
                     .accessibilityIdentifier("sample-chat-composer")
             }
             .padding(.horizontal, 12)
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
             .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
             Button { store.sendDiscussion(for: key, revision: revision) } label: {
-                Image(systemName: frozen ? "arrow.clockwise" : "arrow.up").font(.headline)
+                Image(systemName: frozen ? "arrow.clockwise" : "arrow.up")
+                    .font(.headline)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
             }
             .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
-            .frame(width: 44, height: 44)
             .accessibilityLabel(store.isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
             .accessibilityIdentifier("sample-chat-send")
             .disabled(store.isSendingDiscussion || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || store.hasUnreadyUploadReference(for: key, revision: revision) || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
