@@ -3,6 +3,33 @@ import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
 
+enum ConversationPanelEmptyState: Equatable {
+    case noChat
+    case checkingAvailability
+    case chatUnavailable
+    case connectionUnavailable
+    case offline
+    case availabilityUnconfirmed
+
+    @MainActor
+    static func resolve(availability: NativeConversationAvailability.State,
+                        isRefreshing: Bool,
+                        hasConnectionWarning: Bool,
+                        canCheckAvailability: Bool) -> Self {
+        if isRefreshing { return .checkingAvailability }
+        if hasConnectionWarning { return .connectionUnavailable }
+
+        switch availability {
+        case .unavailable:
+            return .chatUnavailable
+        case .available:
+            return .noChat
+        case .unconfirmed:
+            return canCheckAvailability ? .availabilityUnconfirmed : .offline
+        }
+    }
+}
+
 @MainActor
 struct ConversationPanel: View {
     let store: LivePresentationStore
@@ -97,8 +124,37 @@ struct ConversationPanel: View {
                         .padding(verticalSizeClass == .compact ? 4 : 12)
                 }
             } else {
-                ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.bubble.right",
-                    description: Text("This request has no conversation record. Its existing answer remains available."))
+                switch ConversationPanelEmptyState.resolve(
+                    availability: store.conversationAvailabilityState,
+                    isRefreshing: store.isRefreshing,
+                    hasConnectionWarning: store.connectionWarning != nil,
+                    canCheckAvailability: store.canCheckConversationAvailability
+                ) {
+                case .noChat:
+                    ContentUnavailableView("No chat", systemImage: "bubble.left.and.bubble.right",
+                        description: Text("The agent that sent this didn’t open a chat for it. You can still respond to the message itself."))
+                        .accessibilityIdentifier("conversation-no-chat-empty-state")
+                case .checkingAvailability:
+                    ProgressView("Checking chat availability…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityIdentifier("conversation-availability-checking")
+                case .chatUnavailable:
+                    ContentUnavailableView("Chat unavailable", systemImage: "bubble.left.and.bubble.right",
+                        description: Text("Chat is not available on this server yet."))
+                        .accessibilityIdentifier("conversation-unavailable")
+                case .connectionUnavailable:
+                    ContentUnavailableView("Chat status unavailable", systemImage: "wifi.slash",
+                        description: Text("The server connection could not confirm whether a chat was opened."))
+                        .accessibilityIdentifier("conversation-status-unavailable")
+                case .offline:
+                    ContentUnavailableView("Chat status unavailable offline", systemImage: "wifi.slash",
+                        description: Text("This offline view cannot confirm whether a chat was opened."))
+                        .accessibilityIdentifier("conversation-status-offline")
+                case .availabilityUnconfirmed:
+                    ContentUnavailableView("Chat status not confirmed", systemImage: "questionmark.bubble",
+                        description: Text("The server has not confirmed whether a chat was opened yet."))
+                        .accessibilityIdentifier("conversation-status-unconfirmed")
+                }
             }
         }
         .onAppear { if selectedRevision == nil { selectedRevision = thread?.currentRevision } }

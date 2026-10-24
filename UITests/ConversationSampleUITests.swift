@@ -49,6 +49,44 @@ final class ConversationSampleUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testNoChatStateExplainsMissingThreadAndKeepsMessageActionAvailable() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-1"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let seenAction = app.buttons["request-seen-action"]
+        XCTAssertTrue(seenAction.waitForExistence(timeout: 5), app.debugDescription)
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+
+        let noChatTitle = app.staticTexts["No chat"]
+        let noChatDescription = app.staticTexts[
+            "The agent that sent this didn’t open a chat for it. You can still respond to the message itself."
+        ]
+        XCTAssertTrue(noChatTitle.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(noChatDescription.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Chat unavailable"].exists,
+                       "A confirmed local no-chat example must not be presented as a server failure.")
+        XCTAssertFalse(app.textFields["sample-chat-composer"].exists,
+                       "A missing chat thread must not show a chat composer.")
+        capture("conversation-no-chat-empty-state", app)
+
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(noChatTitle.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(seenAction.exists, "The message's Seen response remains available outside the no-chat view.")
+    }
+
     func testChatPanelRemovesHeaderAndKeepsComposerControlsAlignedAsPromptGrows() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

@@ -785,10 +785,33 @@ final class ForegroundConnectDeadline {
 @MainActor
 @Observable
 final class NativeConversationAvailability {
-    var unavailableContext: ProfileContext?
+    enum State: Equatable {
+        case unconfirmed
+        case available
+        case unavailable
+    }
+
+    // A missing thread is authoritative only after this profile's refresh confirms chat availability.
+    private(set) var confirmedContext: ProfileContext?
+    private(set) var unavailableContext: ProfileContext?
+
+    func state(for context: ProfileContext) -> State {
+        guard confirmedContext == context else { return .unconfirmed }
+        return unavailableContext == context ? .unavailable : .available
+    }
+
+    func confirm(for context: ProfileContext, conversationsUnavailable: Bool) {
+        confirmedContext = context
+        unavailableContext = conversationsUnavailable ? context : nil
+    }
+
+    func reset() {
+        confirmedContext = nil
+        unavailableContext = nil
+    }
 
     func message(for context: ProfileContext) -> String? {
-        unavailableContext == context ? String(localized: "Chat is not available on this server yet.") : nil
+        state(for: context) == .unavailable ? String(localized: "Chat is not available on this server yet.") : nil
     }
 }
 
@@ -801,7 +824,7 @@ final class NativeRelayLifecycle {
 
     let conversationAvailability = NativeConversationAvailability()
     private var core: NativeRelayCore? {
-        didSet { conversationAvailability.unavailableContext = nil }
+        didSet { conversationAvailability.reset() }
     }
     private var transport: URLSessionInstallationSession?
     private var context: ProfileContext?
@@ -1323,7 +1346,7 @@ final class NativeRelayLifecycle {
         guard refreshGeneration == generation, self.context == context, self.core === core else {
             throw NativeRelayCoreError.inactive
         }
-        conversationAvailability.unavailableContext = conversationsUnavailable ? context : nil
+        conversationAvailability.confirm(for: context, conversationsUnavailable: conversationsUnavailable)
         confirmedRelayContext = context
         if let configuration {
             let threads = try configuration.store.conversationSnapshot(context: context).threads
