@@ -525,3 +525,17 @@ private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIEleme
     if tabBarButton.exists { return tabBarButton }
     return app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
 }
+
+@MainActor
+private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
+    let field = app.searchFields.firstMatch
+    if field.exists { return field }
+    let list = app.collectionViews.firstMatch
+    if list.exists {
+        for _ in 0..<3 {
+            list.swipeDown()
+            if field.waitForExistence(timeout: 1) { break }
+        }
+    }
+    return field
+}
