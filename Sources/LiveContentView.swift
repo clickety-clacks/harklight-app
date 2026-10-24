@@ -2,6 +2,45 @@ import AttentionDomain
 import SwiftUI
 import UIKit
 
+struct SeenActionPresentation: Equatable {
+    let status: InformationalSeenStatus
+
+    var isPending: Bool { status == .pending }
+    var isCompleted: Bool { status == .confirmed }
+
+    var title: LocalizedStringResource {
+        switch status {
+        case .pending: "Pending"
+        case .confirmed: "Seen"
+        case .available, .resolvedWithoutSeen: "Seen"
+        }
+    }
+
+    var symbolName: String {
+        switch status {
+        case .pending: "clock"
+        case .confirmed: "checkmark"
+        case .available, .resolvedWithoutSeen: "checkmark"
+        }
+    }
+
+    var accessibilityLabel: LocalizedStringResource {
+        switch status {
+        case .pending: "Seen pending confirmation"
+        case .confirmed: "Seen with green checkmark"
+        case .available, .resolvedWithoutSeen: "Mark as seen"
+        }
+    }
+
+    var accessibilityValue: LocalizedStringResource {
+        switch status {
+        case .pending: "Pending"
+        case .confirmed: "Completed"
+        case .available, .resolvedWithoutSeen: "Available"
+        }
+    }
+}
+
 /// True while a reply editor below has keyboard focus. Auto-presented surfaces
 /// (the warning popover, the connection alert) defer while this is set, because
 /// presenting over the editor resigns first responder mid-typing. They present
@@ -647,15 +686,29 @@ struct LiveRequestDetail: View {
         return availableSeenAction != nil
     }
 
+    private var seenActionPresentation: SeenActionPresentation {
+        SeenActionPresentation(status: request.informationalSeenStatus ?? .available)
+    }
+
     private func finishSeenAction() {
         if let localExample { localExample.finishLocally() }
         else if let availableSeenAction { submitSeenAction(availableSeenAction) }
     }
 
     private var seenActionIsComplete: Bool {
-        localExample?.localSeenSelected == true ||
-            request.informationalSeenStatus == .pending ||
-            request.informationalSeenStatus == .confirmed
+        localExample?.localSeenSelected == true || seenActionPresentation.isCompleted
+    }
+
+    private var seenActionIsPending: Bool {
+        seenActionPresentation.isPending
+    }
+
+    private var seenActionColor: Color {
+        if seenActionIsComplete {
+            return HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
+        }
+        if seenActionIsPending { return detailColors.secondaryTextColor }
+        return detailColors.textColor
     }
 
     private var finishSeenButton: some View {
@@ -663,21 +716,32 @@ struct LiveRequestDetail: View {
             if seenActionIsComplete {
                 Label("Seen", systemImage: "checkmark")
                     .labelStyle(.titleAndIcon)
-                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).accent.seenColor)
+                    .foregroundStyle(seenActionColor)
+                    .font(.headline)
+            } else if seenActionIsPending {
+                Label {
+                    Text(seenActionPresentation.title)
+                } icon: {
+                    Image(systemName: seenActionPresentation.symbolName)
+                }
+                    .labelStyle(.titleAndIcon)
+                    .foregroundStyle(seenActionColor)
                     .font(.headline)
             } else {
                 Image(systemName: "checkmark")
-                    .foregroundStyle(detailColors.textColor)
+                    .foregroundStyle(seenActionColor)
                     .font(.headline)
             }
         }
-        .tint(seenActionIsComplete
-              ? HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
-              : detailColors.textColor)
+        .tint(seenActionColor)
         .opacity(seenActionIsComplete ? 0.76 : (sendControlsDisabled ? 0.48 : 1))
         .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
-        .accessibilityLabel(seenActionIsComplete ? "Seen with green checkmark" : "Mark as seen")
-        .accessibilityValue(seenActionIsComplete ? "Completed" : "Available")
+        .accessibilityLabel(Text(localExample?.localSeenSelected == true
+                                 ? "Seen with green checkmark"
+                                 : seenActionPresentation.accessibilityLabel))
+        .accessibilityValue(Text(localExample?.localSeenSelected == true
+                                 ? "Completed"
+                                 : seenActionPresentation.accessibilityValue))
         .accessibilityIdentifier("request-finish-seen")
     }
 
@@ -1599,10 +1663,28 @@ private struct LiveCompatibilityActions: View {
             : store.draft(for: request.key, revision: request.requestRevision)?.compatibility.selectedActionID
     }
 
+    private var seenActionPresentation: SeenActionPresentation {
+        SeenActionPresentation(status: request.informationalSeenStatus ?? .available)
+    }
+
     private var seenActionIsComplete: Bool {
-        localExample?.localSeenSelected == true ||
-            request.informationalSeenStatus == .pending ||
-            request.informationalSeenStatus == .confirmed
+        localExample?.localSeenSelected == true || seenActionPresentation.isCompleted
+    }
+
+    private var seenActionIsPending: Bool {
+        seenActionPresentation.isPending
+    }
+
+    private var seenActionColor: Color {
+        if seenActionIsComplete { return seenColor }
+        if seenActionIsPending { return detailColors.secondaryTextColor }
+        return detailColors.textColor
+    }
+
+    private var seenActionSymbol: String {
+        if seenActionIsComplete { return "checkmark" }
+        if seenActionIsPending { return seenActionPresentation.symbolName ?? "clock" }
+        return "eye"
     }
 
     private func activate(_ action: ProjectedAction) {
@@ -1653,18 +1735,30 @@ private struct LiveCompatibilityActions: View {
                     }
                 } label: {
                     HStack(spacing: 10) {
-                        Image(systemName: seenActionIsComplete ? "checkmark" : "eye")
-                            .foregroundStyle(seenActionIsComplete ? seenColor : detailColors.textColor)
-                        Text(seenActionIsComplete ? "Seen" : (actions.first?.label.rawValue ?? "Seen"))
-                            .foregroundStyle(seenActionIsComplete ? seenColor : detailColors.textColor)
+                        Image(systemName: seenActionSymbol)
+                            .foregroundStyle(seenActionColor)
+                        if seenActionIsComplete {
+                            Text("Seen").foregroundStyle(seenActionColor)
+                        } else if seenActionIsPending {
+                            Text(seenActionPresentation.title).foregroundStyle(seenActionColor)
+                        } else {
+                            Text(actions.first?.label.rawValue ?? "Seen")
+                                .foregroundStyle(seenActionColor)
+                        }
                     }
                     .font(.headline)
                     .frame(maxWidth: .infinity, minHeight: 50)
                 }
                 .buttonStyle(.glass)
-                .tint(seenActionIsComplete ? seenColor : detailColors.textColor)
+                .tint(seenActionColor)
                 .disabled(sendDisabled || seenStatus != .available)
                 .opacity(seenActionIsComplete ? 0.76 : (sendDisabled ? 0.48 : 1))
+                .accessibilityLabel(Text(localExample?.localSeenSelected == true
+                                         ? "Seen with green checkmark"
+                                         : seenActionPresentation.accessibilityLabel))
+                .accessibilityValue(Text(localExample?.localSeenSelected == true
+                                         ? "Completed"
+                                         : seenActionPresentation.accessibilityValue))
                 .accessibilityIdentifier("request-seen-action")
             case .resolvedWithoutSeen:
                 Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
