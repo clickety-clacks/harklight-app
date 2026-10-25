@@ -478,8 +478,33 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertLessThanOrEqual(editor.frame.maxY, keyboard.frame.minY + 2,
                                  "The floating reply field sits above the keyboard.")
         editor.typeText("Keep the smaller first step.")
+        XCTAssertFalse(chat.isHittable,
+                       "The keyboard may cover the bottom-toolbar Chat action while replying.")
+        capture("reply-draft-chat-covered-by-keyboard", app)
+
+        let messageCardScroll = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(messageCardScroll.exists, app.debugDescription)
+        messageCardScroll.swipeDown()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5),
+                      "A downward content swipe dismisses the reply keyboard.")
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(chat.isHittable, "Chat is reachable after dismissing the keyboard.")
+        chat.tap()
+        let chatComposer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(chatComposer.waitForExistence(timeout: 5), app.debugDescription)
+        capture("reply-draft-chat-sheet-open", app)
+        dismissChatSheet(app, chatComposer)
+        XCTAssertTrue(chatComposer.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
+                       "Opening and dismissing Chat preserves the unsent reply draft.")
+        capture("reply-draft-after-chat-dismissal", app)
+
         let sendReply = app.buttons["request-reply-send"]
         XCTAssertTrue(sendReply.waitForExistence(timeout: 5), app.debugDescription)
+        editor.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
+                      "The reply can be resumed after closing Chat.")
         sendReply.tap()
         let collapsedReply = app.buttons["request-input-answer-reply-own"]
         XCTAssertTrue(collapsedReply.waitForExistence(timeout: 5), app.debugDescription)
