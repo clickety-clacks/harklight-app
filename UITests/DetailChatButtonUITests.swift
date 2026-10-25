@@ -2,6 +2,33 @@ import XCTest
 
 @MainActor
 final class DetailChatButtonUITests: XCTestCase {
+    func testChatUsesTrailingBottomToolbarAndPresentsSheet() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10),
+                      app.debugDescription)
+        let sample = app.descendants(matching: .any)["sample-information-2"]
+        XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
+        sample.tap()
+        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+
+        let chat = app.toolbars.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        let screen = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(chat.frame.midY, screen.midY,
+                             "Chat belongs in the message screen's bottom toolbar.")
+        XCTAssertGreaterThan(chat.frame.midX, screen.midX,
+                             "Chat is trailing in the bottom toolbar.")
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+
+        chat.tap()
+        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+    }
+
     func testDetailChatUsesNativeToolbarInLightMode() {
         verifyToolbarChatButton(appearance: "Light")
     }

@@ -472,6 +472,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "Selecting Reply focuses its editor.")
+        XCTAssertTrue(app.buttons["Chat"].isHittable,
+                      "Chat stays available while the reply editor is active.")
         XCTAssertLessThanOrEqual(editor.frame.maxY, keyboard.frame.minY + 2,
                                  "The floating reply field sits above the keyboard.")
         editor.typeText("Keep the smaller first step.")
