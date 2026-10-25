@@ -85,8 +85,10 @@ final class DetailChatButtonUITests: XCTestCase {
             XCTFail("The chat sheet's composer did not appear. \(app.debugDescription)")
             return
         }
+        attachScreenshot("wide-detail-chat-sheet-presented")
         dismissNativeChatSheet(app, chatSheet, composer)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
+        attachScreenshot("wide-detail-chat-toolbar-after-sheet-dismissal")
     }
 
     func testUnreadChatIsExposedAndClearedFromToolbar() {
