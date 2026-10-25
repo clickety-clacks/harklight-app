@@ -58,8 +58,7 @@ final class DetailChatButtonUITests: XCTestCase {
         attachScreenshot("wide-detail-trailing-chat-toolbar-before-tap")
         chat.tap()
 
-        let chatPresentationHosts = app.otherElements
-            .containing(.other, identifier: "PopoverDismissRegion")
+        let chatPresentationHosts = app.popovers
             .containing(.other, identifier: "sample-chat-input-surface")
         let presentationAppears = expectation(for: NSPredicate(format: "count == 1"),
                                               evaluatedWith: chatPresentationHosts)
