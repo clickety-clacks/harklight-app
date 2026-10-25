@@ -3,8 +3,8 @@ import XCTest
 import AttentionDomain
 
 final class ReleaseNotesTests: XCTestCase {
-    func testFirstReleaseNoteShowsMarketingVersionAndRetainsBuildIdentity() {
-        let first = HarklightReleaseNotes.entries[0]
+    func testBuildOneReleaseNoteShowsMarketingVersionAndRetainsBuildIdentity() throws {
+        let first = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == "1" })
 
         XCTAssertEqual(first.marketingVersion, "0.1.0")
         XCTAssertEqual(first.buildIdentifier, "1")

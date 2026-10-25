@@ -27,6 +27,22 @@ enum HarklightReleaseNotes {
     /// user-visible changes, recording both CFBundleVersion and MARKETING_VERSION.
     static let entries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
+            buildIdentifier: "59",
+            marketingVersion: "0.1.0",
+            title: LocalizedStringResource(
+                "Settings is easier to reach",
+                comment: "Heading for the release that moved Settings into the top toolbar."),
+            introduction: LocalizedStringResource(
+                "Open Settings directly from the top toolbar.",
+                comment: "Introduction for the Settings toolbar update."),
+            highlights: [
+                .init(
+                    id: "settings-toolbar",
+                    text: LocalizedStringResource(
+                        "The Settings button stays in the toolbar at every screen size.",
+                        comment: "Release-note detail about finding Settings across layouts."))
+            ]),
+        HarklightReleaseNote(
             buildIdentifier: "1",
             marketingVersion: "0.1.0",
             title: LocalizedStringResource(
