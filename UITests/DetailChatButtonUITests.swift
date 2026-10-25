@@ -37,7 +37,7 @@ final class DetailChatButtonUITests: XCTestCase {
         }
 
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
 
         let settings = app.buttons["inbox-settings"]
@@ -54,10 +54,10 @@ final class DetailChatButtonUITests: XCTestCase {
         done.tap()
         XCTAssertTrue(settingsTitle.waitForNonExistence(timeout: 5), app.debugDescription)
 
-        let sample = app.descendants(matching: .any)["sample-information-2"]
-        XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
-        sample.tap()
-        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
+        let request = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(request.waitForExistence(timeout: 5), app.debugDescription)
+        request.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
                       app.debugDescription)
 
         let chat = app.toolbars.buttons["Chat"].exists
@@ -66,7 +66,9 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         attachScreenshot("chat-toolbar-before-tap")
         chat.tap()
-        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.staticTexts["No chat"].waitForExistence(timeout: 5),
+                      "The production request's Chat panel should open even when it has no thread.\n\(app.debugDescription)")
+        XCTAssertTrue(app.staticTexts["The agent that sent this didn’t open a chat for it. You can still respond to the message itself."].exists,
                       app.debugDescription)
         attachScreenshot("chat-panel-open")
     }
