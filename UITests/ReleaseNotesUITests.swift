@@ -36,62 +36,62 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        let historyList = app.collectionViews.element(boundBy: app.collectionViews.count - 1)
-        XCTAssertTrue(historyList.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(historyList.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
+        let currentBuildHeader = app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"]
+        XCTAssertTrue(currentBuildHeader.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(currentBuildHeader.exists,
                       "Settings history identifies the build attached to this release note.")
-        XCTAssertTrue(historyList.staticTexts["A single rounded Reply box"].exists,
+        XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
                       app.debugDescription)
-        XCTAssertTrue(historyList.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
+        XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
                       app.debugDescription)
 
-        let build61Header = historyList.staticTexts["Version 0.1.0 · Build 61"]
-        let inboxScrollingTitle = historyList.staticTexts["Scroll through your Inbox more smoothly"]
-        let inboxScrollingDetail = historyList.staticTexts[
+        let build61Header = app.staticTexts["Version 0.1.0 · Build 61"]
+        let inboxScrollingTitle = app.staticTexts["Scroll through your Inbox more smoothly"]
+        let inboxScrollingDetail = app.staticTexts[
             "Scrolling the inbox list does less work, so it should feel smoother."
         ]
         XCTAssertTrue(build61Header.isHittable,
                       "The earlier numbered release is visible before history is scrolled.")
         XCTAssertTrue(inboxScrollingTitle.isHittable, app.debugDescription)
         XCTAssertTrue(inboxScrollingDetail.isHittable, app.debugDescription)
-        XCTAssertTrue(historyList.staticTexts["See clearer release notes"].isHittable,
+        XCTAssertTrue(app.staticTexts["See clearer release notes"].isHittable,
                       app.debugDescription)
-        XCTAssertTrue(historyList.staticTexts[
+        XCTAssertTrue(app.staticTexts[
             "Each update now has an icon, a short title and a clear description."
         ].isHittable, app.debugDescription)
         attachScreenshot("release-notes-settings-history", from: app)
 
-        let build59Header = historyList.staticTexts["Version 0.1.0 · Build 59"]
-        revealHistoryElement(build59Header, in: historyList)
+        let build59Header = app.staticTexts["Version 0.1.0 · Build 59"]
+        revealHistoryElement(build59Header, in: app)
         XCTAssertTrue(build59Header.isHittable,
                       "Settings history keeps earlier numbered notes after the new release.")
-        let settingsTitle = historyList.staticTexts["Settings in the toolbar"]
-        revealHistoryElement(settingsTitle, in: historyList)
+        let settingsTitle = app.staticTexts["Settings in the toolbar"]
+        revealHistoryElement(settingsTitle, in: app)
         XCTAssertTrue(settingsTitle.isHittable,
                       "Settings history retains the confirmed Build 59 entry.")
-        let datedHistoryHeader = historyList.staticTexts["Version 0.1.0 · Earlier on October 25, 2026"]
-        revealHistoryElement(datedHistoryHeader, in: historyList)
+        let datedHistoryHeader = app.staticTexts["Version 0.1.0 · Earlier on October 25, 2026"]
+        revealHistoryElement(datedHistoryHeader, in: app)
         XCTAssertTrue(datedHistoryHeader.isHittable,
                       "Settings history identifies the dated entry without a build number.")
-        let replyTitle = historyList.staticTexts["Reply right from the message"]
-        revealHistoryElement(replyTitle, in: historyList)
+        let replyTitle = app.staticTexts["Reply right from the message"]
+        revealHistoryElement(replyTitle, in: app)
         XCTAssertTrue(replyTitle.isHittable,
                       "Settings history includes the shipped inline Reply field.")
-        let listeningTitle = historyList.staticTexts["See when your agent is listening"]
-        revealHistoryElement(listeningTitle, in: historyList)
+        let listeningTitle = app.staticTexts["See when your agent is listening"]
+        revealHistoryElement(listeningTitle, in: app)
         XCTAssertTrue(listeningTitle.isHittable,
                       app.debugDescription)
-        let keyboardTitle = historyList.staticTexts["Keep your keyboard while reading"]
-        revealHistoryElement(keyboardTitle, in: historyList)
+        let keyboardTitle = app.staticTexts["Keep your keyboard while reading"]
+        revealHistoryElement(keyboardTitle, in: app)
         XCTAssertTrue(keyboardTitle.isHittable,
                       app.debugDescription)
         attachScreenshot("release-notes-settings-history-lower", from: app)
     }
 
-    private func revealHistoryElement(_ element: XCUIElement, in list: XCUIElement) {
+    private func revealHistoryElement(_ element: XCUIElement, in app: XCUIApplication) {
         for _ in 0..<8 where !element.isHittable {
-            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
-            let end = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.70))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.56))
             start.press(forDuration: 0.05, thenDragTo: end)
         }
         XCTAssertTrue(element.isHittable,
