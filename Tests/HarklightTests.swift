@@ -471,6 +471,24 @@ final class HarklightTests: XCTestCase {
         }
     }
 
+    func testSessionChoicesAndReplyDescriptorPreservesBothAnswerKinds() throws {
+        // Matches the answer_ui emitted for two choices by harklight-agent.
+        let descriptor = try JSONValue.parse(Data(#"{"schema":"attention-client.actions/1","actions":[{"id":"choice-1","label":"Approve","kind":"value","value":"Approve"},{"id":"choice-2","label":"Hold","kind":"value","value":"Hold"},{"id":"reply","label":"Reply","kind":"text"}]}"#.utf8))
+
+        guard case let .compatibility(form) = RequestInterface.recognize(descriptor) else {
+            return XCTFail("The session action descriptor must be answerable.")
+        }
+        XCTAssertEqual(form.actions.map(\.id), [ExactText("choice-1"), ExactText("choice-2"), ExactText("reply")])
+        XCTAssertEqual(form.actions.map(\.kind), [.value, .value, .text])
+        XCTAssertEqual(form.actions.map(\.label), [ExactText("Approve"), ExactText("Hold"), ExactText("Reply")])
+        XCTAssertEqual(AnswerComposer.compose(action: form.actions[0], editedText: ExactText("ignored")),
+                       .string(ExactText("Approve")))
+        XCTAssertEqual(AnswerComposer.compose(action: form.actions[1], editedText: ExactText("ignored")),
+                       .string(ExactText("Hold")))
+        XCTAssertEqual(AnswerComposer.compose(action: form.actions[2], editedText: ExactText("  Another option?\n")),
+                       .string(ExactText("  Another option?\n")))
+    }
+
     @MainActor
     func testInvalidTypedStatesCapacityAndUnsupportedDocumentsCreateNoReceipt() throws {
         let fixtures = try loadFixtures()
