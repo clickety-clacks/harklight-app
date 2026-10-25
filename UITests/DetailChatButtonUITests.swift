@@ -54,11 +54,38 @@ final class DetailChatButtonUITests: XCTestCase {
         let chat = app.toolbars.buttons["Chat"].exists
             ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+        attachScreenshot("wide-detail-trailing-chat-toolbar-before-tap")
         chat.tap()
-        let composer = app.textFields["sample-chat-composer"]
-        XCTAssertTrue(composer.waitForExistence(timeout: 5),
-                      app.debugDescription)
-        dismissChatSheet(app, composer)
+
+        let chatSheets = app.sheets.containing(.other,
+                                               identifier: "sample-chat-input-surface")
+        let sheetAppears = expectation(for: NSPredicate(format: "count == 1"),
+                                       evaluatedWith: chatSheets)
+        wait(for: [sheetAppears], timeout: 5)
+        guard chatSheets.count == 1 else {
+            XCTFail("Expected one presented chat sheet containing the composer surface. \(app.debugDescription)")
+            return
+        }
+        let chatSheet = chatSheets.element(boundBy: 0)
+        let inputSurfaces = chatSheet.otherElements.matching(
+            identifier: "sample-chat-input-surface")
+        guard inputSurfaces.count == 1 else {
+            XCTFail("Expected one composer surface inside the chat sheet. \(app.debugDescription)")
+            return
+        }
+        let composers = inputSurfaces.textFields.matching(
+            identifier: "sample-chat-composer")
+        guard composers.count == 1 else {
+            XCTFail("Expected one composer inside the chat sheet's composer surface. \(app.debugDescription)")
+            return
+        }
+        let composer = composers.element(boundBy: 0)
+        guard composer.waitForExistence(timeout: 5) else {
+            XCTFail("The chat sheet's composer did not appear. \(app.debugDescription)")
+            return
+        }
+        dismissNativeChatSheet(app, chatSheet, composer)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
     }
 
@@ -160,6 +187,19 @@ final class DetailChatButtonUITests: XCTestCase {
         let start = screen.withOffset(CGVector(dx: presentation.midX,
                                                dy: presentation.minY + 16))
         let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
+    }
+
+    private func dismissNativeChatSheet(_ app: XCUIApplication,
+                                        _ sheet: XCUIElement,
+                                        _ composer: XCUIElement) {
+        let windowHeight = app.windows.firstMatch.frame.height
+        let sheetFrame = sheet.frame
+        XCTAssertGreaterThan(sheetFrame.height, composer.frame.height * 4,
+                             app.debugDescription)
+        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02))
+        let end = start.withOffset(CGVector(dx: 0, dy: min(400, windowHeight * 0.8)))
         start.press(forDuration: 0.1, thenDragTo: end)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
