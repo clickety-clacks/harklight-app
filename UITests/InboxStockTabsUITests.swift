@@ -65,7 +65,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
-        XCTAssertFalse(workspaceTab("Search", in: app).exists,
+        XCTAssertFalse(app.tabBars.buttons["Search"].exists,
                        "Search belongs to the message list, not a separate tab.")
         assertListHeader(in: app)
         attachScreenshot("Inbox with native list search", from: app)
