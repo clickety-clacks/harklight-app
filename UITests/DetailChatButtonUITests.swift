@@ -29,6 +29,50 @@ final class DetailChatButtonUITests: XCTestCase {
                       app.debugDescription)
     }
 
+    func testSettingsAndChatToolbarTapsPresentTheirPanels() {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
+        defer {
+            if isPad { XCUIDevice.shared.orientation = .portrait }
+        }
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture"]
+        app.launch()
+
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(settings.isHittable, app.debugDescription)
+        attachScreenshot("settings-toolbar-before-tap")
+        settings.tap()
+
+        let settingsTitle = app.navigationBars["Settings"]
+        XCTAssertTrue(settingsTitle.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("settings-panel-open")
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
+        done.tap()
+        XCTAssertTrue(settingsTitle.waitForNonExistence(timeout: 5), app.debugDescription)
+
+        let request = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(request.waitForExistence(timeout: 5), app.debugDescription)
+        request.tap()
+        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
+                      "Selecting the request should open its detail after dismissing Settings.\n\(app.debugDescription)")
+
+        let chat = app.toolbars.buttons["Chat"].exists
+            ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+        attachScreenshot("chat-toolbar-before-tap")
+        chat.tap()
+        XCTAssertTrue(app.staticTexts["No chat"].waitForExistence(timeout: 5),
+                      "The production request's Chat panel should open even when it has no thread.\n\(app.debugDescription)")
+        XCTAssertTrue(app.staticTexts["The agent that sent this didn’t open a chat for it. You can still respond to the message itself."].exists,
+                      app.debugDescription)
+        attachScreenshot("chat-panel-open")
+    }
+
     func testDetailChatUsesNativeToolbarInLightMode() {
         verifyToolbarChatButton(appearance: "Light")
     }
