@@ -698,7 +698,6 @@ struct InboxList: View {
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
     let triggerNotification: (() -> Void)?
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @State private var scrollMetrics = InboxScrollMetrics.empty
     @State private var isUserScrolling = false
@@ -940,23 +939,10 @@ struct InboxList: View {
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                if horizontalSizeClass == .compact {
-                    // Compact split sidebars move trailing items to a side rail.
-                    // A single principal item keeps both controls in the header.
-                    HStack(spacing: 16) {
-                        brandAndStatusHeader
-                        settingsButton
-                    }
-                } else {
-                    brandAndStatusHeader
-                }
-            }
-            if horizontalSizeClass != .compact {
-                ToolbarItem(placement: .topBarTrailing) {
-                    settingsButton
-                }
+                brandAndStatusHeader
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                settingsButton
                 warningButton
             }
         }

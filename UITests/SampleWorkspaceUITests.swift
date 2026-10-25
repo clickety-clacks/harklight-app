@@ -333,9 +333,11 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(brand.exists, app.debugDescription)
         XCTAssertGreaterThanOrEqual(warningButton.frame.minX, brand.frame.maxX - 2,
-                                    "The warning icon sits beside the Harklight title.")
-        XCTAssertLessThan(warningButton.frame.midX, settings.frame.midX,
-                          "The warning icon sits before Settings in the shared title row.")
+                                    "The warning icon remains after the Harklight title.")
+        XCTAssertEqual(warningButton.frame.midY, settings.frame.midY, accuracy: 5,
+                       "Settings and the warning button share the native toolbar row.")
+        XCTAssertLessThan(settings.frame.midX, warningButton.frame.midX,
+                          "Settings keeps its existing wide-toolbar position before the warning icon.")
         capture("inbox-recovery-warning-dismissed", app)
         selectMessageTab("Replied", in: app)
         XCTAssertTrue(replied.isSelected, app.debugDescription)
