@@ -10,147 +10,283 @@ private struct PersistedAttentionStateHeader: Decodable {
 struct HarklightReleaseNote: Identifiable, Sendable {
     struct Highlight: Identifiable, Sendable {
         let id: String
-        let text: LocalizedStringResource
+        let symbol: String
+        let title: LocalizedStringResource
+        let detail: LocalizedStringResource
     }
 
-    let buildIdentifier: String
+    let id: String
+    let buildIdentifier: Int?
     let marketingVersion: String
-    let title: LocalizedStringResource
-    let introduction: LocalizedStringResource
+    let historyDateDescription: LocalizedStringResource?
+    /// Earliest confirmed running build that contains a dated history entry.
+    /// This does not claim the unknown build number of the changes it describes.
+    let visibleFromBuildIdentifier: Int?
     let highlights: [Highlight]
 
-    var id: String { buildIdentifier }
+    init(buildIdentifier: Int, marketingVersion: String, highlights: [Highlight]) {
+        id = String(buildIdentifier)
+        self.buildIdentifier = buildIdentifier
+        self.marketingVersion = marketingVersion
+        historyDateDescription = nil
+        visibleFromBuildIdentifier = nil
+        self.highlights = highlights
+    }
+
+    init(
+        historyIdentifier: String,
+        marketingVersion: String,
+        historyDateDescription: LocalizedStringResource,
+        visibleFromBuildIdentifier: Int,
+        highlights: [Highlight]
+    ) {
+        id = historyIdentifier
+        buildIdentifier = nil
+        self.marketingVersion = marketingVersion
+        self.historyDateDescription = historyDateDescription
+        self.visibleFromBuildIdentifier = visibleFromBuildIdentifier
+        self.highlights = highlights
+    }
 }
 
 enum HarklightReleaseNotes {
-    /// Keep entries newest first. Add an entry for every build that carries
-    /// user-visible changes, recording both CFBundleVersion and MARKETING_VERSION.
+    /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
-            buildIdentifier: "1",
+            buildIdentifier: 61,
             marketingVersion: "0.1.0",
-            title: LocalizedStringResource(
-                "Release notes in one place",
-                comment: "Heading for a release-notes entry about finding app updates."),
-            introduction: LocalizedStringResource(
-                "See what’s new when you first open a release with notes, then revisit updates in Settings.",
-                comment: "Introduction to the release-notes feature."),
+            highlights: [
+                .init(
+                    id: "inbox-scrolling",
+                    symbol: "list.bullet",
+                    title: LocalizedStringResource(
+                        "Scroll through your Inbox more smoothly",
+                        comment: "Release-note title for smoother Inbox scrolling."),
+                    detail: LocalizedStringResource(
+                        "Scrolling the inbox list does less work, so it should feel smoother.",
+                        comment: "Release-note detail about reduced work during Inbox list scrolling.")),
+                .init(
+                    id: "release-note-format",
+                    symbol: "sparkles",
+                    title: LocalizedStringResource(
+                        "See clearer release notes",
+                        comment: "Release-note title for the updated note presentation."),
+                    detail: LocalizedStringResource(
+                        "Each update now has an icon, a short title and a clear description.",
+                        comment: "Release-note detail about the updated notes."))
+            ]),
+        HarklightReleaseNote(
+            buildIdentifier: 59,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "settings-toolbar",
+                    symbol: "gearshape",
+                    title: LocalizedStringResource(
+                        "Settings in the toolbar",
+                        comment: "Short release-note title for opening Settings from the top toolbar."),
+                    detail: LocalizedStringResource(
+                        "Open Settings from the top toolbar on any screen size.",
+                        comment: "One-sentence release-note detail about reaching Settings."))
+            ]),
+        HarklightReleaseNote(
+            buildIdentifier: 1,
+            marketingVersion: "0.1.0",
             highlights: [
                 .init(
                     id: "whats-new-sheet",
-                    text: LocalizedStringResource(
-                        "A short What’s New summary appears the first time you open a release that includes notes.",
-                        comment: "Release-note detail about the once-per-release summary.")),
+                    symbol: "sparkles",
+                    title: LocalizedStringResource(
+                        "What’s New after an update",
+                        comment: "Short release-note title for the update summary."),
+                    detail: LocalizedStringResource(
+                        "See a short summary the first time you open a release that includes notes.",
+                        comment: "One-sentence release-note detail about the update summary.")),
                 .init(
                     id: "release-notes-settings",
-                    text: LocalizedStringResource(
-                        "In Settings, choose Release notes to revisit this update and earlier ones.",
-                        comment: "Release-note detail explaining where to revisit updates."))
+                    symbol: "doc.text",
+                    title: LocalizedStringResource(
+                        "Release notes in Settings",
+                        comment: "Short release-note title for the update history."),
+                    detail: LocalizedStringResource(
+                        "Find this and earlier updates in Settings.",
+                        comment: "One-sentence release-note detail about the update history."))
+            ])
+    ]
+
+    /// These changes shipped before Build 59, but their archived build numbers
+    /// are not available. Show their dated summary in Settings from the first
+    /// confirmed build containing them; never present it as a new-build popup.
+    static let historyEntries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            historyIdentifier: "earlier-on-2026-10-25",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource(
+                "Earlier on October 25, 2026",
+                comment: "Date label for shipped changes whose build number is unknown."),
+            visibleFromBuildIdentifier: 59,
+            highlights: [
+                .init(
+                    id: "inline-reply-field",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Reply right from the message",
+                        comment: "Release-note title for composing a text reply inline with a request."),
+                    detail: LocalizedStringResource(
+                        "Write and send a text reply from the request itself.",
+                        comment: "Release-note detail about the inline reply field.")),
+                .init(
+                    id: "listening-status",
+                    symbol: "waveform",
+                    title: LocalizedStringResource(
+                        "See when your agent is listening",
+                        comment: "Release-note title for listening availability in Chat."),
+                    detail: LocalizedStringResource(
+                        "The Chat sheet shows listening status near the composer.",
+                        comment: "Release-note detail about listening availability.")),
+                .init(
+                    id: "chat-toolbar",
+                    symbol: "bubble.left.and.bubble.right",
+                    title: LocalizedStringResource(
+                        "Open Chat from the message toolbar",
+                        comment: "Release-note title for opening Chat from a message."),
+                    detail: LocalizedStringResource(
+                        "Find Chat in the message toolbar and see when a conversation is unavailable.",
+                        comment: "Release-note detail about Chat access and availability.")),
+                .init(
+                    id: "chat-history-keyboard",
+                    symbol: "keyboard",
+                    title: LocalizedStringResource(
+                        "Keep your keyboard while reading",
+                        comment: "Release-note title for using the keyboard while browsing Chat history."),
+                    detail: LocalizedStringResource(
+                        "Scroll through older Chat messages without losing the keyboard, or swipe the history to dismiss it.",
+                        comment: "Release-note detail about keyboard behavior in Chat history."))
             ])
     ]
 
     static func currentBuildIdentifier(in bundle: Bundle = .main) -> String? {
+        if ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] == "1",
+           let testBuild = ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"],
+           !testBuild.isEmpty {
+            return testBuild
+        }
         guard let value = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
               !value.isEmpty else { return nil }
         return value
     }
 
-    static func settingsHistory(
+    static func releasedEntries(
         currentBuildIdentifier: String?,
         entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries
     ) -> [HarklightReleaseNote] {
-        guard let currentBuildIdentifier,
-              let current = entries.first(where: { $0.buildIdentifier == currentBuildIdentifier }) else {
-            return entries
+        guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
+        let released = entries.compactMap { note -> (note: HarklightReleaseNote, build: Int)? in
+            guard let build = note.buildIdentifier, build <= currentBuild else {
+                return nil
+            }
+            return (note: note, build: build)
         }
-        return [current] + entries.filter { $0.buildIdentifier != currentBuildIdentifier }
+        return released.sorted { $0.build > $1.build }.map(\.note)
     }
-}
 
-enum ReleaseNotesLaunchDecision: Equatable {
-    case noNotesForCurrentBuild
-    case alreadySeen
-    case showCurrentNotes
-    case markFreshInstallSeen
+    static func settingsHistory(
+        currentBuildIdentifier: String?,
+        entries: [HarklightReleaseNote]? = nil,
+        historyEntries: [HarklightReleaseNote] = HarklightReleaseNotes.historyEntries
+    ) -> [HarklightReleaseNote] {
+        guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
+        let entries = entries ?? HarklightReleaseNotes.entries
+        let buildNotes = releasedEntries(currentBuildIdentifier: currentBuildIdentifier,
+                                         entries: entries)
+            .compactMap { note -> (note: HarklightReleaseNote, build: Int, priority: Int)? in
+                guard let build = note.buildIdentifier else { return nil }
+                return (note, build, 1)
+            }
+        let datedNotes = historyEntries.compactMap {
+            note -> (note: HarklightReleaseNote, build: Int, priority: Int)? in
+            guard note.buildIdentifier == nil,
+                  let visibleFrom = note.visibleFromBuildIdentifier,
+                  visibleFrom <= currentBuild else { return nil }
+            return (note, visibleFrom, 0)
+        }
+        return (buildNotes + datedNotes)
+            .sorted {
+                if $0.build != $1.build { return $0.build > $1.build }
+                return $0.priority > $1.priority
+            }
+            .map(\.note)
+    }
 }
 
 enum ReleaseNotesLifecycle {
     static let seenBuildIdentifiersDefaultsKey = "release-notes.seen-build-identifiers"
+    static let lastSeenBuildIdentifierDefaultsKey = "release-notes.last-seen-build-identifier"
 
-    static func launchDecision(
+    static func lastSeenBuildIdentifier(defaults: UserDefaults) -> Int? {
+        if let storedBuild = defaults.object(forKey: lastSeenBuildIdentifierDefaultsKey) as? Int {
+            return storedBuild
+        }
+        guard let seenBuildIdentifiers = defaults.stringArray(
+            forKey: seenBuildIdentifiersDefaultsKey) else { return nil }
+        return seenBuildIdentifiers.compactMap(Int.init).max() ?? 0
+    }
+
+    static func notesToPresent(
         currentBuildIdentifier: String?,
-        noteBuildIdentifiers: Set<String>,
-        seenBuildIdentifiers: Set<String>?,
+        entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries,
+        lastSeenBuildIdentifier: Int?,
         hasPriorAppState: Bool
-    ) -> ReleaseNotesLaunchDecision {
-        guard let currentBuildIdentifier,
-              noteBuildIdentifiers.contains(currentBuildIdentifier) else {
-            return .noNotesForCurrentBuild
+    ) -> [HarklightReleaseNote] {
+        let released = HarklightReleaseNotes.releasedEntries(
+            currentBuildIdentifier: currentBuildIdentifier,
+            entries: entries)
+        guard let lastSeenBuildIdentifier else {
+            return hasPriorAppState ? Array(released.prefix(1)) : []
         }
-        if let seenBuildIdentifiers {
-            return seenBuildIdentifiers.contains(currentBuildIdentifier)
-                ? .alreadySeen
-                : .showCurrentNotes
-        }
-        return hasPriorAppState ? .showCurrentNotes : .markFreshInstallSeen
+        return released.filter { ($0.buildIdentifier ?? 0) > lastSeenBuildIdentifier }
     }
 }
 
 @MainActor
 @Observable
 final class ReleaseNotesPresentation {
-    private(set) var currentNote: HarklightReleaseNote?
-    @ObservationIgnored private let currentBuildIdentifier: String?
+    private(set) var notesToShow: [HarklightReleaseNote] = []
     @ObservationIgnored private let defaults: UserDefaults
 
-    var isShowingCurrentRelease = false {
-        didSet {
-            guard oldValue, !isShowingCurrentRelease else { return }
-            markCurrentBuildSeen()
-        }
-    }
+    var isShowingCurrentRelease = false
 
     init(
         currentBuildIdentifier: String?,
         hasPriorAppState: Bool,
-        entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries,
+        entries: [HarklightReleaseNote]? = nil,
         defaults: UserDefaults = .standard
     ) {
-        self.currentBuildIdentifier = currentBuildIdentifier
         self.defaults = defaults
-        currentNote = currentBuildIdentifier.flatMap { build in
-            entries.first { $0.buildIdentifier == build }
-        }
-
-        let storedSeenBuilds: Set<String>?
-        if defaults.object(forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) == nil {
-            storedSeenBuilds = nil
-        } else {
-            storedSeenBuilds = Set(defaults.stringArray(
-                forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) ?? [])
-        }
-        let decision = ReleaseNotesLifecycle.launchDecision(
+        let entries = entries ?? HarklightReleaseNotes.entries
+        let lastSeenBuildIdentifier = ReleaseNotesLifecycle.lastSeenBuildIdentifier(defaults: defaults)
+        let released = HarklightReleaseNotes.releasedEntries(
             currentBuildIdentifier: currentBuildIdentifier,
-            noteBuildIdentifiers: Set(entries.map(\.buildIdentifier)),
-            seenBuildIdentifiers: storedSeenBuilds,
+            entries: entries)
+        notesToShow = ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: currentBuildIdentifier,
+            entries: entries,
+            lastSeenBuildIdentifier: lastSeenBuildIdentifier,
             hasPriorAppState: hasPriorAppState)
 
-        switch decision {
-        case .noNotesForCurrentBuild, .alreadySeen:
-            break
-        case .showCurrentNotes:
-            isShowingCurrentRelease = currentNote != nil
-        case .markFreshInstallSeen:
-            markCurrentBuildSeen()
+        if let currentBuild = currentBuildIdentifier.flatMap(Int.init) {
+            let maxSeenBuild = max(currentBuild, lastSeenBuildIdentifier ?? 0)
+            defaults.set(maxSeenBuild,
+                         forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
+            let seenBuildIdentifiers = Set(defaults.stringArray(
+                forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) ?? [])
+                .union(released.compactMap(\.buildIdentifier).map(String.init))
+                .union([String(maxSeenBuild)])
+            defaults.set(seenBuildIdentifiers.sorted(),
+                         forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey)
         }
-    }
-
-    private func markCurrentBuildSeen() {
-        guard let currentBuildIdentifier, currentNote != nil else { return }
-        var seen = Set(defaults.stringArray(
-            forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) ?? [])
-        seen.insert(currentBuildIdentifier)
-        defaults.set(seen.sorted(), forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey)
+        isShowingCurrentRelease = !notesToShow.isEmpty
     }
 }
 
@@ -244,13 +380,15 @@ struct ReleaseNotesHistoryView: View {
 }
 
 struct ReleaseNotesSheet: View {
-    let note: HarklightReleaseNote
+    let notes: [HarklightReleaseNote]
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
-                ReleaseNoteSection(note: note)
+                ForEach(notes) { note in
+                    ReleaseNoteSection(note: note)
+                }
             }
             .navigationTitle("What’s New")
             .navigationBarTitleDisplayMode(.inline)
@@ -268,15 +406,37 @@ private struct ReleaseNoteSection: View {
 
     var body: some View {
         Section {
-            Text(note.introduction)
             ForEach(note.highlights) { highlight in
-                Text(highlight.text)
+                ReleaseNoteRow(highlight: highlight)
             }
         } header: {
-            Text(note.title)
-        } footer: {
-            Text("Version \(note.marketingVersion) · Build \(note.buildIdentifier)",
-                 comment: "Marketing version and build number associated with this release-notes entry.")
+            if let buildIdentifier = note.buildIdentifier {
+                Text("Version \(note.marketingVersion) · Build \(buildIdentifier)",
+                     comment: "Marketing version and build number associated with this release-notes entry.")
+            } else if let historyDateDescription = note.historyDateDescription {
+                Text("Version \(note.marketingVersion) · \(historyDateDescription)",
+                     comment: "Marketing version and date associated with this history-only entry.")
+            }
+        }
+    }
+}
+
+private struct ReleaseNoteRow: View {
+    let highlight: HarklightReleaseNote.Highlight
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(highlight.title).font(.headline)
+                Text(highlight.detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } icon: {
+            Image(systemName: highlight.symbol)
+                .font(.title2)
+                .frame(width: 36)
         }
     }
 }
