@@ -3,6 +3,13 @@ import XCTest
 import AttentionDomain
 
 final class ReleaseNotesTests: XCTestCase {
+    func testFirstReleaseNoteShowsMarketingVersionAndRetainsBuildIdentity() {
+        let first = HarklightReleaseNotes.entries[0]
+
+        XCTAssertEqual(first.marketingVersion, "0.1.0")
+        XCTAssertEqual(first.buildIdentifier, "1")
+    }
+
     func testFreshInstallMarksTheCurrentNotesBuildSeenWithoutShowingSheet() {
         XCTAssertEqual(
             ReleaseNotesLifecycle.launchDecision(
@@ -149,6 +156,7 @@ final class ReleaseNotesTests: XCTestCase {
     private func releaseNote(_ buildIdentifier: String) -> HarklightReleaseNote {
         HarklightReleaseNote(
             buildIdentifier: buildIdentifier,
+            marketingVersion: "0.1.0",
             title: "Release update",
             introduction: "A release update.",
             highlights: [])
