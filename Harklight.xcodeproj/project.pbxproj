@@ -57,6 +57,7 @@
 		583306081ABB5948FB0C9A78 /* UIDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8286E1FCE4892900854DCF31 /* UIDiagnostics.swift */; };
 		5B3C628638BE1366BBCE7A08 /* SampleMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 321798AEF657AEBF709D6F76 /* SampleMedia.swift */; };
 		5FAA08D77C7D7A90F5B0D173 /* BoundedNativeJoinExchange.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */; };
+		62C0305EF51871E248765FDC /* ReleaseNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 051A64DEB3D98D201BE5075B /* ReleaseNotes.swift */; };
 		639C2AB322317F665A80943C /* InboxBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22C8B2615CAF891BC13EE419 /* InboxBadge.swift */; };
 		63F44E763F683E3A18C463A0 /* SenderRevisionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3AD83C5473F6DFB7981B536 /* SenderRevisionPresentationTests.swift */; };
 		68E5DA318170672675F2F3F0 /* NativeJoinInvitation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */; };
@@ -80,6 +81,7 @@
 		99600D5791D337E606EFF33F /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 5954B3B8B73E147E3A8640AB /* README.md */; };
 		99FA8FC1192D50771C2D80A6 /* SampleCardScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */; };
 		9D262F1A9341068BB8EFA25E /* NativeAppLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */; };
+		9EBAF1B70940FCCDCC38F0C7 /* ReleaseNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 051A64DEB3D98D201BE5075B /* ReleaseNotes.swift */; };
 		A27D48651D89DAC048631C30 /* AttentionTierClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D08AC0D6D784E9C72FE43E /* AttentionTierClientTests.swift */; };
 		A3CF1B415AF68605EE55643F /* SampleFixtureDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */; };
 		A4B67EB0B1355A91F57E9C54 /* InboxMessageSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B98DB32B39F5FB6D0FADF4F /* InboxMessageSurface.swift */; };
@@ -100,6 +102,7 @@
 		C2C9693CD9622596022A9C6C /* ConversationDomainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E74397EED841B8F6A5601C9 /* ConversationDomainTests.swift */; };
 		C3F2ACDF6B6FDBEBF2C5E6FC /* BoundedNativeJoinExchange.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */; };
 		C58F9DAB29034D462893213A /* SampleMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3B9732F966E6F1372B2C35C /* SampleMessages.swift */; };
+		C66E37B80F1222B7DFFA80DE /* ReleaseNotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 958491A214D841A2773BCAC4 /* ReleaseNotesTests.swift */; };
 		C847FB33CCA1E747A47034C5 /* tokens.json in Resources */ = {isa = PBXBuildFile; fileRef = B190A2CC6123E6B2601A49C6 /* tokens.json */; };
 		D115595E684D1EA54457AEF2 /* NativeEnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF276C5C5CAA98BC82FE81BB /* NativeEnrollmentView.swift */; };
 		D3AB5F8C10715ACB5A57BA91 /* NativeGuidedJoinCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F233FE6DF42A345529BFBCB9 /* NativeGuidedJoinCoordinator.swift */; };
@@ -153,6 +156,7 @@
 
 /* Begin PBXFileReference section */
 		01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleFixtureDomain.swift; sourceTree = "<group>"; };
+		051A64DEB3D98D201BE5075B /* ReleaseNotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseNotes.swift; sourceTree = "<group>"; };
 		09DB4C20F00F7F2F62E90594 /* HarklightConversationUITestHost.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HarklightConversationUITestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0F8F742CE377C4E71F4C4844 /* AdaptiveDuoNavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveDuoNavigationUITests.swift; sourceTree = "<group>"; };
 		0FD0F77C018CF082033BCA6E /* ConversationFileStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationFileStorage.swift; sourceTree = "<group>"; };
@@ -201,6 +205,7 @@
 		8EC7E7FF78F30F051661B0A6 /* WorkspaceTabQuery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTabQuery.swift; sourceTree = "<group>"; };
 		92EB6E77E7267A8DF8A2B1DB /* InboxVisualRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxVisualRulesTests.swift; sourceTree = "<group>"; };
 		9338A49F12238750815D8518 /* InboxItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxItem.swift; sourceTree = "<group>"; };
+		958491A214D841A2773BCAC4 /* ReleaseNotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseNotesTests.swift; sourceTree = "<group>"; };
 		962E8942C7FC38C447AABC29 /* HarklightTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HarklightTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9EA260044E9E03BE572ABF11 /* HarklightApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarklightApp.swift; sourceTree = "<group>"; };
 		9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeJoinInvitation.swift; sourceTree = "<group>"; };
@@ -361,6 +366,7 @@
 				130EE825A778D0A7E64C7673 /* NativeGuidedTLSTests.swift */,
 				69EEC3F07C72D78B3516529C /* NativeNotificationPermissionTests.swift */,
 				396BC71281F0B01FF57E83FB /* NativePushRefreshTests.swift */,
+				958491A214D841A2773BCAC4 /* ReleaseNotesTests.swift */,
 				E41F3132369779887ECC5470 /* ReplyDraftUpdateLatencyTests.swift */,
 				264FD09050C11E04B7673DEF /* ReplyFocusDuringSyncTests.swift */,
 				82A636EA3A9AD62ED6E2B6D3 /* RetractionPresentationTests.swift */,
@@ -417,6 +423,7 @@
 				52949BDC0CBA558115562E33 /* NativeNotificationRouting.swift */,
 				DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */,
 				AEC8516B5AF186CD58914057 /* PrototypeStore.swift */,
+				051A64DEB3D98D201BE5075B /* ReleaseNotes.swift */,
 				660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */,
 				01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */,
 				321798AEF657AEBF709D6F76 /* SampleMedia.swift */,
@@ -663,6 +670,7 @@
 				D41A9266F23BD611E896E68C /* NativeGuidedTLSTests.swift in Sources */,
 				9532F1957B8A1A801102CE86 /* NativeNotificationPermissionTests.swift in Sources */,
 				D6B291EA7DB6E31752A36F1A /* NativePushRefreshTests.swift in Sources */,
+				C66E37B80F1222B7DFFA80DE /* ReleaseNotesTests.swift in Sources */,
 				833032321AE0F761EBDA5421 /* ReplyDraftUpdateLatencyTests.swift in Sources */,
 				34DC3355944A6ED901DDE2BA /* ReplyFocusDuringSyncTests.swift in Sources */,
 				53754083DF8313BEFA327034 /* RetractionPresentationTests.swift in Sources */,
@@ -698,6 +706,7 @@
 				B3C08BF4ABBD8D6D3C45506B /* NativeNotificationRouting.swift in Sources */,
 				73E1C95C8C0B539645C93648 /* NativeRelayLifecycle.swift in Sources */,
 				253FF6D928101B02B4093646 /* PrototypeStore.swift in Sources */,
+				62C0305EF51871E248765FDC /* ReleaseNotes.swift in Sources */,
 				99FA8FC1192D50771C2D80A6 /* SampleCardScreen.swift in Sources */,
 				A3CF1B415AF68605EE55643F /* SampleFixtureDomain.swift in Sources */,
 				5B3C628638BE1366BBCE7A08 /* SampleMedia.swift in Sources */,
@@ -742,6 +751,7 @@
 				6DDCBA19885E60DDD5D98579 /* NativeNotificationRouting.swift in Sources */,
 				1633FFB274522FF591DD5935 /* NativeRelayLifecycle.swift in Sources */,
 				AA155EE708EDFA1CD6C9FC25 /* PrototypeStore.swift in Sources */,
+				9EBAF1B70940FCCDCC38F0C7 /* ReleaseNotes.swift in Sources */,
 				488E20D4EC4E76FEC02C9D8C /* SampleCardScreen.swift in Sources */,
 				6D4480601A5BBB0C9E99A2B7 /* SampleFixtureDomain.swift in Sources */,
 				E38A481FFBFBCE5A07ECC09A /* SampleMedia.swift in Sources */,
