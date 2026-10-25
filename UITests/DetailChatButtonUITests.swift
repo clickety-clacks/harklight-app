@@ -40,12 +40,6 @@ final class DetailChatButtonUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
 
-        let request = app.descendants(matching: .any)["request-row-facilities-01"]
-        XCTAssertTrue(request.waitForExistence(timeout: 5), app.debugDescription)
-        request.tap()
-        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
-                      app.debugDescription)
-
         let settings = app.buttons["inbox-settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(settings.isHittable, app.debugDescription)
@@ -59,8 +53,12 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
         done.tap()
         XCTAssertTrue(settingsTitle.waitForNonExistence(timeout: 5), app.debugDescription)
+
+        let request = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(request.waitForExistence(timeout: 5), app.debugDescription)
+        request.tap()
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
-                      "Dismissing Settings should leave the selected request detail open.\n\(app.debugDescription)")
+                      "Selecting the request should open its detail after dismissing Settings.\n\(app.debugDescription)")
 
         let chat = app.toolbars.buttons["Chat"].exists
             ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
