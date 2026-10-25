@@ -2,39 +2,6 @@ import SwiftUI
 import UIKit
 import AttentionDomain
 
-/// A hosting-controller ancestor receives motion events without replacing the
-/// text field's responder. No global window hooks or live-store mutations.
-struct ShakeHostingView<Content: View>: UIViewControllerRepresentable {
-    let onShake: () -> Void
-    @ViewBuilder var content: () -> Content
-
-    func makeUIViewController(context: Context) -> ShakeHostingController<Content> {
-        ShakeHostingController(rootView: content(), onShake: onShake)
-    }
-
-    func updateUIViewController(_ controller: ShakeHostingController<Content>, context: Context) {
-        controller.rootView = content()
-        controller.onShake = onShake
-    }
-}
-
-final class ShakeHostingController<Content: View>: UIHostingController<Content> {
-    var onShake: () -> Void
-    init(rootView: Content, onShake: @escaping () -> Void) {
-        self.onShake = onShake
-        super.init(rootView: rootView)
-    }
-    @MainActor required dynamic init?(coder aDecoder: NSCoder) { fatalError("Use init(rootView:onShake:)") }
-    override var canBecomeFirstResponder: Bool { true }
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        becomeFirstResponder()
-    }
-    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
-        if motion == .motionShake { onShake() } else { super.motionEnded(motion, with: event) }
-    }
-}
-
 /// Window bounds describe the available app window without shrinking when the
 /// keyboard appears. Read this view's window, never a global screen or window.
 struct WorkspaceWindowReader: UIViewRepresentable {
@@ -1329,7 +1296,7 @@ private struct LocalExamplesSettingsSection: View {
 
     var body: some View {
         Section("Local examples") {
-            Text("Shake to add fictional messages to your inbox. Their answers, chat and attachments stay on this device and disappear when the app closes.")
+            Text("Example messages, their answers, chat and attachments stay on this device and disappear when the app closes.")
             Button("Add example messages") {
                 samples.populate()
                 close()
