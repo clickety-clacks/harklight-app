@@ -105,6 +105,15 @@ enum HarklightReleaseNotes {
             visibleFromBuildIdentifier: "59",
             highlights: [
                 .init(
+                    id: "inline-reply-field",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Reply right from the message",
+                        comment: "Release-note title for composing a text reply inline with a request."),
+                    detail: LocalizedStringResource(
+                        "Write and send a text reply from the request itself.",
+                        comment: "Release-note detail about the inline reply field.")),
+                .init(
                     id: "listening-status",
                     symbol: "waveform",
                     title: LocalizedStringResource(

@@ -33,6 +33,8 @@ final class ReleaseNotesUITests: XCTestCase {
                       "Settings history identifies the numbered release.")
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Earlier on October 25, 2026"].exists,
                       "Settings history identifies the dated entry without a build number.")
+        XCTAssertTrue(app.staticTexts["Reply right from the message"].exists,
+                      "Settings history includes the shipped inline Reply field.")
         XCTAssertTrue(app.staticTexts["See when your agent is listening"].exists,
                       app.debugDescription)
         attachScreenshot("release-notes-settings-history", from: app)

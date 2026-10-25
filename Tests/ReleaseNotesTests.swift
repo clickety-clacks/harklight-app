@@ -58,6 +58,7 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertNil(note.buildIdentifier)
         XCTAssertEqual(note.marketingVersion, "0.1.0")
         XCTAssertEqual(note.highlights.map(\.id), [
+            "inline-reply-field",
             "listening-status",
             "chat-toolbar",
             "chat-history-keyboard"
