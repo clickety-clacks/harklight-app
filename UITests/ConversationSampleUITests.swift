@@ -197,7 +197,11 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(firstMessage.isHittable,
                       "The downward content swipe has returned the history to its first message.")
 
-        history.swipeDown()
+        // Interactive dismissal tracks a downward scroll gesture after it enters
+        // the keyboard area, so begin on history and continue through the composer.
+        let dismissalStart = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
+        let dismissalEnd = keyboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        dismissalStart.press(forDuration: 0.1, thenDragTo: dismissalEnd)
         XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
                        "A downward swipe at the start of conversation history dismisses the keyboard interactively.")
         XCTAssertEqual(composer.value as? String, chatDraft,
