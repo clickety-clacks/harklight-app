@@ -58,23 +58,30 @@ final class DetailChatButtonUITests: XCTestCase {
         attachScreenshot("wide-detail-trailing-chat-toolbar-before-tap")
         chat.tap()
 
-        let chatPresentationHosts = app.popovers
-            .containing(.other, identifier: "sample-chat-input-surface")
-        let presentationAppears = expectation(for: NSPredicate(format: "count == 1"),
-                                              evaluatedWith: chatPresentationHosts)
-        wait(for: [presentationAppears], timeout: 5)
-        guard chatPresentationHosts.count == 1 else {
-            XCTFail("Expected one native chat presentation containing the system dismissal region and composer surface. \(app.debugDescription)")
+        let window = app.windows.firstMatch.frame
+        let inputSurfaceQuery = app.otherElements.matching(
+            identifier: "sample-chat-input-surface")
+        let inputSurfaceAppears = expectation(
+            for: NSPredicate(format: "count >= 1"), evaluatedWith: inputSurfaceQuery)
+        wait(for: [inputSurfaceAppears], timeout: 5)
+        let inputSurfaces = inputSurfaceQuery.allElementsBoundByIndex
+        let composerContainers = app.descendants(matching: .any)
+            .containing(.textField, identifier: "sample-chat-composer")
+            .allElementsBoundByIndex
+        let presentations = inputSurfaces.compactMap { surface -> (XCUIElement, CGRect)? in
+            let frames = centeredPresentationFrames(
+                in: composerContainers,
+                containing: surface.frame,
+                window: window)
+            guard frames.count == 1 else { return nil }
+            return (surface, frames[0])
+        }
+        guard presentations.count == 1 else {
+            XCTFail("Expected one composer surface inside one centered native Chat presentation. \(app.debugDescription)")
             return
         }
-        let chatPresentationHost = chatPresentationHosts.element(boundBy: 0)
-        let inputSurfaces = chatPresentationHost.descendants(matching: .other)
-            .matching(identifier: "sample-chat-input-surface")
-        guard inputSurfaces.count == 1 else {
-            XCTFail("Expected one composer surface inside the native chat presentation. \(app.debugDescription)")
-            return
-        }
-        let composers = inputSurfaces.textFields.matching(
+        let (chatInputSurface, presentationFrame) = presentations[0]
+        let composers = chatInputSurface.textFields.matching(
             identifier: "sample-chat-composer")
         guard composers.count == 1 else {
             XCTFail("Expected one composer inside the native chat presentation's composer surface. \(app.debugDescription)")
@@ -86,7 +93,7 @@ final class DetailChatButtonUITests: XCTestCase {
             return
         }
         attachScreenshot("wide-detail-chat-presentation-open")
-        dismissPresentedChat(app, chatPresentationHost, composer)
+        dismissPresentedChat(app, presentationFrame, composer)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         attachScreenshot("wide-detail-chat-toolbar-after-presentation-dismissal")
     }
@@ -193,22 +200,31 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
+    private func centeredPresentationFrames(in elements: [XCUIElement],
+                                            containing contentFrame: CGRect,
+                                            window: CGRect) -> [CGRect] {
+        var frames: [CGRect] = []
+        for element in elements {
+            let frame = element.frame
+            guard frame.contains(contentFrame),
+                  frame.width > contentFrame.width + 4,
+                  frame.height > contentFrame.height * 4,
+                  frame.width < window.width - 4,
+                  frame.height < window.height - 4,
+                  abs(frame.midX - window.midX) <= 4,
+                  abs(frame.midY - window.midY) <= 4,
+                  !frames.contains(frame) else {
+                continue
+            }
+            frames.append(frame)
+        }
+        return frames
+    }
+
     private func dismissPresentedChat(_ app: XCUIApplication,
-                                      _ presentationHost: XCUIElement,
+                                      _ presentation: CGRect,
                                       _ composer: XCUIElement) {
         let window = app.windows.firstMatch.frame
-        let contentFrame = composer.frame
-        let containers = presentationHost.otherElements
-            .containing(.textField, identifier: "sample-chat-composer")
-            .allElementsBoundByIndex.map(\.frame)
-        guard let presentation = containers
-            .filter({ $0.width > contentFrame.width + 4 &&
-                      $0.height > contentFrame.height * 4 &&
-                      $0.height < window.height - 4 })
-            .max(by: { $0.width * $0.height < $1.width * $1.height }) else {
-            XCTFail("Expected a dismissible native chat presentation around its composer. \(app.debugDescription)")
-            return
-        }
         let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
         let start = screen.withOffset(CGVector(dx: presentation.midX,
                                                dy: presentation.minY + 16))
