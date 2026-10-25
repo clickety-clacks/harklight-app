@@ -1071,11 +1071,9 @@ struct LiveRequestDetail: View {
             }
         }
         .toolbar {
-            if activeReplyEditor == nil {
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Spacer()
-                    chatButton
-                }
+            ToolbarItemGroup(placement: .bottomBar) {
+                Spacer()
+                chatButton
             }
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
