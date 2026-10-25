@@ -493,7 +493,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let chatComposer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(chatComposer.waitForExistence(timeout: 5), app.debugDescription)
         capture("reply-draft-chat-sheet-open", app)
-        dismissChatSheet(app, chatComposer)
+        dismissReplyChatSheet(app, chatComposer)
         XCTAssertTrue(chatComposer.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
@@ -732,6 +732,16 @@ final class SampleWorkspaceUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func dismissReplyChatSheet(_ app: XCUIApplication, _ composer: XCUIElement) {
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
     /// Reads the app's diagnostics probes (enabled by `--harklight-ui-diagnostics`)
