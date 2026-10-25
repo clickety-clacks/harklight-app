@@ -99,8 +99,8 @@ private struct ReplyChoiceCard: View {
             if showsEditor {
                 TextEditor(text: $text)
                     .font(.body)
-                    .foregroundStyle(textColor)
-                    .tint(textColor)
+                    .foregroundStyle(.primary)
+                    .tint(.primary)
                     .scrollContentBackground(.hidden)
                     .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
                     .background(Color(uiColor: .systemBackground))
