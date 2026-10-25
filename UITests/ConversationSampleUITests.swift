@@ -162,6 +162,7 @@ final class ConversationSampleUITests: XCTestCase {
         let latestMessage = history.staticTexts[
             "Agent example: the shorter path is faster, while the longer path is easier to revise."
         ]
+        let firstMessage = history.staticTexts["Could you explain the tradeoff?"]
         XCTAssertTrue(latestMessage.isHittable, app.debugDescription)
 
         let chatDraft = "Keep this unsent prompt while I read the conversation."
@@ -191,8 +192,14 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
                       "Scrolling toward older conversation content keeps the keyboard open.")
         history.swipeDown()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Scrolling back through the history keeps the keyboard open until the content reaches its start.")
+        XCTAssertTrue(firstMessage.isHittable,
+                      "The downward content swipe has returned the history to its first message.")
+
+        history.swipeDown()
         XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
-                       "A downward swipe on conversation history dismisses the keyboard.")
+                       "A downward swipe at the start of conversation history dismisses the keyboard interactively.")
         XCTAssertEqual(composer.value as? String, chatDraft,
                        "Interactive dismissal preserves the unsent chat draft.")
         composer.tap()
