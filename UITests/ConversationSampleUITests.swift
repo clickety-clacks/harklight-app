@@ -106,8 +106,8 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inputSurface.exists, app.debugDescription)
         XCTAssertTrue(add.exists && send.exists, app.debugDescription)
-        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5),
-                      "The Chat button presents the native dismissible sheet.")
+        XCTAssertTrue(inputSurface.isHittable,
+                      "The Chat presentation exposes its composer surface.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "About ")).firstMatch.exists,
                        "The conversation panel no longer shows request-context title text.")
         let availability = app.staticTexts["conversation-availability"]
@@ -243,7 +243,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         // A wide landscape layout may reveal its passive inline panel and
         // dismiss the sheet during rotation. Reopen the button presentation.
-        if !app.sheets.firstMatch.exists { app.buttons["Chat"].tap() }
+        if !app.textFields["sample-chat-composer"].exists { app.buttons["Chat"].tap() }
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         dismissChatSheet(app)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
@@ -397,12 +397,17 @@ final class ConversationSampleUITests: XCTestCase {
 
     private func dismissChatSheet(_ app: XCUIApplication) {
         let composer = app.textFields["sample-chat-composer"]
-        let sheet = app.sheets.firstMatch
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
-        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
-        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        let inputSurface = app.otherElements["sample-chat-input-surface"]
+        // The saved accessibility hierarchy exposes the native presentation's
+        // history and composer but has no Sheet node, so anchor the swipe to the history.
+        let history = app.scrollViews.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inputSurface.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(history.exists, app.debugDescription)
+        let start = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        let end = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
         start.press(forDuration: 0.1, thenDragTo: end)
-        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inputSurface.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
