@@ -455,7 +455,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("seen-response-in-replied", app)
     }
 
-    func testReplyChoiceUsesFloatingComposerAndReopensAfterSending() {
+    func testReplyChoiceKeepsDraftAcrossChatNavigationAndSend() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
@@ -468,20 +468,25 @@ final class SampleWorkspaceUITests: XCTestCase {
         let replyChoice = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
         XCTAssertTrue(replyChoice.waitForExistence(timeout: 5), app.debugDescription)
         replyChoice.tap()
-        let editor = app.textFields.matching(identifier: "request-input-answer-response").firstMatch
+        let editor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        let editorCard = app.descendants(matching: .any)["request-input-answer-response-card"].firstMatch
+        XCTAssertTrue(editorCard.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertGreaterThanOrEqual(editor.frame.minX, editorCard.frame.minX)
+        XCTAssertGreaterThanOrEqual(editor.frame.minY, editorCard.frame.minY)
+        XCTAssertLessThanOrEqual(editor.frame.maxX, editorCard.frame.maxX)
+        XCTAssertLessThanOrEqual(editor.frame.maxY, editorCard.frame.maxY,
+                                 "The reply field is inside its selected choice border.")
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "Selecting Reply focuses its editor.")
-        XCTAssertLessThanOrEqual(editor.frame.maxY, keyboard.frame.minY + 2,
-                                 "The floating reply field sits above the keyboard.")
+        capture("reply-editor-inline", app)
         editor.typeText("Keep the smaller first step.")
-        let sendReply = app.buttons["request-reply-send"]
-        XCTAssertTrue(sendReply.waitForExistence(timeout: 5), app.debugDescription)
-        sendReply.tap()
-        let collapsedReply = app.buttons["request-input-answer-reply-own"]
-        XCTAssertTrue(collapsedReply.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(collapsedReply.label.contains("Keep the smaller first step."))
-        capture("reply-choice-after-composer-send", app)
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.exists,
+                      "Replying does not remove Chat from the message screen.")
+        XCTAssertFalse(chat.isHittable,
+                       "The keyboard may cover the bottom-toolbar Chat action while replying.")
+        capture("reply-draft-chat-covered-by-keyboard", app)
 
         showList(app)
         clearSearch(in: app)
@@ -501,27 +506,66 @@ final class SampleWorkspaceUITests: XCTestCase {
         enterSearch("Which approach", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
-        let retainedSummary = app.buttons["request-input-answer-reply-own"]
-        XCTAssertTrue(retainedSummary.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(editor.exists, "Returning to the request keeps the reply collapsed.")
-        XCTAssertTrue(retainedSummary.label.contains("Keep the smaller first step."))
-
-        retainedSummary.tap()
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        let reopenedEditorCard = app.descendants(matching: .any)[
+            "request-input-answer-response-card"].firstMatch
+        XCTAssertTrue(reopenedEditorCard.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertGreaterThanOrEqual(editor.frame.minX, reopenedEditorCard.frame.minX)
+        XCTAssertGreaterThanOrEqual(editor.frame.minY, reopenedEditorCard.frame.minY)
+        XCTAssertLessThanOrEqual(editor.frame.maxX, reopenedEditorCard.frame.maxX)
+        XCTAssertLessThanOrEqual(editor.frame.maxY, reopenedEditorCard.frame.maxY,
+                                 "Returning to the request keeps the reply field in its selected choice.")
+        editor.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
-                      "Tapping the selected choice reopens the editor.")
-        XCTAssertLessThan(editor.frame.height, app.windows.firstMatch.frame.height * 0.15,
-                          "A short reply stays compact before the field needs to grow.")
+                      "The inline reply field can be focused again after navigation.")
+        XCTAssertGreaterThan(editor.frame.height, 0)
         capture("reply-editor-reopened", app)
-        app.buttons["request-reply-send"].tap()
-        XCTAssertTrue(retainedSummary.waitForExistence(timeout: 5))
+        let card = app.scrollViews["message-card-scroll"]
+        let replyContent = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Pick an approach, or describe your own.")
+        ).firstMatch
+        XCTAssertTrue(replyContent.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(replyContent.isHittable, app.debugDescription)
+        replyContent.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Tapping visible message content must leave the reply keyboard open.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        card.swipeUp()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Scrolling to the latest message keeps the reply keyboard focused.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
+        card.swipeDown()
+        XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
+                       "A downward swipe on the message content dismisses the reply keyboard.")
+        XCTAssertTrue(editor.exists, "Interactive dismissal keeps the reply editor open.")
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
+                       "Interactive dismissal preserves the unsent reply draft.")
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(chat.isHittable, "Chat is reachable after dismissing the keyboard.")
+        chat.tap()
+        let chatComposer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(chatComposer.waitForExistence(timeout: 5), app.debugDescription)
+        capture("reply-draft-chat-sheet-open", app)
+        dismissReplyChatSheet(app, chatComposer)
+        XCTAssertTrue(chatComposer.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
+                       "Opening and dismissing Chat preserves the unsent reply draft.")
+        capture("reply-draft-after-chat-dismissal", app)
+        editor.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
+                      "The reply editor can be focused again after interactive dismissal.")
 
         let otherChoice = app.buttons.containing(.staticText, identifier: "Start small").firstMatch
+        reveal(otherChoice, in: card, app: app)
         XCTAssertTrue(otherChoice.waitForExistence(timeout: 5), app.debugDescription)
         otherChoice.tap()
         let ghostedReply = app.buttons["request-input-answer-reply-own"]
         XCTAssertTrue(ghostedReply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(ghostedReply.label.contains("Keep the smaller first step."),
+                      "A deselected reply keeps its draft summary inside its choice.")
+        XCTAssertFalse(editor.exists, "The plain editor stays inside the selected choice only.")
         capture("reply-editor-deselected-with-draft", app)
 
         ghostedReply.tap()
@@ -531,8 +575,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "Reselecting Reply focuses its editor.")
         capture("reply-editor-reselected", app)
-        app.buttons["request-reply-send"].tap()
         app.descendants(matching: .any)["sample-finish"].tap()
+        XCTAssertTrue(chat.isHittable,
+                      "Chat remains available after the reply is accepted.")
         capture("text-response-submitted", app)
         showList(app)
         assertListSearchAvailable(app)
@@ -545,7 +590,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("text-response-in-replied", app)
     }
 
-    func testReplyComposerGrowsAndScrollsWithinThirtyPercentOfScreenHeight() {
+    func testInlineReplyEditorKeepsLongDraftInsideSelectedChoice() {
         let app = XCUIApplication()
         app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
@@ -558,23 +603,25 @@ final class SampleWorkspaceUITests: XCTestCase {
         let replyChoice = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
         XCTAssertTrue(replyChoice.waitForExistence(timeout: 5), app.debugDescription)
         replyChoice.tap()
-        let editor = app.textFields["request-input-answer-response"]
+        let editor = app.textViews["request-input-answer-response"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        let editorCard = app.descendants(matching: .any)["request-input-answer-response-card"].firstMatch
+        XCTAssertTrue(editorCard.waitForExistence(timeout: 5), app.debugDescription)
 
         let longDraft = (1...48).map { "Reply line \($0) keeps growing across the field." }
             .joined(separator: " ")
         editor.typeText(longDraft)
-        capture("reply-composer-at-height-cap", app)
+        capture("reply-editor-inline-long-draft", app)
 
-        let screenHeight = app.windows.firstMatch.frame.height
         let retainedText = editor.value as? String ?? ""
         XCTAssertTrue(retainedText.contains("Reply line 48"),
-                      "The full reply remains available after the field reaches its cap.")
-        XCTAssertGreaterThan(editor.frame.height, screenHeight * 0.2,
-                             "The field expands as the reply grows.")
-        XCTAssertLessThanOrEqual(editor.frame.height, screenHeight * 0.3 + 2,
-                                 "The field stops at 30% of the screen and scrolls internally.")
+                      "The full reply remains available in the inline field.")
+        XCTAssertGreaterThanOrEqual(editor.frame.minX, editorCard.frame.minX)
+        XCTAssertGreaterThanOrEqual(editor.frame.minY, editorCard.frame.minY)
+        XCTAssertLessThanOrEqual(editor.frame.maxX, editorCard.frame.maxX)
+        XCTAssertLessThanOrEqual(editor.frame.maxY, editorCard.frame.maxY,
+                                 "The expanded reply field stays inside its selected choice.")
     }
 
     func testDesignedControlsAndComponentScreenshots() {
@@ -651,14 +698,13 @@ final class SampleWorkspaceUITests: XCTestCase {
                 let ownAnswer = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
                 reveal(ownAnswer, in: app.scrollViews["message-card-scroll"], app: app)
                 ownAnswer.tap()
-                let answer = app.textFields["request-input-answer-response"]
+                let answer = app.textViews["request-input-answer-response"]
                 XCTAssertTrue(answer.waitForExistence(timeout: 5))
                 answer.tap()
                 answer.typeText("Leave room for a quiet corner.")
                 capture("component-own-answer-editing", app)
-                app.buttons["request-reply-send"].tap()
-                capture("component-own-answer-collapsed", app)
                 app.descendants(matching: .any)["sample-finish"].tap()
+                capture("component-own-answer-submitted", app)
             }
             if kind == "pictureChoice" {
                 let card = app.scrollViews["message-card-scroll"]
@@ -702,6 +748,25 @@ final class SampleWorkspaceUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func dismissReplyChatSheet(_ app: XCUIApplication, _ composer: XCUIElement) {
+        let window = app.windows.firstMatch.frame
+        let contentFrame = composer.frame
+        let containers = app.otherElements
+            .containing(.textField, identifier: "sample-chat-composer")
+            .allElementsBoundByIndex.map(\.frame)
+        let presentation = containers
+            .filter { $0.width > contentFrame.width + 4 &&
+                      $0.height > contentFrame.height * 4 &&
+                      $0.height < window.height - 4 }
+            .max { $0.width * $0.height < $1.width * $1.height } ?? window
+        let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+        let start = screen.withOffset(CGVector(dx: presentation.midX,
+                                               dy: presentation.minY + 16))
+        let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
     /// Reads the app's diagnostics probes (enabled by `--harklight-ui-diagnostics`)
@@ -968,7 +1033,15 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(returnedToFirst, app.debugDescription)
         XCTAssertTrue(app.buttons["request-heading"].label.contains("The library review moved to Thursday"),
                       "Previous returns to the first visible Search result.")
-        app.buttons["Chat"].tap()
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        let screen = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(chat.frame.midY, screen.midY,
+                             "Chat is an action in the message screen's bottom toolbar.")
+        XCTAssertGreaterThan(chat.frame.midX, screen.midX,
+                             "Chat is trailing in the bottom toolbar.")
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+        chat.tap()
         XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5))
         capture("adaptive-portrait-chat", app)
         let composer = app.textFields["sample-chat-composer"]
