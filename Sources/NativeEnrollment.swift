@@ -189,6 +189,13 @@ struct NativeEnrollmentStore {
         return try JSONDecoder().decode(NativeEnrollmentRecord.self, from: data)
     }
 
+    /// Reads only durable enrollment material so launch can distinguish an
+    /// upgrade from a fresh install before it writes any release-note marker.
+    func hasSavedInstallationState() throws -> Bool {
+        if try load() != nil { return true }
+        return try loadPrepared() != nil
+    }
+
     func begin(settings: NativeEnrollmentSettings,
                pkcs12: Data,
                password: String,
