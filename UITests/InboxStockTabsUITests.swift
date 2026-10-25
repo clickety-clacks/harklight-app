@@ -102,6 +102,32 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("Replied results for Archive", from: app)
     }
 
+    func testNativeSearchFieldStaysInMasterBesideDetail() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        guard app.windows.firstMatch.frame.width >= 700 else {
+            throw XCTSkip("A regular-width layout is required to show list and detail together.")
+        }
+
+        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+        row.tap()
+        XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5),
+                      "The detail is visible beside the master list.")
+
+        let list = app.collectionViews.firstMatch
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(list.isHittable, "The master list remains usable beside the detail.")
+        XCTAssertGreaterThan(field.frame.width, 180,
+                             "Search is a full native field while the master list is visible.")
+        XCTAssertGreaterThanOrEqual(field.frame.minX, list.frame.minX - 8)
+        XCTAssertLessThanOrEqual(field.frame.maxX, list.frame.maxX + 8)
+        attachScreenshot("Native Search in master beside detail", from: app)
+    }
+
     func testNotificationRouteClearsListSearchAndOpensTheTargetRequest() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation"]
