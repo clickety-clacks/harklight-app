@@ -24,5 +24,13 @@ func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
 @MainActor
 func workspaceBackButton(in app: XCUIApplication) -> XCUIElement {
     let toolbarBack = app.toolbars.buttons["BackButton"]
-    return toolbarBack.exists ? toolbarBack : app.navigationBars.buttons.firstMatch
+    if toolbarBack.exists { return toolbarBack }
+
+    // A split-view detail can put Settings first in the navigation bar; only use an explicit Back control.
+    let navigationBack = app.navigationBars.buttons.matching(
+        NSPredicate(format: "identifier == 'BackButton' OR label == 'Back'")
+    ).firstMatch
+    if navigationBack.exists { return navigationBack }
+
+    return app.buttons["BackButton"]
 }

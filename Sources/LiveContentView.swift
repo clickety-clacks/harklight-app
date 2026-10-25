@@ -99,17 +99,15 @@ private struct ReplyChoiceCard: View {
             if showsEditor {
                 TextEditor(text: $text)
                     .font(.body)
-                    .foregroundStyle(textColor)
-                    .tint(textColor)
+                    .foregroundColor(Color(uiColor: .label))
+                    .tint(Color(uiColor: .label))
                     .scrollContentBackground(.hidden)
-                    .frame(minHeight: 120)
-                    .padding(8)
-                    .background(replySurface)
+                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+                    .background(Color(uiColor: .systemBackground))
                     .focused($focusedActionID, equals: target.actionIdentifier)
                     .accessibilityLabel(title)
                     .accessibilityIdentifier(target.fieldIdentifier)
                     .disabled(isReadOnly || !selected)
-                    .padding(.top, 10)
             } else if !text.isEmpty {
                 Text(text)
                     .font(.body)
@@ -121,7 +119,7 @@ private struct ReplyChoiceCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
+        .padding(showsEditor ? 0 : 14)
         .background(selected ? selectedColor : Color.clear, in: shape)
         .overlay(shape.strokeBorder(selected ? textColor : textColor.opacity(0.30), lineWidth: 1.5))
         .clipShape(shape)

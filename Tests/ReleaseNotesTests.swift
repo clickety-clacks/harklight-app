@@ -97,11 +97,42 @@ final class ReleaseNotesTests: XCTestCase {
             hasPriorAppState: true).compactMap(\.buildIdentifier), [61])
     }
 
-    func testBuildSixtyOneNoteDoesNotRepeatOnLaterBuild() {
-        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+    func testLaterBuildPresentsOnlyItsUnseenNote() {
+        XCTAssertEqual(ReleaseNotesLifecycle.notesToPresent(
             currentBuildIdentifier: "62",
             entries: HarklightReleaseNotes.entries,
             lastSeenBuildIdentifier: 61,
+            hasPriorAppState: true).compactMap(\.buildIdentifier), [62])
+    }
+
+    func testBuildSixtyTwoReplyNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 62 })
+
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["reply-box"])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "61")
+                .compactMap(\.buildIdentifier),
+            [61, 59, 1])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "62")
+                .compactMap(\.buildIdentifier),
+            [62, 61, 59, 1])
+        XCTAssertEqual(
+            HarklightReleaseNotes.settingsHistory(currentBuildIdentifier: "61")
+                .compactMap(\.buildIdentifier),
+            [61, 59, 1])
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "62",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 61,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [62])
+        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "62",
+            entries: HarklightReleaseNotes.entries,
+            lastSeenBuildIdentifier: 62,
             hasPriorAppState: true).isEmpty)
     }
 

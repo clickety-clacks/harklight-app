@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 62,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "reply-box",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "A single rounded Reply box",
+                        comment: "Release-note title for the combined Reply label and editor."),
+                    detail: LocalizedStringResource(
+                        "The Reply label and full-width editor now sit together in one rounded box.",
+                        comment: "Release-note detail about the rounded Reply box."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 61,
             marketingVersion: "0.1.0",
             highlights: [
