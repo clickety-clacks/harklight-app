@@ -110,8 +110,11 @@ final class ConversationSampleUITests: XCTestCase {
                       "The Chat button presents the native dismissible sheet.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "About ")).firstMatch.exists,
                        "The conversation panel no longer shows request-context title text.")
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Agent listening")).firstMatch.exists,
-                       "Listening status belongs to the removed panel header.")
+        let availability = app.staticTexts["conversation-availability"]
+        XCTAssertTrue(availability.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(availability.label, "Example · Agent listening · delivery shown per message")
+        XCTAssertLessThan(availability.frame.maxY, inputSurface.frame.minY,
+                          "Listening status appears directly above the composer.")
         XCTAssertFalse(app.buttons["Close"].exists,
                        "The conversation panel no longer needs a large toolbar X.")
 
