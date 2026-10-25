@@ -548,8 +548,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         chat.tap()
         let chatComposer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(chatComposer.waitForExistence(timeout: 5), app.debugDescription)
-        capture("reply-draft-chat-sheet-open", app)
-        dismissReplyChatSheet(app, chatComposer)
+        capture("reply-draft-chat-open", app)
+        dismissReplyChatPresentation(app, chatComposer)
         XCTAssertTrue(chatComposer.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
@@ -752,7 +752,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         add(attachment)
     }
 
-    private func dismissReplyChatSheet(_ app: XCUIApplication, _ composer: XCUIElement) {
+    private func dismissReplyChatPresentation(_ app: XCUIApplication, _ composer: XCUIElement) {
         let window = app.windows.firstMatch.frame
         let contentFrame = composer.frame
         let containers = app.otherElements
@@ -763,12 +763,18 @@ final class SampleWorkspaceUITests: XCTestCase {
                       $0.height > contentFrame.height * 4 &&
                       $0.height < window.height - 4 }
             .max { $0.width * $0.height < $1.width * $1.height } ?? window
-        let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-        let start = screen.withOffset(CGVector(dx: presentation.midX,
-                                               dy: presentation.minY + 16))
-        let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
-        start.press(forDuration: 0.1, thenDragTo: end)
-        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
+        if presentation.width < window.width - 4 {
+            let chat = app.buttons["Chat"]
+            XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(chat.isHittable, "Chat remains reachable beside its iPad popover.")
+            chat.tap()
+        } else {
+            let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            let start = screen.withOffset(CGVector(dx: presentation.midX,
+                                                   dy: presentation.minY + 16))
+            let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
     }
 
     /// Reads the app's diagnostics probes (enabled by `--harklight-ui-diagnostics`)
