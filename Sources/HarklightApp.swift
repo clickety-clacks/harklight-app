@@ -109,8 +109,8 @@ struct HarklightApp: App {
                 }
             }
             .sheet(isPresented: $releaseNotes.isShowingCurrentRelease) {
-                if let note = releaseNotes.currentNote {
-                    ReleaseNotesSheet(note: note)
+                if !releaseNotes.notesToShow.isEmpty {
+                    ReleaseNotesSheet(notes: releaseNotes.notesToShow)
                 }
             }
         }

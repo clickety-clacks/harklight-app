@@ -55,58 +55,59 @@ enum HarklightReleaseNotes {
         return value
     }
 
+    static func releasedEntries(
+        currentBuildIdentifier: String?,
+        entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries
+    ) -> [HarklightReleaseNote] {
+        guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
+        let released = entries.compactMap { note -> (note: HarklightReleaseNote, build: Int)? in
+            guard let build = Int(note.buildIdentifier), build <= currentBuild else {
+                return nil
+            }
+            return (note: note, build: build)
+        }
+        return released.sorted { $0.build > $1.build }.map(\.note)
+    }
+
     static func settingsHistory(
         currentBuildIdentifier: String?,
         entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries
     ) -> [HarklightReleaseNote] {
-        guard let currentBuildIdentifier,
-              let current = entries.first(where: { $0.buildIdentifier == currentBuildIdentifier }) else {
-            return entries
-        }
-        return [current] + entries.filter { $0.buildIdentifier != currentBuildIdentifier }
+        releasedEntries(currentBuildIdentifier: currentBuildIdentifier, entries: entries)
     }
-}
-
-enum ReleaseNotesLaunchDecision: Equatable {
-    case noNotesForCurrentBuild
-    case alreadySeen
-    case showCurrentNotes
-    case markFreshInstallSeen
 }
 
 enum ReleaseNotesLifecycle {
     static let seenBuildIdentifiersDefaultsKey = "release-notes.seen-build-identifiers"
 
-    static func launchDecision(
+    static func notesToPresent(
         currentBuildIdentifier: String?,
-        noteBuildIdentifiers: Set<String>,
+        entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries,
         seenBuildIdentifiers: Set<String>?,
         hasPriorAppState: Bool
-    ) -> ReleaseNotesLaunchDecision {
-        guard let currentBuildIdentifier,
-              noteBuildIdentifiers.contains(currentBuildIdentifier) else {
-            return .noNotesForCurrentBuild
+    ) -> [HarklightReleaseNote] {
+        let released = HarklightReleaseNotes.releasedEntries(
+            currentBuildIdentifier: currentBuildIdentifier,
+            entries: entries)
+        guard let seenBuildIdentifiers else {
+            return hasPriorAppState ? Array(released.prefix(1)) : []
         }
-        if let seenBuildIdentifiers {
-            return seenBuildIdentifiers.contains(currentBuildIdentifier)
-                ? .alreadySeen
-                : .showCurrentNotes
-        }
-        return hasPriorAppState ? .showCurrentNotes : .markFreshInstallSeen
+        return released.filter { !seenBuildIdentifiers.contains($0.buildIdentifier) }
     }
 }
 
 @MainActor
 @Observable
 final class ReleaseNotesPresentation {
-    private(set) var currentNote: HarklightReleaseNote?
+    private(set) var notesToShow: [HarklightReleaseNote] = []
     @ObservationIgnored private let currentBuildIdentifier: String?
+    @ObservationIgnored private let releasedBuildIdentifiers: Set<String>
     @ObservationIgnored private let defaults: UserDefaults
 
     var isShowingCurrentRelease = false {
         didSet {
             guard oldValue, !isShowingCurrentRelease else { return }
-            markCurrentBuildSeen()
+            markReleasedBuildsSeen()
         }
     }
 
@@ -118,9 +119,10 @@ final class ReleaseNotesPresentation {
     ) {
         self.currentBuildIdentifier = currentBuildIdentifier
         self.defaults = defaults
-        currentNote = currentBuildIdentifier.flatMap { build in
-            entries.first { $0.buildIdentifier == build }
-        }
+        let released = HarklightReleaseNotes.releasedEntries(
+            currentBuildIdentifier: currentBuildIdentifier,
+            entries: entries)
+        releasedBuildIdentifiers = Set(released.map(\.buildIdentifier))
 
         let storedSeenBuilds: Set<String>?
         if defaults.object(forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) == nil {
@@ -129,27 +131,23 @@ final class ReleaseNotesPresentation {
             storedSeenBuilds = Set(defaults.stringArray(
                 forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) ?? [])
         }
-        let decision = ReleaseNotesLifecycle.launchDecision(
+        notesToShow = ReleaseNotesLifecycle.notesToPresent(
             currentBuildIdentifier: currentBuildIdentifier,
-            noteBuildIdentifiers: Set(entries.map(\.buildIdentifier)),
+            entries: entries,
             seenBuildIdentifiers: storedSeenBuilds,
             hasPriorAppState: hasPriorAppState)
 
-        switch decision {
-        case .noNotesForCurrentBuild, .alreadySeen:
-            break
-        case .showCurrentNotes:
-            isShowingCurrentRelease = currentNote != nil
-        case .markFreshInstallSeen:
-            markCurrentBuildSeen()
+        if storedSeenBuilds == nil, !hasPriorAppState {
+            markReleasedBuildsSeen()
         }
+        isShowingCurrentRelease = !notesToShow.isEmpty
     }
 
-    private func markCurrentBuildSeen() {
-        guard let currentBuildIdentifier, currentNote != nil else { return }
+    private func markReleasedBuildsSeen() {
         var seen = Set(defaults.stringArray(
             forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) ?? [])
-        seen.insert(currentBuildIdentifier)
+        seen.formUnion(releasedBuildIdentifiers)
+        if let currentBuildIdentifier { seen.insert(currentBuildIdentifier) }
         defaults.set(seen.sorted(), forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey)
     }
 }
@@ -244,13 +242,15 @@ struct ReleaseNotesHistoryView: View {
 }
 
 struct ReleaseNotesSheet: View {
-    let note: HarklightReleaseNote
+    let notes: [HarklightReleaseNote]
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
-                ReleaseNoteSection(note: note)
+                ForEach(notes) { note in
+                    ReleaseNoteSection(note: note)
+                }
             }
             .navigationTitle("What’s New")
             .navigationBarTitleDisplayMode(.inline)
