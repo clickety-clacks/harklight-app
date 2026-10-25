@@ -29,6 +29,48 @@ final class DetailChatButtonUITests: XCTestCase {
                       app.debugDescription)
     }
 
+    func testSettingsAndChatToolbarTapsPresentTheirPanels() {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
+        defer {
+            if isPad { XCUIDevice.shared.orientation = .portrait }
+        }
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(settings.isHittable, app.debugDescription)
+        attachScreenshot("settings-toolbar-before-tap")
+        settings.tap()
+
+        let settingsTitle = app.navigationBars["Settings"]
+        XCTAssertTrue(settingsTitle.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("settings-panel-open")
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
+        done.tap()
+        XCTAssertTrue(settingsTitle.waitForNonExistence(timeout: 5), app.debugDescription)
+
+        let sample = app.descendants(matching: .any)["sample-information-2"]
+        XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
+        sample.tap()
+        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+
+        let chat = app.toolbars.buttons["Chat"].exists
+            ? app.toolbars.buttons["Chat"] : app.navigationBars.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(chat.isHittable, app.debugDescription)
+        attachScreenshot("chat-toolbar-before-tap")
+        chat.tap()
+        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        attachScreenshot("chat-panel-open")
+    }
+
     func testDetailChatUsesNativeToolbarInLightMode() {
         verifyToolbarChatButton(appearance: "Light")
     }
