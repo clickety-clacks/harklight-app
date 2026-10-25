@@ -93,7 +93,7 @@ final class DetailChatButtonUITests: XCTestCase {
             return
         }
         attachScreenshot("wide-detail-chat-presentation-open")
-        dismissPresentedChat(app, presentationFrame, composer)
+        dismissPresentedChat(app, presentationFrame)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         attachScreenshot("wide-detail-chat-toolbar-after-presentation-dismissal")
     }
@@ -222,8 +222,7 @@ final class DetailChatButtonUITests: XCTestCase {
     }
 
     private func dismissPresentedChat(_ app: XCUIApplication,
-                                      _ presentation: CGRect,
-                                      _ composer: XCUIElement) {
+                                      _ presentation: CGRect) {
         let window = app.windows.firstMatch.frame
         let outsidePoint = CGPoint(x: max(window.minX + 8, presentation.minX - 24),
                                    y: presentation.midY)
@@ -236,7 +235,34 @@ final class DetailChatButtonUITests: XCTestCase {
             dx: (outsidePoint.x - window.minX) / window.width,
             dy: (outsidePoint.y - window.minY) / window.height))
         outsideTap.tap()
-        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitForCenteredChatPresentationToDismiss(in: app,
+                                                               window: window,
+                                                               timeout: 5),
+                      "The centered Chat presentation should close after an outside tap. \(app.debugDescription)")
+    }
+
+    private func waitForCenteredChatPresentationToDismiss(in app: XCUIApplication,
+                                                          window: CGRect,
+                                                          timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let inputSurfaces = app.otherElements.matching(
+                identifier: "sample-chat-input-surface").allElementsBoundByIndex
+            let composerContainers = app.descendants(matching: .any)
+                .containing(.textField, identifier: "sample-chat-composer")
+                .allElementsBoundByIndex
+            let hasCenteredPresentation = inputSurfaces.contains { surface in
+                !centeredPresentationFrames(in: composerContainers,
+                                            containing: surface.frame,
+                                            window: window).isEmpty
+            }
+            if !hasCenteredPresentation {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+
+        return false
     }
 
     private func attachScreenshot(_ name: String) {
