@@ -699,7 +699,7 @@ struct InboxList: View {
     let notificationNavigation: NativeInboxNavigation?
     let triggerNotification: (() -> Void)?
     @Environment(\.colorScheme) private var colorScheme
-    @State private var scrollMetrics = InboxScrollMetrics.empty
+    @State private var canRequestOlderPageOnDrag = false
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
@@ -984,7 +984,11 @@ struct InboxList: View {
             return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
                 distanceToBottom: max(0, extent - top), contentFits: extent == 0)
         } action: { oldMetrics, newMetrics in
-            scrollMetrics = newMetrics
+            let canPageOnDrag = newMetrics.contentFits || newMetrics.distanceToBottom <= 80
+            // Pixel offsets are for this callback only; publishing each one invalidates the list.
+            if canRequestOlderPageOnDrag != canPageOnDrag {
+                canRequestOlderPageOnDrag = canPageOnDrag
+            }
             guard isUserScrolling,
                   newMetrics.offsetY > oldMetrics.offsetY + 1,
                   newMetrics.distanceToBottom <= 80 else { return }
@@ -993,14 +997,14 @@ struct InboxList: View {
         .onScrollPhaseChange { oldPhase, newPhase in
             let scrolling = newPhase == .interacting || newPhase == .decelerating
             if scrolling && !isUserScrolling { requestedInGesture = false }
-            isUserScrolling = scrolling
+            if isUserScrolling != scrolling { isUserScrolling = scrolling }
             if oldPhase == .interacting && !scrolling { requestedInGesture = false }
         }
         .simultaneousGesture(DragGesture(minimumDistance: 10)
             .onChanged { value in
                 guard value.translation.height < -12 else { return }
-                isUserScrolling = true
-                if scrollMetrics.contentFits || scrollMetrics.distanceToBottom <= 80 {
+                if !isUserScrolling { isUserScrolling = true }
+                if canRequestOlderPageOnDrag {
                     requestOlderPage()
                 }
             }
@@ -1022,9 +1026,6 @@ private struct InboxScrollMetrics: Equatable {
     let offsetY: CGFloat
     let distanceToBottom: CGFloat
     let contentFits: Bool
-
-    static let empty = InboxScrollMetrics(offsetY: 0, distanceToBottom: .greatestFiniteMagnitude,
-                                          contentFits: false)
 }
 
 struct InboxRowContent: View {
