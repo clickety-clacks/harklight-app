@@ -143,6 +143,65 @@ final class ConversationSampleUITests: XCTestCase {
         capture("chat-panel-multiline-prompt", app)
     }
 
+    func testChatHistoryKeepsKeyboardUntilDownwardSwipe() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+
+        let composer = app.textFields["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        history.swipeUp()
+        let latestMessage = history.staticTexts[
+            "Agent example: the shorter path is faster, while the longer path is easier to revise."
+        ]
+        XCTAssertTrue(latestMessage.isHittable, app.debugDescription)
+
+        let chatDraft = "Keep this unsent prompt while I read the conversation."
+        composer.tap()
+        composer.typeText(chatDraft)
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), app.debugDescription)
+
+        latestMessage.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Tapping conversation content leaves the composer keyboard open.")
+        XCTAssertEqual(composer.value as? String, chatDraft,
+                       "Tapping conversation content preserves the unsent prompt.")
+
+        let addAttachment = app.buttons["sample-chat-add-attachment"]
+        XCTAssertTrue(addAttachment.isHittable, app.debugDescription)
+        addAttachment.tap()
+        let samplePhoto = app.buttons["Sample photo"]
+        XCTAssertTrue(samplePhoto.waitForExistence(timeout: 5), app.debugDescription)
+        samplePhoto.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Returning from the attachment action leaves the composer keyboard open.")
+        XCTAssertEqual(composer.value as? String, chatDraft,
+                       "The attachment action preserves the unsent prompt.")
+
+        history.swipeUp()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
+                      "Scrolling toward older conversation content keeps the keyboard open.")
+        history.swipeDown()
+        XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
+                       "A downward swipe on conversation history dismisses the keyboard.")
+        XCTAssertEqual(composer.value as? String, chatDraft,
+                       "Interactive dismissal preserves the unsent chat draft.")
+        composer.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
+                      "The composer can be focused again after interactive dismissal.")
+        XCTAssertEqual(composer.value as? String, chatDraft,
+                       "Refocusing the composer preserves the unsent draft.")
+    }
+
     func testAcceptedSenderUpdateIsVisibleInTheSameOrdinaryRequestAndHistory() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
