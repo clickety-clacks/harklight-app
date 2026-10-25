@@ -36,13 +36,27 @@ struct InboxCardContext {
 /// Native scroll and toolbar host shared by admitted messages and local examples.
 struct MessageCardSurface<Content: View>: View {
     let context: InboxCardContext
-    @ViewBuilder let content: () -> Content
+    let replyEditorIsOpen: Bool
+    private let onDownwardContentSwipe: () -> Void
+    private let content: () -> Content
     @Environment(\.colorScheme) private var colorScheme
     @State private var pull: CGFloat = 0
     @State private var armedDirection = 0
     @State private var contentHeight: CGFloat = 0
+    @State private var scrollIsInteracting = false
+    @State private var movedContentDownDuringInteraction = false
 
     private let bottomControlClearance: CGFloat = 72
+
+    init(context: InboxCardContext,
+         replyEditorIsOpen: Bool,
+         onDownwardContentSwipe: @escaping () -> Void = {},
+         @ViewBuilder content: @escaping () -> Content) {
+        self.context = context
+        self.replyEditorIsOpen = replyEditorIsOpen
+        self.onDownwardContentSwipe = onDownwardContentSwipe
+        self.content = content
+    }
 
     var body: some View {
         GeometryReader { viewport in
@@ -61,6 +75,7 @@ struct MessageCardSurface<Content: View>: View {
                         }
                         .allowsHitTesting(false)
                     }
+                    .frame(minHeight: viewport.size.height, alignment: .top)
             }
             .accessibilityIdentifier("message-card-scroll")
             .scrollBounceBehavior(.always)
@@ -73,13 +88,14 @@ struct MessageCardSurface<Content: View>: View {
                     Color.clear.frame(height: bottomControlClearance).accessibilityHidden(true)
                 }
             }
-            .background {
-                HarklightDesignSystem.palette(for: colorScheme)
-                    .messageType(context.messageType).backgroundColor
-                    .ignoresSafeArea()
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top
+            } action: { previousOffset, offset in
+                if scrollIsInteracting,
+                   offset < previousOffset - 1 {
+                    movedContentDownDuringInteraction = true
+                }
             }
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .navigationBarTitleDisplayMode(.inline)
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 let top = geometry.contentOffset.y + geometry.contentInsets.top
                 let extent = max(0, geometry.contentSize.height - geometry.containerSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom)
@@ -94,10 +110,29 @@ struct MessageCardSurface<Content: View>: View {
                 armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
             }
             .onScrollPhaseChange { oldPhase, newPhase in
+                if newPhase == .interacting {
+                    scrollIsInteracting = true
+                    movedContentDownDuringInteraction = false
+                } else if oldPhase == .interacting {
+                    scrollIsInteracting = false
+                    if movedContentDownDuringInteraction && replyEditorIsOpen {
+                        onDownwardContentSwipe()
+                    }
+                    movedContentDownDuringInteraction = false
+                } else {
+                    scrollIsInteracting = false
+                }
                 if oldPhase == .interacting && newPhase != .interacting && armedDirection != 0 {
                     context.move(armedDirection)
                 }
             }
+            .background {
+                HarklightDesignSystem.palette(for: colorScheme)
+                    .messageType(context.messageType).backgroundColor
+                    .ignoresSafeArea()
+            }
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .navigationBarTitleDisplayMode(.inline)
             .overlay(alignment: pull > 0 ? .top : .bottom) {
                 if abs(pull) > 8, let neighbor = pull > 0 ? context.previous : context.next {
                     MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0, armed: armedDirection != 0)

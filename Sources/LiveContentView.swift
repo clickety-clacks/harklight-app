@@ -68,13 +68,16 @@ private struct ReplyEditorTarget: Hashable {
         if let inputID { "request-input-\(inputID)-reply-\(actionID)" }
         else { "request-compatibility-reply-\(actionID)" }
     }
+
+    var editorCardIdentifier: String { "\(fieldIdentifier)-card" }
 }
 
 private struct ReplyChoiceCard: View {
     let title: String
     let detail: String
     let selected: Bool
-    let text: String
+    @Binding var text: String
+    @FocusState.Binding var focusedActionID: String?
     let isEditing: Bool
     let multiple: Bool
     let suggested: Bool
@@ -92,14 +95,19 @@ private struct ReplyChoiceCard: View {
             MessageChoiceLabel(title: title, detail: detail, selected: selected,
                                multiple: multiple, suggested: suggested,
                                ownAnswer: ownAnswer, drawsSurface: false)
-            if !isEditing, !text.isEmpty {
-                Text(text)
+            if isEditing || selected || !text.isEmpty {
+                TextEditor(text: $text)
                     .font(.body)
                     .foregroundStyle(textColor)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(replySurface, in: RoundedRectangle(cornerRadius: 12))
+                    .tint(textColor)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 120)
+                    .padding(8)
+                    .background(replySurface)
+                    .focused($focusedActionID, equals: target.actionIdentifier)
+                    .accessibilityLabel(title)
+                    .accessibilityIdentifier(target.fieldIdentifier)
+                    .disabled(isReadOnly || !selected)
                     .padding(.top, 10)
             }
         }
@@ -111,8 +119,10 @@ private struct ReplyChoiceCard: View {
         .opacity(selected ? 1 : 0.55)
         .animation(.smooth(duration: 0.25), value: selected)
 
-        if isEditing {
+        if isEditing || selected {
             card
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(target.editorCardIdentifier)
         } else {
             Button(action: onOpen) {
                 card
@@ -123,57 +133,6 @@ private struct ReplyChoiceCard: View {
             .accessibilityHint(text.isEmpty ? "Opens the reply field." : "Edit your reply.")
             .disabled(isReadOnly)
         }
-    }
-}
-
-private struct ReplyEditorComposer: View {
-    @Binding var text: String
-    @FocusState.Binding var focusedActionID: String?
-    let target: ReplyEditorTarget
-    let textColor: Color
-    let backgroundColor: Color
-    let fieldColor: Color
-    let maximumHeight: CGFloat
-    let onSend: () -> Void
-
-    private var maximumLineCount: Int {
-        let lineHeight = max(UIFont.preferredFont(forTextStyle: .body).lineHeight, 1)
-        return max(1, Int((maximumHeight - 16) / lineHeight))
-    }
-
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Reply", text: $text, axis: .vertical)
-                .lineLimit(1...maximumLineCount)
-                .fixedSize(horizontal: false, vertical: true)
-                .font(.body)
-                .foregroundStyle(textColor)
-                .tint(textColor)
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
-                .background(fieldColor, in: RoundedRectangle(cornerRadius: 14))
-                .focused($focusedActionID, equals: target.actionIdentifier)
-                .accessibilityLabel("Reply")
-                .accessibilityIdentifier(target.fieldIdentifier)
-
-            Button(action: onSend) {
-                Image(systemName: "arrow.up")
-                    .font(.headline.weight(.semibold))
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.glassProminent)
-            .buttonBorderShape(.circle)
-            .tint(textColor)
-            .foregroundStyle(backgroundColor)
-            .disabled(!text.contains { !$0.isWhitespace })
-            .accessibilityLabel("Send reply")
-            .accessibilityIdentifier("request-reply-send")
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(backgroundColor)
     }
 }
 
@@ -591,21 +550,10 @@ struct LiveRequestDetail: View {
     @State private var requestDetailsPresented = false
     @State private var answerSubmittedHere = false
     @State private var activeReplyEditor: ReplyEditorTarget?
-    @State private var replyComposerContainerHeight: CGFloat = 0
     @FocusState private var focusedReplyActionID: String?
 
     private var detailColors: HarklightDesignSource.MessageType {
         HarklightDesignSystem.palette(for: colorScheme).messageType(context.messageType)
-    }
-
-    private var replyComposerMaximumHeight: CGFloat {
-        let activeScene = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }
-        let window = activeScene?.windows.first(where: \.isKeyWindow)
-            ?? activeScene?.windows.first
-        let screenHeight = window?.bounds.height ?? replyComposerContainerHeight
-        return max(44, screenHeight * 0.3)
     }
 
     private var replyEditorSurface: Color {
@@ -882,7 +830,11 @@ struct LiveRequestDetail: View {
     }
 
     var body: some View {
-        MessageCardSurface(context: context) {
+        MessageCardSurface(context: context,
+                           replyEditorIsOpen: activeReplyEditor != nil || focusedReplyActionID != nil,
+                           onDownwardContentSwipe: {
+                               focusedReplyActionID = nil
+                           }) {
             VStack(alignment: .leading, spacing: 12) {
                 Button {
                     requestDetailsPresented = true
@@ -944,8 +896,10 @@ struct LiveRequestDetail: View {
                                                node: sender.scene,
                                                store: store,
                                                readOnly: controlsReadOnly,
+                                               focusedReplyActionID: $focusedReplyActionID,
                                                activeReplyEditor: activeReplyEditor,
                                                openReplyEditor: { openReplyEditor($0) },
+                                               replyTextBinding: { replyTextBinding(for: $0) },
                                                closeReplyEditor: closeReplyEditor,
                                                localExample: localExample,
                                                enlargePicture: { enlargedPicture = $0 })
@@ -959,6 +913,8 @@ struct LiveRequestDetail: View {
                                              sendDisabled: sendControlsDisabled,
                                              localExample: localExample,
                                              onSeen: submitSeenAction,
+                                             focusedReplyActionID: $focusedReplyActionID,
+                                             replyTextBinding: { replyTextBinding(for: $0) },
                                              canOfferNoComment: canOfferNoComment,
                                              noCommentSelected: noCommentSelected,
                                              noCommentUnavailable: showsNoCommentUnavailable,
@@ -1048,33 +1004,10 @@ struct LiveRequestDetail: View {
             .foregroundStyle(detailColors.textColor)
             .tint(detailColors.textColor)
         }
-        .background {
-            GeometryReader { geometry in
-                Color.clear
-                    .onAppear { replyComposerContainerHeight = geometry.size.height }
-                    .onChange(of: geometry.size.height) { _, height in
-                        replyComposerContainerHeight = height
-                    }
-            }
-            .ignoresSafeArea(.keyboard)
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if let target = activeReplyEditor {
-                ReplyEditorComposer(text: replyTextBinding(for: target),
-                                    focusedActionID: $focusedReplyActionID,
-                                    target: target,
-                                    textColor: detailColors.textColor,
-                                    backgroundColor: detailColors.backgroundColor,
-                                    fieldColor: replyEditorSurface,
-                                    maximumHeight: replyComposerMaximumHeight,
-                                    onSend: closeReplyEditor)
-            }
-        }
         .toolbar {
-            if activeReplyEditor == nil {
-                ToolbarItem(placement: .topBarTrailing) {
-                    chatButton
-                }
+            ToolbarItemGroup(placement: .bottomBar) {
+                Spacer()
+                chatButton
             }
             ToolbarItem(placement: .confirmationAction) {
                 if request.informationalSeenStatus != nil {
@@ -1245,6 +1178,20 @@ struct HistoricalAnswerDraftView: View {
     let request: PresentedRequest
     let store: LivePresentationStore
     var retracted = false
+    @FocusState private var focusedReplyActionID: String?
+
+    private func replyTextBinding(for target: ReplyEditorTarget) -> Binding<String> {
+        let text: String
+        if let inputID = target.inputID {
+            text = request.draft.inputs[ExactText(inputID)]?
+                .textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
+        } else {
+            text = request.draft.compatibility
+                .textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
+        }
+        return .constant(text)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(request.title?.rawValue ?? "Earlier question").font(.headline)
@@ -1254,11 +1201,15 @@ struct HistoricalAnswerDraftView: View {
             switch request.projection {
             case let .sender(sender):
                 LiveProjectedSceneView(request: request, sender: sender, node: sender.scene,
-                                       store: store, readOnly: true)
+                                       store: store, readOnly: true,
+                                       focusedReplyActionID: $focusedReplyActionID,
+                                       replyTextBinding: { replyTextBinding(for: $0) })
             case let .compatibility(actions):
                 LiveCompatibilityActions(request: request, actions: actions, store: store,
                                          readOnly: true,
-                                         sendDisabled: true)
+                                         sendDisabled: true,
+                                         focusedReplyActionID: $focusedReplyActionID,
+                                         replyTextBinding: { replyTextBinding(for: $0) })
             case .unsupported:
                 Text("This saved answer format cannot be displayed.").font(.caption)
             }
@@ -1273,8 +1224,10 @@ private struct LiveProjectedSceneView: View {
     let node: ProjectedSceneNode
     let store: LivePresentationStore
     let readOnly: Bool
+    @FocusState.Binding var focusedReplyActionID: String?
     var activeReplyEditor: ReplyEditorTarget? = nil
     var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
+    var replyTextBinding: (ReplyEditorTarget) -> Binding<String>
     var closeReplyEditor: () -> Void = {}
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
@@ -1313,8 +1266,10 @@ private struct LiveProjectedSceneView: View {
                                        readOnly: readOnly,
                                        localExample: localExample,
                                        enlargePicture: enlargePicture,
+                                       focusedReplyActionID: $focusedReplyActionID,
                                        activeReplyEditor: activeReplyEditor,
                                        openReplyEditor: openReplyEditor,
+                                       replyTextBinding: replyTextBinding,
                                        closeReplyEditor: closeReplyEditor)
             }
         case let .resultPoint(illustrationID, label, point):
@@ -1335,8 +1290,10 @@ private struct LiveProjectedSceneView: View {
     private func childView(_ child: ProjectedSceneNode) -> some View {
         LiveProjectedSceneView(request: request, sender: sender,
                                node: child, store: store, readOnly: readOnly,
+                               focusedReplyActionID: $focusedReplyActionID,
                                activeReplyEditor: activeReplyEditor,
                                openReplyEditor: openReplyEditor,
+                               replyTextBinding: replyTextBinding,
                                closeReplyEditor: closeReplyEditor,
                                localExample: localExample, enlargePicture: enlargePicture)
     }
@@ -1350,10 +1307,12 @@ private struct LiveProjectedInputView: View {
     let sender: AdmittedSenderProjection
     let store: LivePresentationStore
     let readOnly: Bool
+    @FocusState.Binding var focusedReplyActionID: String?
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
     var activeReplyEditor: ReplyEditorTarget? = nil
     var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
+    var replyTextBinding: (ReplyEditorTarget) -> Binding<String>
     var closeReplyEditor: () -> Void = {}
     @State private var pointGestureCapture = PointGestureCapture()
     @State private var typedInputTextByRevision: [UInt64: String] = [:]
@@ -1428,7 +1387,8 @@ private struct LiveProjectedInputView: View {
             : ""
         let target = ReplyEditorTarget(inputID: input.id.rawValue, actionID: action.id.rawValue)
         ReplyChoiceCard(title: action.label.rawValue, detail: detail,
-                        selected: selected, text: text,
+                        selected: selected, text: replyTextBinding(target),
+                        focusedActionID: $focusedReplyActionID,
                         isEditing: activeReplyEditor == target,
                         multiple: false, suggested: false,
                         ownAnswer: action.id.rawValue == "own",
@@ -1613,6 +1573,8 @@ private struct LiveCompatibilityActions: View {
     var noCommentSelected = false
     var noCommentUnavailable = false
     var onSelectNoComment: () -> Void = {}
+    @FocusState.Binding var focusedReplyActionID: String?
+    var replyTextBinding: (ReplyEditorTarget) -> Binding<String>
     var activeReplyEditor: ReplyEditorTarget? = nil
     var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
     var closeReplyEditor: () -> Void = {}
@@ -1679,7 +1641,8 @@ private struct LiveCompatibilityActions: View {
             if case .suggested = $0.role { true } else { false }
         } ?? false
         ReplyChoiceCard(title: action.label.rawValue, detail: detail,
-                        selected: selected, text: text,
+                        selected: selected, text: replyTextBinding(target),
+                        focusedActionID: $focusedReplyActionID,
                         isEditing: activeReplyEditor == target,
                         multiple: false, suggested: suggested, ownAnswer: false,
                         textColor: detailColors.textColor,
