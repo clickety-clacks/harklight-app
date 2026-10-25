@@ -562,8 +562,6 @@ struct LiveInboxSettings: View {
                     Button("Add example messages") { samples.populate(); dismiss() }
                     }
                 }
-                ReleaseNotesSettingsSection(notes: HarklightReleaseNotes.settingsHistory(
-                    currentBuildIdentifier: HarklightReleaseNotes.currentBuildIdentifier()))
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) {
