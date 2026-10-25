@@ -80,6 +80,8 @@ struct ConversationPanel: View {
                             }
                         }.padding(.horizontal)
                     }
+                    .accessibilityIdentifier("conversation-history-scroll")
+                    .scrollDismissesKeyboard(.interactively)
                     .onChange(of: thread.turns.count) { _, _ in
                         if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
