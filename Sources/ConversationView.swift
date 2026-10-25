@@ -349,13 +349,25 @@ private struct ConversationComposer: View {
 struct ConversationAvailabilityLabel: View {
     let availability: ConversationAvailability
     let local: Bool
+
     var body: some View {
+        Text(Self.text(for: availability, local: local))
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("conversation-availability")
+    }
+
+    static func text(for availability: ConversationAvailability, local: Bool = false) -> String {
         let prefix = local ? "Example · " : ""
         switch availability {
-        case .listening: Text(prefix + "Agent listening · delivery shown per message").font(.caption2).foregroundStyle(.secondary)
-        case let .notListening(time): Text(prefix + Self.notListeningText(since: time)).font(.caption2).foregroundStyle(.secondary)
-        case .gone: Text(prefix + "Originating session gone · request remains available").font(.caption2).foregroundStyle(.secondary)
-        case let .unsupported(reason): Text(prefix + "Listening unsupported · " + reason.rawValue).font(.caption2).foregroundStyle(.secondary)
+        case .listening:
+            return prefix + "Agent listening · delivery shown per message"
+        case let .notListening(time):
+            return prefix + notListeningText(since: time)
+        case .gone:
+            return prefix + "Originating session gone · request remains available"
+        case let .unsupported(reason):
+            return prefix + "Listening unsupported · " + reason.rawValue
         }
     }
 

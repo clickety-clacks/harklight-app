@@ -63,6 +63,21 @@ final class ConversationPresentationTests: XCTestCase {
             "Agent not listening since " + date.formatted(date: .abbreviated, time: .shortened))
         XCTAssertEqual(ConversationAvailabilityLabel.notListeningText(since: nil), "Agent not listening")
     }
+
+    func testAvailabilityLabelPreservesEachReceivedListeningState() {
+        let detachDate = Date(timeIntervalSince1970: 1_792_701_232.529)
+        XCTAssertEqual(ConversationAvailabilityLabel.text(for: .listening, local: true),
+            "Example · Agent listening · delivery shown per message")
+        XCTAssertEqual(ConversationAvailabilityLabel.text(
+            for: .notListening(lastDetachedAt: ExactText("1792701232529"))),
+            "Agent not listening since " + detachDate.formatted(date: .abbreviated, time: .shortened))
+        XCTAssertEqual(ConversationAvailabilityLabel.text(
+            for: .unsupported(reason: ExactText("Missing prerequisite"))),
+            "Listening unsupported · Missing prerequisite")
+        XCTAssertEqual(ConversationAvailabilityLabel.text(for: .gone),
+            "Originating session gone · request remains available")
+    }
+
     func testInlineTurnAndDraftBytesStayBehindReferencesAcrossTextOnlyComposerWrites() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
