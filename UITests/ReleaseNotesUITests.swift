@@ -16,7 +16,7 @@ final class ReleaseNotesUITests: XCTestCase {
                       "The update sheet identifies the released build and version.")
         XCTAssertTrue(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Keep your place while browsing messages and loading older items."].exists,
+        XCTAssertTrue(app.staticTexts["Scrolling the inbox list does less work, so it should feel smoother."].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["See clearer release notes"].exists,
                       app.debugDescription)
@@ -40,7 +40,7 @@ final class ReleaseNotesUITests: XCTestCase {
                       "Settings history identifies the build attached to this release note.")
         XCTAssertTrue(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Keep your place while browsing messages and loading older items."].exists,
+        XCTAssertTrue(app.staticTexts["Scrolling the inbox list does less work, so it should feel smoother."].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["See clearer release notes"].exists,
                       app.debugDescription)

@@ -64,8 +64,8 @@ enum HarklightReleaseNotes {
                         "Scroll through your Inbox more smoothly",
                         comment: "Release-note title for smoother Inbox scrolling."),
                     detail: LocalizedStringResource(
-                        "Keep your place while browsing messages and loading older items.",
-                        comment: "Release-note detail about Inbox scrolling.")),
+                        "Scrolling the inbox list does less work, so it should feel smoother.",
+                        comment: "Release-note detail about reduced work during Inbox list scrolling.")),
                 .init(
                     id: "release-note-format",
                     symbol: "sparkles",
