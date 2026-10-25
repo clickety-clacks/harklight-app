@@ -4,22 +4,22 @@ import AttentionDomain
 
 final class ReleaseNotesTests: XCTestCase {
     func testBuildOneReleaseNoteShowsMarketingVersionAndRetainsBuildIdentity() throws {
-        let first = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == "1" })
+        let first = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 1 })
 
         XCTAssertEqual(first.marketingVersion, "0.1.0")
-        XCTAssertEqual(first.buildIdentifier, "1")
+        XCTAssertEqual(first.buildIdentifier, 1)
     }
 
     func testBuildFiftyNineSettingsNoteIsHiddenUntilThatBuildIsRunning() {
         XCTAssertEqual(
             HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "58")
                 .compactMap(\.buildIdentifier),
-            ["1"])
+            [1])
 
         XCTAssertEqual(
             HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "59")
                 .compactMap(\.buildIdentifier),
-            ["59", "1"])
+            [59, 1])
     }
 
     func testDatedHistoryIsSettingsOnlyAndStartsAtItsFirstConfirmedBuild() {
@@ -27,9 +27,9 @@ final class ReleaseNotesTests: XCTestCase {
             historyIdentifier: "earlier-on-2026-10-25",
             marketingVersion: "0.1.0",
             historyDateDescription: LocalizedStringResource("Earlier on October 25, 2026"),
-            visibleFromBuildIdentifier: "59",
+            visibleFromBuildIdentifier: 59,
             highlights: [])
-        let buildNotes = [releaseNote("1"), releaseNote("59")]
+        let buildNotes = [releaseNote(1), releaseNote(59)]
 
         XCTAssertEqual(
             HarklightReleaseNotes.settingsHistory(
@@ -47,7 +47,7 @@ final class ReleaseNotesTests: XCTestCase {
             ReleaseNotesLifecycle.notesToPresent(
                 currentBuildIdentifier: "59",
                 entries: buildNotes + [historyNote],
-                seenBuildIdentifiers: ["1"],
+                lastSeenBuildIdentifier: 1,
                 hasPriorAppState: true).map(\.id),
             ["59"])
     }
@@ -65,92 +65,78 @@ final class ReleaseNotesTests: XCTestCase {
         ])
     }
 
-    func testCurrentBuildEntryUsesProvidedBundleMetadataWithoutGuessingItsNumber() {
-        let latestNumberedBuild = HarklightReleaseNotes.entries
-            .compactMap { $0.buildIdentifier.flatMap(Int.init) }
-            .max() ?? 0
-        let simulatedCurrentBuild = String(latestNumberedBuild + 1)
-        let currentEntries = HarklightReleaseNotes.entriesForCurrentBuild(
-            currentBuildIdentifier: simulatedCurrentBuild,
-            marketingVersion: "0.1.0")
+    func testBuildSixtyOneEntryIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 61 })
 
-        XCTAssertEqual(currentEntries.first?.buildIdentifier, simulatedCurrentBuild)
-        XCTAssertEqual(currentEntries.first?.marketingVersion, "0.1.0")
-        XCTAssertEqual(currentEntries.first?.highlights.map(\.id), [
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), [
             "inbox-scrolling",
-            "release-note-format",
-            "single-rounded-reply-box"
+            "release-note-format"
         ])
         XCTAssertEqual(
-            HarklightReleaseNotes.releasedEntries(
-                currentBuildIdentifier: String(latestNumberedBuild), entries: currentEntries)
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "60")
                 .compactMap(\.buildIdentifier),
-            ["59", "1"])
+            [59, 1])
         XCTAssertEqual(
-            HarklightReleaseNotes.releasedEntries(
-                currentBuildIdentifier: simulatedCurrentBuild, entries: currentEntries)
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "61")
                 .compactMap(\.buildIdentifier),
-            [simulatedCurrentBuild, "59", "1"])
-
+            [61, 59, 1])
         XCTAssertEqual(
-            HarklightReleaseNotes.entriesForCurrentBuild(
-                currentBuildIdentifier: String(latestNumberedBuild),
-                marketingVersion: "0.1.0").map(\.id),
-            HarklightReleaseNotes.entries.map(\.id))
+            HarklightReleaseNotes.settingsHistory(currentBuildIdentifier: "60")
+                .compactMap(\.buildIdentifier),
+            [59, 1])
+        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "60",
+            entries: HarklightReleaseNotes.entries,
+            lastSeenBuildIdentifier: 59,
+            hasPriorAppState: true).isEmpty)
+        XCTAssertEqual(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "61",
+            entries: HarklightReleaseNotes.entries,
+            lastSeenBuildIdentifier: 60,
+            hasPriorAppState: true).compactMap(\.buildIdentifier), [61])
     }
 
-    func testCurrentBuildHighlightsAreNotRelabeledAfterNumberedEntryIsRecorded() throws {
-        let latestNumberedBuild = HarklightReleaseNotes.entries
-            .compactMap { $0.buildIdentifier.flatMap(Int.init) }
-            .max() ?? 0
-        let simulatedPreviousBuild = String(latestNumberedBuild + 1)
-        let simulatedCurrentBuild = String(latestNumberedBuild + 2)
-        let previousBuildEntry = try XCTUnwrap(
-            HarklightReleaseNotes.entriesForCurrentBuild(
-                currentBuildIdentifier: simulatedPreviousBuild,
-                marketingVersion: "0.1.0").first)
-
-        let entries = [previousBuildEntry] + HarklightReleaseNotes.entries
-        XCTAssertEqual(
-            HarklightReleaseNotes.entriesForCurrentBuild(
-                currentBuildIdentifier: simulatedCurrentBuild,
-                marketingVersion: "0.1.0",
-                previousEntries: entries).map(\.id),
-            entries.map(\.id))
+    func testBuildSixtyOneNoteDoesNotRepeatOnLaterBuild() {
+        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "62",
+            entries: HarklightReleaseNotes.entries,
+            lastSeenBuildIdentifier: 61,
+            hasPriorAppState: true).isEmpty)
     }
 
     func testFreshInstallDoesNotPresentPreviouslyReleasedNotes() {
-        let notes = [releaseNote("1"), releaseNote("2")]
+        let notes = [releaseNote(1), releaseNote(2)]
 
         XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
             currentBuildIdentifier: "2",
             entries: notes,
-            seenBuildIdentifiers: nil,
+            lastSeenBuildIdentifier: nil,
             hasPriorAppState: false).isEmpty)
     }
 
     func testLegacyUpgradeShowsNewestReleasedNoteOnly() {
-        let notes = [releaseNote("1"), releaseNote("3"), releaseNote("2"), releaseNote("4")]
+        let notes = [releaseNote(1), releaseNote(3), releaseNote(2), releaseNote(4)]
 
         XCTAssertEqual(
             ReleaseNotesLifecycle.notesToPresent(
                 currentBuildIdentifier: "3",
                 entries: notes,
-                seenBuildIdentifiers: nil,
+                lastSeenBuildIdentifier: nil,
                 hasPriorAppState: true).compactMap(\.buildIdentifier),
-            ["3"])
+            [3])
     }
 
     func testUpdateShowsEveryUnseenReleasedNoteNewestFirst() {
-        let notes = [releaseNote("2"), releaseNote("4"), releaseNote("1"), releaseNote("3")]
+        let notes = [releaseNote(2), releaseNote(4), releaseNote(1), releaseNote(3)]
 
         XCTAssertEqual(
             ReleaseNotesLifecycle.notesToPresent(
                 currentBuildIdentifier: "4",
                 entries: notes,
-                seenBuildIdentifiers: ["1"],
+                lastSeenBuildIdentifier: 1,
                 hasPriorAppState: true).compactMap(\.buildIdentifier),
-            ["4", "3", "2"])
+            [4, 3, 2])
     }
 
     @MainActor
@@ -162,29 +148,31 @@ final class ReleaseNotesTests: XCTestCase {
         let presentation = ReleaseNotesPresentation(
             currentBuildIdentifier: "2",
             hasPriorAppState: false,
-            entries: [releaseNote("1"), releaseNote("2")],
+            entries: [releaseNote(1), releaseNote(2)],
             defaults: defaults)
 
         XCTAssertFalse(presentation.isShowingCurrentRelease)
+        XCTAssertEqual(defaults.integer(forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey), 2)
         XCTAssertEqual(defaults.stringArray(forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey),
                        ["1", "2"])
     }
 
     @MainActor
-    func testUpgradeNotesAreShownOnceAndDismissalPersistsReleasedBuilds() throws {
+    func testUpgradeNotesAreShownOnceAndCurrentBuildIsRecorded() throws {
         let suite = "ReleaseNotesTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        let notes = [releaseNote("1"), releaseNote("2")]
+        let notes = [releaseNote(1), releaseNote(2)]
         let presentation = ReleaseNotesPresentation(
             currentBuildIdentifier: "2",
             hasPriorAppState: true,
             entries: notes,
             defaults: defaults)
 
-        XCTAssertEqual(presentation.notesToShow.compactMap(\.buildIdentifier), ["2"])
+        XCTAssertEqual(presentation.notesToShow.compactMap(\.buildIdentifier), [2])
         XCTAssertTrue(presentation.isShowingCurrentRelease)
+        XCTAssertEqual(defaults.integer(forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey), 2)
         presentation.isShowingCurrentRelease = false
         XCTAssertEqual(defaults.stringArray(forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey),
                        ["1", "2"])
@@ -207,7 +195,7 @@ final class ReleaseNotesTests: XCTestCase {
         let presentation = ReleaseNotesPresentation(
             currentBuildIdentifier: "2",
             hasPriorAppState: true,
-            entries: [releaseNote("1"), releaseNote("2")],
+            entries: [releaseNote(1), releaseNote(2)],
             defaults: defaults)
 
         XCTAssertTrue(presentation.isShowingCurrentRelease)
@@ -216,40 +204,80 @@ final class ReleaseNotesTests: XCTestCase {
                        ["1", "2"])
     }
 
+    @MainActor
+    func testLegacySeenBuildsMigrateToTheHighestBuild() throws {
+        let suite = "ReleaseNotesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(["1", "59"], forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey)
+
+        let presentation = ReleaseNotesPresentation(
+            currentBuildIdentifier: "61",
+            hasPriorAppState: true,
+            defaults: defaults)
+
+        XCTAssertEqual(presentation.notesToShow.compactMap(\.buildIdentifier), [61])
+        XCTAssertEqual(defaults.integer(forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey), 61)
+        XCTAssertEqual(defaults.stringArray(forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey),
+                       ["1", "59", "61"])
+    }
+
+    @MainActor
+    func testLastSeenBuildNeverMovesBackward() throws {
+        let suite = "ReleaseNotesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(62, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
+
+        let presentation = ReleaseNotesPresentation(
+            currentBuildIdentifier: "61",
+            hasPriorAppState: true,
+            defaults: defaults)
+
+        XCTAssertFalse(presentation.isShowingCurrentRelease)
+        XCTAssertEqual(defaults.integer(forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey), 62)
+    }
+
     func testSettingsHistoryPlacesCurrentBuildBeforeEarlierNotes() {
         let history = HarklightReleaseNotes.settingsHistory(
             currentBuildIdentifier: "2",
-            entries: [releaseNote("1"), releaseNote("2")])
+            entries: [releaseNote(1), releaseNote(2)])
 
-        XCTAssertEqual(history.compactMap(\.buildIdentifier), ["2", "1"])
+        XCTAssertEqual(history.compactMap(\.buildIdentifier), [2, 1])
     }
 
     func testSettingsHistorySortsReleasedNotesWhenCurrentBuildHasNoEntry() {
         let history = HarklightReleaseNotes.settingsHistory(
             currentBuildIdentifier: "3",
-            entries: [releaseNote("1"), releaseNote("2")])
+            entries: [releaseNote(1), releaseNote(2)])
 
-        XCTAssertEqual(history.compactMap(\.buildIdentifier), ["2", "1"])
+        XCTAssertEqual(history.compactMap(\.buildIdentifier), [2, 1])
     }
 
     func testSettingsHistoryHidesFutureBuildsAndSortsNewestFirst() {
         let history = HarklightReleaseNotes.settingsHistory(
             currentBuildIdentifier: "3",
-            entries: [releaseNote("4"), releaseNote("1"), releaseNote("3"), releaseNote("2")])
+            entries: [releaseNote(4), releaseNote(1), releaseNote(3), releaseNote(2)])
 
-        XCTAssertEqual(history.compactMap(\.buildIdentifier), ["3", "2", "1"])
+        XCTAssertEqual(history.compactMap(\.buildIdentifier), [3, 2, 1])
     }
 
-    func testReleasedNotesIgnoreMalformedAndFutureBuildIdentifiers() {
+    func testReleasedNotesIgnoreMalformedCurrentAndFutureBuildIdentifiers() {
         let released = HarklightReleaseNotes.releasedEntries(
-            currentBuildIdentifier: "3",
-            entries: [releaseNote("future"), releaseNote("4"), releaseNote("2"), releaseNote("3")])
+            currentBuildIdentifier: "invalid",
+            entries: [releaseNote(4), releaseNote(2), releaseNote(3)])
 
-        XCTAssertEqual(released.compactMap(\.buildIdentifier), ["3", "2"])
+        XCTAssertTrue(released.isEmpty)
+
+        let releasedBeforeFutureEntry = HarklightReleaseNotes.releasedEntries(
+            currentBuildIdentifier: "3",
+            entries: [releaseNote(4), releaseNote(2), releaseNote(3)])
+
+        XCTAssertEqual(releasedBeforeFutureEntry.compactMap(\.buildIdentifier), [3, 2])
     }
 
     @MainActor
-    func testBuildWithoutUnseenNotesDoesNotPresentSheetOrChangeSeenBuilds() throws {
+    func testBuildWithoutUnseenNotesRecordsCurrentHighWatermark() throws {
         let suite = "ReleaseNotesTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -258,12 +286,13 @@ final class ReleaseNotesTests: XCTestCase {
         let presentation = ReleaseNotesPresentation(
             currentBuildIdentifier: "3",
             hasPriorAppState: true,
-            entries: [releaseNote("1"), releaseNote("2")],
+            entries: [releaseNote(1), releaseNote(2)],
             defaults: defaults)
 
         XCTAssertFalse(presentation.isShowingCurrentRelease)
+        XCTAssertEqual(defaults.integer(forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey), 3)
         XCTAssertEqual(defaults.stringArray(forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey),
-                       ["1", "2"])
+                       ["1", "2", "3"])
     }
 
     @MainActor
@@ -297,7 +326,7 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(NativeInstallationHistory.hasPersistedAttentionState(in: directory))
     }
 
-    private func releaseNote(_ buildIdentifier: String) -> HarklightReleaseNote {
+    private func releaseNote(_ buildIdentifier: Int) -> HarklightReleaseNote {
         HarklightReleaseNote(
             buildIdentifier: buildIdentifier,
             marketingVersion: "0.1.0",
