@@ -4,7 +4,7 @@ import XCTest
 final class ReleaseNotesUITests: XCTestCase {
     func testUpdateSheetAndSettingsHistoryShowReleasedNotes() {
         let app = XCUIApplication()
-        let simulatedCurrentBuild = "61" // Synthetic metadata; no archive mapping is claimed.
+        let simulatedCurrentBuild = "62" // Synthetic metadata; no archive mapping is claimed.
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = simulatedCurrentBuild
@@ -14,14 +14,14 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(updateTitle.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       "The update sheet identifies the released build and version.")
-        XCTAssertTrue(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
+        XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Scrolling the inbox list does less work, so it should feel smoother."].exists,
+        XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["See clearer release notes"].exists,
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Each update now has an icon, a short title and a clear description."].exists,
-                      app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
+                       "Earlier build notes do not appear in the current update sheet.")
+        XCTAssertFalse(app.staticTexts["See clearer release notes"].exists,
+                       "Earlier build notes do not appear in the current update sheet.")
         XCTAssertFalse(app.staticTexts["Earlier on October 25, 2026"].exists,
                        "Dated history-only notes do not appear in the update sheet.")
         attachScreenshot("release-notes-update-sheet", from: app)
@@ -38,6 +38,14 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       "Settings history identifies the build attached to this release note.")
+        XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
+                      app.debugDescription)
+        XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
+                      app.debugDescription)
+        attachScreenshot("release-notes-settings-history", from: app)
+        app.swipeUp()
+        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 61"].exists,
+                      "Settings history keeps earlier numbered notes after the new release.")
         XCTAssertTrue(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Scrolling the inbox list does less work, so it should feel smoother."].exists,
@@ -46,7 +54,6 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Each update now has an icon, a short title and a clear description."].exists,
                       app.debugDescription)
-        attachScreenshot("release-notes-settings-history", from: app)
         app.swipeUp()
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 59"].exists,
                       "Settings history retains the confirmed numbered release.")
