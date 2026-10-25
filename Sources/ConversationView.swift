@@ -101,6 +101,8 @@ struct ConversationPanel: View {
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
+                ConversationAvailabilityLabel(availability: thread.availability, local: store.isLocalExample)
+                    .padding(.horizontal)
                 if let message = store.conversationUnavailableMessage {
                     Text(message)
                         .font(.callout)
