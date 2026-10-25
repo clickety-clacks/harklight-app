@@ -935,6 +935,7 @@ struct InboxList: View {
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
         .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
+        .searchPresentationToolbarBehavior(.avoidHidingContent)
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
