@@ -1530,7 +1530,16 @@ final class LivePresentationStore {
 
     func stageText(_ text: String, input: ExactText, action: ExactText?, for key: RequestKey,
                    requestRevision: UInt64? = nil) {
+        let currentDraft = draft(for: key, revision: requestRevision)
+        let currentText: ExactText?
+        if let action {
+            currentText = currentDraft?.inputs[input]?.textByActionID[action]
+        } else {
+            currentText = currentDraft?.inputs[input]?.text
+        }
+        let textChanged = (currentText?.rawValue ?? "") != text
         let update: (inout RequestDraft) -> Void = { draft in
+            if textChanged { draft.noCommentSelected = false }
             if let action {
                 draft.inputs[input]?.textByActionID[action] = ExactText(text)
             } else {
@@ -1555,7 +1564,11 @@ final class LivePresentationStore {
 
     func stageCompatibilityText(_ text: String, action: ExactText, for key: RequestKey,
                                 requestRevision: UInt64? = nil) {
+        let currentText = draft(for: key, revision: requestRevision)?
+            .compatibility.textByActionID[action]?.rawValue ?? ""
+        let textChanged = currentText != text
         stageDraftText(for: key, revision: requestRevision) { draft in
+            if textChanged { draft.noCommentSelected = false }
             draft.compatibility.textByActionID[action] = ExactText(text)
         }
     }
@@ -1813,7 +1826,6 @@ final class LivePresentationStore {
         let bufferKey = DraftBufferKey(request: key, revision: request.requestRevision)
         var draft = pendingDrafts[bufferKey] ?? request.draft
         change(&draft)
-        draft.noCommentSelected = false
         pendingDrafts[bufferKey] = draft
         clearActionError()
         scheduleDraftPersistence(for: bufferKey)

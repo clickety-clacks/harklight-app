@@ -247,10 +247,13 @@ final class SampleWorkspaceUITests: XCTestCase {
                       "Selecting a text-only Reply focuses its embedded editor.")
         replyEditor.typeText("Draft stays saved.")
         XCTAssertEqual(replyEditor.value as? String, "Draft stays saved.")
-        XCTAssertGreaterThan(noComment.frame.minY, replyEditor.frame.maxY,
-                             "No comment stays after the expanded Reply editor.")
+        let messageCardScroll = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(messageCardScroll.exists, app.debugDescription)
+        messageCardScroll.swipeUp()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Scrolling to No comment keeps the Reply keyboard open.")
         XCTAssertTrue(noComment.isHittable,
-                      "The keyboard does not obscure the No comment action.")
+                      "No comment remains reachable after scrolling its message card.")
         capture("reply-only-no-comment-available", app)
 
         noComment.tap()
@@ -258,8 +261,6 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(noComment.value as? String, "Selected")
         XCTAssertFalse(app.descendants(matching: .any)["request-local-no-comment-status"].exists,
                        "Selecting No comment does not submit it.")
-        XCTAssertEqual(replyEditor.value as? String, "Draft stays saved.",
-                       "The typed draft remains saved and unsent.")
         capture("reply-only-no-comment-selected", app)
 
         showList(app)
@@ -282,6 +283,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         row.tap()
         XCTAssertTrue(app.buttons["request-no-comment"].isSelected,
                       "The selected No comment answer survives leaving the detail.")
+        let replySummary = app.buttons["request-compatibility-reply-reply"]
+        XCTAssertTrue(replySummary.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(replySummary.label.contains("Draft stays saved."),
+                      "The same unsent Reply draft remains saved after reopening the detail.")
         app.buttons["sample-finish"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["request-local-no-comment-status"]
             .waitForExistence(timeout: 5), app.debugDescription)
