@@ -65,6 +65,60 @@ final class ReleaseNotesTests: XCTestCase {
         ])
     }
 
+    func testCurrentBuildEntryUsesProvidedBundleMetadataWithoutGuessingItsNumber() {
+        let latestNumberedBuild = HarklightReleaseNotes.entries
+            .compactMap { $0.buildIdentifier.flatMap(Int.init) }
+            .max() ?? 0
+        let simulatedCurrentBuild = String(latestNumberedBuild + 1)
+        let currentEntries = HarklightReleaseNotes.entriesForCurrentBuild(
+            currentBuildIdentifier: simulatedCurrentBuild,
+            marketingVersion: "0.1.0")
+
+        XCTAssertEqual(currentEntries.first?.buildIdentifier, simulatedCurrentBuild)
+        XCTAssertEqual(currentEntries.first?.marketingVersion, "0.1.0")
+        XCTAssertEqual(currentEntries.first?.highlights.map(\.id), [
+            "inbox-scrolling",
+            "release-note-format",
+            "single-rounded-reply-box"
+        ])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(
+                currentBuildIdentifier: String(latestNumberedBuild), entries: currentEntries)
+                .compactMap(\.buildIdentifier),
+            ["59", "1"])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(
+                currentBuildIdentifier: simulatedCurrentBuild, entries: currentEntries)
+                .compactMap(\.buildIdentifier),
+            [simulatedCurrentBuild, "59", "1"])
+
+        XCTAssertEqual(
+            HarklightReleaseNotes.entriesForCurrentBuild(
+                currentBuildIdentifier: String(latestNumberedBuild),
+                marketingVersion: "0.1.0").map(\.id),
+            HarklightReleaseNotes.entries.map(\.id))
+    }
+
+    func testCurrentBuildHighlightsAreNotRelabeledAfterNumberedEntryIsRecorded() throws {
+        let latestNumberedBuild = HarklightReleaseNotes.entries
+            .compactMap { $0.buildIdentifier.flatMap(Int.init) }
+            .max() ?? 0
+        let simulatedPreviousBuild = String(latestNumberedBuild + 1)
+        let simulatedCurrentBuild = String(latestNumberedBuild + 2)
+        let previousBuildEntry = try XCTUnwrap(
+            HarklightReleaseNotes.entriesForCurrentBuild(
+                currentBuildIdentifier: simulatedPreviousBuild,
+                marketingVersion: "0.1.0").first)
+
+        let entries = [previousBuildEntry] + HarklightReleaseNotes.entries
+        XCTAssertEqual(
+            HarklightReleaseNotes.entriesForCurrentBuild(
+                currentBuildIdentifier: simulatedCurrentBuild,
+                marketingVersion: "0.1.0",
+                previousEntries: entries).map(\.id),
+            entries.map(\.id))
+    }
+
     func testFreshInstallDoesNotPresentPreviouslyReleasedNotes() {
         let notes = [releaseNote("1"), releaseNote("2")]
 
