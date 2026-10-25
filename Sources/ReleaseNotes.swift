@@ -251,7 +251,7 @@ struct ReleaseNotesHistoryView: View {
     }
 }
 
-struct What'sNewSheet: View {
+struct ReleaseNotesSheet: View {
     let note: HarklightReleaseNote
     @Environment(\.dismiss) private var dismiss
 
