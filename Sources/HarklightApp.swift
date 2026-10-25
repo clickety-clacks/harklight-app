@@ -15,14 +15,24 @@ struct HarklightApp: App {
         let arguments = ProcessInfo.processInfo.arguments
         let launch = NativeAppLaunch(arguments: arguments)
         _launch = State(initialValue: launch)
-        let isReferenceOrFixtureRun = arguments.contains("--reset-attention-fixture") ||
+        let isReleaseNotesUITest = ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] == "1"
+        let isReferenceOrFixtureRun = !isReleaseNotesUITest && (arguments.contains("--reset-attention-fixture") ||
             arguments.contains("--attention-fixture") ||
-            arguments.contains("--harklight-tier-reference")
+            arguments.contains("--harklight-tier-reference"))
+        let defaults: UserDefaults
+        if isReleaseNotesUITest,
+           let uiTestDefaults = UserDefaults(suiteName: "HarklightReleaseNotesUITests") {
+            uiTestDefaults.removePersistentDomain(forName: "HarklightReleaseNotesUITests")
+            defaults = uiTestDefaults
+        } else {
+            defaults = .standard
+        }
         _releaseNotes = State(initialValue: ReleaseNotesPresentation(
             currentBuildIdentifier: isReferenceOrFixtureRun
                 ? nil
                 : HarklightReleaseNotes.currentBuildIdentifier(),
-            hasPriorAppState: launch.hasPriorAppState))
+            hasPriorAppState: isReleaseNotesUITest ? true : launch.hasPriorAppState,
+            defaults: defaults))
     }
 
     /// The account Inbox drives the icon badge even while an archive is open;
@@ -109,8 +119,8 @@ struct HarklightApp: App {
                 }
             }
             .sheet(isPresented: $releaseNotes.isShowingCurrentRelease) {
-                if let note = releaseNotes.currentNote {
-                    ReleaseNotesSheet(note: note)
+                if !releaseNotes.notesToShow.isEmpty {
+                    ReleaseNotesSheet(notes: releaseNotes.notesToShow)
                 }
             }
         }
