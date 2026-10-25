@@ -152,9 +152,9 @@ final class DetailChatButtonUITests: XCTestCase {
             .containing(.textField, identifier: "sample-chat-composer")
             .allElementsBoundByIndex.map(\.frame)
         let presentation = containers
-            .filter { $0.width > contentFrame.width * 1.5 &&
+            .filter { $0.width > contentFrame.width + 4 &&
                       $0.height > contentFrame.height * 4 &&
-                      $0.width < window.width - 4 && $0.height < window.height - 4 }
+                      $0.height < window.height - 4 }
             .max { $0.width * $0.height < $1.width * $1.height } ?? window
         let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
         let start = screen.withOffset(CGVector(dx: presentation.midX,
