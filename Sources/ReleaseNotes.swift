@@ -14,6 +14,7 @@ struct HarklightReleaseNote: Identifiable, Sendable {
     }
 
     let buildIdentifier: String
+    let marketingVersion: String
     let title: LocalizedStringResource
     let introduction: LocalizedStringResource
     let highlights: [Highlight]
@@ -23,10 +24,11 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 
 enum HarklightReleaseNotes {
     /// Keep entries newest first. Add an entry for every build that carries
-    /// user-visible changes, using that build's CFBundleVersion.
+    /// user-visible changes, recording both CFBundleVersion and MARKETING_VERSION.
     static let entries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
             buildIdentifier: "1",
+            marketingVersion: "0.1.0",
             title: LocalizedStringResource(
                 "Release notes in one place",
                 comment: "Heading for a release-notes entry about finding app updates."),
@@ -273,8 +275,8 @@ private struct ReleaseNoteSection: View {
         } header: {
             Text(note.title)
         } footer: {
-            Text("Build \(note.buildIdentifier)",
-                 comment: "Build number associated with this release-notes entry.")
+            Text("Version \(note.marketingVersion) · Build \(note.buildIdentifier)",
+                 comment: "Marketing version and build number associated with this release-notes entry.")
         }
     }
 }
