@@ -28,28 +28,25 @@ struct HarklightConversationUITestHost: App {
 
     var body: some Scene {
         WindowGroup {
-            ShakeHostingView(onShake: { samples.populate() }) {
-                Group {
-                    if let conversationFixture {
-                        LiveContentView(store: conversationFixture.viewModel, samples: samples)
-                    } else if let prototypeFixture {
-                        if let presentation = prototypeFixture.presentationStore {
-                            LiveContentView(store: presentation, samples: samples,
-                                            fixtureStore: prototypeFixture)
-                        } else {
-                            ContentUnavailableView(
-                                prototypeFixture.loadError ?? "The local example could not be opened.",
-                                systemImage: "exclamationmark.triangle")
-                        }
+            Group {
+                if let conversationFixture {
+                    LiveContentView(store: conversationFixture.viewModel, samples: samples)
+                } else if let prototypeFixture {
+                    if let presentation = prototypeFixture.presentationStore {
+                        LiveContentView(store: presentation, samples: samples,
+                                        fixtureStore: prototypeFixture)
                     } else {
-                        ContentUnavailableView("Local test model unavailable", systemImage: "questionmark.folder")
+                        ContentUnavailableView(
+                            prototypeFixture.loadError ?? "The local example could not be opened.",
+                            systemImage: "exclamationmark.triangle")
                     }
-                }
-                .task {
-                    if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }
+                } else {
+                    ContentUnavailableView("Local test model unavailable", systemImage: "questionmark.folder")
                 }
             }
-            .ignoresSafeArea(.container)
+            .task {
+                if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }
+            }
         }
     }
 }

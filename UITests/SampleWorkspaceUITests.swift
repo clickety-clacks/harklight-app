@@ -20,7 +20,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let original = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
         let originalID = original.identifier
-        capture("ordinary-inbox-before-shake", app)
+        capture("ordinary-inbox-before-examples", app)
         original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
         let originalChoice = app.buttons["Cover A"]

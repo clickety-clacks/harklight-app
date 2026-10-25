@@ -1,5 +1,4 @@
 import XCTest
-import SwiftUI
 import AttentionDomain
 @testable import Harklight
 
@@ -17,10 +16,9 @@ final class SampleLibraryTests: XCTestCase {
         response.undoAnnotation()
         XCTAssertTrue(response.strokes.isEmpty)
     }
-    func testShakePopulatesEveryKindAndPreservesEditsOnRepeat() throws {
+    func testAddingExamplesPopulatesEveryKindAndPreservesEditsOnRepeat() throws {
         let library = SampleLibrary()
-        let controller = ShakeHostingController(rootView: Text("Messages"), onShake: { library.populate() })
-        controller.motionEnded(.motionShake, with: nil)
+        library.populate()
         XCTAssertFalse(library.messages.isEmpty)
         for kind in SampleKind.allCases {
             XCTAssertGreaterThanOrEqual(library.messages.filter { $0.kind == kind }.count, 3)
@@ -35,7 +33,7 @@ final class SampleLibraryTests: XCTestCase {
         let originalPayloads = try firstFixture.domain.snapshot(context: firstFixture.context)
             .requests.mapValues(\.originalPayload)
         let ids = library.messages.map(\.id)
-        controller.motionEnded(.motionShake, with: nil)
+        library.populate()
         XCTAssertNil(library.loadError)
         XCTAssertEqual(library.messages.map(\.id), ids)
         XCTAssertTrue(library.responses[first.id] === response)
@@ -45,7 +43,7 @@ final class SampleLibraryTests: XCTestCase {
         let repeatedPayloads = try firstFixture.domain.snapshot(context: firstFixture.context)
             .requests.mapValues(\.originalPayload)
         XCTAssertEqual(repeatedPayloads, originalPayloads,
-            "Stable sample identities must retain their exact registered payloads on repeated Shake.")
+            "Stable sample identities must retain their exact registered payloads when examples are added again.")
     }
 
     func testSampleActionsLeaveRealRequestsAndIdentityUntouched() throws {

@@ -42,50 +42,45 @@ struct HarklightApp: App {
     var body: some Scene {
         WindowGroup {
             @Bindable var releaseNotes = self.releaseNotes
-            ShakeHostingView(onShake: { samples.populate() }) {
-                Group {
-                    if ProcessInfo.processInfo.arguments.contains("--harklight-tier-reference") {
-                        InboxTierReferenceScreen()
-                    } else if let archive = launch.selectedArchivedPresentation,
-                       let departure = launch.selectedArchivedAccount {
-                        LiveContentView(store: archive, samples: samples, launch: launch,
-                                        archiveDeparture: departure)
-                    } else if launch.guidedJoin.isShowing {
+            Group {
+                if ProcessInfo.processInfo.arguments.contains("--harklight-tier-reference") {
+                    InboxTierReferenceScreen()
+                } else if let archive = launch.selectedArchivedPresentation,
+                   let departure = launch.selectedArchivedAccount {
+                    LiveContentView(store: archive, samples: samples, launch: launch,
+                                    archiveDeparture: departure)
+                } else if launch.guidedJoin.isShowing {
+                    NativeEnrollmentView(launch: launch)
+                } else if launch.canOpenDisconnectedArchive && launch.isShowingDisconnectedArchive,
+                          let archive = launch.disconnectedArchive {
+                    LiveContentView(store: archive, samples: samples, launch: launch,
+                                    archiveDeparture: launch.disconnectedAccount)
+                } else if let store = launch.inboxPresentation {
+                    LiveContentView(store: store, samples: samples, launch: launch,
+                                    archiveDeparture: launch.displayedArchiveDeparture)
+                } else {
+                    switch launch.state {
+                    case .enrollmentRequired:
                         NativeEnrollmentView(launch: launch)
-                    } else if launch.canOpenDisconnectedArchive && launch.isShowingDisconnectedArchive,
-                              let archive = launch.disconnectedArchive {
-                        LiveContentView(store: archive, samples: samples, launch: launch,
-                                        archiveDeparture: launch.disconnectedAccount)
-                    } else if let store = launch.inboxPresentation {
-                        LiveContentView(store: store, samples: samples, launch: launch,
-                                        archiveDeparture: launch.displayedArchiveDeparture)
-                    } else {
-                        switch launch.state {
-                        case .enrollmentRequired:
-                            NativeEnrollmentView(launch: launch)
-                        case let .enrollmentPending(record):
-                            NativeEnrollmentView(launch: launch, pending: record)
-                        case let .fixture(store):
-                            if let presentation = store.presentationStore {
-                                LiveContentView(store: presentation, samples: samples,
-                                                fixtureStore: store)
-                            } else {
-                                ContentUnavailableView(
-                                    store.loadError ?? "The local example could not be opened.",
-                                    systemImage: "exclamationmark.triangle")
-                            }
-                        case .live, .disconnected:
-                            DisconnectedAccountRecoveryView(launch: launch)
+                    case let .enrollmentPending(record):
+                        NativeEnrollmentView(launch: launch, pending: record)
+                    case let .fixture(store):
+                        if let presentation = store.presentationStore {
+                            LiveContentView(store: presentation, samples: samples,
+                                            fixtureStore: store)
+                        } else {
+                            ContentUnavailableView(
+                                store.loadError ?? "The local example could not be opened.",
+                                systemImage: "exclamationmark.triangle")
                         }
+                    case .live, .disconnected:
+                        DisconnectedAccountRecoveryView(launch: launch)
                     }
                 }
-                .task {
-                    if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }
-                }
             }
-            // Fill the container; the hosted SwiftUI bars/content still respect
-            // their own system safe areas, including the software keyboard.
-            .ignoresSafeArea(.container)
+            .task {
+                if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }
+            }
             .task {
                 await launch.restoreInstallation()
                 await launch.handleNotification()

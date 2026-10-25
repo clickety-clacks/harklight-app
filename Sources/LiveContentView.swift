@@ -558,7 +558,7 @@ struct LiveInboxSettings: View {
                 }
                 if !store.isReadOnly {
                     Section("Local examples") {
-                    Text("Shake to add fictional messages to your inbox. Their answers, chat and attachments stay on this device and disappear when the app closes.")
+                    Text("Example messages, their answers, chat and attachments stay on this device and disappear when the app closes.")
                     Button("Add example messages") { samples.populate(); dismiss() }
                     }
                 }
