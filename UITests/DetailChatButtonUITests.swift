@@ -225,11 +225,17 @@ final class DetailChatButtonUITests: XCTestCase {
                                       _ presentation: CGRect,
                                       _ composer: XCUIElement) {
         let window = app.windows.firstMatch.frame
-        let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-        let start = screen.withOffset(CGVector(dx: presentation.midX,
-                                               dy: presentation.minY + 16))
-        let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
-        start.press(forDuration: 0.1, thenDragTo: end)
+        let outsidePoint = CGPoint(x: max(window.minX + 8, presentation.minX - 24),
+                                   y: presentation.midY)
+        guard !presentation.contains(outsidePoint),
+              window.contains(outsidePoint) else {
+            XCTFail("Expected a visible point outside the native Chat presentation. \(app.debugDescription)")
+            return
+        }
+        let outsideTap = app.coordinate(withNormalizedOffset: CGVector(
+            dx: (outsidePoint.x - window.minX) / window.width,
+            dy: (outsidePoint.y - window.minY) / window.height))
+        outsideTap.tap()
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
