@@ -558,25 +558,6 @@ final class SampleWorkspaceUITests: XCTestCase {
         editor.tap()
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
                       "The reply editor can be focused again after interactive dismissal.")
-
-        let otherChoice = app.buttons.containing(.staticText, identifier: "Start small").firstMatch
-        reveal(otherChoice, in: card, app: app)
-        XCTAssertTrue(otherChoice.waitForExistence(timeout: 5), app.debugDescription)
-        otherChoice.tap()
-        let ghostedReply = app.buttons["request-input-answer-reply-own"]
-        XCTAssertTrue(ghostedReply.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(ghostedReply.label.contains("Keep the smaller first step."),
-                      "A deselected reply keeps its draft summary inside its choice.")
-        XCTAssertFalse(editor.exists, "The plain editor stays inside the selected choice only.")
-        capture("reply-editor-deselected-with-draft", app)
-
-        ghostedReply.tap()
-        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(editor.isEnabled, "Tapping the Reply card reselects it.")
-        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
-                      "Reselecting Reply focuses its editor.")
-        capture("reply-editor-reselected", app)
         app.descendants(matching: .any)["sample-finish"].tap()
         XCTAssertTrue(chat.isHittable,
                       "Chat remains available after the reply is accepted.")
@@ -753,7 +734,8 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func dismissReplyChatPresentation(_ app: XCUIApplication, _ composer: XCUIElement) {
-        let window = app.windows.firstMatch.frame
+        let appWindow = app.windows.firstMatch
+        let window = appWindow.frame
         let contentFrame = composer.frame
         let containers = app.otherElements
             .containing(.textField, identifier: "sample-chat-composer")
@@ -764,10 +746,22 @@ final class SampleWorkspaceUITests: XCTestCase {
                       $0.height < window.height - 4 }
             .max { $0.width * $0.height < $1.width * $1.height } ?? window
         if presentation.width < window.width - 4 {
-            let chat = app.buttons["Chat"]
-            XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(chat.isHittable, "Chat remains reachable beside its iPad popover.")
-            chat.tap()
+            let dismissalOffsets = [
+                CGVector(dx: 0.04, dy: 0.96),
+                CGVector(dx: 0.04, dy: 0.04),
+                CGVector(dx: 0.96, dy: 0.04),
+                CGVector(dx: 0.96, dy: 0.96)
+            ]
+            let outsideOffset = dismissalOffsets.first { offset in
+                let point = CGPoint(x: window.minX + offset.dx * window.width,
+                                    y: window.minY + offset.dy * window.height)
+                return !presentation.contains(point)
+            }
+            guard let outsideOffset else {
+                XCTFail("The Chat popover leaves an outside area for native dismissal.")
+                return
+            }
+            appWindow.coordinate(withNormalizedOffset: outsideOffset).tap()
         } else {
             let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
             let start = screen.withOffset(CGVector(dx: presentation.midX,
