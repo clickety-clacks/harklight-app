@@ -66,6 +66,7 @@ final class NativeAppLaunch {
     private(set) var isDisconnectBusy = false
     private(set) var endpointMigrationMessage: String?
     private(set) var isEndpointMigrationBusy = false
+    let hasPriorAppState: Bool
     let guidedJoin: NativeGuidedJoinCoordinator
     let diagnostics: NativeClientDiagnosticJournal
     let notificationRouter: NativeNotificationRouter
@@ -98,14 +99,17 @@ final class NativeAppLaunch {
                 checkBlockedPush: checkBlockedPush)
          }) {
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
+        let enrollment = enrollmentStore ?? NativeEnrollmentStore()
+        let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
+        self.enrollment = enrollment
+        guidedJoinStore = joinStore
+        hasPriorAppState = fixture ? false : NativeInstallationHistory.hasPriorAppState(
+            enrollment: enrollment, guidedJoin: joinStore)
         let diagnostics = NativeClientDiagnosticJournal()
         self.diagnostics = diagnostics
         self.notificationRouter = notificationRouter
         self.refreshOperation = refreshOperation
         didFinishRestoring = initialState != nil
-        enrollment = enrollmentStore ?? NativeEnrollmentStore()
-        let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
-        guidedJoinStore = joinStore
         activeEnrollmentRecord = initialEnrollmentRecord
         archivedAccountDepartures = initialArchivedDepartures
         let savedDeparture = fixture ? nil : (try? joinStore.departure())

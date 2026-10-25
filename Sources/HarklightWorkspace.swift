@@ -1272,6 +1272,8 @@ struct InboxSettings: View {
                     InboxDiagnosticsSettingsSection(launch: launch, closeSettings: { dismiss() })
                 }
                 LocalExamplesSettingsSection(samples: samples, close: { dismiss() })
+                ReleaseNotesSettingsSection(notes: HarklightReleaseNotes.settingsHistory(
+                    currentBuildIdentifier: HarklightReleaseNotes.currentBuildIdentifier()))
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) {
