@@ -10,6 +10,18 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertEqual(first.buildIdentifier, "1")
     }
 
+    func testBuildFiftyNineSettingsNoteIsHiddenUntilThatBuildIsRunning() {
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "58")
+                .map(\.buildIdentifier),
+            ["1"])
+
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "59")
+                .map(\.buildIdentifier),
+            ["59", "1"])
+    }
+
     func testFreshInstallDoesNotPresentPreviouslyReleasedNotes() {
         let notes = [releaseNote("1"), releaseNote("2")]
 
