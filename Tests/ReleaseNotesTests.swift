@@ -192,8 +192,6 @@ final class ReleaseNotesTests: XCTestCase {
         HarklightReleaseNote(
             buildIdentifier: buildIdentifier,
             marketingVersion: "0.1.0",
-            title: "Release update",
-            introduction: "A release update.",
             highlights: [])
     }
 }

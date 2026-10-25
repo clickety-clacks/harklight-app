@@ -10,13 +10,13 @@ private struct PersistedAttentionStateHeader: Decodable {
 struct HarklightReleaseNote: Identifiable, Sendable {
     struct Highlight: Identifiable, Sendable {
         let id: String
-        let text: LocalizedStringResource
+        let symbol: String
+        let title: LocalizedStringResource
+        let detail: LocalizedStringResource
     }
 
     let buildIdentifier: String
     let marketingVersion: String
-    let title: LocalizedStringResource
-    let introduction: LocalizedStringResource
     let highlights: [Highlight]
 
     var id: String { buildIdentifier }
@@ -29,39 +29,39 @@ enum HarklightReleaseNotes {
         HarklightReleaseNote(
             buildIdentifier: "59",
             marketingVersion: "0.1.0",
-            title: LocalizedStringResource(
-                "Settings is easier to reach",
-                comment: "Heading for the release that moved Settings into the top toolbar."),
-            introduction: LocalizedStringResource(
-                "Open Settings directly from the top toolbar.",
-                comment: "Introduction for the Settings toolbar update."),
             highlights: [
                 .init(
                     id: "settings-toolbar",
-                    text: LocalizedStringResource(
-                        "The Settings button stays in the toolbar at every screen size.",
-                        comment: "Release-note detail about finding Settings across layouts."))
+                    symbol: "gearshape",
+                    title: LocalizedStringResource(
+                        "Settings in the toolbar",
+                        comment: "Short release-note title for opening Settings from the top toolbar."),
+                    detail: LocalizedStringResource(
+                        "Open Settings from the top toolbar on any screen size.",
+                        comment: "One-sentence release-note detail about reaching Settings."))
             ]),
         HarklightReleaseNote(
             buildIdentifier: "1",
             marketingVersion: "0.1.0",
-            title: LocalizedStringResource(
-                "Release notes in one place",
-                comment: "Heading for a release-notes entry about finding app updates."),
-            introduction: LocalizedStringResource(
-                "See what’s new when you first open a release with notes, then revisit updates in Settings.",
-                comment: "Introduction to the release-notes feature."),
             highlights: [
                 .init(
                     id: "whats-new-sheet",
-                    text: LocalizedStringResource(
-                        "A short What’s New summary appears the first time you open a release that includes notes.",
-                        comment: "Release-note detail about the once-per-release summary.")),
+                    symbol: "sparkles",
+                    title: LocalizedStringResource(
+                        "What’s New after an update",
+                        comment: "Short release-note title for the update summary."),
+                    detail: LocalizedStringResource(
+                        "See a short summary the first time you open a release that includes notes.",
+                        comment: "One-sentence release-note detail about the update summary.")),
                 .init(
                     id: "release-notes-settings",
-                    text: LocalizedStringResource(
-                        "In Settings, choose Release notes to revisit this update and earlier ones.",
-                        comment: "Release-note detail explaining where to revisit updates."))
+                    symbol: "doc.text",
+                    title: LocalizedStringResource(
+                        "Release notes in Settings",
+                        comment: "Short release-note title for the update history."),
+                    detail: LocalizedStringResource(
+                        "Find this and earlier updates in Settings.",
+                        comment: "One-sentence release-note detail about the update history."))
             ])
     ]
 
@@ -284,15 +284,32 @@ private struct ReleaseNoteSection: View {
 
     var body: some View {
         Section {
-            Text(note.introduction)
             ForEach(note.highlights) { highlight in
-                Text(highlight.text)
+                ReleaseNoteRow(highlight: highlight)
             }
         } header: {
-            Text(note.title)
-        } footer: {
             Text("Version \(note.marketingVersion) · Build \(note.buildIdentifier)",
                  comment: "Marketing version and build number associated with this release-notes entry.")
+        }
+    }
+}
+
+private struct ReleaseNoteRow: View {
+    let highlight: HarklightReleaseNote.Highlight
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(highlight.title).font(.headline)
+                Text(highlight.detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } icon: {
+            Image(systemName: highlight.symbol)
+                .font(.title2)
+                .frame(width: 36)
         }
     }
 }
