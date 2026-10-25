@@ -15,11 +15,38 @@ struct HarklightReleaseNote: Identifiable, Sendable {
         let detail: LocalizedStringResource
     }
 
-    let buildIdentifier: String
+    let id: String
+    let buildIdentifier: String?
     let marketingVersion: String
+    let historyDateDescription: LocalizedStringResource?
+    /// Earliest confirmed running build that contains a dated history entry.
+    /// This does not claim the unknown build number of the changes it describes.
+    let visibleFromBuildIdentifier: String?
     let highlights: [Highlight]
 
-    var id: String { buildIdentifier }
+    init(buildIdentifier: String, marketingVersion: String, highlights: [Highlight]) {
+        id = buildIdentifier
+        self.buildIdentifier = buildIdentifier
+        self.marketingVersion = marketingVersion
+        historyDateDescription = nil
+        visibleFromBuildIdentifier = nil
+        self.highlights = highlights
+    }
+
+    init(
+        historyIdentifier: String,
+        marketingVersion: String,
+        historyDateDescription: LocalizedStringResource,
+        visibleFromBuildIdentifier: String,
+        highlights: [Highlight]
+    ) {
+        id = historyIdentifier
+        buildIdentifier = nil
+        self.marketingVersion = marketingVersion
+        self.historyDateDescription = historyDateDescription
+        self.visibleFromBuildIdentifier = visibleFromBuildIdentifier
+        self.highlights = highlights
+    }
 }
 
 enum HarklightReleaseNotes {
@@ -65,7 +92,54 @@ enum HarklightReleaseNotes {
             ])
     ]
 
+    /// These changes shipped before Build 59, but their archived build numbers
+    /// are not available. Show their dated summary in Settings from the first
+    /// confirmed build containing them; never present it as a new-build popup.
+    static let historyEntries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            historyIdentifier: "earlier-on-2026-10-25",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource(
+                "Earlier on October 25, 2026",
+                comment: "Date label for shipped changes whose build number is unknown."),
+            visibleFromBuildIdentifier: "59",
+            highlights: [
+                .init(
+                    id: "listening-status",
+                    symbol: "waveform",
+                    title: LocalizedStringResource(
+                        "See when your agent is listening",
+                        comment: "Release-note title for listening availability in Chat."),
+                    detail: LocalizedStringResource(
+                        "The Chat sheet shows listening status near the composer.",
+                        comment: "Release-note detail about listening availability.")),
+                .init(
+                    id: "chat-toolbar",
+                    symbol: "bubble.left.and.bubble.right",
+                    title: LocalizedStringResource(
+                        "Open Chat from the message toolbar",
+                        comment: "Release-note title for opening Chat from a message."),
+                    detail: LocalizedStringResource(
+                        "Find Chat in the message toolbar and see when a conversation is unavailable.",
+                        comment: "Release-note detail about Chat access and availability.")),
+                .init(
+                    id: "chat-history-keyboard",
+                    symbol: "keyboard",
+                    title: LocalizedStringResource(
+                        "Keep your keyboard while reading",
+                        comment: "Release-note title for using the keyboard while browsing Chat history."),
+                    detail: LocalizedStringResource(
+                        "Scroll through older Chat messages without losing the keyboard, or swipe the history to dismiss it.",
+                        comment: "Release-note detail about keyboard behavior in Chat history."))
+            ])
+    ]
+
     static func currentBuildIdentifier(in bundle: Bundle = .main) -> String? {
+        if ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] == "1",
+           let testBuild = ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"],
+           !testBuild.isEmpty {
+            return testBuild
+        }
         guard let value = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
               !value.isEmpty else { return nil }
         return value
@@ -77,7 +151,8 @@ enum HarklightReleaseNotes {
     ) -> [HarklightReleaseNote] {
         guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
         let released = entries.compactMap { note -> (note: HarklightReleaseNote, build: Int)? in
-            guard let build = Int(note.buildIdentifier), build <= currentBuild else {
+            guard let buildIdentifier = note.buildIdentifier,
+                  let build = Int(buildIdentifier), build <= currentBuild else {
                 return nil
             }
             return (note: note, build: build)
@@ -87,9 +162,30 @@ enum HarklightReleaseNotes {
 
     static func settingsHistory(
         currentBuildIdentifier: String?,
-        entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries
+        entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries,
+        historyEntries: [HarklightReleaseNote] = HarklightReleaseNotes.historyEntries
     ) -> [HarklightReleaseNote] {
-        releasedEntries(currentBuildIdentifier: currentBuildIdentifier, entries: entries)
+        guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
+        let buildNotes = releasedEntries(currentBuildIdentifier: currentBuildIdentifier,
+                                         entries: entries)
+            .compactMap { note -> (note: HarklightReleaseNote, build: Int, priority: Int)? in
+                guard let buildIdentifier = note.buildIdentifier,
+                      let build = Int(buildIdentifier) else { return nil }
+                return (note, build, 1)
+            }
+        let datedNotes = historyEntries.compactMap {
+            note -> (note: HarklightReleaseNote, build: Int, priority: Int)? in
+            guard note.buildIdentifier == nil,
+                  let visibleFrom = note.visibleFromBuildIdentifier.flatMap(Int.init),
+                  visibleFrom <= currentBuild else { return nil }
+            return (note, visibleFrom, 0)
+        }
+        return (buildNotes + datedNotes)
+            .sorted {
+                if $0.build != $1.build { return $0.build > $1.build }
+                return $0.priority > $1.priority
+            }
+            .map(\.note)
     }
 }
 
@@ -108,7 +204,10 @@ enum ReleaseNotesLifecycle {
         guard let seenBuildIdentifiers else {
             return hasPriorAppState ? Array(released.prefix(1)) : []
         }
-        return released.filter { !seenBuildIdentifiers.contains($0.buildIdentifier) }
+        return released.filter { note in
+            guard let buildIdentifier = note.buildIdentifier else { return false }
+            return !seenBuildIdentifiers.contains(buildIdentifier)
+        }
     }
 }
 
@@ -138,7 +237,7 @@ final class ReleaseNotesPresentation {
         let released = HarklightReleaseNotes.releasedEntries(
             currentBuildIdentifier: currentBuildIdentifier,
             entries: entries)
-        releasedBuildIdentifiers = Set(released.map(\.buildIdentifier))
+        releasedBuildIdentifiers = Set(released.compactMap(\.buildIdentifier))
 
         let storedSeenBuilds: Set<String>?
         if defaults.object(forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) == nil {
@@ -288,8 +387,13 @@ private struct ReleaseNoteSection: View {
                 ReleaseNoteRow(highlight: highlight)
             }
         } header: {
-            Text("Version \(note.marketingVersion) · Build \(note.buildIdentifier)",
-                 comment: "Marketing version and build number associated with this release-notes entry.")
+            if let buildIdentifier = note.buildIdentifier {
+                Text("Version \(note.marketingVersion) · Build \(buildIdentifier)",
+                     comment: "Marketing version and build number associated with this release-notes entry.")
+            } else if let historyDateDescription = note.historyDateDescription {
+                Text("Version \(note.marketingVersion) · \(historyDateDescription)",
+                     comment: "Marketing version and date associated with this history-only entry.")
+            }
         }
     }
 }
