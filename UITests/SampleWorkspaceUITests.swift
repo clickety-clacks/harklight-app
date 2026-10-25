@@ -563,9 +563,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         otherChoice.tap()
         let ghostedReply = app.buttons["request-input-answer-reply-own"]
         XCTAssertTrue(ghostedReply.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(editor.exists, "A deselected reply keeps its inline draft field mounted.")
-        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
-        XCTAssertFalse(editor.isEnabled, "A deselected reply field cannot edit until its choice is selected again.")
+        XCTAssertTrue(ghostedReply.label.contains("Keep the smaller first step."),
+                      "A deselected reply keeps its draft summary inside its choice.")
+        XCTAssertFalse(editor.exists, "The plain editor stays inside the selected choice only.")
         capture("reply-editor-deselected-with-draft", app)
 
         ghostedReply.tap()
@@ -751,12 +751,21 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func dismissReplyChatSheet(_ app: XCUIApplication, _ composer: XCUIElement) {
-        let sheet = app.sheets.firstMatch
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
-        let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
-        let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        let window = app.windows.firstMatch.frame
+        let contentFrame = composer.frame
+        let containers = app.otherElements
+            .containing(.textField, identifier: "sample-chat-composer")
+            .allElementsBoundByIndex.map(\.frame)
+        let presentation = containers
+            .filter { $0.width > contentFrame.width + 4 &&
+                      $0.height > contentFrame.height * 4 &&
+                      $0.height < window.height - 4 }
+            .max { $0.width * $0.height < $1.width * $1.height } ?? window
+        let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+        let start = screen.withOffset(CGVector(dx: presentation.midX,
+                                               dy: presentation.minY + 16))
+        let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
         start.press(forDuration: 0.1, thenDragTo: end)
-        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 

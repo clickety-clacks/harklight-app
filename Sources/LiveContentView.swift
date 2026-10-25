@@ -91,11 +91,12 @@ private struct ReplyChoiceCard: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 16)
+        let showsEditor = !isReadOnly && (isEditing || selected)
         let card = VStack(alignment: .leading, spacing: 0) {
             MessageChoiceLabel(title: title, detail: detail, selected: selected,
                                multiple: multiple, suggested: suggested,
                                ownAnswer: ownAnswer, drawsSurface: false)
-            if isEditing || selected || !text.isEmpty {
+            if showsEditor {
                 TextEditor(text: $text)
                     .font(.body)
                     .foregroundStyle(textColor)
@@ -109,6 +110,14 @@ private struct ReplyChoiceCard: View {
                     .accessibilityIdentifier(target.fieldIdentifier)
                     .disabled(isReadOnly || !selected)
                     .padding(.top, 10)
+            } else if !text.isEmpty {
+                Text(text)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(replySurface, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.top, 10)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -119,7 +128,7 @@ private struct ReplyChoiceCard: View {
         .opacity(selected ? 1 : 0.55)
         .animation(.smooth(duration: 0.25), value: selected)
 
-        if isEditing || selected {
+        if showsEditor || isReadOnly {
             card
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(target.editorCardIdentifier)
@@ -131,7 +140,6 @@ private struct ReplyChoiceCard: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityIdentifier(target.summaryIdentifier)
             .accessibilityHint(text.isEmpty ? "Opens the reply field." : "Edit your reply.")
-            .disabled(isReadOnly)
         }
     }
 }

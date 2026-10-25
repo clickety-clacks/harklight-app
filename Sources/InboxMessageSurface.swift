@@ -75,7 +75,6 @@ struct MessageCardSurface<Content: View>: View {
                         }
                         .allowsHitTesting(false)
                     }
-                    .frame(minHeight: viewport.size.height, alignment: .top)
             }
             .accessibilityIdentifier("message-card-scroll")
             .scrollBounceBehavior(.always)
