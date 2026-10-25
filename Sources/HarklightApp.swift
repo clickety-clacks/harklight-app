@@ -1,4 +1,3 @@
-import Observation
 import SwiftUI
 import UIKit
 
@@ -9,20 +8,9 @@ struct HarklightApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var launch: NativeAppLaunch
     @State private var samples = SampleLibrary()
-    @State private var releaseNotes: ReleaseNotesPresentation
 
     init() {
-        let arguments = ProcessInfo.processInfo.arguments
-        let launch = NativeAppLaunch(arguments: arguments)
-        _launch = State(initialValue: launch)
-        let isReferenceOrFixtureRun = arguments.contains("--reset-attention-fixture") ||
-            arguments.contains("--attention-fixture") ||
-            arguments.contains("--harklight-tier-reference")
-        _releaseNotes = State(initialValue: ReleaseNotesPresentation(
-            currentBuildIdentifier: isReferenceOrFixtureRun
-                ? nil
-                : HarklightReleaseNotes.currentBuildIdentifier(),
-            hasPriorAppState: launch.hasPriorAppState))
+        _launch = State(initialValue: NativeAppLaunch())
     }
 
     /// The account Inbox drives the icon badge even while an archive is open;
@@ -41,7 +29,6 @@ struct HarklightApp: App {
 
     var body: some Scene {
         WindowGroup {
-            @Bindable var releaseNotes = self.releaseNotes
             ShakeHostingView(onShake: { samples.populate() }) {
                 Group {
                     if ProcessInfo.processInfo.arguments.contains("--harklight-tier-reference") {
@@ -111,11 +98,6 @@ struct HarklightApp: App {
                     await launch.guidedJoin.retryAutomaticallyIfNeeded(
                         foregroundOutcome: launch.foregroundConnectProgress?.outcome)
                     try? await Task.sleep(for: .seconds(15))
-                }
-            }
-            .sheet(isPresented: $releaseNotes.isShowingCurrentRelease) {
-                if let note = releaseNotes.currentNote {
-                    ReleaseNotesSheet(note: note)
                 }
             }
         }
