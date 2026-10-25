@@ -101,8 +101,10 @@ struct ConversationPanel: View {
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
-                ConversationAvailabilityLabel(availability: thread.availability, local: store.isLocalExample)
-                    .padding(.horizontal)
+                if ConversationAvailabilityLabel.shouldDisplay(unavailableMessage: store.conversationUnavailableMessage) {
+                    ConversationAvailabilityLabel(availability: thread.availability, local: store.isLocalExample)
+                        .padding(.horizontal)
+                }
                 if let message = store.conversationUnavailableMessage {
                     Text(message)
                         .font(.callout)
@@ -351,6 +353,10 @@ private struct ConversationComposer: View {
 struct ConversationAvailabilityLabel: View {
     let availability: ConversationAvailability
     let local: Bool
+
+    static func shouldDisplay(unavailableMessage: String?) -> Bool {
+        unavailableMessage == nil
+    }
 
     var body: some View {
         Text(Self.text(for: availability, local: local))

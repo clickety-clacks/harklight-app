@@ -78,6 +78,12 @@ final class ConversationPresentationTests: XCTestCase {
             "Originating session gone · request remains available")
     }
 
+    func testAvailabilityLabelIsSuppressedWhenChatUnavailableMessageIsPresent() {
+        XCTAssertFalse(ConversationAvailabilityLabel.shouldDisplay(
+            unavailableMessage: "Chat is not available on this server yet."))
+        XCTAssertTrue(ConversationAvailabilityLabel.shouldDisplay(unavailableMessage: nil))
+    }
+
     func testInlineTurnAndDraftBytesStayBehindReferencesAcrossTextOnlyComposerWrites() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
