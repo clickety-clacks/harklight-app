@@ -28,31 +28,21 @@ enum HarklightReleaseNotes {
         HarklightReleaseNote(
             buildIdentifier: "1",
             title: LocalizedStringResource(
-                "A smoother inbox",
-                comment: "Heading for a release-notes entry about inbox and reply improvements."),
+                "Release notes in one place",
+                comment: "Heading for a release-notes entry about finding app updates."),
             introduction: LocalizedStringResource(
-                "Handle requests and conversations with fewer interruptions.",
-                comment: "Introduction to a release-notes entry."),
+                "See what’s new when you first open a release with notes, then revisit updates in Settings.",
+                comment: "Introduction to the release-notes feature."),
             highlights: [
                 .init(
-                    id: "chat-access",
+                    id: "whats-new-sheet",
                     text: LocalizedStringResource(
-                        "Open Chat from the bottom toolbar while viewing a request.",
-                        comment: "Release-note detail about where to open Chat.")),
-                .init(
-                    id: "reply-keyboard",
-                    text: LocalizedStringResource(
-                        "Keep the newest messages in view while you write, and swipe down to dismiss the keyboard.",
-                        comment: "Release-note detail about composing replies and keyboard interaction.")),
-                .init(
-                    id: "inbox-actions",
-                    text: LocalizedStringResource(
-                        "After a request is marked seen or your reply is accepted, it moves out of Inbox.",
-                        comment: "Release-note detail about completed requests leaving Inbox.")),
+                        "A short What’s New summary appears the first time you open a release that includes notes.",
+                        comment: "Release-note detail about the once-per-release summary.")),
                 .init(
                     id: "release-notes-settings",
                     text: LocalizedStringResource(
-                        "Find these updates again any time in Settings under Release notes.",
+                        "In Settings, choose Release notes to revisit this update and earlier ones.",
                         comment: "Release-note detail explaining where to revisit updates."))
             ])
     ]
