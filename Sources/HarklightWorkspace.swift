@@ -941,10 +941,8 @@ struct InboxList: View {
             ToolbarItem(placement: .principal) {
                 brandAndStatusHeader
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                settingsButton
-            }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                settingsButton
                 warningButton
             }
         }
