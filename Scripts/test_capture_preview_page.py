@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import importlib.util
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -19,29 +19,6 @@ if SPEC is None or SPEC.loader is None:
 capture_page = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = capture_page
 SPEC.loader.exec_module(capture_page)
-
-
-READY_AT = dt.datetime(2026, 10, 26, 12, 0, tzinfo=dt.timezone.utc)
-
-
-def partial_capture_matrix() -> dict[tuple[str, str], dict]:
-    captures = {}
-    for slug, (title, _) in capture_page.TEST_LABELS.items():
-        for appearance in capture_page.APPEARANCES:
-            captures[(slug, appearance)] = capture_page.missing_capture(
-                slug, title, appearance, "No screenshot was captured.",
-            )
-    captures[("inbox", "light")] = {
-        "status": "captured",
-        "file": "captures/inbox-portrait-light.png",
-        "verification": "verified",
-        "orientation": "portrait",
-        "width": 390,
-        "height": 844,
-        "reasons": [],
-        "captureTimestampUTC": None,
-    }
-    return captures
 
 
 def run_main_with_unavailable_capture(
@@ -126,7 +103,7 @@ class PreviewPageInputTests(unittest.TestCase):
 
                 self.assertEqual(result, 0, stderr)
                 page = (page_dir / "index.html").read_text(encoding="utf-8")
-                metadata = capture_page.json.loads(
+                metadata = json.loads(
                     (page_dir / "metadata.json").read_text(encoding="utf-8"),
                 )
                 self.assertIn("pushed unknown", page)
@@ -167,7 +144,7 @@ class PreviewPageInputTests(unittest.TestCase):
 
             self.assertEqual(result, 0, stderr)
             page = (page_dir / "index.html").read_text(encoding="utf-8")
-            metadata = capture_page.json.loads(
+            metadata = json.loads(
                 (page_dir / "metadata.json").read_text(encoding="utf-8"),
             )
             self.assertIn('src="captures/inbox-portrait-light.png"', page)
@@ -184,26 +161,6 @@ class PreviewPageInputTests(unittest.TestCase):
         self.assertEqual(output_path.parent, Path.cwd())
         self.assertRegex(output_path.name, r"^harklight-preview-\d{8}T\d{6}Z$")
 
-    def test_existing_output_folders_are_preserved_and_sibling_is_created(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            requested = Path(temporary_directory) / "preview"
-            requested.mkdir()
-            marker = requested / "keep.txt"
-            marker.write_text("original", encoding="utf-8")
-
-            occupied_sibling = requested.with_name("preview-1")
-            occupied_sibling.mkdir()
-            sibling_marker = occupied_sibling / "keep.txt"
-            sibling_marker.write_text("also original", encoding="utf-8")
-
-            actual, redirected = capture_page.create_output_directory(requested)
-
-            self.assertTrue(redirected)
-            self.assertEqual(actual, requested.with_name("preview-2"))
-            self.assertTrue(actual.is_dir())
-            self.assertEqual(marker.read_text(encoding="utf-8"), "original")
-            self.assertEqual(sibling_marker.read_text(encoding="utf-8"), "also original")
-
     def test_existing_output_folder_is_preserved_by_cli(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             requested = Path(temporary_directory) / "preview"
@@ -219,6 +176,47 @@ class PreviewPageInputTests(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "original")
             self.assertTrue((sibling / "index.html").is_file())
             self.assertIn("page written to sibling", stdout)
+
+    def test_missing_simulator_selection_explains_how_to_set_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            page_dir = Path(temporary_directory) / "page"
+            stderr = io.StringIO()
+            argv = ["capture-preview-page.py", "--page-dir", str(page_dir)]
+            with (
+                mock.patch.object(capture_page.sys, "argv", argv),
+                mock.patch.dict(capture_page.os.environ, {"HARKLIGHT_SIMULATOR_ID": ""}),
+                mock.patch("sys.stderr", stderr),
+            ):
+                result = capture_page.main()
+
+            self.assertEqual(result, 2)
+            self.assertIn("Set HARKLIGHT_SIMULATOR_ID or pass --device-id", stderr.getvalue())
+            self.assertFalse(page_dir.exists())
+
+    def test_unbooted_simulator_explains_how_to_boot_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            page_dir = Path(temporary_directory) / "page"
+            stderr = io.StringIO()
+            argv = [
+                "capture-preview-page.py", "--device-id", "SIM-1",
+                "--page-dir", str(page_dir),
+            ]
+            device_list = json.dumps({
+                "devices": {
+                    "runtime": [{"udid": "SIM-1", "name": "Test Simulator", "state": "Shutdown"}],
+                },
+            })
+            with (
+                mock.patch.object(capture_page.sys, "argv", argv),
+                mock.patch.object(capture_page, "run", return_value=device_list),
+                mock.patch("sys.stderr", stderr),
+            ):
+                result = capture_page.main()
+
+            self.assertEqual(result, 2)
+            self.assertIn("is not booted", stderr.getvalue())
+            self.assertIn("xcrun simctl boot SIM-1", stderr.getvalue())
+            self.assertFalse(page_dir.exists())
 
 
 if __name__ == "__main__":
