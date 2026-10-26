@@ -301,7 +301,7 @@ final class HarklightUITests: XCTestCase {
                        "An unconfirmed closure must keep the neutral sender scene.")
 
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         let inbox = workspaceTab("Inbox", in: app)
