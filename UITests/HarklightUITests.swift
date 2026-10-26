@@ -147,6 +147,82 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("Tapped connection warning shows its error", from: app)
     }
 
+    func testVisibleSettingsAndChatTapsOpenTheirPanelsWhileWarningsArePresent() throws {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCUIDevice.shared.orientation = .landscapeLeft
+        }
+        defer {
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                XCUIDevice.shared.orientation = .portrait
+            }
+        }
+
+        let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
+        let warning = app.staticTexts["inbox-warning-message"]
+        let warningButton = app.buttons["inbox-warning-button"]
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(warning.waitForExistence(timeout: 1),
+                       "The warning stays available from its toolbar button without covering other actions.")
+        attachScreenshot("toolbar-actions-with-connection-warning", from: app)
+        attachHierarchy("toolbar-actions-with-connection-warning-hierarchy", from: app)
+
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertGreaterThan(settings.frame.width, 0, "Settings has a visible toolbar frame.")
+        tapVisibleScreenCenter(of: settings, in: app)
+        let settingsTitle = app.navigationBars["Settings"]
+        XCTAssertTrue(settingsTitle.waitForExistence(timeout: 5),
+                      "One visible Settings tap opens its real panel while a warning remains available.")
+        attachHierarchy("after-visible-settings-tap", from: app)
+        attachScreenshot("settings-panel-from-visible-toolbar-tap", from: app)
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
+        tapVisibleScreenCenter(of: done, in: app)
+        XCTAssertTrue(settingsTitle.waitForNonExistence(timeout: 5), app.debugDescription)
+
+        _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
+        applyFixtureOutcome("cleared", in: app)
+        XCTAssertFalse(warning.waitForExistence(timeout: 1),
+                       "A new unresolved-answer warning does not cover the detail toolbar.")
+        XCTAssertTrue(app.buttons["request-heading"].exists, app.debugDescription)
+
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertGreaterThan(chat.frame.width, 0, "Chat has a visible toolbar frame.")
+        attachScreenshot("chat-toolbar-with-unresolved-answer-warning", from: app)
+        attachHierarchy("chat-toolbar-with-unresolved-answer-warning-hierarchy", from: app)
+        tapVisibleScreenCenter(of: chat, in: app)
+        XCTAssertTrue(waitForChatPanel(in: app, timeout: 5),
+                      "One visible Chat tap opens its existing sheet while a warning remains available.")
+        attachHierarchy("after-visible-chat-tap", from: app)
+        attachScreenshot("chat-panel-from-visible-toolbar-tap", from: app)
+    }
+
+    private func tapVisibleScreenCenter(of element: XCUIElement, in app: XCUIApplication,
+                                        file: StaticString = #filePath, line: UInt = #line) {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.exists, "The app window must be present.", file: file, line: line)
+        let windowFrame = window.frame
+        let visibleFrame = element.frame.intersection(windowFrame)
+        XCTAssertGreaterThan(visibleFrame.width, 0, "The control must be on screen.",
+                             file: file, line: line)
+        XCTAssertGreaterThan(visibleFrame.height, 0, "The control must be on screen.",
+                             file: file, line: line)
+        let center = CGPoint(x: visibleFrame.midX, y: visibleFrame.midY)
+        window.coordinate(withNormalizedOffset: CGVector(
+            dx: (center.x - windowFrame.minX) / windowFrame.width,
+            dy: (center.y - windowFrame.minY) / windowFrame.height)).tap()
+    }
+
+    private func waitForChatPanel(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let panelAppears = expectation(for: NSPredicate { _, _ in
+            app.textFields["sample-chat-composer"].exists
+                || app.staticTexts["No chat"].exists
+                || app.staticTexts["conversation-status-unavailable"].exists
+        }, evaluatedWith: app)
+        return XCTWaiter.wait(for: [panelAppears], timeout: timeout) == .completed
+    }
+
     func testUntouchedRequestStartsInInbox() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
@@ -249,22 +325,27 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("Server-answered response in Replied", from: app)
     }
 
-    func testUnresolvedSendRaisesPlainLanguageWarningPopup() throws {
+    func testUnresolvedSendKeepsPlainLanguageWarningAvailableFromInbox() throws {
         let app = launchFreshApp()
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("cleared", in: app)
 
-        // A fresh warning auto-presents the warning popover, including over
-        // the request detail, so its message is readable without navigating
-        // back or tapping the warning button (which the open popover covers).
         let message = app.staticTexts["inbox-warning-message"]
-        XCTAssertTrue(message.waitForExistence(timeout: 10),
-                      "A send left without a confirmed result raises the inbox warning.")
+        XCTAssertFalse(message.waitForExistence(timeout: 1),
+                       "An unresolved send does not open a popover over the detail toolbar.")
+        let back = workspaceBackButton(in: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        let warningButton = app.buttons["inbox-warning-button"]
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        warningButton.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 5),
+                      "A send left without a confirmed result remains available in the Inbox warning.")
         XCTAssertEqual(message.label,
                        "A request closed without a confirmed result for your answer. Your answer stays saved on this device.",
-                       "The popup explains the unresolved send in plain language.")
-        attachScreenshot("Unresolved send warning popup", from: app)
+                       "The warning explains the unresolved send in plain language.")
+        attachScreenshot("Unresolved send warning opened from Inbox", from: app)
     }
 
     func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {
@@ -483,6 +564,13 @@ final class HarklightUITests: XCTestCase {
 
     private func attachScreenshot(_ name: String, from app: XCUIApplication) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func attachHierarchy(_ name: String, from app: XCUIApplication) {
+        let attachment = XCTAttachment(string: app.debugDescription)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

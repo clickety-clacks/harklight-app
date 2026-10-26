@@ -156,7 +156,7 @@ final class MessageTextLinksTests: XCTestCase {
 
 /// The ruled behavior for an unresolved send: a send from this device whose
 /// request closed without a confirmed result raises a plain-language warning
-/// in the inbox warning popup, and the warning clears once no send remains
+/// in the inbox warning details, and the warning clears once no send remains
 /// unresolved. An in-flight send and a server-resolved request are not
 /// unresolved.
 @MainActor

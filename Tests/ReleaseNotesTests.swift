@@ -159,6 +159,36 @@ final class ReleaseNotesTests: XCTestCase {
             [63])
     }
 
+    func testBuildSixtyFourToolbarActionsNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 64 })
+
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["toolbar-actions"])
+        XCTAssertEqual(entry.highlights.first?.symbol, "hand.tap")
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "63")
+                .compactMap(\.buildIdentifier),
+            [63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "64")
+                .compactMap(\.buildIdentifier),
+            [64, 63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "63",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 63,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [])
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "64",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 63,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [64])
+    }
+
     func testFreshInstallDoesNotPresentPreviouslyReleasedNotes() {
         let notes = [releaseNote(1), releaseNote(2)]
 

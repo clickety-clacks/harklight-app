@@ -53,6 +53,20 @@ enum HarklightReleaseNotes {
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
+            buildIdentifier: 64,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "toolbar-actions",
+                    symbol: "hand.tap",
+                    title: LocalizedStringResource(
+                        "Open Settings and Chat on the first tap",
+                        comment: "Release-note title for reachable Settings and Chat toolbar actions."),
+                    detail: LocalizedStringResource(
+                        "Warnings remain available from the Inbox toolbar without covering Settings or Chat.",
+                        comment: "Release-note detail for keeping the warning popover user-triggered."))
+            ]),
+        HarklightReleaseNote(
             buildIdentifier: 63,
             marketingVersion: "0.1.0",
             highlights: [
