@@ -912,7 +912,7 @@ final class LivePresentationStore {
     var connectionWarning: String?
 
     /// Present while any send from this device remains unresolved; nil once
-    /// every such send resolves, which also clears the inbox warning popup.
+    /// every such send resolves, which also clears the inbox warning indicator.
     var unresolvedSendWarning: String? {
         Self.unresolvedSendWarning(unresolvedSendCount: presentation.requests.filter {
             Self.sendIsUnresolved(lifecycleStatus: $0.lifecycleStatus,

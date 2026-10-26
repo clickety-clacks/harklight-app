@@ -54,7 +54,7 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
-            buildIdentifier: 63,
+            buildIdentifier: 67,
             marketingVersion: "0.1.0",
             highlights: [
                 .init(
@@ -66,6 +66,73 @@ enum HarklightReleaseNotes {
                     detail: LocalizedStringResource(
                         "The editor text now has breathing room, with a subtle fill and corners that fit the Reply box.",
                         comment: "Release-note detail for the Reply editor padding, fill, and shape."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
+            buildIdentifier: 66,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "duo-answered-top-bar",
+                    symbol: "checkmark",
+                    title: LocalizedStringResource(
+                        "See completed requests on Duo",
+                        comment: "Release-note title for completed reply status in the Duo detail toolbar."),
+                    detail: LocalizedStringResource(
+                        "The message toolbar keeps completed reply status visible.",
+                        comment: "Release-note detail for the Answered status in the Duo detail toolbar.")),
+                .init(
+                    id: "chat-after-answer",
+                    symbol: "bubble.left.and.bubble.right",
+                    title: LocalizedStringResource(
+                        "Chat keeps working after you answer",
+                        comment: "Release-note title for continuing a request's conversation after its answer."),
+                    detail: LocalizedStringResource(
+                        "Send follow-up messages and attachments after replying or choosing No comment.",
+                        comment: "Release-note detail for Chat remaining available after an answer."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
+            buildIdentifier: 65,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "landscape-default-split",
+                    symbol: "rectangle.split.2x1",
+                    title: LocalizedStringResource(
+                        "Landscape uses the system's default split",
+                        comment: "Release-note title for the trial of the default landscape split style."),
+                    detail: LocalizedStringResource(
+                        "The Inbox uses the system's default split style, with landscape inline Chat unchanged.",
+                        comment: "Release-note detail for the default landscape split-style trial while preserving inline Chat."))
+            ]),
+        HarklightReleaseNote(
+            buildIdentifier: 64,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "toolbar-actions",
+                    symbol: "hand.tap",
+                    title: LocalizedStringResource(
+                        "Open Settings and Chat on the first tap",
+                        comment: "Release-note title for reachable Settings and Chat toolbar actions."),
+                    detail: LocalizedStringResource(
+                        "Warnings remain available from the Inbox toolbar without covering Settings or Chat.",
+                        comment: "Release-note detail for keeping the warning popover user-triggered."))
+            ]),
+        HarklightReleaseNote(
+            buildIdentifier: 63,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "duo-book-split",
+                    symbol: "rectangle.split.2x1",
+                    title: LocalizedStringResource(
+                        "A more natural split on iPhone Duo",
+                        comment: "Release-note title for the native split adapting to the Duo fold."),
+                    detail: LocalizedStringResource(
+                        "In landscape, your Inbox and message panes adapt around the center fold.",
+                        comment: "Release-note detail for the Duo book-pose split."))
             ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(

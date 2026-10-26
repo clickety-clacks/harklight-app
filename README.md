@@ -9,3 +9,19 @@ Harklight is the current product name. The Xcode project, app target, and shared
 The corrected sender-document examples are bundled in `Resources/attention-client-m2-fixtures.json`; the same fixtures are used by the native host boundary tests. The previous M2 fixture remains in `attention-client-m2-r1-compat.json` for subset regressions. Renderer grammar and exact-result behavior are exercised by the source and tests.
 
 The Xcode project is generated from `project.yml` with XcodeGen. Run `Scripts/verify.sh build`, `Scripts/verify.sh test`, or `Scripts/verify.sh run` with Xcode and a selected booted simulator. The default destination is the existing iPhone Duo; set `HARKLIGHT_SIMULATOR_ID` to use an iPad or another simulator for product validation. `run` installs and launches on that destination and saves a CoreSimulator screenshot. For `test`, set `HARKLIGHT_ONLY_TESTING` to space-separated test identifiers (for example `HarklightUITests/SampleWorkspaceUITests/testDesignedControlsAndComponentScreenshots`) to run only those tests; without it the full suite runs. Desktop-window screenshots use Xcode Device Hub. Follow the repository [Harklight guidance](HARKLIGHT_GUIDANCE.md) for tests and gates.
+
+## UI preview screenshot pages
+
+`Scripts/capture-preview-page.py` runs a targeted simulator UI capture through the unchanged `Scripts/verify.sh test` wrapper, once in light appearance and once in dark appearance. The capture scenario opens the sample Inbox, searches for `Archive`, selects the matching request, and captures the Inbox and selected detail. It uses the portrait orientation and does not change or infer the simulator's fold state. The page includes one switch for both appearances and records the source revision, capture timestamps, screenshot hashes and change-to-page time.
+
+Set `HARKLIGHT_SIMULATOR_ID` to a booted iPhone Duo simulator. The generated page folder must be outside the source checkout.
+
+```sh
+HARKLIGHT_SIMULATOR_ID=<booted-iPhone-Duo-UUID> \
+  Scripts/capture-preview-page.py \
+  --page-dir "$HOME/Library/HarklightPreviews/palette-iteration" \
+  --page-title "Palette iteration" \
+  --pushed-at "2026-10-26T15:12:00Z"
+```
+
+This capture path currently produces portrait screenshots only. It does not capture landscape or fold states.

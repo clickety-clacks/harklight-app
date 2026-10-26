@@ -136,11 +136,12 @@ final class ReleaseNotesTests: XCTestCase {
             hasPriorAppState: true).isEmpty)
     }
 
-    func testBuildSixtyThreeReplyInputNoteIsFixedAndHiddenUntilThatBuild() throws {
+    func testBuildSixtyThreeDuoSplitNoteIsFixedAndHiddenUntilThatBuild() throws {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 63 })
 
         XCTAssertEqual(entry.marketingVersion, "0.1.0")
-        XCTAssertEqual(entry.highlights.map(\.id), ["reply-input-surface"])
+        XCTAssertEqual(entry.highlights.map(\.id), ["duo-book-split"])
+        XCTAssertEqual(entry.highlights.first?.symbol, "rectangle.split.2x1")
         XCTAssertEqual(
             HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "62")
                 .compactMap(\.buildIdentifier),
@@ -156,10 +157,63 @@ final class ReleaseNotesTests: XCTestCase {
                 lastSeenBuildIdentifier: 62,
                 hasPriorAppState: true).compactMap(\.buildIdentifier),
             [63])
+    }
+
+    func testBuildSixtyFourToolbarActionsNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 64 })
+
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["toolbar-actions"])
+        XCTAssertEqual(entry.highlights.first?.symbol, "hand.tap")
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "63")
+                .compactMap(\.buildIdentifier),
+            [63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "64")
+                .compactMap(\.buildIdentifier),
+            [64, 63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "63",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 63,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [])
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "64",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 63,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [64])
+    }
+
+    func testBuildSixtySevenReplyInputNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 67 })
+
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["reply-input-surface"])
+        XCTAssertEqual(entry.highlights.first?.symbol, "square.and.pencil")
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "66")
+                .compactMap(\.buildIdentifier),
+            [66, 65, 64, 63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "67")
+                .compactMap(\.buildIdentifier),
+            [67, 66, 65, 64, 63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "67",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 66,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [67])
         XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
-            currentBuildIdentifier: "63",
+            currentBuildIdentifier: "67",
             entries: HarklightReleaseNotes.entries,
-            lastSeenBuildIdentifier: 63,
+            lastSeenBuildIdentifier: 67,
             hasPriorAppState: true).isEmpty)
     }
 
