@@ -24,6 +24,7 @@ TEST_LABELS = {
     "detail": ("Message detail", "preview-portrait-detail"),
 }
 APPEARANCES = ("light", "dark")
+DEFAULT_PAGE_TITLE = "Harklight preview"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -98,6 +99,13 @@ def timestamp_text(value: dt.datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def resolve_page_title(value: str | None, warnings: list[str]) -> str:
+    if value and value.strip():
+        return value.strip()
+    add_warning(warnings, f"No page title was provided; using '{DEFAULT_PAGE_TITLE}'.")
+    return DEFAULT_PAGE_TITLE
+
+
 def find_simulator(device_id: str) -> str | None:
     raw = run(["xcrun", "simctl", "list", "devices", "--json"], capture_output=True)
     devices = json.loads(raw).get("devices", {})
@@ -133,6 +141,12 @@ def create_output_directory(requested: Path) -> tuple[Path, bool]:
 def default_output_directory() -> Path:
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return Path.cwd() / f"harklight-preview-{timestamp}"
+
+
+def requested_output_directory(page_dir: str | None) -> tuple[Path, bool]:
+    if page_dir is None:
+        return default_output_directory(), True
+    return Path(page_dir).expanduser().resolve(), False
 
 
 def result_bundles() -> set[Path]:
@@ -445,6 +459,20 @@ def format_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def calculate_timing(pushed_at: dt.datetime | None, interpretation: str,
+                     ready_at: dt.datetime, warnings: list[str]) -> tuple[int | None, str]:
+    if pushed_at is None:
+        return None, f"unavailable-{interpretation}-push-time"
+
+    elapsed = int((ready_at - pushed_at).total_seconds())
+    if elapsed < 0:
+        add_warning(warnings, "The supplied push timestamp is later than page readiness; elapsed time is uncertain.")
+        return None, "uncertain-future-push-time"
+
+    timing_status = "measured-assuming-local-time" if interpretation == "assumed-local" else "measured"
+    return elapsed, timing_status
+
+
 def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
                ready_at: dt.datetime, simulator_label: str,
                capture_matrix: dict[tuple[str, str], dict],
@@ -579,19 +607,12 @@ def main() -> int:
             raise CaptureError(
                 "Set HARKLIGHT_SIMULATOR_ID or pass --device-id with a booted simulator UUID."
             )
-        page_title = args.page_title.strip() if args.page_title and args.page_title.strip() else "Harklight preview"
-        if page_title == "Harklight preview" and not (args.page_title and args.page_title.strip()):
-            add_warning(warnings, "No page title was provided; using 'Harklight preview'.")
+        page_title = resolve_page_title(args.page_title, warnings)
         pushed_at, push_time_interpretation = parse_timestamp(args.pushed_at, warnings)
         simulator_name = find_simulator(args.device_id)
         simulator_label = simulator_name or f"Simulator {args.device_id}"
 
-        output_path_defaulted = args.page_dir is None
-        requested_page_dir = (
-            default_output_directory()
-            if output_path_defaulted
-            else Path(args.page_dir).expanduser().resolve()
-        )
+        requested_page_dir, output_path_defaulted = requested_output_directory(args.page_dir)
         if output_path_defaulted:
             print(f"No --page-dir was provided; using timestamped folder: {requested_page_dir}", flush=True)
         page_dir, output_path_changed = create_output_directory(requested_page_dir)
@@ -706,22 +727,9 @@ def main() -> int:
                     capture["verification"] = "unverified"
 
         ready_at = dt.datetime.now(dt.timezone.utc)
-        if pushed_at is None:
-            elapsed_seconds = None
-            timing_status = f"unavailable-{push_time_interpretation}-push-time"
-        else:
-            elapsed = int((ready_at - pushed_at).total_seconds())
-            if elapsed < 0:
-                add_warning(warnings, "The supplied push timestamp is later than page readiness; elapsed time is uncertain.")
-                elapsed_seconds = None
-                timing_status = "uncertain-future-push-time"
-            else:
-                elapsed_seconds = elapsed
-                timing_status = (
-                    "measured-assuming-local-time"
-                    if push_time_interpretation == "assumed-local"
-                    else "measured"
-                )
+        elapsed_seconds, timing_status = calculate_timing(
+            pushed_at, push_time_interpretation, ready_at, warnings,
+        )
 
         page_html = build_html(
             page_title, revision, pushed_at, ready_at, simulator_label,
