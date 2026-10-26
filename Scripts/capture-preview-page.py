@@ -65,7 +65,14 @@ def run(command: list[str], *, capture_output: bool = False,
     return result["output"].strip() if capture_output else ""
 
 
-def parse_timestamp(value: str, warnings: list[str]) -> tuple[dt.datetime | None, str]:
+def parse_timestamp(value: str | None, warnings: list[str]) -> tuple[dt.datetime | None, str]:
+    if value is None or not value.strip():
+        add_warning(
+            warnings,
+            "No --pushed-at value was provided; the page will be built without a push time.",
+        )
+        return None, "missing"
+
     try:
         parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -475,8 +482,8 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
 </section>'''
         )
 
-    if timing_status == "unavailable-invalid-push-time":
-        timing_text = "Change-to-page time unavailable because the push time could not be parsed."
+    if timing_status.startswith("unavailable-"):
+        timing_text = "Change-to-page time unavailable because the push time is unknown."
     elif elapsed_seconds is None:
         timing_text = "Change-to-page time is uncertain; see the warning below."
     else:
@@ -555,8 +562,8 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--page-dir", required=True, help="Preferred output directory; a numbered sibling is used if it exists.")
-    parser.add_argument("--page-title", required=True, help="Short review title for this iteration.")
-    parser.add_argument("--pushed-at", required=True, help="Change timestamp; a missing time zone is interpreted as local time.")
+    parser.add_argument("--page-title", help="Short review title; defaults to Harklight preview when omitted or blank.")
+    parser.add_argument("--pushed-at", help="Optional change timestamp; a missing time zone is interpreted as local time.")
     parser.add_argument("--device-id", default=os.environ.get("HARKLIGHT_SIMULATOR_ID"),
                         help="Booted simulator UUID; defaults to HARKLIGHT_SIMULATOR_ID.")
     args = parser.parse_args()
@@ -567,8 +574,9 @@ def main() -> int:
             raise CaptureError(
                 "Set HARKLIGHT_SIMULATOR_ID or pass --device-id with a booted simulator UUID."
             )
-        if not args.page_title.strip():
-            raise CaptureError("--page-title cannot be empty.")
+        page_title = args.page_title.strip() if args.page_title and args.page_title.strip() else "Harklight preview"
+        if page_title == "Harklight preview" and not (args.page_title and args.page_title.strip()):
+            add_warning(warnings, "No page title was provided; using 'Harklight preview'.")
         pushed_at, push_time_interpretation = parse_timestamp(args.pushed_at, warnings)
         simulator_name = find_simulator(args.device_id)
         simulator_label = simulator_name or f"Simulator {args.device_id}"
@@ -688,7 +696,7 @@ def main() -> int:
         ready_at = dt.datetime.now(dt.timezone.utc)
         if pushed_at is None:
             elapsed_seconds = None
-            timing_status = "unavailable-invalid-push-time"
+            timing_status = f"unavailable-{push_time_interpretation}-push-time"
         else:
             elapsed = int((ready_at - pushed_at).total_seconds())
             if elapsed < 0:
@@ -704,7 +712,7 @@ def main() -> int:
                 )
 
         page_html = build_html(
-            args.page_title, revision, pushed_at, ready_at, simulator_label,
+            page_title, revision, pushed_at, ready_at, simulator_label,
             capture_matrix, warnings, timing_status, elapsed_seconds, portrait_support,
         )
         (page_dir / "index.html").write_text(page_html, encoding="utf-8")
@@ -720,7 +728,7 @@ def main() -> int:
             if item["status"] == "captured" and item.get("orientation")
         })
         metadata = {
-            "pageTitle": args.page_title,
+            "pageTitle": page_title,
             "sourceRevision": revision,
             "simulator": {
                 "name": simulator_name,
@@ -763,7 +771,7 @@ def main() -> int:
         )
 
         if elapsed_seconds is None:
-            if timing_status == "unavailable-invalid-push-time":
+            if timing_status.startswith("unavailable-"):
                 print("Change-to-page time unavailable; see page notes.")
             else:
                 print("Change-to-page time is uncertain; see page notes.")
