@@ -11,6 +11,12 @@ struct NativeEnrollmentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    if flow.isShowing, let warning = launch.unconfirmedDisconnectWarning {
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                            .font(.caption).padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                    }
                     if let message = flow.message {
                         Label(message, systemImage: "info.circle")
                             .font(.caption).padding(12)

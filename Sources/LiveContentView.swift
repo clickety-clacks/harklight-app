@@ -479,6 +479,20 @@ struct LiveInboxSettings: View {
                     Section("Connection") {
                         Text("This phone is registered to this account.")
                             .foregroundStyle(.secondary)
+                        if let warning = launch?.unconfirmedDisconnectWarning {
+                            Text(warning)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            if launch?.canRetryUnconfirmedDisconnectRemoval == true {
+                                Button(launch?.isDisconnectBusy == true ? "Retrying removal…" : "Retry removal") {
+                                    Task { await launch?.retryDisconnectRemoval() }
+                                }
+                                .disabled(launch?.isDisconnectBusy == true)
+                            }
+                        }
+                        if let message = launch?.priorDisconnectRetryMessage {
+                            Text(message).font(.footnote).foregroundStyle(.secondary)
+                        }
                         if launch?.canMigrateDirectEndpointToGibson == true {
                             Button(launch?.isEndpointMigrationBusy == true ? "Checking Gibson…" : "Move connection to Gibson…") {
                                 confirmingEndpointMigration = true
