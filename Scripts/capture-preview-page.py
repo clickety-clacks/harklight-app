@@ -65,14 +65,26 @@ def run(command: list[str], *, capture_output: bool = False,
     return result["output"].strip() if capture_output else ""
 
 
-def parse_timestamp(value: str) -> dt.datetime:
+def parse_timestamp(value: str, warnings: list[str]) -> tuple[dt.datetime | None, str]:
     try:
         parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise CaptureError("--pushed-at must be an ISO 8601 timestamp with a timezone.") from error
+    except ValueError:
+        add_warning(
+            warnings,
+            "--pushed-at could not be parsed as ISO 8601; the page will be built without a push time.",
+        )
+        return None, "invalid"
+
     if parsed.tzinfo is None:
-        raise CaptureError("--pushed-at must include a timezone, for example 2026-10-23T15:12:00Z.")
-    return parsed.astimezone(dt.timezone.utc)
+        parsed = parsed.astimezone()
+        local_zone = parsed.tzname() or "local time zone"
+        add_warning(
+            warnings,
+            f"--pushed-at has no time zone; interpreting it as local time ({local_zone}).",
+        )
+        return parsed.astimezone(dt.timezone.utc), "assumed-local"
+
+    return parsed.astimezone(dt.timezone.utc), "provided"
 
 
 def timestamp_text(value: dt.datetime) -> str:
@@ -87,9 +99,28 @@ def find_simulator(device_id: str) -> str | None:
             if device.get("udid") == device_id:
                 name = device.get("name")
                 if device.get("state") != "Booted":
-                    raise CaptureError(f"Simulator {name or device_id!r} is not booted.")
+                    raise CaptureError(
+                        f"Simulator {name or device_id!r} is not booted; boot it with "
+                        f"xcrun simctl boot {device_id}."
+                    )
                 return name if isinstance(name, str) and name.strip() else None
-    raise CaptureError("HARKLIGHT_SIMULATOR_ID does not name an available simulator.")
+    raise CaptureError(
+        f"Simulator ID {device_id!r} is not available; set HARKLIGHT_SIMULATOR_ID or pass "
+        "--device-id with an available simulator UUID."
+    )
+
+
+def create_output_directory(requested: Path) -> tuple[Path, bool]:
+    candidate = requested
+    suffix = 1
+    while True:
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate, candidate != requested
+        except FileExistsError:
+            name = requested.name or "preview"
+            candidate = requested.parent / f"{name}-{suffix}"
+            suffix += 1
 
 
 def result_bundles() -> set[Path]:
@@ -402,7 +433,7 @@ def format_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def build_html(title: str, revision: str | None, pushed_at: dt.datetime,
+def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
                ready_at: dt.datetime, simulator_label: str,
                capture_matrix: dict[tuple[str, str], dict],
                warnings: list[str], timing_status: str,
@@ -444,7 +475,9 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime,
 </section>'''
         )
 
-    if elapsed_seconds is None:
+    if timing_status == "unavailable-invalid-push-time":
+        timing_text = "Change-to-page time unavailable because the push time could not be parsed."
+    elif elapsed_seconds is None:
         timing_text = "Change-to-page time is uncertain; see the warning below."
     else:
         timing_text = f"Change-to-page time: {format_duration(elapsed_seconds)}"
@@ -458,7 +491,7 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime,
         )
     revision_text = revision or "Unknown"
     ready_text = ready_at.strftime("%Y-%m-%d %H:%M UTC")
-    pushed_text = pushed_at.strftime("%Y-%m-%d %H:%M UTC")
+    pushed_text = pushed_at.strftime("%Y-%m-%d %H:%M UTC") if pushed_at else "unknown"
     image_count = sum(item["status"] == "captured" for item in capture_matrix.values())
     verified_count = sum(item["verification"] == "verified" for item in capture_matrix.values())
 
@@ -521,32 +554,37 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--page-dir", required=True, help="New output directory; it must not already exist.")
+    parser.add_argument("--page-dir", required=True, help="Preferred output directory; a numbered sibling is used if it exists.")
     parser.add_argument("--page-title", required=True, help="Short review title for this iteration.")
-    parser.add_argument("--pushed-at", required=True, help="UTC ISO 8601 timestamp for the change push.")
+    parser.add_argument("--pushed-at", required=True, help="Change timestamp; a missing time zone is interpreted as local time.")
     parser.add_argument("--device-id", default=os.environ.get("HARKLIGHT_SIMULATOR_ID"),
                         help="Booted simulator UUID; defaults to HARKLIGHT_SIMULATOR_ID.")
     args = parser.parse_args()
 
     try:
+        warnings: list[str] = []
         if not args.device_id:
-            raise CaptureError("Set HARKLIGHT_SIMULATOR_ID to the booted simulator UUID.")
+            raise CaptureError(
+                "Set HARKLIGHT_SIMULATOR_ID or pass --device-id with a booted simulator UUID."
+            )
         if not args.page_title.strip():
             raise CaptureError("--page-title cannot be empty.")
-        pushed_at = parse_timestamp(args.pushed_at)
+        pushed_at, push_time_interpretation = parse_timestamp(args.pushed_at, warnings)
         simulator_name = find_simulator(args.device_id)
         simulator_label = simulator_name or f"Simulator {args.device_id}"
 
-        page_dir = Path(args.page_dir).expanduser().resolve()
-        if page_dir.exists():
-            raise CaptureError(f"Output directory already exists: {page_dir}")
-        page_dir.mkdir(parents=True, exist_ok=False)
+        requested_page_dir = Path(args.page_dir).expanduser().resolve()
+        page_dir, output_path_changed = create_output_directory(requested_page_dir)
+        if output_path_changed:
+            add_warning(
+                warnings,
+                f"Requested output directory already existed; using the new sibling folder {page_dir}.",
+            )
         captures_dir = page_dir / "captures"
         provenance_dir = page_dir / "provenance"
         captures_dir.mkdir()
         provenance_dir.mkdir()
 
-        warnings: list[str] = []
         revision_result = attempt(["git", "rev-parse", "HEAD"])
         revision = None
         if revision_result["error"] or revision_result["returnCode"] != 0:
@@ -648,14 +686,22 @@ def main() -> int:
                     capture["verification"] = "unverified"
 
         ready_at = dt.datetime.now(dt.timezone.utc)
-        elapsed = int((ready_at - pushed_at).total_seconds())
-        if elapsed < 0:
-            add_warning(warnings, "The supplied push timestamp is later than page readiness; elapsed time is uncertain.")
+        if pushed_at is None:
             elapsed_seconds = None
-            timing_status = "uncertain-future-push-time"
+            timing_status = "unavailable-invalid-push-time"
         else:
-            elapsed_seconds = elapsed
-            timing_status = "measured"
+            elapsed = int((ready_at - pushed_at).total_seconds())
+            if elapsed < 0:
+                add_warning(warnings, "The supplied push timestamp is later than page readiness; elapsed time is uncertain.")
+                elapsed_seconds = None
+                timing_status = "uncertain-future-push-time"
+            else:
+                elapsed_seconds = elapsed
+                timing_status = (
+                    "measured-assuming-local-time"
+                    if push_time_interpretation == "assumed-local"
+                    else "measured"
+                )
 
         page_html = build_html(
             args.page_title, revision, pushed_at, ready_at, simulator_label,
@@ -681,8 +727,13 @@ def main() -> int:
                 "displayName": simulator_label,
                 "id": args.device_id,
             },
-            "pushedAtUTC": timestamp_text(pushed_at),
+            "pushedAtInput": args.pushed_at,
+            "pushedAtUTC": timestamp_text(pushed_at) if pushed_at else None,
+            "pushTimeInterpretation": push_time_interpretation,
             "pageReadyAtUTC": timestamp_text(ready_at),
+            "requestedOutputDirectory": str(requested_page_dir),
+            "outputDirectory": str(page_dir),
+            "outputDirectoryFallback": output_path_changed,
             "changeToPageSeconds": elapsed_seconds,
             "timingStatus": timing_status,
             "capturedOrientations": actual_orientations,
@@ -712,9 +763,14 @@ def main() -> int:
         )
 
         if elapsed_seconds is None:
-            print("Change-to-page time is uncertain; see page notes.")
+            if timing_status == "unavailable-invalid-push-time":
+                print("Change-to-page time unavailable; see page notes.")
+            else:
+                print("Change-to-page time is uncertain; see page notes.")
         else:
             print(f"Change-to-page time: {format_duration(elapsed_seconds)}")
+        if output_path_changed:
+            print(f"Requested output folder existed; page written to sibling: {page_dir / 'index.html'}")
         print(f"Page ready ({page_status}): {page_dir / 'index.html'}")
         print(f"Captured {available_count} of {len(capture_records)} images; {verified_count} verified.")
         print(f"Source revision: {revision or 'unknown'}")
