@@ -227,7 +227,9 @@ final class HarklightUITests: XCTestCase {
 
     private func waitForChatPanel(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         let panelAppears = expectation(for: NSPredicate { _, _ in
-            app.textFields["sample-chat-composer"].exists || app.staticTexts["No chat"].exists
+            app.textFields["sample-chat-composer"].exists
+                || app.staticTexts["No chat"].exists
+                || app.staticTexts["conversation-status-unavailable"].exists
         }, evaluatedWith: app)
         return XCTWaiter.wait(for: [panelAppears], timeout: timeout) == .completed
     }
