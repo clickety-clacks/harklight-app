@@ -130,6 +130,11 @@ def create_output_directory(requested: Path) -> tuple[Path, bool]:
             suffix += 1
 
 
+def default_output_directory() -> Path:
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path.cwd() / f"harklight-preview-{timestamp}"
+
+
 def result_bundles() -> set[Path]:
     directory = ROOT / "DerivedData" / "Logs" / "Test"
     return {path.resolve() for path in directory.glob("*.xcresult")}
@@ -561,7 +566,7 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--page-dir", required=True, help="Preferred output directory; a numbered sibling is used if it exists.")
+    parser.add_argument("--page-dir", help="Output directory; defaults to a timestamped folder in the current directory.")
     parser.add_argument("--page-title", help="Short review title; defaults to Harklight preview when omitted or blank.")
     parser.add_argument("--pushed-at", help="Optional change timestamp; a missing time zone is interpreted as local time.")
     parser.add_argument("--device-id", default=os.environ.get("HARKLIGHT_SIMULATOR_ID"),
@@ -581,7 +586,14 @@ def main() -> int:
         simulator_name = find_simulator(args.device_id)
         simulator_label = simulator_name or f"Simulator {args.device_id}"
 
-        requested_page_dir = Path(args.page_dir).expanduser().resolve()
+        output_path_defaulted = args.page_dir is None
+        requested_page_dir = (
+            default_output_directory()
+            if output_path_defaulted
+            else Path(args.page_dir).expanduser().resolve()
+        )
+        if output_path_defaulted:
+            print(f"No --page-dir was provided; using timestamped folder: {requested_page_dir}", flush=True)
         page_dir, output_path_changed = create_output_directory(requested_page_dir)
         if output_path_changed:
             add_warning(
@@ -742,6 +754,7 @@ def main() -> int:
             "requestedOutputDirectory": str(requested_page_dir),
             "outputDirectory": str(page_dir),
             "outputDirectoryFallback": output_path_changed,
+            "outputDirectoryDefaulted": output_path_defaulted,
             "changeToPageSeconds": elapsed_seconds,
             "timingStatus": timing_status,
             "capturedOrientations": actual_orientations,
