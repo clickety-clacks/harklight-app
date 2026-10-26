@@ -52,6 +52,20 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 enum HarklightReleaseNotes {
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            buildIdentifier: 63,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "duo-book-split",
+                    symbol: "rectangle.split.2x1",
+                    title: LocalizedStringResource(
+                        "A more natural split on iPhone Duo",
+                        comment: "Release-note title for the native split adapting to the Duo fold."),
+                    detail: LocalizedStringResource(
+                        "In landscape, your Inbox and message panes adapt around the center fold.",
+                        comment: "Release-note detail for the Duo book-pose split."))
+            ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
             buildIdentifier: 62,

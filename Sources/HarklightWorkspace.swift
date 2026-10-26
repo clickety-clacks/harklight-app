@@ -542,7 +542,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       notificationNavigation: activeNotificationNavigation,
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
-            .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 380)
         } detail: {
             detailContent(for: selection, inlineChat: inlineChat,
                           geometry: geometry)
