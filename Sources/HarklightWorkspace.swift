@@ -2,6 +2,9 @@ import SwiftUI
 import UIKit
 import AttentionDomain
 
+/// Leave the landscape conversation pane off while evaluating the native split.
+private let landscapeInlineChatPaneEnabledForTrial = false
+
 /// Window bounds describe the available app window without shrinking when the
 /// keyboard appears. Read this view's window, never a global screen or window.
 struct WorkspaceWindowReader: UIViewRepresentable {
@@ -564,9 +567,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         GeometryReader { geometry in
             let landscape = geometry.size.width > geometry.size.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
-            // Wide landscape retains its passive inline thread. The Chat
-            // toolbar button presents a sheet independently at every size.
-            let inlineChat = wideChat && landscape
+            let inlineChat = landscapeInlineChatPaneEnabledForTrial && wideChat && landscape
             let tabs = TabView(selection: $workspaceTab) {
                 Tab(value: .inbox) {
                     inboxSplitView(for: .inbox, inlineChat: inlineChat,

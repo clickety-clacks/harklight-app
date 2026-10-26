@@ -58,6 +58,8 @@ final class DetailChatButtonUITests: XCTestCase {
         let inputSurfaceQuery = app.otherElements.matching(
             identifier: "sample-chat-input-surface")
         let inputSurfaceCountBeforePresentation = inputSurfaceQuery.count
+        XCTAssertEqual(inputSurfaceCountBeforePresentation, 0,
+                       "Landscape keeps the native list/detail split until Chat opens its sheet.")
         attachScreenshot("wide-detail-trailing-chat-toolbar-before-tap")
         chat.tap()
 

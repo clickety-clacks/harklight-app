@@ -52,6 +52,21 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 enum HarklightReleaseNotes {
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
+            buildIdentifier: 65,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "landscape-inline-chat-off",
+                    symbol: "bubble.left.and.bubble.right",
+                    title: LocalizedStringResource(
+                        "Inline chat is off in landscape for now",
+                        comment: "Release-note title for the temporary landscape inline-chat pane trial."),
+                    detail: LocalizedStringResource(
+                        "Open Chat from the toolbar to view the conversation in a sheet.",
+                        comment: "Release-note detail for opening Chat from the toolbar in landscape."))
+            ]),
         HarklightReleaseNote(
             buildIdentifier: 64,
             marketingVersion: "0.1.0",
