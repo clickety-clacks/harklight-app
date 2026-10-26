@@ -553,7 +553,6 @@ struct LiveRequestDetail: View {
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
-    @State private var answerSubmittedHere = false
     @State private var activeReplyEditor: ReplyEditorTarget?
     @FocusState private var focusedReplyActionID: String?
 
@@ -718,23 +717,9 @@ struct LiveRequestDetail: View {
         return ownOutcome == .accepted && lifecycleStatus != .noComment
     }
 
-    private var submissionIsConfirmedAccepted: Bool {
-        Self.submissionDismissesToList(ownOutcome: request.receiptFacts?.ownOutcome,
-                                       answerNotDelivered: request.answerNotDelivered)
-    }
-
     private func returnToListIfSinglePane() {
         guard isSinglePanePresentation else { return }
         context.dismissToList?()
-    }
-
-    /// A checkmark submission returns a single-pane detail to the list only once
-    /// the relay confirms acceptance. A pending or refused send must not
-    /// dismiss as if it were done.
-    static func submissionDismissesToList(ownOutcome: OwnOutcome?,
-                                          answerNotDelivered: Bool) -> Bool {
-        guard !answerNotDelivered else { return false }
-        return ownOutcome == .accepted
     }
 
     private var answerStatusText: String? {
@@ -1053,24 +1038,19 @@ struct LiveRequestDetail: View {
                                 : fixtureStore.sendSelectedAnswer(for: request.key)
                             guard sent else { return }
                             closeReplyEditor()
-                            answerSubmittedHere = true
                             try? store.refreshFromDurableStore()
                         } else {
                             guard store.submitFromUser(request.key,
                                                        requestRevision: request.requestRevision) else { return }
                             closeReplyEditor()
-                            answerSubmittedHere = true
                         }
+                        returnToListIfSinglePane()
                     }
                         .labelStyle(.iconOnly)
                         .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
                         .accessibilityIdentifier("request-finish")
                 }
             }
-        }
-        .onChange(of: submissionIsConfirmedAccepted) { _, confirmed in
-            guard confirmed, answerSubmittedHere else { return }
-            returnToListIfSinglePane()
         }
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)

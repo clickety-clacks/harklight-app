@@ -44,9 +44,17 @@ final class SampleWorkspaceUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(finish.isEnabled, app.debugDescription)
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let detail = app.scrollViews["message-card-scroll"]
         finish.tap()
-        XCTAssertTrue(app.staticTexts["request-lifecycle-status"].waitForExistence(timeout: 5),
-                      "A saved answer moves only after it is submitted.")
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                          "Submitting in two-pane presentation keeps the detail visible.")
+        } else {
+            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
+                          "Submitting returns the single-pane detail to the list before confirmation.")
+            XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+        }
         showList(app)
         XCTAssertTrue(inboxTab.isSelected,
                       "Submitting an Inbox response keeps the Inbox tab selected.")
@@ -57,6 +65,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(original.waitForExistence(timeout: 5),
                       "A submitted answer appears in Replied after the user switches tabs.")
+        XCTAssertTrue(original.label.contains("Pending"),
+                      "The submitted answer remains pending until its outcome is confirmed.")
         capture("choice-response-in-replied", app)
         app.buttons["inbox-settings"].tap()
         app.buttons["Add example messages"].tap()
@@ -128,10 +138,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         submit.tap()
         if listVisibleAlongsideDetail {
             XCTAssertTrue(detail.waitForExistence(timeout: 5),
-                          "When the list and detail are both visible, accepted No comment keeps the detail selected.")
+                          "Submitting No comment in two-pane presentation keeps the detail visible.")
         } else {
             XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
-                          "In a single-pane presentation, accepted No comment returns to the list.")
+                          "Submitting No comment returns a single-pane detail to the list immediately.")
         }
         showList(app)
         XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected,
