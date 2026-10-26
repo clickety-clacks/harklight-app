@@ -96,6 +96,13 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
     }
 }
 
+@MainActor
+private final class MessageLinkRefreshPlan {
+    var step = 0
+    var pageReturnsTarget = false
+    var didDeliverLateMessage = false
+}
+
 /// Actual pinned TLS exercises certificate-free enrollment and the explicit
 /// identity proof required for own-device removal. The iOS listener cannot
 /// request an optional certificate; that server seam needs server integration.
@@ -620,6 +627,119 @@ final class NativeGuidedTLSTests: XCTestCase {
         router.receive(try notificationPayload(), opened: false)
         XCTAssertNil(router.intent)
         XCTAssertEqual(try persistence.load(identity: context.identity), persisted)
+    }
+
+    @MainActor
+    func testMessageDeepLinkExplainsMissingMessagesAndSelectsTheExactDelivery() async throws {
+        let namespace = "Harklight.message-link." + UUID().uuidString
+        let defaultsSuite = namespace + ".notifications"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-message-links"),
+                                       deviceID: ExactText("device-message-links"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context,
+                                              persistence: MemoryAttentionStatePersistence())
+        let otherKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:one"),
+                                  messageID: ExactText("other"))
+        let targetKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:one"),
+                                   messageID: ExactText("message/one"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Same message title"}"#.utf8))
+        let otherDelivery = RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: otherKey, originalPayload: payload), .message))
+        try domain.apply(otherDelivery, context: context)
+        _ = try domain.beginInboxCandidate(startupID: "message-link-startup", since: 1,
+                                           batches: [], context: context)
+        try domain.saveInboxInitialPage(snapshotID: "message-link-snapshot", highWater: 2,
+            items: [InboxSnapshotItem(acceptance: otherDelivery)], nextCursor: "older",
+            receiptCursor: nil, context: context)
+        _ = try domain.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try domain.acceptInboxCheckpoint(snapshotID: "message-link-snapshot", highWater: 2,
+                                             context: context)
+        let live = try LivePresentationStore(store: domain, context: context)
+        try live.refreshFromDurableStore()
+        let refreshPlan = MessageLinkRefreshPlan()
+        let app = NativeAppLaunch(arguments: [],
+            joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
+            initialState: .live(live),
+            notificationRouter: NativeNotificationRouter(defaults: defaults),
+            refreshOperation: { _ in
+                if refreshPlan.step == 2 && !refreshPlan.didDeliverLateMessage {
+                    refreshPlan.didDeliverLateMessage = true
+                    try! domain.apply(RelayEvent(sequence: 3,
+                        body: .delivery(StoredRequest(key: RequestKey(accountScope: identity.personID,
+                            senderID: ExactText("app:one"), messageID: ExactText("never-sent")),
+                            originalPayload: payload), .message)), context: context)
+                    try! live.refreshFromDurableStore()
+                }
+                guard refreshPlan.step > 0 else { return .unavailable }
+                return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
+                    confirmedContext: context, confirmedTransportAttemptID: UUID())
+            },
+            fetchInboxPageOperation: { _ in
+                guard refreshPlan.pageReturnsTarget else { return false }
+                refreshPlan.pageReturnsTarget = false
+                let targetDelivery = RelayEvent(sequence: 2,
+                    body: .delivery(StoredRequest(key: targetKey, originalPayload: payload), .message))
+                try! domain.saveInboxOlderPage(snapshotID: "message-link-snapshot", highWater: 2,
+                    cursor: "older", items: [InboxSnapshotItem(acceptance: targetDelivery)],
+                    nextCursor: nil, context: context)
+                try! live.refreshFromDurableStore()
+                return true
+            })
+
+        await app.receiveInvitation(URL(string: "harklight://message/app%3Aone/message%2Fone")!)
+        XCTAssertEqual(app.notificationNavigation?.request, targetKey)
+        XCTAssertEqual(app.notificationNavigationMessage,
+                       "This message hasn't arrived yet. Harklight will keep checking while it's open.")
+        XCTAssertNotEqual(live.selectedRequestKey, otherKey,
+                          "A similar title cannot stand in for the linked sender/message identity.")
+        XCTAssertFalse(live.submitFromUser(otherKey))
+        let otherRequestWarning = try XCTUnwrap(live.actionError)
+        XCTAssertEqual(otherRequestWarning, "Complete the response before sending your answer.")
+
+        refreshPlan.step = 1
+        await app.refreshLive()
+        XCTAssertEqual(app.notificationNavigationMessage,
+                       "This message hasn't arrived yet. Harklight will keep checking while it's open.")
+        XCTAssertEqual(live.actionError, otherRequestWarning,
+                       "A pending message link must not clear another request's answer warning on refresh.")
+
+        refreshPlan.pageReturnsTarget = true
+        await app.refreshLive()
+        XCTAssertEqual(live.selectedRequestKey, targetKey)
+        XCTAssertEqual(app.notificationNavigation?.request, targetKey)
+        XCTAssertNil(app.notificationNavigationMessage)
+
+        await app.receiveInvitation(URL(string: "harklight://message/app%3Aone/never-sent")!)
+        XCTAssertEqual(app.notificationNavigationMessage,
+                       "This message was never sent to this Harklight inbox.")
+        let lateKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:one"),
+                                 messageID: ExactText("never-sent"))
+        refreshPlan.step = 2
+        await app.refreshLive()
+        XCTAssertEqual(app.notificationNavigation?.request, lateKey)
+        XCTAssertEqual(live.selectedRequestKey, lateKey)
+        XCTAssertNil(app.notificationNavigationMessage)
+
+        let retractedKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:gone"),
+                                      messageID: ExactText("retracted"))
+        try domain.apply(RelayEvent(sequence: 4,
+            body: .delivery(StoredRequest(key: retractedKey, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1,
+                sessionHandle: ExactText("retracted-session"), eventID: ExactText("1"))), context: context)
+        let retraction = try RelayWire(profile: context).decodeEvent(Data("""
+        {"v":1,"type":"lifecycle","seq":5,"sender_id":"app:gone","message_id":"retracted","origin":"origin","state":"cleared","terminal_reason":"retracted","by":"origin_withdrawal","author":"origin","event_id":"4","request_revision":1,"at":1760000000123,"retracted_at":1760000000123}
+        """.utf8))
+        try domain.apply(retraction, context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertTrue(live.isRetracted(retractedKey))
+
+        await app.receiveInvitation(URL(string: "harklight://message/app%3Agone/retracted")!)
+        XCTAssertEqual(app.notificationNavigation?.request, retractedKey)
+        XCTAssertEqual(live.selectedRequestKey, retractedKey)
+        XCTAssertEqual(app.notificationNavigationMessage, "The sender retracted this message.")
     }
 
     func testColdPendingNotificationWaitsForOrdinaryLoadingAndRejectsSequenceOrGenerationChange() throws {

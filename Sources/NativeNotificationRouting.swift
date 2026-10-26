@@ -84,6 +84,35 @@ struct NativeInboxNavigation: Equatable {
     let request: RequestKey?
 }
 
+struct NativeMessageDeepLink: Equatable {
+    let senderID: String
+    let messageID: String
+
+    static func recognizes(_ url: URL) -> Bool {
+        guard let scheme = url.scheme, let host = url.host else { return false }
+        return scheme.caseInsensitiveCompare("harklight") == .orderedSame &&
+            host.caseInsensitiveCompare("message") == .orderedSame
+    }
+
+    init?(url: URL) {
+        guard Self.recognizes(url),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.user == nil, components.password == nil, components.port == nil,
+              components.query == nil, components.fragment == nil,
+              components.percentEncodedPath.first == "/" else { return nil }
+
+        let segments = components.percentEncodedPath.dropFirst()
+            .split(separator: "/", omittingEmptySubsequences: false)
+        guard segments.count == 2,
+              let senderID = String(segments[0]).removingPercentEncoding, !senderID.isEmpty,
+              let messageID = String(segments[1]).removingPercentEncoding, !messageID.isEmpty else {
+            return nil
+        }
+        self.senderID = senderID
+        self.messageID = messageID
+    }
+}
+
 /// The persisted data is navigation only. It never enters the answer/outbox store.
 @MainActor
 @Observable
