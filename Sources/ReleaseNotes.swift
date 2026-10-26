@@ -58,14 +58,14 @@ enum HarklightReleaseNotes {
             marketingVersion: "0.1.0",
             highlights: [
                 .init(
-                    id: "landscape-inline-chat-off",
-                    symbol: "bubble.left.and.bubble.right",
+                    id: "landscape-default-split",
+                    symbol: "rectangle.split.2x1",
                     title: LocalizedStringResource(
-                        "Inline chat is off in landscape for now",
-                        comment: "Release-note title for the temporary landscape inline-chat pane trial."),
+                        "Landscape uses the system's default split",
+                        comment: "Release-note title for the trial of the default landscape split style."),
                     detail: LocalizedStringResource(
-                        "Open Chat from the toolbar to view the conversation in a sheet.",
-                        comment: "Release-note detail for opening Chat from the toolbar in landscape."))
+                        "The Inbox uses the system's default split style, with landscape inline Chat unchanged.",
+                        comment: "Release-note detail for the default landscape split-style trial while preserving inline Chat."))
             ]),
         HarklightReleaseNote(
             buildIdentifier: 64,

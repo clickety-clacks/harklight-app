@@ -494,9 +494,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let chat = app.buttons["Chat"]
         XCTAssertTrue(chat.exists,
                       "Replying does not remove Chat from the message screen.")
-        XCTAssertFalse(chat.isHittable,
-                       "The keyboard may cover the bottom-toolbar Chat action while replying.")
-        capture("reply-draft-chat-covered-by-keyboard", app)
+        capture("reply-editor-with-keyboard", app)
 
         showList(app)
         clearSearch(in: app)

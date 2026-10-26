@@ -58,8 +58,8 @@ final class DetailChatButtonUITests: XCTestCase {
         let inputSurfaceQuery = app.otherElements.matching(
             identifier: "sample-chat-input-surface")
         let inputSurfaceCountBeforePresentation = inputSurfaceQuery.count
-        XCTAssertEqual(inputSurfaceCountBeforePresentation, 0,
-                       "Landscape keeps the native list/detail split until Chat opens its sheet.")
+        XCTAssertGreaterThan(inputSurfaceCountBeforePresentation, 0,
+                             "Wide landscape keeps inline Chat in the detail while the Chat button can still open its sheet.")
         attachScreenshot("wide-detail-trailing-chat-toolbar-before-tap")
         chat.tap()
 
@@ -189,6 +189,20 @@ final class DetailChatButtonUITests: XCTestCase {
     }
 
     private func dismissChatSheet(_ app: XCUIApplication, _ composer: XCUIElement) {
+        let keyboard = app.keyboards.firstMatch
+        if keyboard.exists {
+            let draftBeforeKeyboardDismissal = composer.value as? String
+            let hideKeyboard = keyboard.buttons["Hide keyboard"]
+            guard hideKeyboard.waitForExistence(timeout: 2) else {
+                XCTFail("The focused Chat keyboard exposes its native hide action. \(app.debugDescription)")
+                return
+            }
+            hideKeyboard.tap()
+            XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(composer.value as? String, draftBeforeKeyboardDismissal,
+                           "Dismissing the keyboard keeps the unsent Chat draft.")
+        }
+
         let window = app.windows.firstMatch.frame
         let contentFrame = composer.frame
         let containers = app.otherElements
