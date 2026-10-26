@@ -136,6 +136,33 @@ final class ReleaseNotesTests: XCTestCase {
             hasPriorAppState: true).isEmpty)
     }
 
+    func testBuildSixtyThreeReplyInputNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 63 })
+
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["reply-input-surface"])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "62")
+                .compactMap(\.buildIdentifier),
+            [62, 61, 59, 1])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "63")
+                .compactMap(\.buildIdentifier),
+            [63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "63",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 62,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [63])
+        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "63",
+            entries: HarklightReleaseNotes.entries,
+            lastSeenBuildIdentifier: 63,
+            hasPriorAppState: true).isEmpty)
+    }
+
     func testFreshInstallDoesNotPresentPreviouslyReleasedNotes() {
         let notes = [releaseNote(1), releaseNote(2)]
 
