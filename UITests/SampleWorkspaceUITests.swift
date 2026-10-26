@@ -522,7 +522,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let chat = app.buttons["Chat"]
         XCTAssertTrue(chat.exists,
                       "Replying does not remove Chat from the message screen.")
-        capture("reply-editor-with-keyboard", app)
+        capture("reply-draft-before-chat-navigation", app)
 
         showList(app)
         clearSearch(in: app)
