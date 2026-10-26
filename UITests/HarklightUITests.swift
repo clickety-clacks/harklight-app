@@ -245,13 +245,24 @@ final class HarklightUITests: XCTestCase {
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
 
+        let detail = app.scrollViews["message-card-scroll"]
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                          "When the list and detail are both visible, accepted submission keeps the detail selected.")
+            XCTAssertTrue(app.buttons["request-answered"].waitForExistence(timeout: 5),
+                          "The retained detail reflects the accepted answer.")
+        } else {
+            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
+                          "An accepted submission returns a single-pane detail to the list.")
+        }
         let inbox = workspaceTab("Inbox", in: app)
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
-                      "A confirmed accepted answer returns the compact detail to the list.")
+                      "A confirmed answer is no longer an available submit action.")
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inbox.isSelected,
                       "The automatic return keeps the tab the user entered from.")
@@ -286,6 +297,7 @@ final class HarklightUITests: XCTestCase {
 
     func testServerAnsweredAfterUnconfirmedSendMovesToRepliedWithoutClaimingAcceptance() throws {
         let app = launchFreshApp()
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("answerOutcomeUnconfirmed", in: app)
@@ -301,9 +313,11 @@ final class HarklightUITests: XCTestCase {
                        "An unconfirmed closure must keep the neutral sender scene.")
 
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        if !listVisibleAlongsideDetail {
+            let back = workspaceBackButton(in: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+            back.tap()
+        }
         let inbox = workspaceTab("Inbox", in: app)
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
@@ -578,12 +592,22 @@ final class HarklightUITests: XCTestCase {
 
     func testAnsweredRequestMovesToRepliedAndKeepsInboxSelected() throws {
         let app = launchFreshApp(diagnostics: true)
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("ownOperationAccepted", in: app)
+        let detail = app.scrollViews["message-card-scroll"]
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                          "When the list and detail are both visible, accepted submission keeps the detail selected.")
+            XCTAssertTrue(app.buttons["request-answered"].waitForExistence(timeout: 5), app.debugDescription)
+        } else {
+            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
+                          "An accepted submission returns a single-pane detail to the list.")
+        }
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
-                      "A confirmed accepted answer returns the compact detail to the list.")
+                      "A confirmed answer is no longer an available submit action.")
 
         let inbox = workspaceTab("Inbox", in: app)
         let replied = workspaceTab("Replied", in: app)

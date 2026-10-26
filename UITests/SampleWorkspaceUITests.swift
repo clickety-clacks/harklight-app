@@ -123,7 +123,16 @@ final class SampleWorkspaceUITests: XCTestCase {
                       "The No comment selection survives leaving the detail.")
         let submit = app.buttons["request-finish"]
         XCTAssertTrue(submit.isEnabled, app.debugDescription)
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let detail = app.scrollViews["message-card-scroll"]
         submit.tap()
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                          "When the list and detail are both visible, accepted No comment keeps the detail selected.")
+        } else {
+            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
+                          "In a single-pane presentation, accepted No comment returns to the list.")
+        }
         showList(app)
         XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected,
                       "Submitting No comment keeps the Inbox tab selected.")
@@ -451,8 +460,17 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1)
         capture("seen-detail-with-body-and-toolbar-actions", app)
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let detail = app.scrollViews["message-card-scroll"]
         bodySeen.tap()
-        capture("seen-response-detail", app)
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                          "When the list and detail are both visible, confirmed Seen keeps the detail selected.")
+        } else {
+            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
+                          "In a single-pane presentation, confirmed Seen returns to the list.")
+        }
+        capture("seen-response-after-confirmation", app)
 
         showList(app)
         assertListSearchAvailable(app)

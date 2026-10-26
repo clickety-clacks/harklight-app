@@ -554,11 +554,17 @@ struct LiveRequestDetail: View {
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
     @State private var answerSubmittedHere = false
+    @State private var seenSubmissionRevision: UInt64?
     @State private var activeReplyEditor: ReplyEditorTarget?
     @FocusState private var focusedReplyActionID: String?
 
     private var detailColors: HarklightDesignSource.MessageType {
         HarklightDesignSystem.palette(for: colorScheme).messageType(context.messageType)
+    }
+
+    private var isSinglePanePresentation: Bool {
+        // Use the split view's current adaptive width, not a device or fold-state guess.
+        horizontalSizeClass == .compact
     }
 
     private var replyEditorSurface: Color {
@@ -615,15 +621,20 @@ struct LiveRequestDetail: View {
         return !canEdit
     }
 
-    private var localSeenAction: ((ExactText) -> Void)? {
+    private var localSeenAction: ((ExactText) -> Bool)? {
         if let localExample {
-            return { _ in localExample.finishLocally() }
+            return { _ in
+                guard localExample.canFinishLocally else { return false }
+                localExample.finishLocally()
+                return true
+            }
         }
         guard let fixtureStore else { return nil }
         return { action in
             guard fixtureStore.sendSelectedAnswer(for: request.key,
-                                                   explicitCompatibilityAction: action) else { return }
+                                                   explicitCompatibilityAction: action) else { return false }
             try? store.refreshFromDurableStore()
+            return true
         }
     }
 
@@ -646,8 +657,13 @@ struct LiveRequestDetail: View {
     }
 
     private func finishSeenAction() {
-        if let localExample { localExample.finishLocally() }
-        else if let availableSeenAction { submitSeenAction(availableSeenAction) }
+        if let localExample {
+            guard localExample.canFinishLocally else { return }
+            localExample.finishLocally()
+            seenSubmissionRevision = request.requestRevision
+        } else if let availableSeenAction {
+            submitSeenAction(availableSeenAction)
+        }
     }
 
     private var seenActionIsComplete: Bool {
@@ -711,7 +727,12 @@ struct LiveRequestDetail: View {
                                        answerNotDelivered: request.answerNotDelivered)
     }
 
-    /// A checkmark submission returns the compact detail to the list only once
+    private func returnToListAfterCompletedActionIfSinglePane() {
+        guard isSinglePanePresentation else { return }
+        context.dismissToList?()
+    }
+
+    /// A checkmark submission returns a single-pane detail to the list only once
     /// the relay confirms acceptance. A pending or refused send must not
     /// dismiss as if it were done.
     static func submissionDismissesToList(ownOutcome: OwnOutcome?,
@@ -799,12 +820,15 @@ struct LiveRequestDetail: View {
     }
 
     private func submitSeenAction(_ action: ExactText) {
+        seenSubmissionRevision = nil
+        let submitted: Bool
         if let localSeenAction {
-            localSeenAction(action)
+            submitted = localSeenAction(action)
         } else {
-            store.submitFromUser(request.key, explicitCompatibilityAction: action,
-                                 requestRevision: request.requestRevision)
+            submitted = store.submitFromUser(request.key, explicitCompatibilityAction: action,
+                                             requestRevision: request.requestRevision)
         }
+        if submitted { seenSubmissionRevision = request.requestRevision }
     }
 
     var canAnswer: Bool {
@@ -1051,9 +1075,14 @@ struct LiveRequestDetail: View {
                 }
             }
         }
+        .onChange(of: seenActionIsComplete) { _, confirmed in
+            guard confirmed, seenSubmissionRevision == request.requestRevision else { return }
+            seenSubmissionRevision = nil
+            returnToListAfterCompletedActionIfSinglePane()
+        }
         .onChange(of: submissionIsConfirmedAccepted) { _, confirmed in
-            guard confirmed, answerSubmittedHere, horizontalSizeClass == .compact else { return }
-            context.dismissToList?()
+            guard confirmed, answerSubmittedHere else { return }
+            returnToListAfterCompletedActionIfSinglePane()
         }
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)
