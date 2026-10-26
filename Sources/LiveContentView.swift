@@ -466,10 +466,11 @@ struct LiveInboxSettings: View {
                                     launch?.beginReconnect()
                                 }
                             } else {
-                                Button(launch?.isDisconnectBusy == true ? "Retrying removal…" : "Retry removal") {
-                                    Task { await launch?.retryDisconnectRemoval() }
+                                Button(launch?.isDisconnectBusy(for: archiveDeparture) == true
+                                       ? "Retrying removal…" : "Retry removal") {
+                                    Task { await launch?.retryDisconnectRemoval(for: archiveDeparture) }
                                 }
-                                .disabled(launch?.isDisconnectBusy == true)
+                                .disabled(launch?.isDisconnectBusy(for: archiveDeparture) == true)
                             }
                         } else if let departure = launch?.disconnectedAccount, departure.replacement == nil {
                             Label(departure.removed ? "Disconnected" : "Removal not confirmed",
@@ -481,10 +482,11 @@ struct LiveInboxSettings: View {
                             if departure.removed {
                                 Button("Connect with an invitation") { launch?.beginReconnect() }
                             } else {
-                                Button(launch?.isDisconnectBusy == true ? "Retrying removal…" : "Retry removal") {
-                                    Task { await launch?.retryDisconnectRemoval() }
+                                Button(launch?.isDisconnectBusy(for: departure) == true
+                                       ? "Retrying removal…" : "Retry removal") {
+                                    Task { await launch?.retryDisconnectRemoval(for: departure) }
                                 }
-                                .disabled(launch?.isDisconnectBusy == true)
+                                .disabled(launch?.isDisconnectBusy(for: departure) == true)
                             }
                         } else {
                             Label("Read-only saved messages", systemImage: "lock")
@@ -492,23 +494,29 @@ struct LiveInboxSettings: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                    if let launch {
+                        let currentArchiveID = archiveDeparture?.archiveID ?? launch.disconnectedAccount?.archiveID
+                        let otherPendingRemovals = launch.unconfirmedAccountDepartures.filter {
+                            $0.archiveID != currentArchiveID
+                        }
+                        if !otherPendingRemovals.isEmpty {
+                            Section("Other pending removals") {
+                                ForEach(otherPendingRemovals, id: \.archiveID) { departure in
+                                    UnconfirmedAccountRemovalNotice(launch: launch, departure: departure)
+                                        .font(.footnote)
+                                }
+                            }
+                        }
+                    }
                 } else if launch != nil {
                     Section("Connection") {
                         Text("This phone is registered to this account.")
                             .foregroundStyle(.secondary)
-                        if let warning = launch?.unconfirmedDisconnectWarning {
-                            Text(warning)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            if launch?.canRetryUnconfirmedDisconnectRemoval == true {
-                                Button(launch?.isDisconnectBusy == true ? "Retrying removal…" : "Retry removal") {
-                                    Task { await launch?.retryDisconnectRemoval() }
-                                }
-                                .disabled(launch?.isDisconnectBusy == true)
+                        if let launch {
+                            ForEach(launch.unconfirmedAccountDepartures, id: \.archiveID) { departure in
+                                UnconfirmedAccountRemovalNotice(launch: launch, departure: departure)
+                                    .font(.footnote)
                             }
-                        }
-                        if let message = launch?.priorDisconnectRetryMessage {
-                            Text(message).font(.footnote).foregroundStyle(.secondary)
                         }
                         if launch?.canMigrateDirectEndpointToGibson == true {
                             Button(launch?.isEndpointMigrationBusy == true ? "Checking Gibson…" : "Move connection to Gibson…") {

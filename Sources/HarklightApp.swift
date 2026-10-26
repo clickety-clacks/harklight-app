@@ -140,10 +140,15 @@ private struct DisconnectedAccountRecoveryView: View {
             if launch.disconnectedAccount?.removed == true {
                 Button("Connect with an invitation") { launch.beginReconnect() }
                     .buttonStyle(.borderedProminent)
-            } else {
+            }
+            if !launch.unconfirmedAccountDepartures.isEmpty {
+                ForEach(launch.unconfirmedAccountDepartures, id: \.archiveID) { departure in
+                    UnconfirmedAccountRemovalNotice(launch: launch, departure: departure)
+                }
+            } else if launch.disconnectedAccount?.removed != true {
                 Button("Retry removal") { Task { await launch.retryDisconnectRemoval() } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(launch.isDisconnectBusy)
+                    .disabled(launch.disconnectedAccount.map { launch.isDisconnectBusy(for: $0) } ?? false)
             }
         }
     }

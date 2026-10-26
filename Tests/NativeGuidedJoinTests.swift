@@ -897,28 +897,32 @@ final class NativeGuidedJoinTests: XCTestCase {
         let transport = FakeTransport()
         let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
         let (original, record) = try await approvedInstallation(fixture, store: store, transport: transport)
-        var removalCalls = 0
+        var removalCalls: [String: Int] = [:]
+        var nextPersonID: String?
         transport.removalHandler = { url, body, root, identity in
             XCTAssertEqual(url.path, "/device/remove")
             XCTAssertEqual(root, record.trustedRootDER)
             let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
-            XCTAssertEqual(fields, ["expected_device_id": original.deviceID])
-            let saved = try XCTUnwrap(store.departure())
-            XCTAssertNil(saved.replacement, "Standalone removal must not require another invitation")
+            let deviceID = try XCTUnwrap(fields["expected_device_id"])
+            let saved = try XCTUnwrap(store.unconfirmedDepartures().first { $0.record.deviceID == deviceID })
             XCTAssertFalse(saved.removed, "The intent is durable before the server call")
             var certificate: SecCertificate?
             XCTAssertEqual(SecIdentityCopyCertificate(identity, &certificate), errSecSuccess)
             XCTAssertTrue(DeviceCertificateBinding.matches(
                 SecCertificateCopyData(try XCTUnwrap(certificate)) as Data,
-                expectedDeviceID: original.deviceID))
-            removalCalls += 1
-            if removalCalls == 1 { throw URLError(.networkConnectionLost) }
-            return try response(["state": "removed", "person_id": fixture.invitation.personID,
-                                 "device_id": original.deviceID, "enrollment_revision": 3])
+                expectedDeviceID: deviceID))
+            let count = (removalCalls[deviceID] ?? 0) + 1
+            removalCalls[deviceID] = count
+            if count == 1 || (deviceID == original.deviceID && count == 2) {
+                throw URLError(.networkConnectionLost)
+            }
+            let personID = deviceID == original.deviceID ? fixture.invitation.personID : try XCTUnwrap(nextPersonID)
+            return try response(["state": "removed", "person_id": personID,
+                                 "device_id": deviceID, "enrollment_revision": 3])
         }
 
         try store.prepareAccountDeparture(record)
-        XCTAssertEqual(removalCalls, 0, "Preparing the durable intent does not contact the server")
+        XCTAssertTrue(removalCalls.isEmpty, "Preparing the durable intent does not contact the server")
         do {
             try await store.removeCurrentAccount(record)
             XCTFail("The first removal reply is lost")
@@ -929,6 +933,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         let reopened = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
         let nextInvitation = try fixture.invitationWith(token: String(repeating: "2", count: 64),
                                                         person: "another-invited-person")
+        nextPersonID = nextInvitation.personID
         transport.handler = { url, method, _ in
             if method == "GET" && url.path == "/enroll" {
                 return try response(["error": "invalid_request"], status: 400)
@@ -946,7 +951,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         await disconnectedApp.receiveInvitation(fixture.url(nextInvitation))
         XCTAssertTrue(flow.isShowing, "The ordinary invitation flow opens while old removal is unconfirmed")
         XCTAssertEqual(flow.screen, .confirmation)
-        XCTAssertEqual(removalCalls, 1)
+        XCTAssertEqual(removalCalls[original.deviceID], 1)
         XCTAssertEqual(try reopened.approvedRecord(), record)
         XCTAssertTrue(disconnectedApp.unconfirmedDisconnectWarning?.contains("may still list this phone as registered") == true)
 
@@ -1017,13 +1022,136 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertNotNil(connectedApp.unconfirmedDisconnectWarning)
         XCTAssertTrue(connectedApp.canRetryUnconfirmedDisconnectRemoval,
                       "Retry remains available while the new account is connected")
-        await connectedApp.retryDisconnectRemoval()
-        XCTAssertTrue(try XCTUnwrap(reopened.departure()).removed)
+        XCTAssertEqual(connectedApp.unconfirmedAccountDepartures.map { $0.record.deviceID }, [original.deviceID])
+        let firstPending = try XCTUnwrap(connectedApp.unconfirmedAccountDepartures.first)
+        await connectedApp.retryDisconnectRemoval(for: firstPending)
+        XCTAssertEqual(removalCalls[original.deviceID], 2)
+        XCTAssertFalse(try XCTUnwrap(reopened.departure()).removed)
+        if case .live = connectedApp.state {} else {
+            XCTFail("Retrying an earlier account removal must keep the new account connected")
+        }
+
+        await connectedApp.disconnectCurrentAccount()
+        XCTAssertEqual(try reopened.departure()?.record.deviceID, next.deviceID,
+                       "The new account gets its own removal record")
+        XCTAssertFalse(try XCTUnwrap(reopened.departure()).removed)
         XCTAssertEqual(try reopened.approvedRecord()?.deviceID, next.deviceID,
-                       "Confirming old removal does not clear the active new account")
-        XCTAssertNotNil(connectedApp.priorDisconnectRetryMessage)
-        if case .live = connectedApp.state {} else { XCTFail("Retrying the old removal must keep the new account connected") }
-        XCTAssertEqual(removalCalls, 2)
+                       "An unconfirmed removal keeps the new account's saved identity")
+        XCTAssertEqual(Set(connectedApp.unconfirmedAccountDepartures.map { $0.record.deviceID }),
+                       Set([original.deviceID, next.deviceID]),
+                       "The earlier and current removals both remain available")
+        let oldPending = try XCTUnwrap(connectedApp.unconfirmedAccountDepartures.first {
+            $0.record.deviceID == original.deviceID
+        })
+        let newPending = try XCTUnwrap(connectedApp.unconfirmedAccountDepartures.first {
+            $0.record.deviceID == next.deviceID
+        })
+        XCTAssertFalse(oldPending.removed)
+        XCTAssertNil(oldPending.replacement, "Disconnecting the new account leaves the old removal independently retryable")
+        XCTAssertFalse(newPending.removed)
+        XCTAssertNil(newPending.replacement)
+        XCTAssertTrue(connectedApp.canRetryUnconfirmedDisconnectRemoval(for: oldPending))
+        XCTAssertTrue(connectedApp.canRetryUnconfirmedDisconnectRemoval(for: newPending))
+        XCTAssertNotNil(connectedApp.unconfirmedDisconnectWarning(for: oldPending))
+        XCTAssertNotNil(connectedApp.unconfirmedDisconnectWarning(for: newPending))
+
+        await connectedApp.retryDisconnectRemoval(for: oldPending)
+        XCTAssertTrue(try XCTUnwrap(reopened.archivedDepartures().first {
+            $0.record.deviceID == original.deviceID
+        }).removed)
+        XCTAssertEqual(try reopened.departure()?.record.deviceID, next.deviceID,
+                       "Confirming the earlier removal does not change the disconnected account")
+        XCTAssertFalse(try XCTUnwrap(reopened.departure()).removed)
+
+        await connectedApp.retryDisconnectRemoval(for: newPending)
+        XCTAssertTrue(try XCTUnwrap(reopened.departure()).removed)
+        XCTAssertNil(try reopened.approvedRecord(), "The new account's removal clears only its own enrollment")
+        XCTAssertEqual(removalCalls[original.deviceID], 3)
+        XCTAssertEqual(removalCalls[next.deviceID], 2)
+    }
+
+    func testSecondInvitationCanProceedWhileReplacementRemovalIsUnconfirmed() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let (original, originalRecord) = try await approvedInstallation(fixture, store: store, transport: transport)
+        try store.prepareAccountDeparture(originalRecord)
+        transport.removalHandler = { _, body, _, _ in
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+            XCTAssertEqual(fields["expected_device_id"], original.deviceID)
+            throw URLError(.networkConnectionLost)
+        }
+        do {
+            try await store.removeCurrentAccount(originalRecord)
+            XCTFail("The original removal must remain unconfirmed")
+        } catch is URLError {}
+
+        let firstInvitation = try fixture.invitationWith(token: String(repeating: "2", count: 64),
+                                                        person: "replacement-account")
+        let replacementInvitation = try fixture.invitationWith(token: String(repeating: "3", count: 64),
+                                                               person: "next-replacement-account")
+        let secondInvitation = try fixture.invitationWith(token: String(repeating: "4", count: 64),
+                                                          person: "second-invitation-account")
+        let reopened = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        transport.handler = { url, method, _ in
+            if method == "GET" && url.path == "/enroll" {
+                return try response(["error": "invalid_request"], status: 400)
+            }
+            if method == "POST" && url.path == "/enroll" {
+                return try fixture.pendingResponse()
+            }
+            let attempt = try XCTUnwrap(reopened.loadAttempt())
+            return try response(["state": "approved", "person_id": attempt.invitation.personID,
+                                 "device_id": attempt.deviceID])
+        }
+        var removalCalls: [String: Int] = [:]
+        transport.removalHandler = { _, body, _, _ in
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+            let deviceID = try XCTUnwrap(fields["expected_device_id"])
+            removalCalls[deviceID, default: 0] += 1
+            throw URLError(.networkConnectionLost)
+        }
+        let launch = NativeAppLaunch(arguments: [],
+            enrollmentStore: NativeEnrollmentStore(service: fixture.namespace),
+            joinStore: reopened, initialState: .disconnected(nil))
+        let flow = launch.guidedJoin
+        flow.connectApproved = { _ in true }
+        await flow.receive(fixture.url(firstInvitation))
+        XCTAssertEqual(flow.screen, .confirmation)
+        await flow.join()
+        XCTAssertEqual(flow.screen, .pending)
+        await flow.retry()
+        XCTAssertEqual(flow.screen, .connected)
+        let firstRecord = try XCTUnwrap(reopened.approvedRecord())
+        XCTAssertNotEqual(firstRecord.deviceID, original.deviceID)
+
+        await flow.receive(fixture.url(replacementInvitation))
+        XCTAssertEqual(flow.screen, .existingAccount)
+        flow.considerReplacement()
+        await flow.confirmReplacement()
+        XCTAssertEqual(flow.screen, .replacementConfirmation)
+        XCTAssertEqual(removalCalls[firstRecord.deviceID], 1)
+        XCTAssertEqual(try reopened.departure()?.record.deviceID, firstRecord.deviceID)
+        XCTAssertEqual(try reopened.departure()?.replacement, replacementInvitation)
+        XCTAssertEqual(Set(launch.unconfirmedAccountDepartures.map { $0.record.deviceID }),
+                       Set([original.deviceID, firstRecord.deviceID]))
+
+        await flow.receive(fixture.url(secondInvitation))
+        XCTAssertEqual(flow.screen, .confirmation,
+                       "A second invitation remains available while the prior removal is pending")
+        XCTAssertEqual(flow.invitation, secondInvitation)
+        XCTAssertEqual(Set(launch.unconfirmedAccountDepartures.map { $0.record.deviceID }),
+                       Set([original.deviceID, firstRecord.deviceID]))
+        await flow.join()
+        let secondAttempt = try XCTUnwrap(reopened.loadAttempt())
+        XCTAssertEqual(secondAttempt.invitation, secondInvitation)
+        XCTAssertEqual(secondAttempt.phase, .pending)
+        XCTAssertFalse(try XCTUnwrap(reopened.departure()).removed)
+        XCTAssertEqual(try reopened.departure()?.record.deviceID, firstRecord.deviceID)
+        XCTAssertEqual(try reopened.departure()?.replacement, secondInvitation,
+                       "The outstanding removal follows the invitation now being completed")
+        XCTAssertEqual(launch.unconfirmedAccountDepartures.count, 2)
     }
 
     func testFullInvitationPasteChecksDestinationBeforeAJoinAndReadsDisplayOnlyLabels() async throws {
