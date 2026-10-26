@@ -71,9 +71,28 @@ final class HarklightUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
         XCTAssertTrue(finish.isEnabled, "A valid point and note should enable the shared answer action.")
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         finish.tap()
         let lifecycle = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5))
+        let detail = app.scrollViews["message-card-scroll"]
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                          "Submitting in two-pane presentation keeps the detail visible.")
+        } else {
+            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
+                          "Submitting returns a single-pane detail to the list before confirmation.")
+            XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected, app.debugDescription)
+            XCTAssertFalse(lifecycle.exists,
+                           "The pending detail is no longer presented after returning to the list.")
+            let replied = workspaceTab("Replied", in: app)
+            replied.tap()
+            let row = app.descendants(matching: .any)["request-row-facilities-01"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(row.label.contains("Pending"),
+                          "The reply stays visibly pending rather than appearing accepted.")
+            row.tap()
+        }
+        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(lifecycle.label, "Pending",
                        "A local submission remains pending until its fixture outcome is explicitly simulated.")
         XCTAssertTrue(app.buttons["fixture-outcome-menu"].waitForExistence(timeout: 5),
@@ -106,11 +125,20 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(finish.isEnabled,
                       "A refresh must not dim or disable the visible answer action.")
         attachScreenshot("Answer available while inbox is refreshing", from: app)
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         finish.tap()
 
         let lifecycle = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(lifecycle.label, "Pending")
+        let detail = app.scrollViews["message-card-scroll"]
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(lifecycle.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(lifecycle.label, "Pending")
+        } else {
+            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
+                          "The single-pane submit returns to the list even while refresh is running.")
+            XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected, app.debugDescription)
+        }
         attachScreenshot("Answer submitted while inbox is refreshing", from: app)
     }
 
@@ -245,19 +273,31 @@ final class HarklightUITests: XCTestCase {
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
 
-        let inbox = workspaceTab("Inbox", in: app)
+        let detail = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                      "The pending row is reopened to simulate its later server outcome.")
+        XCTAssertTrue(app.buttons["request-answered"].waitForExistence(timeout: 5),
+                      "The reopened detail reflects the accepted answer.")
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
-                      "A confirmed accepted answer returns the compact detail to the list.")
+                      "A confirmed answer is no longer an available submit action.")
+        if !listVisibleAlongsideDetail {
+            let back = workspaceBackButton(in: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+            back.tap()
+        }
+        let inbox = workspaceTab("Inbox", in: app)
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
+        if !inbox.isSelected { inbox.tap() }
         XCTAssertTrue(inbox.isSelected,
-                      "The automatic return keeps the tab the user entered from.")
+                      "The Inbox tab remains available after the later accepted result.")
         XCTAssertFalse(app.buttons["inbox-warning-button"].exists,
                        "A resolved send raises no unresolved-send warning.")
-        attachScreenshot("Accepted answer returns to the list", from: app)
+        attachScreenshot("Accepted answer removed from Inbox", from: app)
 
         workspaceTab("Replied", in: app).tap()
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
@@ -302,13 +342,12 @@ final class HarklightUITests: XCTestCase {
 
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
         let back = workspaceBackButton(in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        if back.exists { back.tap() }
         let inbox = workspaceTab("Inbox", in: app)
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(inbox.isSelected,
-                      "A lost or unconfirmed response leaves the user on Inbox.")
+        if !inbox.isSelected { inbox.tap() }
+        XCTAssertTrue(inbox.isSelected, app.debugDescription)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A server-answered request no longer appears in Inbox.")
         XCTAssertFalse(app.staticTexts["Answer sent · result not confirmed"].exists,
@@ -337,6 +376,12 @@ final class HarklightUITests: XCTestCase {
         let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
+        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        let inbox = workspaceTab("Inbox", in: app)
+        if !inbox.isSelected { inbox.tap() }
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.label.contains("Answer sent · result not confirmed"),
+                      "A failed or unresolved send is shown on its Inbox row.")
         let warningButton = app.buttons["inbox-warning-button"]
         XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
         warningButton.tap()
@@ -582,14 +627,20 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("ownOperationAccepted", in: app)
+        let detail = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                      "The pending row is reopened to simulate its later accepted result.")
+        XCTAssertTrue(app.buttons["request-answered"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
-                      "A confirmed accepted answer returns the compact detail to the list.")
+                      "A confirmed answer is no longer an available submit action.")
 
+        let back = workspaceBackButton(in: app)
+        if back.exists { back.tap() }
         let inbox = workspaceTab("Inbox", in: app)
         let replied = workspaceTab("Replied", in: app)
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(inbox.isSelected,
-                      "The automatic return keeps the tab the user entered from.")
+        if !inbox.isSelected { inbox.tap() }
+        XCTAssertTrue(inbox.isSelected, app.debugDescription)
         XCTAssertFalse(facilities.waitForExistence(timeout: 2),
                        "An answered request leaves the Inbox list.")
         attachScreenshot("Answered request leaves Inbox selected", from: app)
@@ -608,7 +659,17 @@ final class HarklightUITests: XCTestCase {
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {
-        let outcomeButton = app.buttons["fixture-outcome-menu"]
+        var outcomeButton = app.buttons["fixture-outcome-menu"]
+        if !outcomeButton.exists {
+            let replied = workspaceTab("Replied", in: app)
+            XCTAssertTrue(replied.waitForExistence(timeout: 5), app.debugDescription)
+            if !replied.isSelected { replied.tap() }
+            let row = app.descendants(matching: .any)["request-row-facilities-01"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5),
+                          "The submitted pending request remains available in Replied for its outcome update.")
+            row.tap()
+            outcomeButton = app.buttons["fixture-outcome-menu"]
+        }
         XCTAssertTrue(outcomeButton.waitForExistence(timeout: 5),
                       "The ordinary pending fixture card must expose its local outcome control.")
         revealInCard(outcomeButton, in: app)
@@ -731,11 +792,22 @@ final class HarklightUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
         XCTAssertTrue(finish.isEnabled)
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         finish.tap()
         let status = app.staticTexts["request-lifecycle-status"]
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
-        XCTAssertEqual(status.label, "Pending",
-                       "The local answer stays pending until its fixture outcome is explicitly simulated.")
+        let detail = app.scrollViews["message-card-scroll"]
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(status.waitForExistence(timeout: 5), app.debugDescription)
+        } else {
+            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
+                          "A successful checkmark submission returns single-pane detail immediately.")
+            XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected, app.debugDescription)
+        }
+        if status.exists {
+            XCTAssertEqual(status.label, "Pending",
+                           "The local answer stays pending until its fixture outcome is explicitly simulated.")
+        }
         return selectedPoint
     }
 

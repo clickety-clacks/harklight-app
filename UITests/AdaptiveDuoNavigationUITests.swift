@@ -37,7 +37,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachScreenshot("portrait-master-after-native-back")
     }
 
-    func testSeenKeepsCardNavigationAfterMovingOutOfInbox() {
+    func testSeenReturnsToListOnlyWhenNoListPaneIsVisible() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -50,6 +50,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertTrue(check.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(check.isEnabled, app.debugDescription)
         let card = app.scrollViews["message-card-scroll"]
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         let counter = app.staticTexts.matching(
             NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")
         ).firstMatch
@@ -62,21 +63,36 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertLessThan(index, total, "The fixture needs a following message.")
         attachScreenshot("native-toolbar-check-before-seen")
         check.tap()
-        XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"]
-            .waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(check.isEnabled, "The Seen action must not repeat after completion.")
-        XCTAssertEqual(counter.label, initialPosition,
-                       "Moving a Seen message to Replied must not reset its card position.")
-        attachScreenshot("native-toolbar-check-after-seen")
+        if listVisibleAlongsideDetail {
+            XCTAssertTrue(card.waitForExistence(timeout: 5),
+                          "When the list and detail are both visible, confirmed Seen keeps the detail selected.")
+            XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"]
+                .waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertFalse(check.isEnabled, "The Seen action must not repeat after completion.")
+            XCTAssertEqual(counter.label, initialPosition,
+                           "Moving a Seen message to Replied must not reset its card position.")
+            attachScreenshot("native-toolbar-check-after-seen")
 
-        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
-        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
-        lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow,
-                    thenHoldForDuration: 4)
-        let nextPosition = "\(index + 1) of \(total)"
-        XCTAssertTrue(app.staticTexts[nextPosition].waitForExistence(timeout: 5),
-                      "Next must remain available after the current message moves to Replied. \(app.debugDescription)")
-        attachScreenshot("native-toolbar-next-after-seen")
+            let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+            let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+            lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow,
+                        thenHoldForDuration: 4)
+            let nextPosition = "\(index + 1) of \(total)"
+            XCTAssertTrue(app.staticTexts[nextPosition].waitForExistence(timeout: 5),
+                          "Next remains available after the current message moves to Replied. \(app.debugDescription)")
+            attachScreenshot("native-toolbar-next-after-seen")
+        } else {
+            XCTAssertTrue(card.waitForNonExistence(timeout: 5),
+                          "A single-pane view returns to Inbox after Seen is confirmed.")
+            let inbox = workspaceTab("Inbox", in: app)
+            XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(inbox.isSelected, "Returning keeps the Inbox tab selected.")
+            XCTAssertFalse(row.waitForExistence(timeout: 2),
+                           "The Seen row leaves Inbox as it returns to the list.")
+            workspaceTab("Replied", in: app).tap()
+            XCTAssertTrue(row.waitForExistence(timeout: 5),
+                          "The confirmed Seen row appears in Replied.")
+        }
     }
 
     private func attachScreenshot(_ name: String) {
