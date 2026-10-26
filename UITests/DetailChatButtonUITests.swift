@@ -192,12 +192,12 @@ final class DetailChatButtonUITests: XCTestCase {
         let keyboard = app.keyboards.firstMatch
         if keyboard.exists {
             let draftBeforeKeyboardDismissal = composer.value as? String
-            let hideKeyboard = keyboard.buttons["Hide keyboard"]
-            guard hideKeyboard.waitForExistence(timeout: 2) else {
-                XCTFail("The focused Chat keyboard exposes its native hide action. \(app.debugDescription)")
-                return
-            }
-            hideKeyboard.tap()
+            let history = app.scrollViews["conversation-history-scroll"]
+            XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+            // The Chat history's interactive scroll dismissal works on both iPhone and iPad.
+            let start = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05))
+            let end = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+            start.press(forDuration: 0.1, thenDragTo: end)
             XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), app.debugDescription)
             XCTAssertEqual(composer.value as? String, draftBeforeKeyboardDismissal,
                            "Dismissing the keyboard keeps the unsent Chat draft.")
