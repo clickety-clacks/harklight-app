@@ -52,6 +52,21 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 enum HarklightReleaseNotes {
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
+            buildIdentifier: 65,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "landscape-default-split",
+                    symbol: "rectangle.split.2x1",
+                    title: LocalizedStringResource(
+                        "Landscape uses the system's default split",
+                        comment: "Release-note title for the trial of the default landscape split style."),
+                    detail: LocalizedStringResource(
+                        "The Inbox uses the system's default split style, with landscape inline Chat unchanged.",
+                        comment: "Release-note detail for the default landscape split-style trial while preserving inline Chat."))
+            ]),
         HarklightReleaseNote(
             buildIdentifier: 64,
             marketingVersion: "0.1.0",

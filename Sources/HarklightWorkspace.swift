@@ -532,7 +532,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             detailContent(for: selection, inlineChat: inlineChat,
                           geometry: geometry)
         }
-        .navigationSplitViewStyle(.balanced)
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
@@ -564,8 +563,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         GeometryReader { geometry in
             let landscape = geometry.size.width > geometry.size.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
-            // Wide landscape retains its passive inline thread. The Chat
-            // toolbar button presents a sheet independently at every size.
             let inlineChat = wideChat && landscape
             let tabs = TabView(selection: $workspaceTab) {
                 Tab(value: .inbox) {
