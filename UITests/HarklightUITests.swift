@@ -326,7 +326,6 @@ final class HarklightUITests: XCTestCase {
 
     func testServerAnsweredAfterUnconfirmedSendMovesToRepliedWithoutClaimingAcceptance() throws {
         let app = launchFreshApp()
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("answerOutcomeUnconfirmed", in: app)
@@ -342,6 +341,7 @@ final class HarklightUITests: XCTestCase {
                        "An unconfirmed closure must keep the neutral sender scene.")
 
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         if !listVisibleAlongsideDetail {
             let back = workspaceBackButton(in: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
@@ -627,7 +627,6 @@ final class HarklightUITests: XCTestCase {
 
     func testAnsweredRequestMovesToRepliedAndKeepsInboxSelected() throws {
         let app = launchFreshApp(diagnostics: true)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
@@ -639,6 +638,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
                       "A confirmed answer is no longer an available submit action.")
 
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         if !listVisibleAlongsideDetail {
             let back = workspaceBackButton(in: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)

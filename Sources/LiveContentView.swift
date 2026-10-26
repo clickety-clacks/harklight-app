@@ -919,7 +919,10 @@ struct LiveRequestDetail: View {
                                              readOnly: controlsReadOnly,
                                              sendDisabled: sendControlsDisabled,
                                              localExample: localExample,
-                                             onSeen: submitSeenAction,
+                                             onSeen: { action in
+                                                 submitSeenAction(action)
+                                                 returnToListIfSinglePane()
+                                             },
                                              canOfferNoComment: canOfferNoComment,
                                              noCommentSelected: noCommentSelected,
                                              noCommentUnavailable: showsNoCommentUnavailable,
