@@ -52,6 +52,20 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 enum HarklightReleaseNotes {
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            buildIdentifier: 66,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "duo-answered-top-bar",
+                    symbol: "checkmark",
+                    title: LocalizedStringResource(
+                        "See completed requests on Duo",
+                        comment: "Release-note title for completed reply status in the Duo detail toolbar."),
+                    detail: LocalizedStringResource(
+                        "The message toolbar keeps completed reply status visible.",
+                        comment: "Release-note detail for the Answered status in the Duo detail toolbar."))
+            ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
             buildIdentifier: 65,
