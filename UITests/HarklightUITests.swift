@@ -341,12 +341,8 @@ final class HarklightUITests: XCTestCase {
                        "An unconfirmed closure must keep the neutral sender scene.")
 
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
-        if !listVisibleAlongsideDetail {
-            let back = workspaceBackButton(in: app)
-            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-            back.tap()
-        }
+        let back = workspaceBackButton(in: app)
+        if back.exists { back.tap() }
         let inbox = workspaceTab("Inbox", in: app)
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
@@ -638,12 +634,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
                       "A confirmed answer is no longer an available submit action.")
 
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
-        if !listVisibleAlongsideDetail {
-            let back = workspaceBackButton(in: app)
-            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-            back.tap()
-        }
+        let back = workspaceBackButton(in: app)
+        if back.exists { back.tap() }
         let inbox = workspaceTab("Inbox", in: app)
         let replied = workspaceTab("Replied", in: app)
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)

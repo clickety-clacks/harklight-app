@@ -707,6 +707,11 @@ struct LiveRequestDetail: View {
                                            answerNotDelivered: request.answerNotDelivered)
     }
 
+    private var pinsAnsweredStatusInWidePhoneToolbar: Bool {
+        answerIsComplete && UIDevice.current.userInterfaceIdiom == .phone &&
+            horizontalSizeClass == .regular
+    }
+
     /// A pending or refused send never counts as Answered; only a request the
     /// relay reports answered, or an accepted submission, completes the state.
     static func answerStatusIsComplete(lifecycleStatus: AppLifecycleStatus,
@@ -1019,39 +1024,47 @@ struct LiveRequestDetail: View {
                 Spacer()
                 chatButton
             }
-            ToolbarItem(placement: .confirmationAction) {
-                if request.informationalSeenStatus != nil {
-                    finishSeenButton
-                } else if let localExample {
-                    Button("Finish locally", systemImage: "checkmark") {
-                        closeReplyEditor()
-                        localExample.finishLocally()
-                    }
-                    .labelStyle(.iconOnly)
-                    .disabled(!localExample.canFinishLocally || localExample.finished)
-                    .accessibilityIdentifier("sample-finish")
-                } else if answerIsComplete {
+            if pinsAnsweredStatusInWidePhoneToolbar {
+                ToolbarItem(placement: .topBarPinnedTrailing) {
                     answeredStatusButton
-                } else {
-                    Button(submitLabel, systemImage: "checkmark") {
-                        if let fixtureStore {
-                            let sent = store.draft(for: request.key,
-                                                   revision: request.requestRevision)?.noCommentSelected == true
-                                ? fixtureStore.sendNoCommentLocally(for: request.key)
-                                : fixtureStore.sendSelectedAnswer(for: request.key)
-                            guard sent else { return }
+                }
+            } else {
+                ToolbarItem(placement: .confirmationAction) {
+                    if request.informationalSeenStatus != nil {
+                        finishSeenButton
+                    } else if let localExample {
+                        Button("Finish locally", systemImage: "checkmark") {
                             closeReplyEditor()
-                            try? store.refreshFromDurableStore()
-                        } else {
-                            guard store.submitFromUser(request.key,
-                                                       requestRevision: request.requestRevision) else { return }
-                            closeReplyEditor()
+                            localExample.finishLocally()
                         }
-                        returnToListIfSinglePane()
-                    }
                         .labelStyle(.iconOnly)
-                        .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
-                        .accessibilityIdentifier("request-finish")
+                        .disabled(!localExample.canFinishLocally || localExample.finished)
+                        .accessibilityIdentifier("sample-finish")
+                    } else if answerIsComplete {
+                        answeredStatusButton
+                    } else {
+                        Button(submitLabel, systemImage: "checkmark") {
+                            if let fixtureStore {
+                                let sent = store.draft(for: request.key,
+                                                       revision: request.requestRevision)?.noCommentSelected == true
+                                    ? fixtureStore.sendNoCommentLocally(for: request.key)
+                                    : fixtureStore.sendSelectedAnswer(for: request.key)
+                                guard sent else { return }
+                                closeReplyEditor()
+                                answerSubmittedHere = true
+                                try? store.refreshFromDurableStore()
+                            } else {
+                                guard store.submitFromUser(request.key,
+                                                           requestRevision: request.requestRevision) else { return }
+                                closeReplyEditor()
+                                answerSubmittedHere = true
+                            }
+                            returnToListIfSinglePane()
+                        }
+                            .labelStyle(.iconOnly)
+                            .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
+                            .accessibilityIdentifier("request-finish")
+                    }
                 }
             }
         }
