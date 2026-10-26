@@ -58,6 +58,15 @@ enum HarklightReleaseNotes {
             marketingVersion: "0.1.0",
             highlights: [
                 .init(
+                    id: "duo-answered-top-bar",
+                    symbol: "checkmark",
+                    title: LocalizedStringResource(
+                        "See completed requests on Duo",
+                        comment: "Release-note title for completed reply status in the Duo detail toolbar."),
+                    detail: LocalizedStringResource(
+                        "The message toolbar keeps completed reply status visible.",
+                        comment: "Release-note detail for the Answered status in the Duo detail toolbar.")),
+                .init(
                     id: "chat-after-answer",
                     symbol: "bubble.left.and.bubble.right",
                     title: LocalizedStringResource(
