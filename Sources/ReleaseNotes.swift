@@ -52,6 +52,7 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 enum HarklightReleaseNotes {
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
             buildIdentifier: 66,
             marketingVersion: "0.1.0",
@@ -64,7 +65,16 @@ enum HarklightReleaseNotes {
                         comment: "Release-note title for completed reply status in the Duo detail toolbar."),
                     detail: LocalizedStringResource(
                         "The message toolbar keeps completed reply status visible.",
-                        comment: "Release-note detail for the Answered status in the Duo detail toolbar."))
+                        comment: "Release-note detail for the Answered status in the Duo detail toolbar.")),
+                .init(
+                    id: "chat-after-answer",
+                    symbol: "bubble.left.and.bubble.right",
+                    title: LocalizedStringResource(
+                        "Chat keeps working after you answer",
+                        comment: "Release-note title for continuing a request's conversation after its answer."),
+                    detail: LocalizedStringResource(
+                        "Send follow-up messages and attachments after replying or choosing No comment.",
+                        comment: "Release-note detail for Chat remaining available after an answer."))
             ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(

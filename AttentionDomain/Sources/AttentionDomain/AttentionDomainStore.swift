@@ -2259,7 +2259,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
               thread.revisions[draft.binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.terminal == nil else { throw ConversationError.closed }
+        guard thread.allowsDiscussion else { throw ConversationError.closed }
         if let previous = thread.drafts[draft.binding.revision] {
             switch previous.disposition {
             case .submitting, .outcomeUnknown, .acceptedPendingReplay: throw ConversationError.pendingSubmission
@@ -2289,7 +2289,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard var conversation = next.conversation,
               var thread = conversation.threads[binding.request],
               thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.terminal == nil else { throw ConversationError.closed }
+        guard thread.allowsDiscussion else { throw ConversationError.closed }
         var draft = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
         guard draft.binding == binding else { throw ConversationError.invalidBinding }
         switch draft.disposition {
@@ -2335,7 +2335,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, let thread = conversation.threads[binding.request],
               let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        guard thread.terminal == nil else { throw ConversationError.closed }
+        guard thread.allowsDiscussion else { throw ConversationError.closed }
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
@@ -2388,7 +2388,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
               var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        guard thread.terminal == nil else { throw ConversationError.closed }
+        guard thread.allowsDiscussion else { throw ConversationError.closed }
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }

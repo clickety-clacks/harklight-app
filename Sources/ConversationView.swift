@@ -262,6 +262,7 @@ private struct ConversationComposer: View {
     @State private var attachmentChoices = false
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
+    private var allowsDiscussion: Bool { thread?.allowsDiscussion == true }
     private var frozen: Bool {
         switch draft.disposition { case .submitting, .outcomeUnknown, .acceptedPendingReplay: return true; default: return false }
     }
@@ -279,7 +280,7 @@ private struct ConversationComposer: View {
                 .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
                 .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
                 .accessibilityIdentifier("sample-chat-add-attachment")
-                .disabled(frozen || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision))
+                .disabled(frozen || !allowsDiscussion || store.hasPendingUploadCleanup(for: key, revision: revision))
                 .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
                     Button("Sample photo") { addExample("Photo") }
                     Button("Sample file") { addExample("Document") }
@@ -315,7 +316,7 @@ private struct ConversationComposer: View {
                 TextField("Write a message…", text: Binding(get: { draft.text.rawValue }, set: {
                     store.updateConversation(for: key, revision: revision, text: $0)
                 }), axis: .vertical)
-                    .lineLimit(1...5).disabled(frozen || thread?.terminal != nil)
+                    .lineLimit(1...5).disabled(frozen || !allowsDiscussion)
                     .padding(.vertical, 11)
                     .accessibilityIdentifier("sample-chat-composer")
             }
@@ -331,7 +332,7 @@ private struct ConversationComposer: View {
             .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
             .accessibilityLabel(store.isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
             .accessibilityIdentifier("sample-chat-send")
-            .disabled(store.isSendingDiscussion || thread?.terminal != nil || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || store.hasUnreadyUploadReference(for: key, revision: revision) || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
+            .disabled(store.isSendingDiscussion || !allowsDiscussion || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || store.hasUnreadyUploadReference(for: key, revision: revision) || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
         }
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {

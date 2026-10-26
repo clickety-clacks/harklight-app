@@ -277,8 +277,8 @@ final class ConversationDomainTests: XCTestCase {
             fact: .revision(revision, payload: revised)), context: context)
         try store.applyConversation(ConversationEvent(sequence: 3, binding: second,
             fact: .delivered(turn: ExactText("terminal-4"))), context: context)
-        XCTAssertThrowsError(try store.saveConversationDraft(ConversationDraft(binding: second,
-            text: ExactText("Cannot submit after closure")), context: context))
+        try store.saveConversationDraft(ConversationDraft(binding: second,
+            text: ExactText("Chat remains open after the answer")), context: context)
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
         let snapshot = try restored.conversationSnapshot(context: context)
         let thread = try XCTUnwrap(snapshot.threads[first.request])
@@ -289,8 +289,79 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertEqual(thread.revisions[2], revised)
         XCTAssertEqual(thread.turns.map(\.id), [earlier.id, revision.id])
         XCTAssertEqual(thread.terminal, .answered)
+        XCTAssertTrue(thread.allowsDiscussion)
         XCTAssertEqual(thread.facts[ExactText("terminal-4")]?.delivered, true)
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Keep draft"))
+        XCTAssertEqual(thread.drafts[2]?.text, ExactText("Chat remains open after the answer"))
+    }
+
+    func testAnswerAndNoCommentKeepChatDraftSendAndAgentRepliesAvailable() throws {
+        for terminal in [TerminalState.answered, .noComment] {
+            let relayContext = context()
+            let store = try AttentionDomainStore(context: relayContext,
+                persistence: MemoryAttentionStatePersistence())
+            let request = binding(relayContext)
+            try store.applyConversation(ConversationEvent(sequence: 1, binding: request,
+                fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: relayContext)
+            try store.saveConversationDraft(ConversationDraft(binding: request,
+                text: ExactText("Before answering")), context: relayContext)
+            try store.applyConversation(ConversationEvent(sequence: 2, binding: request,
+                fact: .terminal(turn: ExactText("answer"), author: .person, state: terminal)), context: relayContext)
+
+            var thread = try XCTUnwrap(store.conversationSnapshot(context: relayContext).threads[request.request])
+            XCTAssertTrue(thread.allowsDiscussion, "\(terminal) ends the answer flow, not Chat")
+            XCTAssertEqual(thread.drafts[1]?.text, ExactText("Before answering"))
+            XCTAssertEqual(thread.drafts[1]?.disposition, .saved)
+            let edited = try store.updateConversationDraftText(ExactText("After answering"),
+                for: request, context: relayContext)
+            XCTAssertEqual(edited.text, ExactText("After answering"))
+            let operation = try store.prepareDiscussion(request, context: relayContext)
+            thread = try XCTUnwrap(store.conversationSnapshot(context: relayContext).threads[request.request])
+            XCTAssertEqual(thread.drafts[1]?.disposition, .submitting(operation))
+            let reply = ConversationTurn(id: ExactText("agent-reply"), binding: request,
+                author: .agent, sessionHandle: ExactText("session"),
+                text: ExactText("Chat continues"), kind: .reply)
+            try store.applyConversation(ConversationEvent(sequence: 3, binding: request,
+                fact: .turn(reply)), context: relayContext)
+            XCTAssertEqual(try store.conversationSnapshot(context: relayContext)
+                .threads[request.request]?.latestAgentReply?.text, ExactText("Chat continues"))
+
+            let fixtureContext = context(.fixture)
+            let fixture = try AttentionDomainStore(context: fixtureContext,
+                persistence: MemoryAttentionStatePersistence())
+            let fixtureRequest = binding(fixtureContext)
+            try fixture.applyConversation(ConversationEvent(sequence: 1, binding: fixtureRequest,
+                fact: .request(sessionHandle: ExactText("session"), payload: .null)),
+                context: fixtureContext)
+            try fixture.applyConversation(ConversationEvent(sequence: 2, binding: fixtureRequest,
+                fact: .terminal(turn: ExactText("answer"), author: .person, state: terminal)),
+                context: fixtureContext)
+            try fixture.saveConversationDraft(ConversationDraft(binding: fixtureRequest,
+                text: ExactText("Local follow-up")), context: fixtureContext)
+            try fixture.appendFixtureDiscussion(fixtureRequest, context: fixtureContext)
+            XCTAssertEqual(try fixture.conversationSnapshot(context: fixtureContext)
+                .threads[fixtureRequest.request]?.turns.last?.text, ExactText("Local follow-up"))
+        }
+    }
+
+    func testSenderClosureStillStopsChatDraftAndSend() throws {
+        let context = context(.fixture)
+        let store = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let request = binding(context)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: request,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        try store.saveConversationDraft(ConversationDraft(binding: request,
+            text: ExactText("Saved before withdrawal")), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: request,
+            fact: .terminal(turn: ExactText("withdrawal"), author: .origin, state: .cleared)), context: context)
+        let thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request.request])
+        XCTAssertFalse(thread.allowsDiscussion)
+        XCTAssertEqual(thread.drafts[1]?.disposition,
+            .rejected(ExactText("Not delivered: request closed")))
+        XCTAssertThrowsError(try store.updateConversationDraftText(ExactText("After withdrawal"),
+            for: request, context: context))
+        XCTAssertThrowsError(try store.appendFixtureDiscussion(request, context: context))
     }
 
     func testOldOrdinaryReplayCanGainMetadataWithoutChangingItsCursorOrDraft() throws {
