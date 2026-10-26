@@ -148,15 +148,36 @@ final class NativeGuidedJoinStore {
 
     func prepare(_ invitation: NativeJoinInvitation, deviceLabel: String) throws -> NativeJoinAttempt {
         try invitation.validate()
+        var unconfirmedStandaloneDeparture: NativeAccountDeparture?
         if let departure = try departure() {
-            guard departure.removed else { throw NativeJoinError.savedRequest }
-            try finishConfirmedDeparture(departure)
+            if departure.removed {
+                try finishConfirmedDeparture(departure)
+            } else if departure.replacement == nil {
+                // A standalone Disconnect may remain unconfirmed while the
+                // person joins another account. Keep the old record in the
+                // departure slot so its identity and local data stay scoped
+                // to that account while the new attempt gets a fresh key.
+                unconfirmedStandaloneDeparture = departure
+            } else {
+                throw NativeJoinError.savedRequest
+            }
         }
-        guard try enrollment.load()?.isApproved != true else { throw NativeJoinError.existingAccount }
+        let currentEnrollment = try enrollment.load()
+        let keepsDisconnectedEnrollment: Bool
+        if let unconfirmedStandaloneDeparture, let currentEnrollment {
+            keepsDisconnectedEnrollment = sameInstallation(currentEnrollment, unconfirmedStandaloneDeparture.record)
+        } else {
+            keepsDisconnectedEnrollment = false
+        }
+        guard currentEnrollment?.isApproved != true || keepsDisconnectedEnrollment else {
+            throw NativeJoinError.existingAccount
+        }
         let prior = try loadAttempt()
         if let prior {
             if prior.invitation == invitation { return prior }
-            guard prior.isTerminal else {
+            let isApprovedAttemptForDisconnectedAccount =
+                unconfirmedStandaloneDeparture?.record.deviceID == prior.deviceID && prior.phase == .approved
+            guard prior.isTerminal || isApprovedAttemptForDisconnectedAccount else {
                 throw NativeJoinError.savedRequest
             }
         }
@@ -420,9 +441,18 @@ final class NativeGuidedJoinStore {
             let body = try JSONSerialization.data(withJSONObject: ["expected_device_id": record.deviceID])
             let reply = try await transport.remove(url, body: body, rootDER: record.trustedRootDER,
                                                   identity: material.keychainIdentity)
-            guard let latest = try enrollment.load(), sameInstallation(latest, record),
-                  let operation = try self.departure(), sameInstallation(operation.record, record),
+            guard let operation = try self.departure(), sameInstallation(operation.record, record),
                   operation.replacement == replacement, !operation.removed else { throw NativeJoinError.superseded }
+            if let latest = try enrollment.load(), !sameInstallation(latest, record) {
+                // The previous account's removal can finish after a new
+                // invitation has installed a different approved identity.
+                // Validate that identity, but do not let it replace the old
+                // departure record used to authenticate this removal.
+                guard latest.isApproved, latest.deviceID != record.deviceID else {
+                    throw NativeJoinError.superseded
+                }
+                _ = try enrollment.material(from: latest)
+            }
             try acceptStatus(reply.statusCode, data: reply.data)
             let receipt = try JSONDecoder().decode(RemovalReply.self, from: reply.data)
             guard receipt.state == "removed", NativeAuthorityBinding.samePerson(receipt.personID, record.personID),
@@ -450,20 +480,34 @@ final class NativeGuidedJoinStore {
                     guard attempt.invitation == replacement else { throw NativeJoinError.superseded }
                 }
                 if let current = try enrollment.load() {
-                    guard current.isApproved, current.deviceID == attempt.deviceID,
-                          NativeAuthorityBinding.samePerson(current.personID, attempt.invitation.personID),
-                          current.host == attempt.invitation.enrollmentURL.host?.lowercased(),
-                          current.enrollmentPort == (attempt.invitation.enrollmentURL.port ?? 443),
-                          current.relayPort == (attempt.invitation.relayURL.port ?? 443),
-                          current.trustedRootDER == attempt.invitation.trustedRootDER else {
-                        throw NativeJoinError.superseded
+                    if current.deviceID == departure.record.deviceID {
+                        // The old removal completed while the new invitation
+                        // was pending. Clear only the old enrollment slot and
+                        // leave the successor request and identity intact.
+                        try enrollment.clearAfterConfirmedRemoval(of: departure.record)
+                    } else {
+                        guard current.isApproved, current.deviceID == attempt.deviceID,
+                              NativeAuthorityBinding.samePerson(current.personID, attempt.invitation.personID),
+                              current.host == attempt.invitation.enrollmentURL.host?.lowercased(),
+                              current.enrollmentPort == (attempt.invitation.enrollmentURL.port ?? 443),
+                              current.relayPort == (attempt.invitation.relayURL.port ?? 443),
+                              current.trustedRootDER == attempt.invitation.trustedRootDER else {
+                            throw NativeJoinError.superseded
+                        }
+                        _ = try enrollment.material(from: current)
                     }
-                    _ = try enrollment.material(from: current)
                 }
                 if departure.replacement != nil { try deleteData(account: "guided-departure") }
                 return
             }
             try deleteData(account: "guided-request")
+        }
+        if let current = try enrollment.load(), current.isApproved,
+           current.deviceID != departure.record.deviceID {
+            // A new account may already be active while the old server is
+            // still confirming its removal. Keep the active enrollment.
+            _ = try enrollment.material(from: current)
+            return
         }
         try enrollment.clearAfterConfirmedRemoval(of: departure.record)
         // Keep the committed receipt until the next deliberate Join. A
@@ -572,8 +616,13 @@ final class NativeGuidedJoinStore {
             record.accountDisplayName = attempt.invitation.personName
             record.foregroundRelayConfirmed = false
             record.notificationExplanationSeen = false
+            let departure = try self.departure()
+            let replaceableUnconfirmedAccount = departure.flatMap { value in
+                value.replacement == nil && !value.removed ? value.record : nil
+            }
             try enrollment.retainApprovedGuided(record, expectedPersonID: attempt.invitation.personID,
-                                                 expectedDeviceID: attempt.deviceID)
+                                                 expectedDeviceID: attempt.deviceID,
+                                                 replacingUnconfirmedAccount: replaceableUnconfirmedAccount)
             next.phase = .approved
         default: throw NativeJoinError.invalidResponse
         }

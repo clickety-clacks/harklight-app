@@ -63,6 +63,7 @@ final class NativeAppLaunch {
     private(set) var archiveCatalogWarning: String?
     private(set) var isShowingDisconnectedArchive = false
     private(set) var disconnectMessage: String?
+    private(set) var priorDisconnectRetryMessage: String?
     private(set) var isDisconnectBusy = false
     private(set) var endpointMigrationMessage: String?
     private(set) var isEndpointMigrationBusy = false
@@ -118,6 +119,7 @@ final class NativeAppLaunch {
         archivedAccountDepartures = initialArchivedDepartures
         let savedDeparture = fixture ? nil : (try? joinStore.departure())
         let standaloneDeparture = savedDeparture.flatMap { $0.replacement == nil ? $0 : nil }
+        disconnectedAccount = standaloneDeparture
         guidedJoin = NativeGuidedJoinCoordinator(store: joinStore,
                                                  deviceName: UIDevice.current.name,
                                                  isShowing: !fixture && standaloneDeparture == nil,
@@ -128,7 +130,6 @@ final class NativeAppLaunch {
             state = .fixture(PrototypeStore.loadFromBundle())
         } else if let standaloneDeparture {
             state = .disconnected(nil)
-            disconnectedAccount = standaloneDeparture
         } else {
             state = .enrollmentRequired
         }
@@ -211,9 +212,9 @@ final class NativeAppLaunch {
             disconnectedAccount = departure
             let attempt = try? guidedJoinStore.loadAttempt()
             let active = try? enrollment.load()
-            let hasNewRegistration = departure.removed &&
-                ((attempt.map { $0.deviceID != departure.record.deviceID } ?? false) ||
-                 (active.map { $0.isApproved && $0.deviceID != departure.record.deviceID } ?? false))
+            let hasNewRegistration =
+                (attempt.map { $0.deviceID != departure.record.deviceID } ?? false) ||
+                (active.map { $0.isApproved && $0.deviceID != departure.record.deviceID } ?? false)
             if hasNewRegistration {
                 if let archive = try? makeDisconnectedPresentation(for: departure) {
                     archive.enterReadOnlyMode()
@@ -221,7 +222,9 @@ final class NativeAppLaunch {
                     state = .disconnected(archive)
                 }
                 disconnectMessage = nil
-                activeEnrollmentRecord = active ?? nil
+                activeEnrollmentRecord = active.flatMap {
+                    $0.isApproved && $0.deviceID != departure.record.deviceID ? $0 : nil
+                }
                 guidedJoin.restoreAfterStandaloneRemoval()
                 await guidedJoin.restore()
                 return
@@ -338,25 +341,63 @@ final class NativeAppLaunch {
     }
 
     func retryDisconnectRemoval() async {
-        guard !isDisconnectBusy, case .disconnected = state,
-              let departure = disconnectedAccount,
-              departure.replacement == nil, !departure.removed else { return }
+        guard !isDisconnectBusy, canRetryUnconfirmedDisconnectRemoval,
+              let departure = disconnectedAccount else { return }
+        let isConnectedToAnotherAccount: Bool
+        if case .live = state {
+            isConnectedToAnotherAccount = activeEnrollmentRecord?.deviceID != departure.record.deviceID
+        } else {
+            isConnectedToAnotherAccount = false
+        }
         isDisconnectBusy = true
         defer { isDisconnectBusy = false }
         disconnectMessage = nil
-        await NativeRelayLifecycle.shared.deactivate()
+        priorDisconnectRetryMessage = nil
+        if !isConnectedToAnotherAccount {
+            await NativeRelayLifecycle.shared.deactivate()
+        }
         do {
             try await guidedJoin.removeStandaloneAccount()
             refreshArchivedAccounts()
             disconnectedAccount = try guidedJoinStore.departure() ?? departure
-            disconnectMessage = disconnectedStatusMessage(for: disconnectedAccount ?? departure,
-                                                         presentation: disconnectedStore)
+            if isConnectedToAnotherAccount {
+                priorDisconnectRetryMessage = (disconnectedAccount ?? departure).removed
+                    ? "The previous server confirmed removal. This account remains connected."
+                    : "The previous server did not confirm removal. This account remains connected; you can retry."
+            } else {
+                disconnectMessage = disconnectedStatusMessage(for: disconnectedAccount ?? departure,
+                                                             presentation: disconnectedStore)
+            }
         } catch {
             refreshArchivedAccounts()
             disconnectedAccount = (try? guidedJoinStore.departure()) ?? departure
-            disconnectMessage = disconnectedStatusMessage(for: disconnectedAccount ?? departure,
-                                                         presentation: disconnectedStore)
+            if isConnectedToAnotherAccount {
+                priorDisconnectRetryMessage = "The previous server did not confirm removal. This account remains connected; you can retry."
+            } else {
+                disconnectMessage = disconnectedStatusMessage(for: disconnectedAccount ?? departure,
+                                                             presentation: disconnectedStore)
+            }
         }
+    }
+
+    var canRetryUnconfirmedDisconnectRemoval: Bool {
+        guard let departure = disconnectedAccount,
+              departure.replacement == nil, !departure.removed else { return false }
+        if case .disconnected = state { return true }
+        if case .live = state {
+            return activeEnrollmentRecord.map {
+                $0.isApproved && $0.deviceID != departure.record.deviceID
+            } ?? false
+        }
+        return false
+    }
+
+    var unconfirmedDisconnectWarning: String? {
+        guard let departure = disconnectedAccount,
+              departure.replacement == nil, !departure.removed else { return nil }
+        let account = departure.record.savedAccountName ?? "the old account"
+        let server = departure.record.serverDisplayName ?? departure.record.host
+        return "The previous server, \(server), may still list this phone as registered for \(account). Saved messages, drafts and pending answers stay with that account and will not be shown or sent through this account."
     }
 
     func beginReconnect() {
@@ -380,11 +421,9 @@ final class NativeAppLaunch {
             await receiveMessageDeepLink(deepLink)
             return
         }
-        if case .disconnected = state, let departure = disconnectedAccount {
-            guard departure.removed else {
-                disconnectMessage = "Removal is still unconfirmed. Retry it with the original server before connecting again."
-                return
-            }
+        if case .disconnected = state,
+           let departure = disconnectedAccount,
+           departure.replacement == nil {
             guidedJoin.beginReconnect()
         }
         await guidedJoin.receive(url)
@@ -538,7 +577,7 @@ final class NativeAppLaunch {
         let pending = pendingAnswers > 0
             ? " Pending answers are no longer retrying; some may already have reached the server."
             : ""
-        return "This phone is disconnected locally from \(account) on \(server), but server removal is not confirmed. Its original identity and saved messages, drafts and receipts are kept for retry.\(pending)"
+        return "This phone is disconnected locally from \(account) on \(server). The previous server may still list this phone as registered. Its original identity and saved messages, drafts and receipts are kept for retry.\(pending)"
     }
 
     func beginEnrollment(host: String,

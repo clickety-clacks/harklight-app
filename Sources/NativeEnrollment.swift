@@ -344,18 +344,29 @@ struct NativeEnrollmentStore {
 
     func retainApprovedGuided(_ record: NativeEnrollmentRecord,
                               expectedPersonID: String,
-                              expectedDeviceID: String) throws {
+                              expectedDeviceID: String,
+                              replacingUnconfirmedAccount: NativeEnrollmentRecord? = nil) throws {
         guard NativeAuthorityBinding.samePerson(record.personID, expectedPersonID),
               record.deviceID == expectedDeviceID, record.isApproved else {
             throw NativeEnrollmentError.wrongApprovedDevice
         }
         _ = try material(from: record)
         if let current = try load(), current.isApproved {
-            guard current.deviceID == record.deviceID, NativeAuthorityBinding.samePerson(current.personID, record.personID),
-                  current.host == record.host, current.enrollmentPort == record.enrollmentPort,
-                  current.relayPort == record.relayPort, current.trustedRootDER == record.trustedRootDER,
-                  current.profileAuthority == record.profileAuthority else {
+            let isSameEnrollment = current.deviceID == record.deviceID &&
+                NativeAuthorityBinding.samePerson(current.personID, record.personID) &&
+                current.host == record.host && current.enrollmentPort == record.enrollmentPort &&
+                current.relayPort == record.relayPort && current.trustedRootDER == record.trustedRootDER &&
+                current.profileAuthority == record.profileAuthority
+            guard isSameEnrollment || current == replacingUnconfirmedAccount else {
                 throw NativeJoinError.existingAccount
+            }
+            guard isSameEnrollment else {
+                // The prior enrollment remains durably attached to its
+                // unconfirmed standalone departure. A newly approved
+                // invitation receives its own identity and replaces only the
+                // active-enrollment pointer; the prior profile data is intact.
+                try save(record)
+                return
             }
             // A repeated approved status is not a new installation. Keep the
             // existing durable APNs operation/revision and enrollment record.
