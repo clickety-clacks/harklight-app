@@ -554,7 +554,6 @@ struct LiveRequestDetail: View {
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
     @State private var answerSubmittedHere = false
-    @State private var seenSubmissionRevision: UInt64?
     @State private var activeReplyEditor: ReplyEditorTarget?
     @FocusState private var focusedReplyActionID: String?
 
@@ -621,20 +620,15 @@ struct LiveRequestDetail: View {
         return !canEdit
     }
 
-    private var localSeenAction: ((ExactText) -> Bool)? {
+    private var localSeenAction: ((ExactText) -> Void)? {
         if let localExample {
-            return { _ in
-                guard localExample.canFinishLocally else { return false }
-                localExample.finishLocally()
-                return true
-            }
+            return { _ in localExample.finishLocally() }
         }
         guard let fixtureStore else { return nil }
         return { action in
             guard fixtureStore.sendSelectedAnswer(for: request.key,
-                                                   explicitCompatibilityAction: action) else { return false }
+                                                   explicitCompatibilityAction: action) else { return }
             try? store.refreshFromDurableStore()
-            return true
         }
     }
 
@@ -660,10 +654,12 @@ struct LiveRequestDetail: View {
         if let localExample {
             guard localExample.canFinishLocally else { return }
             localExample.finishLocally()
-            seenSubmissionRevision = request.requestRevision
         } else if let availableSeenAction {
             submitSeenAction(availableSeenAction)
+        } else {
+            return
         }
+        returnToListIfSinglePane()
     }
 
     private var seenActionIsComplete: Bool {
@@ -727,7 +723,7 @@ struct LiveRequestDetail: View {
                                        answerNotDelivered: request.answerNotDelivered)
     }
 
-    private func returnToListAfterCompletedActionIfSinglePane() {
+    private func returnToListIfSinglePane() {
         guard isSinglePanePresentation else { return }
         context.dismissToList?()
     }
@@ -820,15 +816,12 @@ struct LiveRequestDetail: View {
     }
 
     private func submitSeenAction(_ action: ExactText) {
-        seenSubmissionRevision = nil
-        let submitted: Bool
         if let localSeenAction {
-            submitted = localSeenAction(action)
+            localSeenAction(action)
         } else {
-            submitted = store.submitFromUser(request.key, explicitCompatibilityAction: action,
-                                             requestRevision: request.requestRevision)
+            store.submitFromUser(request.key, explicitCompatibilityAction: action,
+                                 requestRevision: request.requestRevision)
         }
-        if submitted { seenSubmissionRevision = request.requestRevision }
     }
 
     var canAnswer: Bool {
@@ -1075,14 +1068,9 @@ struct LiveRequestDetail: View {
                 }
             }
         }
-        .onChange(of: seenActionIsComplete) { _, confirmed in
-            guard confirmed, seenSubmissionRevision == request.requestRevision else { return }
-            seenSubmissionRevision = nil
-            returnToListAfterCompletedActionIfSinglePane()
-        }
         .onChange(of: submissionIsConfirmedAccepted) { _, confirmed in
             guard confirmed, answerSubmittedHere else { return }
-            returnToListAfterCompletedActionIfSinglePane()
+            returnToListIfSinglePane()
         }
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)
