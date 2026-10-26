@@ -1051,13 +1051,11 @@ struct LiveRequestDetail: View {
                                     : fixtureStore.sendSelectedAnswer(for: request.key)
                                 guard sent else { return }
                                 closeReplyEditor()
-                                answerSubmittedHere = true
                                 try? store.refreshFromDurableStore()
                             } else {
                                 guard store.submitFromUser(request.key,
                                                            requestRevision: request.requestRevision) else { return }
                                 closeReplyEditor()
-                                answerSubmittedHere = true
                             }
                             returnToListIfSinglePane()
                         }
