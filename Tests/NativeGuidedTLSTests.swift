@@ -695,11 +695,16 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "This message hasn't arrived yet. Harklight will keep checking while it's open.")
         XCTAssertNotEqual(live.selectedRequestKey, otherKey,
                           "A similar title cannot stand in for the linked sender/message identity.")
+        XCTAssertFalse(live.submitFromUser(otherKey))
+        let otherRequestWarning = try XCTUnwrap(live.actionError)
+        XCTAssertEqual(otherRequestWarning, "Complete the response before sending your answer.")
 
         refreshPlan.step = 1
         await app.refreshLive()
         XCTAssertEqual(app.notificationNavigationMessage,
                        "This message hasn't arrived yet. Harklight will keep checking while it's open.")
+        XCTAssertEqual(live.actionError, otherRequestWarning,
+                       "A pending message link must not clear another request's answer warning on refresh.")
 
         refreshPlan.pageReturnsTarget = true
         await app.refreshLive()
