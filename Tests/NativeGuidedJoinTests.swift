@@ -1143,6 +1143,11 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(flow.invitation, secondInvitation)
         XCTAssertEqual(Set(launch.unconfirmedAccountDepartures.map { $0.record.deviceID }),
                        Set([original.deviceID, firstRecord.deviceID]))
+        for departure in launch.unconfirmedAccountDepartures {
+            XCTAssertTrue(launch.canRetryUnconfirmedDisconnectRemoval(for: departure))
+            XCTAssertTrue(launch.unconfirmedDisconnectWarning(for: departure)?.contains(
+                "You can continue with another invitation and retry this removal later.") == true)
+        }
         await flow.join()
         let secondAttempt = try XCTUnwrap(reopened.loadAttempt())
         XCTAssertEqual(secondAttempt.invitation, secondInvitation)

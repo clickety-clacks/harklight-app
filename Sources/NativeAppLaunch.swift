@@ -417,7 +417,7 @@ final class NativeAppLaunch {
         guard !departure.removed else { return nil }
         let account = departure.record.savedAccountName ?? "this account"
         let server = departure.record.serverDisplayName ?? departure.record.host
-        return "The server, \(server), may still list this phone as registered for \(account). Saved messages, drafts and pending answers stay with this account and will not be shown or sent through another account."
+        return "The server, \(server), may still list this phone as registered for \(account). You can continue with another invitation and retry this removal later. Saved messages, drafts and pending answers stay with this account and will not be shown or sent through another account."
     }
 
     func disconnectRemovalMessage(for departure: NativeAccountDeparture) -> String? {
