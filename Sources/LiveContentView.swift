@@ -41,10 +41,9 @@ struct SeenActionPresentation: Equatable {
     }
 }
 
-/// True while a reply editor below has keyboard focus. Auto-presented surfaces
-/// (the warning popover, the connection alert) defer while this is set, because
-/// presenting over the editor resigns first responder mid-typing. They present
-/// once focus clears; the underlying one-shot state stays pending until then.
+/// True while a reply editor below has keyboard focus. The foreground connection
+/// alert defers while this is set, because presenting over the editor resigns
+/// first responder mid-typing.
 struct ReplyEditorFocusKey: PreferenceKey {
     static let defaultValue = false
 

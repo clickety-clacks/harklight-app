@@ -277,8 +277,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var selection: InboxSelection?
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var isWarningPresented = false
-    @State private var automaticallyPresentedWarnings = Set<String>()
-    @State private var replyEditorFocused = false
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
@@ -313,20 +311,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         )
     }
 
-    private func updateWarningPresentation(with newWarnings: [String]) {
-        guard !newWarnings.isEmpty else {
-            isWarningPresented = false
-            return
-        }
-        // Auto-presenting over a focused reply editor resigns the keyboard
-        // mid-typing. Defer, leaving fresh warnings unmarked so they present
-        // when focus clears; the header warning button stays available.
-        guard !replyEditorFocused else { return }
-        let freshWarnings = Set(newWarnings).subtracting(automaticallyPresentedWarnings)
-        automaticallyPresentedWarnings.formUnion(newWarnings)
-        if !freshWarnings.isEmpty && !isWarningPresented {
-            isWarningPresented = true
-        }
+    private func dismissWarningWhenCleared(_ warnings: [String]) {
+        if warnings.isEmpty { isWarningPresented = false }
     }
 
     private var orderedIDs: [InboxSelection] { rows.map(\.id) }
@@ -609,11 +595,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 workspaceTab = tab == .replied ? .replied : .inbox
             }
             .onChange(of: visibleWarnings, initial: true) { _, newWarnings in
-                updateWarningPresentation(with: newWarnings)
-            }
-            .onPreferenceChange(ReplyEditorFocusKey.self) { focused in
-                replyEditorFocused = focused
-                if !focused { updateWarningPresentation(with: visibleWarnings) }
+                dismissWarningWhenCleared(newWarnings)
             }
             tabs
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in

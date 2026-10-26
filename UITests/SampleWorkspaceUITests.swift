@@ -306,7 +306,7 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "Replied rows have no swipe action.")
     }
 
-    func testRecoveryWarningUsesTitleRowPopoverAndPresentsOnce() {
+    func testRecoveryWarningStaysAvailableWithoutCoveringToolbarActions() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "--harklight-test-recovery-status"]
@@ -320,17 +320,13 @@ final class SampleWorkspaceUITests: XCTestCase {
         let message = app.staticTexts["inbox-warning-message"]
         let row = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'")).firstMatch
-        XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(message.label.contains("Could not verify notification"), message.label)
-        XCTAssertTrue(inbox.isSelected, "Automatic warning presentation does not change the selected tab.")
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "Existing Inbox content remains visible.")
-        capture("inbox-recovery-warning-popover", app)
-
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.10)).tap()
-        XCTAssertFalse(message.waitForExistence(timeout: 1),
-                       "Tapping outside the stock popover dismisses it.")
-        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(message.waitForExistence(timeout: 1),
+                       "Warnings remain available from their toolbar button without opening a popover over other actions.")
+        XCTAssertTrue(inbox.isSelected, "The warning leaves the selected tab unchanged.")
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Existing Inbox content remains visible.")
+        capture("inbox-recovery-warning-toolbar", app)
         XCTAssertTrue(brand.exists, app.debugDescription)
         XCTAssertGreaterThanOrEqual(warningButton.frame.minX, brand.frame.maxX - 2,
                                     "The warning icon remains after the Harklight title.")
@@ -338,15 +334,27 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "Settings and the warning button share the native toolbar row.")
         XCTAssertLessThan(settings.frame.midX, warningButton.frame.midX,
                           "Settings keeps its existing wide-toolbar position before the warning icon.")
-        capture("inbox-recovery-warning-dismissed", app)
+
+        settings.tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5), app.debugDescription)
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForNonExistence(timeout: 5), app.debugDescription)
+
+        warningButton.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(message.label.contains("Could not verify notification"), message.label)
+        capture("inbox-recovery-warning-opened-on-demand", app)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.10)).tap()
+        XCTAssertFalse(message.waitForExistence(timeout: 1), "Tapping outside the stock popover dismisses it.")
+
         selectMessageTab("Replied", in: app)
         XCTAssertTrue(replied.isSelected, app.debugDescription)
         XCTAssertFalse(message.waitForExistence(timeout: 1),
-                       "The same warning does not reopen when switching lists.")
+                       "The dismissed warning does not reopen when switching lists.")
         selectMessageTab("Inbox", in: app)
         XCTAssertTrue(inbox.isSelected, app.debugDescription)
         XCTAssertFalse(message.waitForExistence(timeout: 1),
-                       "Returning to Inbox does not auto-present the same warning again.")
+                       "Returning to Inbox does not auto-present a warning popover.")
         warningButton.tap()
         XCTAssertTrue(message.waitForExistence(timeout: 5),
                       "The warning icon still opens a persistent warning manually.")

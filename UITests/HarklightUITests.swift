@@ -159,7 +159,10 @@ final class HarklightUITests: XCTestCase {
 
         let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
         let warning = app.staticTexts["inbox-warning-message"]
-        XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
+        let warningButton = app.buttons["inbox-warning-button"]
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(warning.waitForExistence(timeout: 1),
+                       "The warning stays available from its toolbar button without covering other actions.")
         attachScreenshot("toolbar-actions-with-connection-warning", from: app)
         attachHierarchy("toolbar-actions-with-connection-warning-hierarchy", from: app)
 
@@ -168,14 +171,9 @@ final class HarklightUITests: XCTestCase {
         XCTAssertGreaterThan(settings.frame.width, 0, "Settings has a visible toolbar frame.")
         tapVisibleScreenCenter(of: settings, in: app)
         let settingsTitle = app.navigationBars["Settings"]
-        let settingsOpenedOnFirstTap = settingsTitle.waitForExistence(timeout: 2)
-        attachHierarchy("after-first-visible-settings-tap", from: app)
-        if !settingsOpenedOnFirstTap {
-            XCTAssertTrue(warning.waitForNonExistence(timeout: 2),
-                          "The visible Settings tap should not be consumed by the warning popover.")
-            tapVisibleScreenCenter(of: settings, in: app)
-            XCTAssertTrue(settingsTitle.waitForExistence(timeout: 5), app.debugDescription)
-        }
+        XCTAssertTrue(settingsTitle.waitForExistence(timeout: 5),
+                      "One visible Settings tap opens its real panel while a warning remains available.")
+        attachHierarchy("after-visible-settings-tap", from: app)
         attachScreenshot("settings-panel-from-visible-toolbar-tap", from: app)
         let done = app.buttons["Done"]
         XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
@@ -184,7 +182,8 @@ final class HarklightUITests: XCTestCase {
 
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("cleared", in: app)
-        XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(warning.waitForExistence(timeout: 1),
+                       "A new unresolved-answer warning does not cover the detail toolbar.")
         XCTAssertTrue(app.buttons["request-heading"].exists, app.debugDescription)
 
         let chat = app.buttons["Chat"]
@@ -193,20 +192,10 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("chat-toolbar-with-unresolved-answer-warning", from: app)
         attachHierarchy("chat-toolbar-with-unresolved-answer-warning-hierarchy", from: app)
         tapVisibleScreenCenter(of: chat, in: app)
-        let chatOpenedOnFirstTap = waitForChatPanel(in: app, timeout: 2)
-        attachHierarchy("after-first-visible-chat-tap", from: app)
-        if !chatOpenedOnFirstTap {
-            XCTAssertTrue(warning.waitForNonExistence(timeout: 2),
-                          "The visible Chat tap should not be consumed by the warning popover.")
-            tapVisibleScreenCenter(of: chat, in: app)
-            XCTAssertTrue(waitForChatPanel(in: app, timeout: 5), app.debugDescription)
-        }
+        XCTAssertTrue(waitForChatPanel(in: app, timeout: 5),
+                      "One visible Chat tap opens its existing sheet while a warning remains available.")
+        attachHierarchy("after-visible-chat-tap", from: app)
         attachScreenshot("chat-panel-from-visible-toolbar-tap", from: app)
-
-        XCTAssertTrue(settingsOpenedOnFirstTap,
-                      "The first visible Settings tap should open its real panel.")
-        XCTAssertTrue(chatOpenedOnFirstTap,
-                      "The first visible Chat tap should open its real panel.")
     }
 
     private func tapVisibleScreenCenter(of element: XCUIElement, in app: XCUIApplication,
@@ -336,22 +325,27 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("Server-answered response in Replied", from: app)
     }
 
-    func testUnresolvedSendRaisesPlainLanguageWarningPopup() throws {
+    func testUnresolvedSendKeepsPlainLanguageWarningAvailableFromInbox() throws {
         let app = launchFreshApp()
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("cleared", in: app)
 
-        // A fresh warning auto-presents the warning popover, including over
-        // the request detail, so its message is readable without navigating
-        // back or tapping the warning button (which the open popover covers).
         let message = app.staticTexts["inbox-warning-message"]
-        XCTAssertTrue(message.waitForExistence(timeout: 10),
-                      "A send left without a confirmed result raises the inbox warning.")
+        XCTAssertFalse(message.waitForExistence(timeout: 1),
+                       "An unresolved send does not open a popover over the detail toolbar.")
+        let back = workspaceBackButton(in: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        let warningButton = app.buttons["inbox-warning-button"]
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        warningButton.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 5),
+                      "A send left without a confirmed result remains available in the Inbox warning.")
         XCTAssertEqual(message.label,
                        "A request closed without a confirmed result for your answer. Your answer stays saved on this device.",
-                       "The popup explains the unresolved send in plain language.")
-        attachScreenshot("Unresolved send warning popup", from: app)
+                       "The warning explains the unresolved send in plain language.")
+        attachScreenshot("Unresolved send warning opened from Inbox", from: app)
     }
 
     func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {
