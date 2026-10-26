@@ -12,16 +12,16 @@ The Xcode project is generated from `project.yml` with XcodeGen. Run `Scripts/ve
 
 ## UI preview screenshot pages
 
-Run `Scripts/capture-preview-page.py` on a Mac with Xcode 27.1 or later and a booted iPhone Duo simulator. Set `HARKLIGHT_SIMULATOR_ID` to that simulator's UUID; the command refuses to choose a default device. It builds through the unchanged `Scripts/verify.sh build` action, installs the app, launches its local sample inbox, then captures each changed screen from the simulator display. For each screen, use Device Hub to set the requested open, partly folded, or closed outer-display pose and each interface orientation supported by the built iPhone app. The command captures both system appearances at each pose and orientation, then writes one static page with a single switch that changes all screenshots together.
+`Scripts/capture-preview-page.py` runs a targeted simulator UI capture through the unchanged `Scripts/verify.sh test` wrapper, once in light appearance and once in dark appearance. The capture scenario opens the sample Inbox, searches for `Archive`, selects the matching request, and captures the Inbox and selected detail. It uses the portrait orientation and does not change or infer the simulator's fold state. The page includes one switch for both appearances and records the source revision, capture timestamps, screenshot hashes and change-to-page time.
 
-Pass the timestamp recorded when the change was pushed so the page can report change-to-page time. Keep generated pages outside the source repository. The page and its PNG files form one folder and can be served privately for review; use only a temporary server bound to a private network address, and stop it after review.
+Set `HARKLIGHT_SIMULATOR_ID` to a booted iPhone Duo simulator. The generated page folder must be outside the source checkout.
 
 ```sh
 HARKLIGHT_SIMULATOR_ID=<booted-iPhone-Duo-UUID> \
   Scripts/capture-preview-page.py \
   --page-dir "$HOME/Library/HarklightPreviews/palette-iteration" \
   --page-title "Palette iteration" \
-  --pushed-at "2026-10-23T15:12:00Z" \
-  --screen inbox=Inbox \
-  --screen message-detail="Message detail"
+  --pushed-at "2026-10-26T15:12:00Z"
 ```
+
+This capture path currently produces portrait screenshots only. It does not capture landscape or fold states.

@@ -880,6 +880,22 @@ final class SampleWorkspaceUITests: XCTestCase {
         }
     }
 
+    func testPreviewPageCapturesInboxAndDetail() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Archive", in: app)
+        let row = app.descendants(matching: .any)["sample-approval-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertLessThan(app.frame.width, app.frame.height, "The preview capture is portrait.")
+        capture("preview-portrait-inbox", app)
+        row.tap()
+        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5), app.debugDescription)
+        capture("preview-portrait-detail", app)
+    }
+
     func testNativeInboxHeaderMinimizesAndRestoresOnIPad() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("The native sidebar-column capture matrix is specific to iPad.")
