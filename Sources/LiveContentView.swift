@@ -72,6 +72,12 @@ private struct ReplyEditorTarget: Hashable {
     var editorCardIdentifier: String { "\(fieldIdentifier)-card" }
 }
 
+private enum ReplyInputSurfaceStyle {
+    static func fill(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color.black.opacity(0.10) : Color.white.opacity(0.10)
+    }
+}
+
 private struct ReplyChoiceCard: View {
     let title: String
     let detail: String
@@ -85,12 +91,20 @@ private struct ReplyChoiceCard: View {
     let textColor: Color
     let selectedColor: Color
     let replySurface: Color
+    let inputSurface: Color
     let target: ReplyEditorTarget
     let isReadOnly: Bool
     let onOpen: () -> Void
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 16)
+        let inputShape = UnevenRoundedRectangle(
+            topLeadingRadius: 0,
+            bottomLeadingRadius: 16,
+            bottomTrailingRadius: 16,
+            topTrailingRadius: 0,
+            style: .continuous
+        )
         let showsEditor = !isReadOnly && (isEditing || selected)
         let card = VStack(alignment: .leading, spacing: 0) {
             MessageChoiceLabel(title: title, detail: detail, selected: selected,
@@ -103,7 +117,10 @@ private struct ReplyChoiceCard: View {
                     .tint(Color(uiColor: .label))
                     .scrollContentBackground(.hidden)
                     .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
-                    .background(Color(uiColor: .systemBackground))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(inputSurface, in: inputShape)
+                    .clipShape(inputShape)
                     .focused($focusedActionID, equals: target.actionIdentifier)
                     .accessibilityLabel(title)
                     .accessibilityIdentifier(target.fieldIdentifier)
@@ -1401,6 +1418,7 @@ private struct LiveProjectedInputView: View {
                         textColor: detailColors.textColor,
                         selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
                         replySurface: replyEditorSurface,
+                        inputSurface: ReplyInputSurfaceStyle.fill(for: colorScheme),
                         target: target, isReadOnly: readOnly,
                         onOpen: { activate(action) })
     }
@@ -1654,6 +1672,7 @@ private struct LiveCompatibilityActions: View {
                         textColor: detailColors.textColor,
                         selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
                         replySurface: HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor,
+                        inputSurface: ReplyInputSurfaceStyle.fill(for: colorScheme),
                         target: target, isReadOnly: readOnly,
                         onOpen: { activate(action) })
     }
