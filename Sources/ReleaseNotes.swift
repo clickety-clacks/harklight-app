@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 66,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "chat-after-answer",
+                    symbol: "bubble.left.and.bubble.right",
+                    title: LocalizedStringResource(
+                        "Chat keeps working after you answer",
+                        comment: "Release-note title for continuing a request's conversation after its answer."),
+                    detail: LocalizedStringResource(
+                        "Send follow-up messages and attachments after replying or choosing No comment.",
+                        comment: "Release-note detail for Chat remaining available after an answer."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 65,
             marketingVersion: "0.1.0",
             highlights: [

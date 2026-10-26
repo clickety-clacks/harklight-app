@@ -249,6 +249,13 @@ public struct ConversationThread: Equatable, Codable, Sendable {
 
     public var isRetracted: Bool { retraction != nil || reportedRetractedAtMilliseconds != nil }
 
+    /// Answering the request ends its answer flow, not its separate Chat.
+    public var allowsDiscussion: Bool {
+        guard !isRetracted else { return false }
+        guard let terminal else { return true }
+        return terminal == .answered || terminal == .noComment
+    }
+
     public var revisionNumbers: [UInt64] { Set(revisions.keys).union(redactedRevisions ?? []).sorted() }
     /// Accepted sender facts remain available under their original request,
     /// revision and turn identities. Draft edits and replay do not create one.
@@ -589,12 +596,14 @@ struct ConversationState: Codable {
             thread.terminal = state
             thread.terminalTurn = turn
             thread.terminalAuthor = author
-            for revision in thread.drafts.keys {
-                guard var draft = thread.drafts[revision] else { continue }
-                // Ambiguous submissions stay reconcilable with their original operation identity.
-                if case .saved = draft.disposition {
-                    draft.disposition = .rejected(ExactText("Not delivered: request closed"))
-                    thread.drafts[revision] = draft
+            if !thread.allowsDiscussion {
+                for revision in thread.drafts.keys {
+                    guard var draft = thread.drafts[revision] else { continue }
+                    // Ambiguous submissions stay reconcilable with their original operation identity.
+                    if case .saved = draft.disposition {
+                        draft.disposition = .rejected(ExactText("Not delivered: request closed"))
+                        thread.drafts[revision] = draft
+                    }
                 }
             }
         case let .retraction(turn, sequence):
