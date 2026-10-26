@@ -553,12 +553,16 @@ struct LiveRequestDetail: View {
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
-    @State private var answerSubmittedHere = false
     @State private var activeReplyEditor: ReplyEditorTarget?
     @FocusState private var focusedReplyActionID: String?
 
     private var detailColors: HarklightDesignSource.MessageType {
         HarklightDesignSystem.palette(for: colorScheme).messageType(context.messageType)
+    }
+
+    private var isSinglePanePresentation: Bool {
+        // Use the split view's current adaptive width, not a device or fold-state guess.
+        horizontalSizeClass == .compact
     }
 
     private var replyEditorSurface: Color {
@@ -646,8 +650,15 @@ struct LiveRequestDetail: View {
     }
 
     private func finishSeenAction() {
-        if let localExample { localExample.finishLocally() }
-        else if let availableSeenAction { submitSeenAction(availableSeenAction) }
+        if let localExample {
+            guard localExample.canFinishLocally else { return }
+            localExample.finishLocally()
+        } else if let availableSeenAction {
+            submitSeenAction(availableSeenAction)
+        } else {
+            return
+        }
+        returnToListIfSinglePane()
     }
 
     private var seenActionIsComplete: Bool {
@@ -711,18 +722,9 @@ struct LiveRequestDetail: View {
         return ownOutcome == .accepted && lifecycleStatus != .noComment
     }
 
-    private var submissionIsConfirmedAccepted: Bool {
-        Self.submissionDismissesToList(ownOutcome: request.receiptFacts?.ownOutcome,
-                                       answerNotDelivered: request.answerNotDelivered)
-    }
-
-    /// A checkmark submission returns the compact detail to the list only once
-    /// the relay confirms acceptance. A pending or refused send must not
-    /// dismiss as if it were done.
-    static func submissionDismissesToList(ownOutcome: OwnOutcome?,
-                                          answerNotDelivered: Bool) -> Bool {
-        guard !answerNotDelivered else { return false }
-        return ownOutcome == .accepted
+    private func returnToListIfSinglePane() {
+        guard isSinglePanePresentation else { return }
+        context.dismissToList?()
     }
 
     private var answerStatusText: String? {
@@ -922,7 +924,10 @@ struct LiveRequestDetail: View {
                                              readOnly: controlsReadOnly,
                                              sendDisabled: sendControlsDisabled,
                                              localExample: localExample,
-                                             onSeen: submitSeenAction,
+                                             onSeen: { action in
+                                                 submitSeenAction(action)
+                                                 returnToListIfSinglePane()
+                                             },
                                              canOfferNoComment: canOfferNoComment,
                                              noCommentSelected: noCommentSelected,
                                              noCommentUnavailable: showsNoCommentUnavailable,
@@ -1046,14 +1051,13 @@ struct LiveRequestDetail: View {
                                     : fixtureStore.sendSelectedAnswer(for: request.key)
                                 guard sent else { return }
                                 closeReplyEditor()
-                                answerSubmittedHere = true
                                 try? store.refreshFromDurableStore()
                             } else {
                                 guard store.submitFromUser(request.key,
                                                            requestRevision: request.requestRevision) else { return }
                                 closeReplyEditor()
-                                answerSubmittedHere = true
                             }
+                            returnToListIfSinglePane()
                         }
                             .labelStyle(.iconOnly)
                             .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
@@ -1061,10 +1065,6 @@ struct LiveRequestDetail: View {
                     }
                 }
             }
-        }
-        .onChange(of: submissionIsConfirmedAccepted) { _, confirmed in
-            guard confirmed, answerSubmittedHere, horizontalSizeClass == .compact else { return }
-            context.dismissToList?()
         }
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)

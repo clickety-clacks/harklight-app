@@ -676,6 +676,7 @@ struct InboxList: View {
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
     let triggerNotification: (() -> Void)?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @State private var canRequestOlderPageOnDrag = false
     @State private var isUserScrolling = false
@@ -689,6 +690,10 @@ struct InboxList: View {
 
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
         InboxListProjection.filteredRows(rows, in: tab, search: search)
+    }
+
+    private var tabMembershipIDs: Set<InboxSelection> {
+        Set(rows.filter { $0.belongsToReplied == (tab.messageTab == .replied) }.map(\.id))
     }
 
     private var brandAndStatusHeader: some View {
@@ -907,6 +912,7 @@ struct InboxList: View {
             }
         }
         .listStyle(.plain)
+        .animation(reduceMotion ? nil : .default, value: tabMembershipIDs)
         .scrollContentBackground(.hidden)
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
