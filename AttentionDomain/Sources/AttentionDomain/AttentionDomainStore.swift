@@ -2835,7 +2835,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private func effectiveRequest(for key: RequestKey) -> StoredRequest? {
         guard let original = state.requests[key] else { return nil }
         guard let thread = state.conversation?.threads[key] else { return original }
-        let current = StoredRequest(key: key, originalPayload: thread.currentQuestionPayload)
+        let currentPayload: JSONValue
+        if let members = thread.currentQuestionPayload.objectMembers {
+            // Supersedes belongs to the original delivery. A later question
+            // revision may replace message content, but cannot replace the
+            // relationship carried by that delivery.
+            var currentMembers = members.filter { $0.key != ExactText("supersedes") }
+            if let supersedes = original.originalPayload.uniqueValue(named: "supersedes") {
+                currentMembers.append(JSONMember("supersedes", supersedes))
+            }
+            currentPayload = .object(currentMembers)
+        } else {
+            currentPayload = thread.currentQuestionPayload
+        }
+        let current = StoredRequest(key: key, originalPayload: currentPayload)
         return original.acceptanceOrder.map { current.assigningAcceptanceOrder($0) } ?? current
     }
 
