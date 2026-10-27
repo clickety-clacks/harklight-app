@@ -217,6 +217,23 @@ final class ReleaseNotesTests: XCTestCase {
             hasPriorAppState: true).isEmpty)
     }
 
+    func testBuildSeventyAccountPhoneOutcomeNoteIsHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 70 })
+
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["account-phone-outcome-sync"])
+        XCTAssertEqual(entry.highlights.first?.symbol, "arrow.triangle.2.circlepath")
+        XCTAssertFalse(HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "69")
+            .contains { $0.buildIdentifier == 70 })
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "70",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 69,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [70])
+    }
+
     func testFreshInstallDoesNotPresentPreviouslyReleasedNotes() {
         let notes = [releaseNote(1), releaseNote(2)]
 

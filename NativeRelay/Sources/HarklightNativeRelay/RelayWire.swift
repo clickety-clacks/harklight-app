@@ -8,6 +8,12 @@ public enum RelayWireError: Error, Equatable {
     case unsupportedEvent
 }
 
+public enum RelayWireUpdate: Equatable, Sendable {
+    case event(RelayEvent)
+    /// The relay supplied a sequenced update this build does not understand.
+    case ignored(sequence: UInt64)
+}
+
 /// Decode the server's authenticated projection without re-encoding sender JSON.
 /// The trusted profile, never a wire field, supplies the person/account scope.
 public struct RelayWire: Sendable {
@@ -26,14 +32,41 @@ public struct RelayWire: Sendable {
         Data("{\"v\":1,\"type\":\"ack\",\"seq\":\(cursor),\"ref\":\"native-ack\"}\n".utf8)
     }
 
-    public func decodeEvent(_ bytes: Data) throws -> RelayEvent {
+    /// Decodes ordinary relay updates without stopping replay on a future event
+    /// type or lifecycle state. A usable sequence is required to advance safely.
+    public func decodeUpdate(_ bytes: Data) throws -> RelayWireUpdate {
         let value = try parseFrame(bytes)
+        let seq = try sequence(value)
+        guard seq > 0 else { throw RelayWireError.invalidFrame }
+        let eventType = try text(value, "type")
+        switch eventType {
+        case "delivery", "attention_tier":
+            return .event(try decodeKnownEvent(value))
+        case "lifecycle":
+            let state = try text(value, "state")
+            guard TerminalState(rawValue: state) != nil else { return .ignored(sequence: seq) }
+            return .event(try decodeKnownEvent(value))
+        case "ok", "resynced", "error":
+            throw RelayWireError.unsupportedEvent
+        default:
+            return .ignored(sequence: seq)
+        }
+    }
+
+    public func decodeEvent(_ bytes: Data) throws -> RelayEvent {
+        try decodeKnownEvent(parseFrame(bytes))
+    }
+
+    private func decodeKnownEvent(_ value: JSONValue) throws -> RelayEvent {
         let seq = try sequence(value)
         let key = try requestKey(value)
         let origin = try text(value, "origin")
         let isOrigin = origin == profile.identity.deviceID.rawValue
         let conversation = try ConversationWire(profile: profile).ordinaryMetadata(value)
         let eventType = try text(value, "type")
+        let accountAnswerOutcome = eventType == "lifecycle"
+            ? decodeAccountAnswerOutcome(value.uniqueValue(named: "answer_outcome"))
+            : nil
         let attentionTier: AttentionTier?
         switch eventType {
         case "delivery": attentionTier = try decodeAttentionTier(value, required: false)
@@ -57,7 +90,14 @@ public struct RelayWire: Sendable {
                               body: .delivery(StoredRequest(key: key, originalPayload: payload), classification),
                               conversation: conversation, origin: ExactText(origin), attentionTier: attentionTier)
         case "lifecycle":
-            guard let state = TerminalState(rawValue: try text(value, "state")),
+            guard let wireState = TerminalState(rawValue: try text(value, "state")) else {
+                throw RelayWireError.invalidFrame
+            }
+            let terminalKind = value.uniqueValue(named: "terminal_kind")?.stringValue?.rawValue
+            let state = terminalKind == "no_comment" || accountAnswerOutcome == .noComment
+                ? TerminalState.noComment
+                : wireState
+            guard
                   (isOrigin || value.uniqueValue(named: "answer") == nil),
                   (state != .noComment || value.uniqueValue(named: "answer") == nil) else {
                 throw RelayWireError.invalidFrame
@@ -65,7 +105,8 @@ public struct RelayWire: Sendable {
             // A present JSON null is distinct from an absent answer in the wire.
             return RelayEvent(sequence: seq,
                               body: .terminal(key, state, value.uniqueValue(named: "answer")),
-                              conversation: conversation)
+                              conversation: conversation,
+                              accountAnswerOutcome: accountAnswerOutcome)
         case "attention_tier":
             guard seq > 0 else { throw RelayWireError.invalidFrame }
             return RelayEvent(sequence: seq, body: .attentionTierChange(key),
@@ -160,5 +201,25 @@ public struct RelayWire: Sendable {
         guard let string = raw.stringValue?.rawValue,
               let tier = AttentionTier(rawValue: string) else { throw RelayWireError.invalidFrame }
         return tier
+    }
+
+    private func decodeAccountAnswerOutcome(_ raw: JSONValue?) -> AccountAnswerOutcome? {
+        guard let raw,
+              case .object = raw,
+              raw.hasUniqueObjectKeys,
+              let kind = raw.uniqueValue(named: "kind")?.stringValue?.rawValue else { return nil }
+        switch kind {
+        case "seen":
+            return .seen
+        case "reply":
+            guard let text = raw.uniqueValue(named: "text")?.stringValue else { return nil }
+            return .reply(text)
+        case "no_comment":
+            return .noComment
+        default:
+            // This optional projection must not prevent the lifecycle event
+            // from applying. Unknown values fall back to generic Answered.
+            return nil
+        }
     }
 }

@@ -39,6 +39,15 @@ public extension AuthenticatedInstallationSession {
 public protocol AuthenticatedConversationSession: AuthenticatedInstallationSession {
     func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws
     func acknowledgeConversation(_ request: Data) async throws
+    func sendConversationReadPosition(_ frame: Data, operationID: UUID) async -> ConversationReadPositionResult
+}
+
+public extension AuthenticatedConversationSession {
+    /// Older test or transport adapters do not claim support for the additive
+    /// account read-position operation until they implement its response path.
+    func sendConversationReadPosition(_ frame: Data, operationID: UUID) async -> ConversationReadPositionResult {
+        .unresolved
+    }
 }
 
 /// After the projection is opened, the relay pushes new conversation entries
@@ -123,6 +132,8 @@ public actor NativeRelayCore {
     private var conversationReplay: ConversationReplayProgress?
     private var liveConversationConsumerTask: Task<Void, Never>?
     private var pendingLiveConversationReplay = false
+    private var conversationReadPositionSupportForSession = false
+    private var pendingConversationReadPositionDrain = false
     private var inspectedConversationMetadata = false
     private var discoveredOriginURL: URL?
     private var activeCleanupRequests: Set<UUID> = []
@@ -350,6 +361,7 @@ public actor NativeRelayCore {
         liveConversationConsumerTask?.cancel()
         liveConversationConsumerTask = nil
         pendingLiveConversationReplay = false
+        conversationReadPositionSupportForSession = false
         resumePostCheckpointWaiters(throwing: NativeRelayCoreError.inactive)
     }
 
@@ -769,22 +781,30 @@ public actor NativeRelayCore {
             while !Task.isCancelled {
                 let frame = try await eventStream.nextPostCheckpointInboxEvent()
                 let previousCursor = try validatedRelayCursor()
-                let event = try wire.decodeEvent(frame)
-                let result = store.applyRelayEvent(event, context: context)
                 let durableCursor: UInt64
-                switch result {
-                case let .committed(contiguousCursor, _),
-                     let .compatibleRepeat(contiguousCursor, _):
-                    durableCursor = contiguousCursor
-                case let .deferred(contiguousCursor) where contiguousCursor == event.sequence:
-                    durableCursor = contiguousCursor
-                case .gap, .conflict, .repairRequired, .deferred:
-                    throw NativeRelayCoreError.eventRejected
+                let sequence: UInt64
+                switch try wire.decodeUpdate(frame) {
+                case let .event(event):
+                    sequence = event.sequence
+                    switch store.applyRelayEvent(event, context: context) {
+                    case let .committed(contiguousCursor, _),
+                         let .compatibleRepeat(contiguousCursor, _):
+                        durableCursor = contiguousCursor
+                    case let .deferred(contiguousCursor) where contiguousCursor == event.sequence:
+                        durableCursor = contiguousCursor
+                    case .gap, .conflict, .repairRequired, .deferred:
+                        throw NativeRelayCoreError.eventRejected
+                    }
+                case let .ignored(ignoredSequence):
+                    sequence = ignoredSequence
+                    durableCursor = try store.advanceRelayCursor(
+                        overIgnoredUpdateAt: ignoredSequence, context: context)
+                    diagnose(.relay, .ordinaryReplay, .observed, causeCode: "unknown_update_kind")
                 }
-                if event.sequence > previousCursor {
+                if sequence > previousCursor {
                     guard previousCursor < UInt64.max,
-                          event.sequence == previousCursor + 1,
-                          durableCursor == event.sequence else {
+                          sequence == previousCursor + 1,
+                          durableCursor == sequence else {
                         throw NativeRelayCoreError.invalidReplay
                     }
                 } else if durableCursor != previousCursor {
@@ -955,23 +975,33 @@ public actor NativeRelayCore {
             activeInboxReplay = replay
             return
         }
-        let event = try wire.decodeEvent(frame)
-        guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
-            throw NativeRelayCoreError.invalidReplay
+        switch try wire.decodeUpdate(frame) {
+        case let .event(event):
+            guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            switch store.applyRelayEvent(event, context: context) {
+            case .committed, .compatibleRepeat:
+                break
+            case let .deferred(cursor) where cursor == event.sequence:
+                break
+            case .gap, .conflict, .repairRequired, .deferred:
+                throw NativeRelayCoreError.eventRejected
+            }
+            replay.expected = event.sequence
+        case let .ignored(sequence):
+            guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            _ = try store.advanceRelayCursor(overIgnoredUpdateAt: sequence, context: context)
+            replay.expected = sequence
+            diagnose(.relay, .ordinaryReplay, .observed, causeCode: "unknown_update_kind")
         }
-        switch store.applyRelayEvent(event, context: context) {
-        case .committed, .compatibleRepeat:
-            break
-        case let .deferred(cursor) where cursor == event.sequence:
-            break
-        case .gap, .conflict, .repairRequired, .deferred:
-            throw NativeRelayCoreError.eventRejected
-        }
-        replay.expected = event.sequence
         activeInboxReplay = replay
     }
 
-    private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
+    private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession,
+                                                 drainReadPositions: Bool = true) async throws {
         guard !conversationsUnavailable else { return }
         diagnose(.conversation, .conversationReplay, .began)
         let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
@@ -983,6 +1013,12 @@ public actor NativeRelayCore {
                 diagnose(.conversation, .acknowledgement, .retrying,
                          error: InstallationTransportError.acknowledgementBehind)
                 high = try await replayConversation(since: 0, using: transport, wire: wire)
+                try await transport.acknowledgeConversation(wire.acknowledge(high))
+            }
+            if drainReadPositions,
+               try await sendPendingConversationReadPositions(using: transport) {
+                high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
+                    using: transport, wire: wire)
                 try await transport.acknowledgeConversation(wire.acknowledge(high))
             }
             diagnose(.conversation, .acknowledgement, .completed)
@@ -1006,6 +1042,67 @@ public actor NativeRelayCore {
                 await self?.consumeLiveConversationSignals(from: events)
             }
         }
+    }
+
+    /// Chat read updates are account state, separate from this device's replay
+    /// ACK. The saved operation remains queued until its idempotent reply arrives.
+    public func sendPendingConversationReadPositions() async {
+        guard active else { return }
+        guard !busy else {
+            pendingConversationReadPositionDrain = true
+            return
+        }
+        guard let transport = session as? any AuthenticatedConversationSession else { return }
+        busy = true
+        defer { releaseBusy() }
+        do {
+            if try await sendPendingConversationReadPositions(using: transport) {
+                try await replayConversationAndAcknowledge(using: transport, drainReadPositions: false)
+            }
+        } catch {
+            diagnose(.conversation, .conversationReadPosition,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+        }
+    }
+
+    private func sendPendingConversationReadPositions(
+        using transport: any AuthenticatedConversationSession
+    ) async throws -> Bool {
+        guard conversationReadPositionSupportForSession else { return false }
+        let snapshot = try store.conversationSnapshot(context: context)
+        guard snapshot.chatReadPositionSupport == true else { return false }
+        let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
+        var createdConversationEvents = false
+        for pending in snapshot.pendingChatReadPositions {
+            try validate()
+            let frame = try wire.conversationReadPosition(pending)
+            diagnose(.conversation, .conversationReadPosition, .began,
+                     operationID: pending.operationID, request: pending.request)
+            let result = await transport.sendConversationReadPosition(frame, operationID: pending.operationID)
+            switch result {
+            case let .accepted(position, eventSequence, eventID, duplicate):
+                guard position >= pending.readThroughConversationSequence,
+                      (eventSequence == nil) == (eventID == nil) else {
+                    diagnose(.conversation, .conversationReadPosition, .unresolved,
+                             causeCode: "read_position_response_mismatch",
+                             operationID: pending.operationID, request: pending.request)
+                    continue
+                }
+                try store.acceptConversationReadPosition(pending, serverPosition: position, context: context)
+                diagnose(.conversation, .conversationReadPosition, .completed,
+                         causeCode: duplicate ? "duplicate_read_position" : nil,
+                         operationID: pending.operationID, request: pending.request)
+                createdConversationEvents = createdConversationEvents || eventSequence != nil
+            case let .rejected(reason):
+                diagnose(.conversation, .conversationReadPosition, .rejected,
+                         causeCode: "read_position_\(reason.rawValue)",
+                         operationID: pending.operationID, request: pending.request)
+            case .unresolved:
+                diagnose(.conversation, .conversationReadPosition, .unresolved,
+                         operationID: pending.operationID, request: pending.request)
+            }
+        }
+        return createdConversationEvents
     }
 
     private func consumeLiveConversationSignals(from events: any AuthenticatedConversationEventSession) async {
@@ -1055,17 +1152,33 @@ public actor NativeRelayCore {
             guard try wire.isOpenAccepted(frame) else { throw NativeRelayCoreError.invalidReplay }
             discoveredOriginURL = try wire.originEndpoint(frame)
             replay.accepted = true
-        } else if let high = try? wire.decodeResynced(frame) {
+        } else if let snapshot = try? wire.decodeResyncedSnapshot(frame) {
+            let high = snapshot.highWater
             guard high >= replay.durableCursor, high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
-            try store.finishConversationReplay(at: high, context: context)
+            try store.finishConversationReplay(at: high,
+                chatReadPositions: snapshot.chatReadPositions, context: context)
+            conversationReadPositionSupportForSession = snapshot.chatReadPositions != nil
+            if snapshot.hasInvalidChatReadPositions {
+                diagnose(.conversation, .conversationReadPosition, .observed,
+                         causeCode: "invalid_chat_read_positions")
+            }
             replay.high = high
         } else {
-            let event = try wire.decodeEvent(frame)
-            guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
-                throw NativeRelayCoreError.invalidReplay
+            switch try wire.decodeUpdate(frame) {
+            case let .event(event):
+                guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
+                    throw NativeRelayCoreError.invalidReplay
+                }
+                _ = try store.applyConversation(event, context: context)
+                replay.expected = event.sequence
+            case let .ignored(sequence):
+                guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
+                    throw NativeRelayCoreError.invalidReplay
+                }
+                _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
+                replay.expected = sequence
+                diagnose(.conversation, .conversationReplay, .observed, causeCode: "unknown_update_kind")
             }
-            _ = try store.applyConversation(event, context: context)
-            replay.expected = event.sequence
         }
         conversationReplay = replay
     }
@@ -1114,15 +1227,20 @@ public actor NativeRelayCore {
             pendingLiveConversationReplay = false
             Task { await replayLiveConversation() }
         }
-        guard !pendingInboxPageWaiters.isEmpty else { return }
-        let waiters = pendingInboxPageWaiters
-        pendingInboxPageWaiters.removeAll()
-        Task {
-            do {
-                let result = try await fetchNextInboxPage()
-                for waiter in waiters { waiter.resume(returning: result) }
-            } catch {
-                for waiter in waiters { waiter.resume(throwing: error) }
+        if pendingConversationReadPositionDrain {
+            pendingConversationReadPositionDrain = false
+            Task { await sendPendingConversationReadPositions() }
+        }
+        if !pendingInboxPageWaiters.isEmpty {
+            let waiters = pendingInboxPageWaiters
+            pendingInboxPageWaiters.removeAll()
+            Task {
+                do {
+                    let result = try await fetchNextInboxPage()
+                    for waiter in waiters { waiter.resume(returning: result) }
+                } catch {
+                    for waiter in waiters { waiter.resume(throwing: error) }
+                }
             }
         }
     }

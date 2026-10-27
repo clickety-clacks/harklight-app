@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 70,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "account-phone-outcome-sync",
+                    symbol: "arrow.triangle.2.circlepath",
+                    title: LocalizedStringResource(
+                        "Seen and replies sync across your phones",
+                        comment: "Release-note title for showing the same request outcome across an account's phones."),
+                    detail: LocalizedStringResource(
+                        "Each phone shows the same Seen state, reply, No comment choice, and Chat unread status.",
+                        comment: "Release-note detail for shared request outcomes and Chat read state across account phones."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 69,
             marketingVersion: "0.1.0",
             highlights: [

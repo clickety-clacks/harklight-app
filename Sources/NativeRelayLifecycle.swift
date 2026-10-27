@@ -1280,6 +1280,12 @@ final class NativeRelayLifecycle {
         return try await core.submitDiscussion(binding, retainedFile: retainedFile)
     }
 
+    func sendPendingConversationReadPositions(expected: ProfileContext) async {
+        guard context == expected, let core else { return }
+        await core.sendPendingConversationReadPositions()
+        guard context == expected else { return }
+    }
+
     func discardAbandonedUploads(for request: RequestKey, expected: ProfileContext) async throws {
         guard context == expected, let core else { throw NativeRelayCoreError.inactive }
         // Do not wait for the active send flight: departure fences its upload.

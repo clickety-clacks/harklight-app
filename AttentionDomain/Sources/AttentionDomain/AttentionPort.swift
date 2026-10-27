@@ -282,6 +282,8 @@ public struct PresentedRequest: Equatable, Sendable {
     public let intentReceipt: IntentReceipt?
     public let projection: AdmittedRequestProjection
     public let informationalSeenStatus: InformationalSeenStatus?
+    /// The server's account-wide terminal outcome, when supported.
+    public let accountAnswerOutcome: AccountAnswerOutcome?
     public let attentionTier: AttentionTier
     /// The relay explicitly rejected No comment; other answer methods remain usable.
     public let noCommentUnavailable: Bool
@@ -311,6 +313,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 intentReceipt: IntentReceipt?,
                 projection: AdmittedRequestProjection,
                 informationalSeenStatus: InformationalSeenStatus? = nil,
+                accountAnswerOutcome: AccountAnswerOutcome? = nil,
                 attentionTier: AttentionTier = .middle,
                 noCommentUnavailable: Bool = false,
                 answerNotDelivered: Bool = false,
@@ -330,6 +333,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.intentReceipt = intentReceipt
         self.projection = projection
         self.informationalSeenStatus = informationalSeenStatus
+        self.accountAnswerOutcome = accountAnswerOutcome
         self.attentionTier = attentionTier
         self.noCommentUnavailable = noCommentUnavailable
         self.answerNotDelivered = answerNotDelivered
@@ -415,9 +419,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
         return try store.updateConversationDraftText(text, for: binding, context: profileContext)
     }
 
-    public func markConversationRead(_ request: RequestKey, context suppliedContext: PortContext) throws {
+    @discardableResult
+    public func markConversationRead(_ request: RequestKey,
+                                    context suppliedContext: PortContext) throws -> PendingConversationReadPosition? {
         try validate(suppliedContext)
-        try store.markConversationRead(request, context: profileContext)
+        return try store.markConversationRead(request, context: profileContext)
     }
 
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws {
@@ -885,6 +891,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         }
 
         let projection: AdmittedRequestProjection
+        let hasAccountTerminal = remote?.state != nil
         switch request.interface {
         case let .sender(document):
             let scene: SceneNode
@@ -899,13 +906,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 authorizedAnswer = terminal.authorizedAnswer
                 scene = document.terminalScene(state: terminal.state, authorizedAnswer: terminal.authorizedAnswer)
             } else if let remoteState = remote?.state {
-                if let originAnswer = remote?.authorizedOriginAnswer {
-                    authorizedAnswer = originAnswer
-                } else if let submission, !submission.isNoComment, case .accepted = submission.disposition {
-                    authorizedAnswer = submission.answer
-                } else {
-                    authorizedAnswer = nil
-                }
+                // The legacy answer field and a local receipt can differ by
+                // device. Shared terminal details come only from the common
+                // account outcome projection below.
+                authorizedAnswer = nil
                 terminalState = remoteState
                 scene = document.terminalScene(state: remoteState, authorizedAnswer: authorizedAnswer)
             } else {
@@ -966,15 +970,16 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 selector: selector,
                                 draft: draft,
                                 lifecycleStatus: status,
-                                receiptFacts: receiptFacts,
-                                intentReceipt: submission.map { receipt($0, context: context) },
+                                receiptFacts: hasAccountTerminal ? nil : receiptFacts,
+                                intentReceipt: hasAccountTerminal ? nil : submission.map { receipt($0, context: context) },
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
                                     status: status, remote: remote, submission: submission),
+                                accountAnswerOutcome: remote?.accountAnswerOutcome,
                                 attentionTier: remote?.attentionTier ?? .middle,
-                                noCommentUnavailable: noCommentUnavailable,
-                                answerNotDelivered: answerNotDelivered,
-                                staleAnswerRevision: staleAnswerRevision,
+                                noCommentUnavailable: hasAccountTerminal ? false : noCommentUnavailable,
+                                answerNotDelivered: hasAccountTerminal ? false : answerNotDelivered,
+                                staleAnswerRevision: hasAccountTerminal ? nil : staleAnswerRevision,
                                 inboxStateIsCurrent: inboxStateIsCurrent)
     }
 
@@ -982,6 +987,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                          status: AppLifecycleStatus,
                                          remote: RemoteRequestState?,
                                          submission: Submission?) -> InformationalSeenStatus? {
+        if let remote, remote.state != nil {
+            guard remote.state == .answered,
+                  remote.accountAnswerOutcome == .seen else { return nil }
+            return .confirmed
+        }
         guard request.hasExplicitInformationalSeenAction else { return nil }
         let seenValue = JSONValue.object([
             JSONMember("acknowledgment", .string(ExactText("seen")))

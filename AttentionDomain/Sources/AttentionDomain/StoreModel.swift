@@ -244,9 +244,18 @@ public enum AttentionTierFeed: String, Equatable, Codable, Sendable {
     case conversation
 }
 
+/// A terminal answer outcome shared by the account-level lifecycle projection.
+/// This is separate from the origin-only legacy answer payload.
+public enum AccountAnswerOutcome: Equatable, Codable, Sendable {
+    case seen
+    case reply(ExactText)
+    case noComment
+}
+
 public struct RemoteRequestState: Equatable, Codable, Sendable {
     public var state: TerminalState?
     public var authorizedOriginAnswer: JSONValue?
+    public var accountAnswerOutcome: AccountAnswerOutcome?
     public var classification: RemoteDeliveryClassification?
     public var eventSequence: UInt64?
     /// Optional fields keep existing schema-2 account state readable.
@@ -257,6 +266,7 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
 
     public init(state: TerminalState? = nil,
                 authorizedOriginAnswer: JSONValue? = nil,
+                accountAnswerOutcome: AccountAnswerOutcome? = nil,
                 classification: RemoteDeliveryClassification? = nil,
                 eventSequence: UInt64? = nil,
                 attentionTier: AttentionTier? = nil,
@@ -265,6 +275,7 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
                 attentionTierOrigin: ExactText? = nil) {
         self.state = state
         self.authorizedOriginAnswer = authorizedOriginAnswer
+        self.accountAnswerOutcome = accountAnswerOutcome
         self.classification = classification
         self.eventSequence = eventSequence
         self.attentionTier = attentionTier
@@ -356,6 +367,7 @@ public struct RelayEvent: Equatable, Codable, Sendable {
     public let body: RelayEventBody
     public let conversation: RelayConversationMetadata?
     public let origin: ExactText?
+    public let accountAnswerOutcome: AccountAnswerOutcome?
     public let attentionTier: AttentionTier
     public let attentionTierWasProvided: Bool
 
@@ -363,17 +375,19 @@ public struct RelayEvent: Equatable, Codable, Sendable {
                 body: RelayEventBody,
                 conversation: RelayConversationMetadata? = nil,
                 origin: ExactText? = nil,
+                accountAnswerOutcome: AccountAnswerOutcome? = nil,
                 attentionTier: AttentionTier? = nil) {
         self.sequence = sequence
         self.body = body
         self.conversation = conversation
         self.origin = origin
+        self.accountAnswerOutcome = accountAnswerOutcome
         self.attentionTier = attentionTier ?? .middle
         self.attentionTierWasProvided = attentionTier != nil
     }
 
     private enum CodingKeys: String, CodingKey {
-        case sequence, body, conversation, origin, attentionTier
+        case sequence, body, conversation, origin, accountAnswerOutcome, attentionTier
     }
 
     public init(from decoder: Decoder) throws {
@@ -382,6 +396,7 @@ public struct RelayEvent: Equatable, Codable, Sendable {
         body = try values.decode(RelayEventBody.self, forKey: .body)
         conversation = try values.decodeIfPresent(RelayConversationMetadata.self, forKey: .conversation)
         origin = try values.decodeIfPresent(ExactText.self, forKey: .origin)
+        accountAnswerOutcome = try values.decodeIfPresent(AccountAnswerOutcome.self, forKey: .accountAnswerOutcome)
         let decodedTier = try values.decodeIfPresent(AttentionTier.self, forKey: .attentionTier)
         attentionTier = decodedTier ?? .middle
         attentionTierWasProvided = decodedTier != nil
@@ -393,6 +408,7 @@ public struct RelayEvent: Equatable, Codable, Sendable {
         try values.encode(body, forKey: .body)
         try values.encodeIfPresent(conversation, forKey: .conversation)
         try values.encodeIfPresent(origin, forKey: .origin)
+        try values.encodeIfPresent(accountAnswerOutcome, forKey: .accountAnswerOutcome)
         if attentionTierWasProvided {
             try values.encode(attentionTier, forKey: .attentionTier)
         }
@@ -412,7 +428,10 @@ public struct RelayEvent: Equatable, Codable, Sendable {
         case let (.attentionTierChange(left), .attentionTierChange(right)):
             return sameOrigin && sameTier && left == right
         case let (.terminal(leftKey, leftState, leftAnswer), .terminal(rightKey, rightState, rightAnswer)):
-            return leftKey == rightKey && leftState == rightState && optionalJSONEquals(leftAnswer, rightAnswer)
+            return leftKey == rightKey && leftState == rightState &&
+                optionalJSONEquals(leftAnswer, rightAnswer) &&
+                (accountAnswerOutcome == nil || other.accountAnswerOutcome == nil ||
+                    accountAnswerOutcome == other.accountAnswerOutcome)
         default:
             return false
         }

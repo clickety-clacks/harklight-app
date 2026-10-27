@@ -78,13 +78,17 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
     public let contentRedacted: Bool?
     public let kind: Kind?
     public let resultStatus: ExactText?
+    /// The per-account conversation feed sequence that delivered this turn.
+    /// Older saved turns are reconstructed from the event journal on load.
+    public var conversationSequence: UInt64?
 
     public enum Kind: String, Codable, Sendable { case discussion, reply, revision, result, terminal }
 
     public init(id: ExactText, binding: ConversationBinding, author: ConversationAuthor,
                 sessionHandle: ExactText, text: ExactText, inReplyTo: ExactText? = nil,
                 operationID: UUID? = nil, files: [ConversationFile] = [],
-                contentRedacted: Bool? = nil, kind: Kind? = nil, resultStatus: ExactText? = nil) {
+                contentRedacted: Bool? = nil, kind: Kind? = nil, resultStatus: ExactText? = nil,
+                conversationSequence: UInt64? = nil) {
         self.id = id
         self.binding = binding
         self.author = author
@@ -96,6 +100,7 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
         self.contentRedacted = contentRedacted
         self.kind = kind
         self.resultStatus = resultStatus
+        self.conversationSequence = conversationSequence
     }
 }
 
@@ -187,6 +192,8 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         case fileUse(turn: ExactText, file: ExactText, ConversationFileUse)
         case terminal(turn: ExactText, author: ConversationAuthor, state: TerminalState)
         case attentionTier(eventID: ExactText, origin: ExactText, tier: AttentionTier, sessionHandle: ExactText?)
+        /// Account read state is keyed by RequestKey and deliberately has no revision binding.
+        case readPosition(eventID: ExactText, readThroughConversationSequence: UInt64)
         /// Reference to the same ordinary terminal, never another ordinary event.
         case retraction(turn: ExactText, terminalSequence: UInt64)
     }
@@ -208,7 +215,7 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
 
     var requiresLoadedThread: Bool {
         switch fact {
-        case .request, .attentionTier: return false
+        case .request, .attentionTier, .readPosition: return false
         case .revision: return binding.revision > 1
         default: return true
         }
@@ -237,6 +244,9 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var uploadCleanups: [UUID: ConversationUploadCleanup]?
     /// The latest agent reply that was on screen in this request's Chat.
     public var readThroughTurn: ExactText?
+    /// Account-wide cursor when this server has supplied the read-position map.
+    /// nil preserves the legacy local turn marker on older servers.
+    public var accountReadThroughConversationSequence: UInt64?
 
     public var latestAgentReply: ConversationTurn? {
         turns.last { $0.kind == .reply && $0.author != .person }
@@ -244,6 +254,10 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// An agent reply arrived after Chat last showed this request's replies.
     public var hasUnreadAgentReply: Bool {
         guard let latest = latestAgentReply else { return false }
+        if let accountReadThroughConversationSequence,
+           let latestSequence = latest.conversationSequence {
+            return latestSequence > accountReadThroughConversationSequence
+        }
         return latest.id != readThroughTurn
     }
 
@@ -300,7 +314,9 @@ public struct ConversationThread: Equatable, Codable, Sendable {
             return left == right ? false : left < right
         }
         for (index, turn) in zip(sequencedIndexes, sequencedTurns) {
-            turns[index] = turn
+            var sequenced = turn
+            sequenced.conversationSequence = projectionSequences[turn.id] ?? turn.conversationSequence
+            turns[index] = sequenced
         }
     }
 
@@ -400,14 +416,68 @@ public enum ConversationError: Error, Equatable, Sendable {
 }
 
 /// Stored alongside existing account state, but with a wholly independent replay cursor.
-struct ConversationState: Codable {
+public struct AccountConversationReadPosition: Equatable, Codable, Sendable {
+    public let request: RequestKey
+    public let readThroughConversationSequence: UInt64
+
+    public init(request: RequestKey, readThroughConversationSequence: UInt64) {
+        self.request = request
+        self.readThroughConversationSequence = readThroughConversationSequence
+    }
+}
+
+public struct PendingConversationReadPosition: Equatable, Codable, Sendable {
+    public let request: RequestKey
+    public let operationID: UUID
+    public let readThroughConversationSequence: UInt64
+
+    public init(request: RequestKey, operationID: UUID, readThroughConversationSequence: UInt64) {
+        self.request = request
+        self.operationID = operationID
+        self.readThroughConversationSequence = readThroughConversationSequence
+    }
+}
+
+struct ConversationState: Codable, Equatable {
     var cursor: UInt64 = 0
     var events: [UInt64: ConversationEvent] = [:]
     var threads: [RequestKey: ConversationThread] = [:]
+    /// nil means no server read map has been observed in this saved state.
+    var chatReadPositions: [RequestKey: UInt64]? = nil
+    var chatReadPositionSupport: Bool? = nil
+    var pendingChatReadPositions: [RequestKey: PendingConversationReadPosition]? = nil
 
     /// Reconstruct old persisted turn arrays from the conversation sequence
     /// journal. Turn IDs are identities and are not chronological ordering keys.
     mutating func orderTurnsFromProjectionEvents() {
+        // `conversationSequence` was added after turns and projection events
+        // were already persisted. Fill it from the containing journal entry so
+        // replaying an already-saved event compares equal to its older copy.
+        var normalizedEvents: [UInt64: ConversationEvent] = [:]
+        for (sequence, event) in events {
+            let fact: ConversationEvent.Fact
+            switch event.fact {
+            case let .turn(original):
+                var turn = original
+                turn.conversationSequence = sequence
+                fact = .turn(turn)
+            case let .revision(original, payload):
+                var turn = original
+                turn.conversationSequence = sequence
+                fact = .revision(turn, payload: payload)
+            case let .redactedRevision(original):
+                var turn = original
+                turn.conversationSequence = sequence
+                fact = .redactedRevision(turn)
+            default:
+                fact = event.fact
+            }
+            normalizedEvents[sequence] = ConversationEvent(sequence: event.sequence,
+                binding: event.binding, fact: fact,
+                retractedAtMilliseconds: event.retractedAtMilliseconds)
+        }
+        events = normalizedEvents
+
         var turnSequences: [RequestKey: [ExactText: UInt64]] = [:]
         var retractionSequences: [RequestKey: [ExactText: UInt64]] = [:]
         for event in events.values {
@@ -440,10 +510,16 @@ struct ConversationState: Codable {
             orderedThreads[request] = thread
         }
         threads = orderedThreads
+        applySavedReadPositionSupport()
     }
 
     mutating func apply(_ event: ConversationEvent) throws {
-        guard event.binding.revision > 0 else { throw ConversationError.invalidBinding }
+        let isReadPosition: Bool
+        if case .readPosition = event.fact { isReadPosition = true }
+        else { isReadPosition = false }
+        guard isReadPosition ? event.binding.revision == 0 : event.binding.revision > 0 else {
+            throw ConversationError.invalidBinding
+        }
         if event.sequence <= cursor {
             guard let previous = events[event.sequence], event.canEnrich(previous) else {
                 throw ConversationError.conflict
@@ -462,6 +538,15 @@ struct ConversationState: Codable {
         }
         guard cursor < UInt64.max, event.sequence == cursor + 1 else {
             throw ConversationError.gap(expected: cursor == UInt64.max ? cursor : cursor + 1, received: event.sequence)
+        }
+        if case let .readPosition(eventID, position) = event.fact {
+            guard event.binding.revision == 0, !eventID.rawValue.isEmpty, position > 0 else {
+                throw ConversationError.invalidBinding
+            }
+            mergeReadPosition(event.binding.request, position: position)
+            events[event.sequence] = event
+            cursor = event.sequence
+            return
         }
         let binding = event.binding
         if threads[binding.request] == nil && event.requiresLoadedThread {
@@ -485,6 +570,7 @@ struct ConversationState: Codable {
             var thread = ConversationThread(request: binding.request, sessionHandle: turn.sessionHandle,
                 revision: binding.revision, payload: payload)
             try applyHeldEvents(to: &thread)
+            applySavedReadPosition(to: &thread)
             threads[binding.request] = thread
             try applyThreadFact(event, to: &thread)
             threads[binding.request] = thread
@@ -518,8 +604,166 @@ struct ConversationState: Codable {
             var thread = ConversationThread(request: binding.request, sessionHandle: handle,
                 revision: binding.revision, payload: payload)
             try applyHeldEvents(to: &thread)
+            applySavedReadPosition(to: &thread)
             threads[binding.request] = thread
         }
+    }
+
+    mutating func mergeChatReadPositions(_ positions: [AccountConversationReadPosition]?) throws {
+        guard let positions else {
+            chatReadPositionSupport = false
+            for key in Array(threads.keys) {
+                threads[key]?.accountReadThroughConversationSequence = nil
+            }
+            return
+        }
+
+        var incoming: [RequestKey: UInt64] = [:]
+        for position in positions {
+            guard position.readThroughConversationSequence > 0,
+                  incoming[position.request] == nil else { throw ConversationError.invalidBinding }
+            incoming[position.request] = position.readThroughConversationSequence
+        }
+        var merged = chatReadPositions ?? [:]
+        for (request, position) in incoming {
+            merged[request] = max(merged[request] ?? 0, position)
+        }
+        var pending = pendingChatReadPositions ?? [:]
+        for request in Array(pending.keys) {
+            // `chatReadPositions` also holds optimistic local cursors. Only the
+            // position from this server snapshot can confirm a pending write.
+            let serverPosition = incoming[request] ?? 0
+            if let pendingWrite = pending[request],
+               pendingWrite.readThroughConversationSequence <= serverPosition {
+                pending.removeValue(forKey: request)
+            }
+        }
+        chatReadPositions = merged
+        pendingChatReadPositions = pending
+        chatReadPositionSupport = true
+        applySavedReadPositionSupport(reconcileLocalRead: true)
+    }
+
+    mutating func prepareReadPosition(for request: RequestKey,
+                                      operationID: UUID,
+                                      position: UInt64) -> PendingConversationReadPosition? {
+        guard chatReadPositionSupport == true, position > 0 else { return nil }
+        var positions = chatReadPositions ?? [:]
+        let current = positions[request] ?? 0
+        if current >= position {
+            if let pending = pendingChatReadPositions?[request],
+               pending.readThroughConversationSequence >= position {
+                return pending
+            }
+            return nil
+        }
+        positions[request] = position
+        chatReadPositions = positions
+        var pending = pendingChatReadPositions ?? [:]
+        if let previous = pending[request], previous.readThroughConversationSequence == position {
+            return previous
+        }
+        let saved = PendingConversationReadPosition(request: request, operationID: operationID,
+            readThroughConversationSequence: position)
+        pending[request] = saved
+        pendingChatReadPositions = pending
+        if var thread = threads[request] {
+            thread.accountReadThroughConversationSequence = position
+            synchronizeLocalReadThrough(in: &thread, position: position)
+            threads[request] = thread
+        }
+        return saved
+    }
+
+    mutating func acceptReadPosition(_ pending: PendingConversationReadPosition,
+                                     serverPosition: UInt64) throws {
+        guard serverPosition >= pending.readThroughConversationSequence else {
+            throw ConversationError.conflict
+        }
+        var positions = chatReadPositions ?? [:]
+        positions[pending.request] = max(positions[pending.request] ?? 0, serverPosition)
+        chatReadPositions = positions
+        chatReadPositionSupport = true
+        var queued = pendingChatReadPositions ?? [:]
+        if queued[pending.request]?.operationID == pending.operationID {
+            queued.removeValue(forKey: pending.request)
+        }
+        pendingChatReadPositions = queued
+        if var thread = threads[pending.request] {
+            thread.accountReadThroughConversationSequence = positions[pending.request]
+            synchronizeLocalReadThrough(in: &thread, position: positions[pending.request] ?? 0)
+            threads[pending.request] = thread
+        }
+    }
+
+    private mutating func mergeReadPosition(_ request: RequestKey, position: UInt64) {
+        var positions = chatReadPositions ?? [:]
+        positions[request] = max(positions[request] ?? 0, position)
+        chatReadPositions = positions
+        if let pending = pendingChatReadPositions?[request],
+           pending.readThroughConversationSequence <= position {
+            pendingChatReadPositions?.removeValue(forKey: request)
+        }
+        chatReadPositionSupport = true
+        applySavedReadPositionSupport(reconcileLocalRead: true)
+    }
+
+    private mutating func applySavedReadPositionSupport(reconcileLocalRead: Bool = false) {
+        guard chatReadPositionSupport == true else { return }
+        var positions = chatReadPositions ?? [:]
+        var pending = pendingChatReadPositions ?? [:]
+        for key in Array(threads.keys) {
+            guard var thread = threads[key] else { continue }
+            let serverPosition = positions[key] ?? 0
+            if let locallyReadTurn = thread.readThroughTurn,
+               let localPosition = conversationSequence(for: locallyReadTurn, in: thread),
+               localPosition > serverPosition {
+                if reconcileLocalRead,
+                   (pending[key]?.readThroughConversationSequence ?? 0) < localPosition {
+                    pending[key] = PendingConversationReadPosition(request: key, operationID: UUID(),
+                        readThroughConversationSequence: localPosition)
+                }
+                if reconcileLocalRead { positions[key] = localPosition }
+            }
+            let position = positions[key] ?? 0
+            thread.accountReadThroughConversationSequence = position
+            synchronizeLocalReadThrough(in: &thread, position: position)
+            threads[key] = thread
+        }
+        chatReadPositions = positions
+        pendingChatReadPositions = pending
+    }
+
+    private func conversationSequence(for turnID: ExactText,
+                                      in thread: ConversationThread) -> UInt64? {
+        if let sequence = thread.turns.first(where: { $0.id == turnID })?.conversationSequence {
+            return sequence
+        }
+        return events.values.compactMap { event -> UInt64? in
+            guard event.binding.request == thread.request else { return nil }
+            switch event.fact {
+            case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
+                return turn.id == turnID ? event.sequence : nil
+            default:
+                return nil
+            }
+        }.min()
+    }
+
+    private func applySavedReadPosition(to thread: inout ConversationThread) {
+        guard chatReadPositionSupport == true else { return }
+        let position = chatReadPositions?[thread.request] ?? 0
+        thread.accountReadThroughConversationSequence = position
+        synchronizeLocalReadThrough(in: &thread, position: position)
+    }
+
+    private func synchronizeLocalReadThrough(in thread: inout ConversationThread, position: UInt64) {
+        guard position > 0,
+              let turn = thread.turns.last(where: {
+                  $0.kind == .reply && $0.author != .person &&
+                      ($0.conversationSequence ?? 0) <= position
+              }) else { return }
+        thread.readThroughTurn = turn.id
     }
 
     private func validateUnloadedSessionHandle(_ handle: ExactText, for request: RequestKey) throws {
@@ -558,7 +802,7 @@ struct ConversationState: Codable {
         guard thread.revisionNumbers.contains(binding.revision) else { throw ConversationError.missingRequest }
 
         switch event.fact {
-        case .request, .attentionTier:
+        case .request, .attentionTier, .readPosition:
             throw ConversationError.invalidBinding
         case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
             guard turn.binding == binding, turn.sessionHandle == thread.sessionHandle,
@@ -666,10 +910,19 @@ struct ConversationState: Codable {
 public struct ConversationSnapshot: Sendable {
     public let cursor: UInt64
     public let threads: [RequestKey: ConversationThread]
+    public let chatReadPositions: [RequestKey: UInt64]?
+    public let chatReadPositionSupport: Bool?
+    public let pendingChatReadPositions: [PendingConversationReadPosition]
 
-    public init(cursor: UInt64, threads: [RequestKey: ConversationThread]) {
+    public init(cursor: UInt64, threads: [RequestKey: ConversationThread],
+                chatReadPositions: [RequestKey: UInt64]? = nil,
+                chatReadPositionSupport: Bool? = nil,
+                pendingChatReadPositions: [PendingConversationReadPosition] = []) {
         self.cursor = cursor
         self.threads = threads
+        self.chatReadPositions = chatReadPositions
+        self.chatReadPositionSupport = chatReadPositionSupport
+        self.pendingChatReadPositions = pendingChatReadPositions
     }
 }
 

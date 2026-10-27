@@ -510,6 +510,29 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
+    public func sendConversationReadPosition(_ frame: Data, operationID: UUID) async -> ConversationReadPositionResult {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
+        do {
+            let outgoing = try JSONValue.parse(frame)
+            guard outgoing.uniqueValue(named: "type") == .string(ExactText("conversation_read")),
+                  outgoing.uniqueValue(named: "op_id")?.stringValue?.rawValue == operationID.uuidString.lowercased() else {
+                return .unresolved
+            }
+            try await send(frame)
+            let wire = try ConversationWire(profile: profileContext, endpointHost: relayEndpointHost)
+            while true {
+                let incoming = try await receive()
+                let kind = try JSONValue.parse(incoming).uniqueValue(named: "type")?.stringValue?.rawValue
+                if kind == "delivery" || kind == "lifecycle" || kind == "conversation" { continue }
+                return try wire.decodeConversationReadPositionResult(incoming)
+            }
+        } catch {
+            close()
+            return .unresolved
+        }
+    }
+
     /// The APNs address is a separate device binding, never answer content.
     /// The caller durably owns the operation ID and revision across retries.
     public func registerPush(address: String, operationID: UUID, revision: UInt64) async throws -> String {

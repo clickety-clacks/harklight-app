@@ -8,6 +8,34 @@ public enum DiscussionOperationResult: Equatable, Sendable {
     case unresolved
 }
 
+public enum ConversationReadPositionResult: Equatable, Sendable {
+    case accepted(position: UInt64, eventSequence: UInt64?, eventID: ExactText?, duplicate: Bool)
+    case rejected(reason: ExactText)
+    case unresolved
+}
+
+public struct ConversationResyncSnapshot: Equatable, Sendable {
+    public let highWater: UInt64
+    /// nil identifies a server that predates account-level Chat read positions.
+    public let chatReadPositions: [AccountConversationReadPosition]?
+    /// An unusable optional read map disables account-level unread syncing for
+    /// this snapshot without preventing conversation history from catching up.
+    public let hasInvalidChatReadPositions: Bool
+
+    public init(highWater: UInt64, chatReadPositions: [AccountConversationReadPosition]?,
+                hasInvalidChatReadPositions: Bool = false) {
+        self.highWater = highWater
+        self.chatReadPositions = chatReadPositions
+        self.hasInvalidChatReadPositions = hasInvalidChatReadPositions
+    }
+}
+
+public enum ConversationWireUpdate: Equatable, Sendable {
+    case event(ConversationEvent)
+    /// The event is sequenced but its kind is not yet supported by this build.
+    case ignored(sequence: UInt64)
+}
+
 /// Independent projection on the existing authenticated relay. A conversation
 /// sequence is never an ordinary delivery/lifecycle sequence.
 public struct ConversationWire: Sendable {
@@ -79,6 +107,20 @@ public struct ConversationWire: Sendable {
         guard bytes.count <= 2 * 1024 * 1024 else { throw RelayWireError.invalidFrame }
         return bytes
     }
+    public func conversationReadPosition(_ pending: PendingConversationReadPosition) throws -> Data {
+        guard pending.request.accountScope == profile.identity.personID,
+              pending.readThroughConversationSequence > 0 else { throw RelayWireError.invalidFrame }
+        let frame = JSONValue.object([
+            JSONMember("v", .number(JSONNumber(lexeme: "1"))),
+            JSONMember("type", .string(ExactText("conversation_read"))),
+            JSONMember("ref", .string(ExactText("native-conversation-read-position"))),
+            JSONMember("op_id", .string(ExactText(pending.operationID.uuidString.lowercased()))),
+            JSONMember("sender_id", .string(pending.request.senderID)),
+            JSONMember("message_id", .string(pending.request.messageID)),
+            JSONMember("read_through_conversation_seq", .number(JSONNumber(lexeme: String(pending.readThroughConversationSequence))))
+        ])
+        return Data((frame.jsonString + "\n").utf8)
+    }
     public func isOpenAccepted(_ bytes: Data) throws -> Bool {
         let value = try frame(bytes)
         return try text(value, "type") == "ok" && value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-conversation-sync"
@@ -110,21 +152,137 @@ public struct ConversationWire: Sendable {
         default: throw RelayWireError.unsupportedEvent
         }
     }
+    public func decodeConversationReadPositionResult(_ bytes: Data) throws -> ConversationReadPositionResult {
+        let value = try frame(bytes)
+        guard value.uniqueValue(named: "ref") == .string(ExactText("native-conversation-read-position")) else {
+            throw RelayWireError.invalidFrame
+        }
+        switch try text(value, "type") {
+        case "ok":
+            let position = try integer(value, "read_through_conversation_seq")
+            guard position > 0 else { throw RelayWireError.invalidFrame }
+            let sequence = value.uniqueValue(named: "seq")
+            let event = value.uniqueValue(named: "event_id")
+            let eventSequence: UInt64?
+            let eventID: ExactText?
+            if sequence == nil && event == nil {
+                eventSequence = nil
+                eventID = nil
+            } else {
+                guard sequence != nil, event != nil else { throw RelayWireError.invalidFrame }
+                let parsedSequence = try integer(value, "seq")
+                let parsedEvent = ExactText(try text(value, "event_id"))
+                guard parsedSequence > 0, !parsedEvent.rawValue.isEmpty else {
+                    throw RelayWireError.invalidFrame
+                }
+                eventSequence = parsedSequence
+                eventID = parsedEvent
+            }
+            let duplicate: Bool
+            if let rawDuplicate = value.uniqueValue(named: "duplicate") {
+                guard case let .bool(value) = rawDuplicate else { throw RelayWireError.invalidFrame }
+                duplicate = value
+            } else {
+                duplicate = false
+            }
+            return .accepted(position: position, eventSequence: eventSequence,
+                             eventID: eventID, duplicate: duplicate)
+        case "error":
+            return .rejected(reason: ExactText(try text(value, "reason")))
+        default:
+            throw RelayWireError.unsupportedEvent
+        }
+    }
     public func decodeResynced(_ bytes: Data) throws -> UInt64 {
+        try decodeResyncedSnapshot(bytes).highWater
+    }
+    public func decodeResyncedSnapshot(_ bytes: Data) throws -> ConversationResyncSnapshot {
         let value = try frame(bytes)
         guard try text(value, "type") == "conversation_resynced" else { throw RelayWireError.invalidFrame }
-        return try integer(value, "conversation_seq")
+        let highWater = try integer(value, "conversation_seq")
+        let positions: [AccountConversationReadPosition]?
+        var hasInvalidPositions = false
+        if let rawPositions = value.uniqueValue(named: "chat_read_positions") {
+            if let array = rawPositions.arrayValues {
+                do {
+                    var seen = Set<RequestKey>()
+                    positions = try array.map { raw in
+                        let senderID = ExactText(try text(raw, "sender_id"))
+                        let messageID = ExactText(try text(raw, "message_id"))
+                        guard !senderID.rawValue.isEmpty, !messageID.rawValue.isEmpty else {
+                            throw RelayWireError.invalidFrame
+                        }
+                        let key = RequestKey(accountScope: profile.identity.personID,
+                            senderID: senderID, messageID: messageID)
+                        let position = try integer(raw, "read_through_conversation_seq")
+                        guard position > 0, position <= highWater, seen.insert(key).inserted else {
+                            throw RelayWireError.invalidFrame
+                        }
+                        return AccountConversationReadPosition(request: key,
+                            readThroughConversationSequence: position)
+                    }
+                } catch {
+                    positions = nil
+                    hasInvalidPositions = true
+                }
+            } else {
+                positions = nil
+                hasInvalidPositions = true
+            }
+        } else {
+            positions = nil
+        }
+        return ConversationResyncSnapshot(highWater: highWater, chatReadPositions: positions,
+            hasInvalidChatReadPositions: hasInvalidPositions)
     }
-    public func decodeEvent(_ bytes: Data) throws -> ConversationEvent {
+    /// Unknown conversation kinds are safe to skip because the conversation
+    /// sequence remains available to durably advance replay and its ACK.
+    public func decodeUpdate(_ bytes: Data) throws -> ConversationWireUpdate {
         let value = try frame(bytes)
         guard try text(value, "type") == "conversation" else { throw RelayWireError.unsupportedEvent }
-        let sequence = try integer(value, "conversation_seq"), revision = try integer(value, "request_revision")
-        guard sequence > 0, revision > 0 else { throw RelayWireError.invalidFrame }
+        let sequence = try integer(value, "conversation_seq")
+        guard sequence > 0 else { throw RelayWireError.invalidFrame }
+        let kind = try text(value, "kind")
+        let knownKinds: Set<String> = [
+            "attention_tier", "discussion", "reply", "revision", "result", "receipt", "acted",
+            "file_transfer", "file_use", "availability", "retraction", "read_position"
+        ]
+        guard knownKinds.contains(kind) else { return .ignored(sequence: sequence) }
+        return .event(try decodeKnownEvent(value))
+    }
+
+    public func decodeEvent(_ bytes: Data) throws -> ConversationEvent {
+        switch try decodeUpdate(bytes) {
+        case let .event(event): return event
+        case .ignored: throw RelayWireError.unsupportedEvent
+        }
+    }
+
+    private func decodeKnownEvent(_ value: JSONValue) throws -> ConversationEvent {
+        guard try text(value, "type") == "conversation" else { throw RelayWireError.unsupportedEvent }
+        let sequence = try integer(value, "conversation_seq")
+        guard sequence > 0 else { throw RelayWireError.invalidFrame }
+        let kind = try text(value, "kind")
+        if kind == "read_position" {
+            let senderID = ExactText(try text(value, "sender_id"))
+            let messageID = ExactText(try text(value, "message_id"))
+            let key = RequestKey(accountScope: profile.identity.personID,
+                senderID: senderID, messageID: messageID)
+            let eventID = ExactText(try text(value, "event_id"))
+            let position = try integer(value, "read_through_conversation_seq")
+            guard !senderID.rawValue.isEmpty, !messageID.rawValue.isEmpty,
+                  !eventID.rawValue.isEmpty, position > 0 else { throw RelayWireError.invalidFrame }
+            return ConversationEvent(sequence: sequence,
+                binding: ConversationBinding(request: key, revision: 0),
+                fact: .readPosition(eventID: eventID,
+                    readThroughConversationSequence: position))
+        }
+        let revision = try integer(value, "request_revision")
+        guard revision > 0 else { throw RelayWireError.invalidFrame }
         let key = RequestKey(accountScope: profile.identity.personID, senderID: ExactText(try text(value, "sender_id")),
             messageID: ExactText(try text(value, "message_id")))
         let binding = ConversationBinding(request: key, revision: revision)
         let origin = try text(value, "origin")
-        let kind = try text(value, "kind")
         let sessionHandle: ExactText?
         if let rawHandle = value.uniqueValue(named: "session_handle") {
             guard let parsed = rawHandle.stringValue, !parsed.rawValue.isEmpty else {
@@ -192,7 +350,7 @@ public struct ConversationWire: Sendable {
                 author: author, sessionHandle: handle, text: content, inReplyTo: inReplyTo,
                 operationID: operation, files: try files(value),
                 contentRedacted: kind == "result" ? nil : redacted ? true : nil,
-                kind: turnKind, resultStatus: resultStatus)
+                kind: turnKind, resultStatus: resultStatus, conversationSequence: sequence)
             if kind == "revision" {
                 if redacted { fact = .redactedRevision(turn) }
                 else {

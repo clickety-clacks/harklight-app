@@ -1,15 +1,32 @@
-import AttentionDomain
+@testable import AttentionDomain
 import CryptoKit
+import Foundation
 import HarklightNativeRelay
 import XCTest
 
 final class ConversationRelayTests: XCTestCase {
-    private final class Session: AuthenticatedInboxPagingSession, AuthenticatedConversationEventSession, @unchecked Sendable {
+    private final class DiagnosticCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [NativeClientDiagnosticEvent] = []
+        func append(_ event: NativeClientDiagnosticEvent) {
+            lock.lock(); defer { lock.unlock() }
+            storage.append(event)
+        }
+        var events: [NativeClientDiagnosticEvent] {
+            lock.lock(); defer { lock.unlock() }
+            return storage
+        }
+    }
+
+    private final class Session: AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession, @unchecked Sendable {
         let authenticatedIdentity: ProfileIdentity
         var ordinary: [Data] = []
         var conversation: [Data] = []
         var ordinaryACKs: [Data] = []
         var conversationACKs: [Data] = []
+        var conversationReadPositionRequests: [Data] = []
+        var conversationReadPositionResults: [ConversationReadPositionResult] = []
+        var supportsPostCheckpointInboxEvents = false
         var onOrdinaryACK: (() throws -> Void)?
         var onConversationACK: (() throws -> Void)?
         var onConversationOpen: (() -> Void)?
@@ -17,6 +34,10 @@ final class ConversationRelayTests: XCTestCase {
         var rejectFirstConversationACK = false
         var onLiveConversationWait: (() -> Void)?
         private var liveConversation: CheckedContinuation<Void, any Error>?
+        private let postCheckpointLock = NSLock()
+        private var postCheckpointEvents: [Data] = []
+        private var postCheckpointWaiters: [CheckedContinuation<Data, any Error>] = []
+        private var postCheckpointEventsEnded = false
         init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
         func nextLiveConversationSignal() async throws {
             try await withCheckedThrowingContinuation { continuation in
@@ -35,6 +56,41 @@ final class ConversationRelayTests: XCTestCase {
             try onOrdinaryACK?()
             ordinaryACKs.append(request)
         }
+        func nextPostCheckpointInboxEvent() async throws -> Data {
+            try await withCheckedThrowingContinuation { continuation in
+                postCheckpointLock.lock()
+                if !postCheckpointEvents.isEmpty {
+                    let frame = postCheckpointEvents.removeFirst()
+                    postCheckpointLock.unlock()
+                    continuation.resume(returning: frame)
+                } else if postCheckpointEventsEnded {
+                    postCheckpointLock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    postCheckpointWaiters.append(continuation)
+                    postCheckpointLock.unlock()
+                }
+            }
+        }
+        func pushPostCheckpointInboxEvent(_ frame: Data) {
+            postCheckpointLock.lock()
+            if postCheckpointWaiters.isEmpty {
+                postCheckpointEvents.append(frame)
+                postCheckpointLock.unlock()
+            } else {
+                let waiter = postCheckpointWaiters.removeFirst()
+                postCheckpointLock.unlock()
+                waiter.resume(returning: frame)
+            }
+        }
+        func finishPostCheckpointInboxEvents() {
+            postCheckpointLock.lock()
+            postCheckpointEventsEnded = true
+            let waiters = postCheckpointWaiters
+            postCheckpointWaiters.removeAll()
+            postCheckpointLock.unlock()
+            waiters.forEach { $0.resume(throwing: CancellationError()) }
+        }
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             onConversationOpen?()
             if let conversationOpenError { throw conversationOpenError }
@@ -47,6 +103,11 @@ final class ConversationRelayTests: XCTestCase {
                 rejectFirstConversationACK = false
                 throw InstallationTransportError.acknowledgementBehind
             }
+        }
+        func sendConversationReadPosition(_ frame: Data, operationID: UUID) async -> ConversationReadPositionResult {
+            conversationReadPositionRequests.append(frame)
+            guard !conversationReadPositionResults.isEmpty else { return .unresolved }
+            return conversationReadPositionResults.removeFirst()
         }
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult { .unresolved }
     }
@@ -102,6 +163,218 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertFalse(stillUnavailable)
         XCTAssertEqual(supported.conversationACKs.count, 1)
         await replacement.deactivate()
+    }
+
+    func testReadPositionUpdateClearsOnlyItsRequestBeforeConversationACK() async throws {
+        let (context, _, store, session) = try setup()
+        let first = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let second = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("second"))
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"First question"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
+            data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"second","origin":"origin","as":"message","message":{"title":"Second question"},"session_handle":"second-handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("reply", sequence: 1, fields: #""author":"origin","event_id":"reply-1","text":"First reply""#),
+            event("reply", sequence: 2, fields: #""author":"origin","event_id":"reply-2","text":"Second reply""#,
+                messageID: "second", sessionHandle: "second-handle"),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2,"chat_read_positions":[]}"#)]
+
+        let liveSignal = expectation(description: "The account conversation feed remains open for live updates")
+        let appliedBeforeACK = expectation(description: "The read update is durable before its transport ACK")
+        liveSignal.assertForOverFulfill = false
+        session.onLiveConversationWait = { liveSignal.fulfill() }
+        var conversationACKCount = 0
+        session.onConversationACK = {
+            conversationACKCount += 1
+            guard conversationACKCount == 2 else { return }
+            let snapshot = try store.conversationSnapshot(context: context)
+            XCTAssertFalse(snapshot.threads[first]?.hasUnreadAgentReply ?? true)
+            XCTAssertTrue(snapshot.threads[second]?.hasUnreadAgentReply ?? false)
+            appliedBeforeACK.fulfill()
+        }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[first]).hasUnreadAgentReply)
+        XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[second]).hasUnreadAgentReply)
+        await fulfillment(of: [liveSignal], timeout: 2)
+
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","event_id":"read-3","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","kind":"read_position","read_through_conversation_seq":1}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
+        await session.pushLiveConversation()
+        await fulfillment(of: [appliedBeforeACK], timeout: 2)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+        XCTAssertEqual(session.conversationACKs.count, 2)
+        await core.deactivate()
+    }
+
+    func testLocalReadBeforeServerSupportMigratesAndRetriesWithSameOperationID() async throws {
+        let (context, persistence, store, session) = try setup()
+        let first = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let second = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("second"))
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"First question"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
+            data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"second","origin":"origin","as":"message","message":{"title":"Second question"},"session_handle":"second-handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("reply", sequence: 1, fields: #""author":"origin","event_id":"reply-1","text":"First reply""#),
+            event("reply", sequence: 2, fields: #""author":"origin","event_id":"reply-2","text":"Second reply""#,
+                messageID: "second", sessionHandle: "second-handle"),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        XCTAssertNil(try store.markConversationRead(first, context: context),
+                     "An older server keeps the existing local read marker and receives no read-position write.")
+        XCTAssertTrue(session.conversationReadPositionRequests.isEmpty)
+        let locallyRead = try XCTUnwrap(store.conversationSnapshot(context: context).threads[first])
+        XCTAssertEqual(locallyRead.latestAgentReply?.id, ExactText("reply-1"))
+        XCTAssertEqual(locallyRead.readThroughTurn, ExactText("reply-1"))
+        XCTAssertFalse(locallyRead.hasUnreadAgentReply)
+        XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[second]).hasUnreadAgentReply)
+
+        // The inbox replay is already at high water 2; this subsequent open
+        // returns only the accepted frame and its matching checkpoint.
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2,"chat_read_positions":[]}"#)]
+        session.conversationReadPositionResults = [.unresolved,
+            .accepted(position: 1, eventSequence: 3, eventID: ExactText("read-3"), duplicate: false)]
+        _ = try await core.resyncAndDrainOutbox()
+
+        let migrated = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(migrated.chatReadPositionSupport, true)
+        XCTAssertEqual(migrated.chatReadPositions?[first], 1)
+        XCTAssertEqual(migrated.pendingChatReadPositions.first?.readThroughConversationSequence, 1)
+        let firstAttempt = try XCTUnwrap(session.conversationReadPositionRequests.first)
+        let firstFrame = try JSONValue.parse(firstAttempt)
+        XCTAssertEqual(firstFrame.uniqueValue(named: "type")?.stringValue?.rawValue, "conversation_read")
+        XCTAssertEqual(firstFrame.uniqueValue(named: "sender_id")?.stringValue, first.senderID)
+        XCTAssertEqual(firstFrame.uniqueValue(named: "message_id")?.stringValue, first.messageID)
+        XCTAssertEqual(firstFrame.uniqueValue(named: "read_through_conversation_seq")?.integerValue, 1)
+        XCTAssertNil(firstFrame.uniqueValue(named: "request_revision"))
+        XCTAssertNil(firstFrame.uniqueValue(named: "person_id"))
+        XCTAssertNil(firstFrame.uniqueValue(named: "device_id"))
+
+        let pendingBeforeRelaunch = try XCTUnwrap(
+            store.conversationSnapshot(context: context).pendingChatReadPositions.first)
+        let relaunchedStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistedPending = try XCTUnwrap(
+            relaunchedStore.conversationSnapshot(context: context).pendingChatReadPositions.first)
+        XCTAssertEqual(persistedPending.operationID, pendingBeforeRelaunch.operationID,
+                       "The unresolved read operation and its identity survive a relaunch.")
+        await core.deactivate()
+
+        let retrySession = Session(context.identity)
+        retrySession.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        retrySession.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2,"chat_read_positions":[]}"#)]
+        retrySession.conversationReadPositionResults = [
+            .accepted(position: 1, eventSequence: 3, eventID: ExactText("read-3"), duplicate: false)
+        ]
+        var conversationOpenCount = 0
+        retrySession.onConversationOpen = {
+            conversationOpenCount += 1
+            guard conversationOpenCount == 2 else { return }
+            retrySession.conversation = [self.data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+                self.data(#"{"v":1,"type":"conversation","event_id":"read-3","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","kind":"read_position","read_through_conversation_seq":1}"#),
+                self.data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
+        }
+        let retryCore = try NativeRelayCore(store: relaunchedStore, context: context, session: retrySession)
+        _ = try await retryCore.resyncAndDrainOutbox()
+
+        XCTAssertEqual(retrySession.conversationReadPositionRequests.count, 1)
+        let retryFrame = try JSONValue.parse(retrySession.conversationReadPositionRequests[0])
+        XCTAssertEqual(retryFrame.uniqueValue(named: "op_id")?.stringValue,
+                       firstFrame.uniqueValue(named: "op_id")?.stringValue,
+                       "A retry of the same logical read reuses its durable operation identity.")
+        let snapshot = try relaunchedStore.conversationSnapshot(context: context)
+        XCTAssertTrue(snapshot.pendingChatReadPositions.isEmpty)
+        XCTAssertEqual(snapshot.chatReadPositions?[first], 1)
+        XCTAssertFalse(try XCTUnwrap(snapshot.threads[first]).hasUnreadAgentReply)
+        XCTAssertTrue(try XCTUnwrap(snapshot.threads[second]).hasUnreadAgentReply)
+        await retryCore.deactivate()
+    }
+
+    func testReadPositionWireDoesNotRequireRevisionOrSessionHandle() throws {
+        let (context, _, _, _) = try setup()
+        let wire = try ConversationWire(profile: context)
+        let valid = try wire.decodeUpdate(data(#"{"v":1,"type":"conversation","event_id":"read-7","conversation_seq":7,"sender_id":"author","message_id":"request","origin":"origin","kind":"read_position","read_through_conversation_seq":4}"#))
+        guard case let .event(event) = valid,
+              case let .readPosition(eventID, position) = event.fact else {
+            return XCTFail("The valid account read-position update should be applied.")
+        }
+        XCTAssertEqual(event.sequence, 7)
+        XCTAssertEqual(event.binding.revision, 0)
+        XCTAssertEqual(event.binding.request.accountScope, context.identity.personID)
+        XCTAssertEqual(eventID, ExactText("read-7"))
+        XCTAssertEqual(position, 4)
+
+        XCTAssertThrowsError(try wire.decodeUpdate(data(#"{"v":1,"type":"conversation","event_id":"read-7","conversation_seq":7,"sender_id":"author","message_id":"request","kind":"read_position"}"#)))
+        XCTAssertThrowsError(try wire.decodeUpdate(data(#"{"v":1,"type":"conversation","event_id":"","conversation_seq":7,"sender_id":"author","message_id":"request","kind":"read_position","read_through_conversation_seq":4}"#)))
+    }
+
+    func testOlderSavedConversationTurnSequenceIsRecoveredForDuplicateReplay() throws {
+        let request = RequestKey(accountScope: ExactText("person"),
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: request, revision: 1)
+        let handle = ExactText("handle")
+        let oldTurn = ConversationTurn(id: ExactText("reply-1"), binding: binding,
+            author: .origin, sessionHandle: handle, text: ExactText("Reply"), kind: .reply)
+        var thread = ConversationThread(request: request, sessionHandle: handle,
+            revision: 1, payload: .null)
+        try thread.merge(oldTurn)
+        var state = ConversationState()
+        state.cursor = 1
+        state.events[1] = ConversationEvent(sequence: 1, binding: binding, fact: .turn(oldTurn))
+        state.threads[request] = thread
+
+        state.orderTurnsFromProjectionEvents()
+        var replayedTurn = oldTurn
+        replayedTurn.conversationSequence = 1
+        try state.apply(ConversationEvent(sequence: 1, binding: binding, fact: .turn(replayedTurn)))
+
+        XCTAssertEqual(state.threads[request]?.latestAgentReply?.conversationSequence, 1)
+        guard case let .turn(savedTurn)? = state.events[1]?.fact else {
+            return XCTFail("The old saved conversation event should remain available.")
+        }
+        XCTAssertEqual(savedTurn.conversationSequence, 1)
+    }
+
+    func testResyncSnapshotDistinguishesOldServerFromEmptyReadMap() throws {
+        let (context, _, _, _) = try setup()
+        let wire = try ConversationWire(profile: context)
+        let oldServer = try wire.decodeResyncedSnapshot(
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0}"#))
+        let supportedServer = try wire.decodeResyncedSnapshot(
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0,"chat_read_positions":[]}"#))
+        XCTAssertNil(oldServer.chatReadPositions)
+        XCTAssertEqual(supportedServer.chatReadPositions, [])
+    }
+
+    func testInvalidOptionalReadMapDoesNotStopConversationReplay() async throws {
+        let (context, _, store, session) = try setup()
+        let diagnostics = DiagnosticCollector()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("reply", sequence: 1, fields: #""author":"origin","event_id":"reply-1","text":"Reply""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":2}]}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: diagnostics.append)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let snapshot = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 1)
+        XCTAssertEqual(snapshot.chatReadPositionSupport, false)
+        XCTAssertTrue(snapshot.threads.values.contains { $0.latestAgentReply?.id == ExactText("reply-1") })
+        XCTAssertEqual(session.conversationACKs.count, 1)
+        XCTAssertTrue(diagnostics.events.contains { $0.causeCode == "invalid_chat_read_positions" })
+        await core.deactivate()
     }
 
     func testOtherConversationRefusalsStillFailTheDrain() async throws {
@@ -461,17 +734,95 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         XCTAssertTrue(session.conversationACKs.isEmpty)
     }
-    func testUnknownConversationKindCannotAdvanceOrACKItsHighWater() async throws {
+    func testUnknownConversationKindIsNotedSkippedAndReplayContinues() async throws {
+        let (context, _, store, session) = try setup()
+        let diagnostics = DiagnosticCollector()
+        let liveACK = expectation(description: "The live replay is acknowledged through its later known event")
+        var conversationACKCount = 0
+        session.onConversationACK = {
+            conversationACKCount += 1
+            if conversationACKCount == 2 { liveACK.fulfill() }
+        }
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"kind":"future_fact"}"#),
+            event("discussion", sequence: 2, fields: #""author":"agent","event_id":"2","text":"Reply""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: diagnostics.append)
+        _ = try await core.resyncAndDrainOutbox()
+        let snapshot = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 2)
+        XCTAssertTrue(snapshot.threads.values.contains { $0.turns.contains { $0.id == ExactText("2") } })
+        XCTAssertTrue(diagnostics.events.contains { $0.causeCode == "unknown_update_kind" })
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(session.conversationACKs.count, 1)
+
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":3,"kind":"future_fact"}"#),
+            event("reply", sequence: 4, fields: #""author":"agent","event_id":"4","text":"Next reply""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#)]
+        await session.pushLiveConversation()
+        await fulfillment(of: [liveACK], timeout: 2)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 4)
+        XCTAssertTrue(try store.conversationSnapshot(context: context).threads.values
+            .contains { $0.turns.contains { $0.id == ExactText("4") } })
+        await core.deactivate()
+    }
+
+    func testUnknownRelayUpdateIsNotedSkippedAndAcknowledged() async throws {
+        let (context, _, store, session) = try setup()
+        let diagnostics = DiagnosticCollector()
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"future_relay_update","seq":1}"#),
+            data(#"{"v":1,"type":"lifecycle","seq":2,"state":"future_terminal"}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: diagnostics.append)
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 2)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        XCTAssertEqual(session.ordinaryACKs.count, 1)
+        XCTAssertTrue(diagnostics.events.contains { $0.causeCode == "unknown_update_kind" })
+        await core.deactivate()
+    }
+
+    func testMalformedUnknownConversationFrameStillStopsItsReplay() async throws {
         let (context, _, store, session) = try setup()
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            event("future_fact", sequence: 1, fields: #""event_id":"2""#),
+            data(#"{"v":1,"type":"conversation","kind":"future_fact"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        do { _ = try await core.resyncAndDrainOutbox(); XCTFail("Unknown event must refuse replay") }
-        catch { XCTAssertEqual(error as? RelayWireError, .unsupportedEvent) }
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("An unknown update without a usable sequence cannot advance replay")
+        } catch {
+            XCTAssertEqual(error as? RelayWireError, .invalidFrame)
+        }
         XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertTrue(session.conversationACKs.isEmpty)
+        await core.deactivate()
+    }
+
+    func testUnknownPostCheckpointRelayUpdateAdvancesCursorAndACKs() async throws {
+        let (context, _, store, session) = try setup()
+        session.supportsPostCheckpointInboxEvents = true
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0}"#)]
+        let postCheckpointACK = expectation(description: "The unknown live update is acknowledged")
+        var ordinaryACKCount = 0
+        session.onOrdinaryACK = {
+            ordinaryACKCount += 1
+            if ordinaryACKCount == 2 { postCheckpointACK.fulfill() }
+        }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.ordinaryACKs.count, 1)
+        session.pushPostCheckpointInboxEvent(data(#"{"v":1,"type":"future_relay_update","seq":2}"#))
+        await fulfillment(of: [postCheckpointACK], timeout: 2)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        XCTAssertEqual(session.ordinaryACKs.count, 2)
+        await core.deactivate()
+        session.finishPostCheckpointInboxEvents()
     }
     func testConversationGapAndWrongHighWaterCannotBeAcknowledged() async throws {
         for gap in [true, false] {

@@ -218,8 +218,21 @@ public final class AttentionDomainStore: @unchecked Sendable {
                   validIntents, validIntentIndex, validFences, validOutbox else {
                 throw AttentionStoreError.persistence("The profile store contains cross-account or inconsistent request state.")
             }
-            guard (loaded.conversation?.threads.keys.allSatisfy { $0.accountScope == context.identity.personID } ?? true),
-                  (loaded.conversation?.events.values.allSatisfy { $0.binding.request.accountScope == context.identity.personID } ?? true) else {
+            let validConversationThreads = loaded.conversation?.threads.keys.allSatisfy {
+                $0.accountScope == context.identity.personID
+            } ?? true
+            let validConversationEvents = loaded.conversation?.events.values.allSatisfy {
+                $0.binding.request.accountScope == context.identity.personID
+            } ?? true
+            let validConversationReadPositions = loaded.conversation?.chatReadPositions?.keys.allSatisfy {
+                $0.accountScope == context.identity.personID
+            } ?? true
+            let validPendingConversationReadPositions = loaded.conversation?.pendingChatReadPositions?.allSatisfy {
+                $0.key.accountScope == context.identity.personID && $0.key == $0.value.request &&
+                    $0.value.readThroughConversationSequence > 0
+            } ?? true
+            guard validConversationThreads, validConversationEvents,
+                  validConversationReadPositions, validPendingConversationReadPositions else {
                 throw AttentionStoreError.persistence("The conversation store contains a different account's requests.")
             }
             loaded.conversation?.orderTurnsFromProjectionEvents()
@@ -840,6 +853,15 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 try recordRepair(.conflictingEvent(sequence: event.sequence))
                 throw AttentionStoreError.eventConflict(event.sequence)
             }
+            if previous.accountAnswerOutcome == nil,
+               event.accountAnswerOutcome != nil,
+               case .terminal = event.body {
+                var next = state
+                try applyInboxProjection(event, to: &next)
+                next.appliedEvents[event.sequence] = event
+                try commit(next)
+                return state.cursor
+            }
             if let metadata = event.conversation {
                 if let previous = state.appliedEvents[event.sequence]?.conversation, !metadata.canEnrich(previous) {
                     throw ConversationError.conflict
@@ -966,6 +988,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             var updated = previous
             updated.state = terminalState
             updated.authorizedOriginAnswer = effectiveAuthorizedAnswer
+            updated.accountAnswerOutcome = event.accountAnswerOutcome ?? previous.accountAnswerOutcome
             updated.eventSequence = event.sequence
             next.remoteStates[requestKey] = updated
             if let intentID = next.intentByRequest[requestKey], var intent = next.intents[intentID] {
@@ -1023,6 +1046,40 @@ public final class AttentionDomainStore: @unchecked Sendable {
         if case let .terminal(requestKey, _, _) = event.body {
             refreshAcceptedReplayIndex(for: requestKey)
         }
+        return state.cursor
+    }
+
+    /// Commits only the ordinary relay cursor for a sequenced update this
+    /// client does not understand. No request state is fabricated or changed.
+    @discardableResult
+    public func advanceRelayCursor(overIgnoredUpdateAt sequence: UInt64,
+                                   context suppliedContext: ProfileContext) throws -> UInt64 {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        if sequence <= state.cursor { return state.cursor }
+        guard state.cursor < UInt64.max, sequence == state.cursor + 1 else {
+            let expected = state.cursor == UInt64.max ? UInt64.max : state.cursor + 1
+            try recordRepair(.eventGap(expected: expected, received: sequence))
+            throw AttentionStoreError.eventGap(expected: expected, received: sequence)
+        }
+        if let barrier = state.replayBarrier, sequence > barrier {
+            try recordRepair(.eventGap(expected: barrier, received: sequence))
+            throw AttentionStoreError.eventGap(expected: barrier, received: sequence)
+        }
+        var next = state
+        next.cursor = sequence
+        next.repairIssues.removeAll { issue in
+            switch issue {
+            case let .eventGap(_, received): return sequence == UInt64.max || received <= sequence + 1
+            case let .missingOriginContent(received, _): return received == sequence
+            case let .conflictingEvent(received): return received == sequence
+            }
+        }
+        try commit(next)
         return state.cursor
     }
 
@@ -1113,6 +1170,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     thread.answerDrafts = archived
                 }
             }
+            if conversation.chatReadPositionSupport == true {
+                thread.accountReadThroughConversationSequence = conversation.chatReadPositions?[key] ?? 0
+            }
             for revision in thread.drafts.keys {
                 guard var draft = thread.drafts[revision] else { continue }
                 if case .saved = draft.disposition {
@@ -1184,6 +1244,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             if (previous?.eventSequence ?? 0) <= highWater {
                 let current = RemoteRequestState(state: terminalState,
                     authorizedOriginAnswer: answer ?? previous?.authorizedOriginAnswer,
+                    accountAnswerOutcome: terminal.accountAnswerOutcome ?? previous?.accountAnswerOutcome,
                     classification: classification ?? previous?.classification,
                     eventSequence: terminal.sequence,
                     attentionTier: previous?.attentionTier,
@@ -1206,6 +1267,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 guard previous?.state == nil else { throw AttentionStoreError.inboxPageConflict }
                 let current = RemoteRequestState(state: nil,
                     authorizedOriginAnswer: previous?.authorizedOriginAnswer,
+                    accountAnswerOutcome: previous?.accountAnswerOutcome,
                     classification: classification ?? previous?.classification,
                     eventSequence: acceptance.sequence,
                     attentionTier: previous?.attentionTier,
@@ -1281,10 +1343,19 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try validate(key, in: context.identity)
         if let prior = next.appliedEvents[event.sequence] {
             guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
-            return
+            guard prior.accountAnswerOutcome == nil, event.accountAnswerOutcome != nil else { return }
         }
         if let prior = next.pendingRelayOverlays?[event.sequence] {
             guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
+            if prior.accountAnswerOutcome == nil, event.accountAnswerOutcome != nil {
+                if next.requests[key] != nil || next.inboxReferences?[key] != nil {
+                    try applyInboxProjection(event, to: &next)
+                    next.appliedEvents[event.sequence] = event
+                    next.pendingRelayOverlays?.removeValue(forKey: event.sequence)
+                } else {
+                    next.pendingRelayOverlays?[event.sequence] = event
+                }
+            }
             return
         }
         guard next.requests[key] != nil || next.inboxReferences?[key] != nil else {
@@ -1315,6 +1386,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
             var updated = RemoteRequestState(state: terminalState,
                 authorizedOriginAnswer: answer ?? currentPrevious.authorizedOriginAnswer,
+                accountAnswerOutcome: event.accountAnswerOutcome ?? currentPrevious.accountAnswerOutcome,
                 classification: currentPrevious.classification,
                 eventSequence: event.sequence,
                 attentionTier: currentPrevious.attentionTier,
@@ -2118,7 +2190,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         let conversation = state.conversation ?? ConversationState()
-        return ConversationSnapshot(cursor: conversation.cursor, threads: conversation.threads)
+        let pending = (conversation.pendingChatReadPositions ?? [:]).values.sorted {
+            if $0.request.senderID != $1.request.senderID {
+                return $0.request.senderID.rawValue < $1.request.senderID.rawValue
+            }
+            return $0.request.messageID.rawValue < $1.request.messageID.rawValue
+        }
+        return ConversationSnapshot(cursor: conversation.cursor, threads: conversation.threads,
+            chatReadPositions: conversation.chatReadPositions,
+            chatReadPositionSupport: conversation.chatReadPositionSupport,
+            pendingChatReadPositions: pending)
     }
 
     /// The conversation cursor commits in the same account transaction as its fact.
@@ -2229,7 +2310,39 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return conversation.cursor
     }
 
+    /// Persists the conversation sequence for an ignored, well-formed update
+    /// so replay can continue without creating an artificial request thread.
+    @discardableResult
+    public func advanceConversationCursor(overIgnoredUpdateAt sequence: UInt64,
+                                          context suppliedContext: ProfileContext) throws -> UInt64 {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var conversation = state.conversation ?? ConversationState()
+        if sequence <= conversation.cursor { return conversation.cursor }
+        guard conversation.cursor < UInt64.max, sequence == conversation.cursor + 1 else {
+            let expected = conversation.cursor == UInt64.max ? UInt64.max : conversation.cursor + 1
+            throw ConversationError.gap(expected: expected, received: sequence)
+        }
+        conversation.cursor = sequence
+        var next = state
+        next.conversation = conversation
+        try commit(next)
+        return state.conversation?.cursor ?? 0
+    }
+
     public func finishConversationReplay(at highWater: UInt64, context suppliedContext: ProfileContext) throws {
+        try finishConversationReplay(at: highWater, chatReadPositions: nil, context: suppliedContext)
+    }
+
+    public func finishConversationReplay(at highWater: UInt64,
+                                         chatReadPositions: [AccountConversationReadPosition]?,
+                                         context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
@@ -2237,6 +2350,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard highWater == actual else {
             throw AttentionStoreError.replayIncomplete(expected: highWater, actual: actual)
         }
+        for position in chatReadPositions ?? [] {
+            guard position.request.accountScope == context.identity.personID,
+                  position.readThroughConversationSequence > 0 else {
+                throw AttentionStoreError.wrongAccount
+            }
+        }
+        var conversation = state.conversation ?? ConversationState()
+        try conversation.mergeChatReadPositions(chatReadPositions)
+        guard conversation != (state.conversation ?? ConversationState()) else { return }
+        var next = state
+        next.conversation = conversation
+        try commit(next)
     }
 
     private func preservesOperationResult(_ disposition: IntentDisposition) -> Bool {
@@ -2308,7 +2433,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     /// Records that Chat has shown the request's latest agent reply.
-    public func markConversationRead(_ request: RequestKey, context suppliedContext: ProfileContext) throws {
+    @discardableResult
+    public func markConversationRead(_ request: RequestKey,
+                                     context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -2318,9 +2445,32 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation,
               var thread = conversation.threads[request] else { throw ConversationError.missingRequest }
-        guard let latest = thread.latestAgentReply?.id, thread.readThroughTurn != latest else { return }
-        thread.readThroughTurn = latest
+        guard let latest = thread.latestAgentReply else { return nil }
+        let shouldCommitLocalRead = thread.readThroughTurn != latest.id
+        thread.readThroughTurn = latest.id
         conversation.threads[request] = thread
+        let pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
+            position: latest.conversationSequence ?? 0)
+        if conversation == (state.conversation ?? ConversationState()), !shouldCommitLocalRead {
+            return pending
+        }
+        next.conversation = conversation
+        try commit(next)
+        return pending
+    }
+
+    public func acceptConversationReadPosition(_ pending: PendingConversationReadPosition,
+                                               serverPosition: UInt64,
+                                               context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(pending.request, in: context.identity)
+        var next = state
+        guard var conversation = next.conversation else { throw ConversationError.missingRequest }
+        try conversation.acceptReadPosition(pending, serverPosition: serverPosition)
         next.conversation = conversation
         try commit(next)
     }
@@ -2844,6 +2994,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata,
                           origin: event.origin,
+                          accountAnswerOutcome: event.accountAnswerOutcome,
                           attentionTier: event.attentionTierWasProvided ? event.attentionTier : nil)
     }
 

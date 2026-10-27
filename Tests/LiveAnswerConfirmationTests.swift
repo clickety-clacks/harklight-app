@@ -82,7 +82,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         live.submitFromUser(key)
         XCTAssertNil(live.actionError)
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
-        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertNil(live.request(for: key)?.receiptFacts,
+                     "A completed account state does not expose the submitting device's receipt.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
     }
@@ -316,7 +317,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
         let accepted = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(accepted.lifecycleStatus, .noComment)
-        XCTAssertEqual(accepted.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertNil(accepted.receiptFacts,
+                     "A common No comment terminal does not expose which phone submitted it.")
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
         XCTAssertFalse(LiveRequestDetail(request: accepted, store: live).canAnswer)
         let intentCount = try store.snapshot(context: context).intents.count
@@ -334,8 +336,129 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(request.lifecycleStatus, .noComment)
-        XCTAssertEqual(request.receiptFacts?.evidenceLabel, "The sender recorded your No comment answer.")
+        XCTAssertNil(request.receiptFacts)
+        XCTAssertNil(request.accountAnswerOutcome,
+                     "An older server still supplies the shared No comment state through lifecycle.")
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
+    }
+
+    func testAccountSeenOutcomeConfirmsOnAnyDeviceWithoutLocalAnswerReceipt() throws {
+        let (context, store, live, key) = try setup()
+        _ = try store.apply(RelayEvent(sequence: 2,
+            body: .terminal(key, .answered, nil)), context: context)
+        let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"seen"}}"#.utf8)
+        let event = try RelayWire(profile: context).decodeEvent(terminal)
+        XCTAssertEqual(event.accountAnswerOutcome, .seen)
+        _ = try store.apply(event, context: context)
+        try live.refreshFromDurableStore()
+
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(request.informationalSeenStatus, .confirmed)
+        XCTAssertEqual(request.accountAnswerOutcome, .seen)
+        let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertTrue(row.status.contains("Seen"))
+        XCTAssertFalse(row.status.contains("confirmed"),
+                       "A shared Seen outcome is presented as Seen, without a phone-specific confirmation label.")
+        XCTAssertEqual(LiveRequestDetail.informationalSeenText(.confirmed), "Seen")
+        XCTAssertNil(request.intentReceipt,
+                     "A shared terminal does not expose an actor-device operation receipt.")
+        XCTAssertTrue(row.belongsToReplied)
+    }
+
+    func testNoCommentTerminalKindAndUnknownOptionalOutcomeDoNotStopLifecycleSync() throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let wire = try RelayWire(profile: context)
+        let noComment = try wire.decodeEvent(Data(#"{"v":1,"type":"lifecycle","seq":1,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","terminal_kind":"no_comment"}"#.utf8))
+        guard case let .terminal(_, state, _) = noComment.body else {
+            return XCTFail("The known lifecycle terminal must continue to decode.")
+        }
+        XCTAssertEqual(state, .noComment,
+                       "The existing terminal_kind field carries No comment across older-server fallback.")
+
+        let commonNoComment = try wire.decodeEvent(Data(#"{"v":1,"type":"lifecycle","seq":4,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"}}"#.utf8))
+        guard case let .terminal(_, commonState, _) = commonNoComment.body else {
+            return XCTFail("The shared No comment terminal must continue to decode.")
+        }
+        XCTAssertEqual(commonState, .noComment)
+        XCTAssertEqual(commonNoComment.accountAnswerOutcome, .noComment)
+
+        let futureOutcome = try wire.decodeUpdate(Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"future_outcome","detail":"ignored"}}"#.utf8))
+        guard case let .event(event) = futureOutcome else {
+            return XCTFail("An unknown optional answer outcome must not stop the lifecycle stream.")
+        }
+        XCTAssertNil(event.accountAnswerOutcome)
+
+        let incompleteReply = try wire.decodeUpdate(Data(#"{"v":1,"type":"lifecycle","seq":3,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"reply"}}"#.utf8))
+        guard case let .event(replyEvent) = incompleteReply else {
+            return XCTFail("An unusable optional reply outcome must not stop lifecycle replay.")
+        }
+        XCTAssertNil(replyEvent.accountAnswerOutcome)
+    }
+
+    func testAccountReplyOutcomePreservesExactTextAndHidesOriginOnlyLegacyAnswer() throws {
+        let (context, store, live, key) = try setup()
+        let exactText = "Exact reply, with spaces."
+        let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"reply","text":"Exact reply, with spaces."}}"#.utf8)
+        let event = try RelayWire(profile: context).decodeEvent(terminal)
+        XCTAssertEqual(event.accountAnswerOutcome, .reply(ExactText(exactText)))
+        _ = try store.apply(event, context: context)
+        try live.refreshFromDurableStore()
+
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(request.accountAnswerOutcome, .reply(ExactText(exactText)))
+        XCTAssertNil(request.informationalSeenStatus,
+                     "A reply is not a failed Seen action.")
+        XCTAssertNil(request.intentReceipt,
+                     "The synced account outcome, not a phone-local receipt, supplies the answer text.")
+        XCTAssertNil(request.receiptFacts)
+    }
+
+    func testTerminalInboxPageCarriesTheSharedAccountOutcome() throws {
+        let (context, _, _, _) = try setup()
+        let paging = try InboxPagingWire(profile: context)
+        let page = Data(#"{"v":1,"type":"ok","paging_version":1,"ref":"page","snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"sample","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123},"terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"reply","text":"Exact shared reply"}}}],"next_cursor":null}"#.utf8)
+
+        let decoded = try paging.decodePage(page, ref: "page", snapshotID: "snapshot", highWater: 2)
+
+        XCTAssertEqual(decoded.items.first?.terminal?.accountAnswerOutcome,
+                       .reply(ExactText("Exact shared reply")))
+    }
+
+    func testOlderServerOriginOnlyAnswerDoesNotCreatePhoneSpecificSeenState() throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("sample"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let live = try LivePresentationStore(store: store, context: context)
+        let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"device","state":"answered","answer":{"acknowledgment":"seen"}}"#.utf8)
+        _ = try store.apply(RelayWire(profile: context).decodeEvent(terminal), context: context)
+        try live.refreshFromDurableStore()
+
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(request.lifecycleStatus, .answered)
+        XCTAssertNil(request.accountAnswerOutcome)
+        XCTAssertNil(request.informationalSeenStatus,
+                     "An older server's origin-only answer is not the shared account outcome.")
+        XCTAssertNil(request.intentReceipt)
+        XCTAssertNil(request.receiptFacts)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).status.contains("Answered"))
+        XCTAssertEqual(LiveRequestDetail.answeredStatusTitle(
+            accountAnswerOutcome: request.accountAnswerOutcome, isLiveRequest: true), "Answered",
+            "An older server's terminal stays generic instead of claiming Replied or Seen.")
+    }
+
+    func testRemoteRequestStateReadsPersistedRecordsWithoutAccountOutcome() throws {
+        let saved = try JSONDecoder().decode(RemoteRequestState.self,
+                                             from: Data(#"{"state":"answered"}"#.utf8))
+        XCTAssertEqual(saved.state, .answered)
+        XCTAssertNil(saved.accountAnswerOutcome)
     }
 
     func testNoCommentKeepsTypedDraftSavedWithoutPuttingItInTheFrame() throws {
@@ -473,7 +596,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         live.submitFromUser(key)
         XCTAssertEqual(live.actionError, "This request is no longer open for an answer.")
         XCTAssertTrue(try store.snapshot(context: context).intents.isEmpty)
-        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .unconfirmed)
+        XCTAssertNil(live.request(for: key)?.receiptFacts)
     }
 
     func testAcceptedAnswerReplaysTerminalEventBeforeCompletingRefresh() async throws {
@@ -490,7 +613,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "The checkpoint ACK is distinct; ordinary ACKs cover only post-H events.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
-        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertNil(live.request(for: key)?.receiptFacts,
+                     "Without the common outcome field, local acceptance is not displayed as shared state.")
     }
 
     func testServerAnsweredAfterLostOperationReplyMovesToRepliedWithoutInventingAcceptance() async throws {
@@ -503,7 +627,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         try live.refreshFromDurableStore()
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
-        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .unconfirmed)
+        XCTAssertNil(live.request(for: key)?.receiptFacts,
+                     "A terminal received from the account feed supersedes local delivery uncertainty.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertNil(live.actionError)
         let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
@@ -529,7 +654,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .noComment)
-        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .unconfirmed)
+        XCTAssertNil(live.request(for: key)?.receiptFacts,
+                     "The common answered state is shown without phone-specific operation attribution.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertNil(live.actionError)
 
@@ -564,8 +690,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         try live.refreshFromDurableStore()
 
         let request = try XCTUnwrap(live.request(for: key))
-        XCTAssertTrue(request.noCommentUnavailable,
-                      "The underlying unsupported-send fact remains available for detail behavior.")
+        XCTAssertFalse(request.noCommentUnavailable,
+                       "A terminal account state supersedes the device-local failed attempt.")
         let liveRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertTrue(liveRow.belongsToReplied)
         XCTAssertFalse(liveRow.status.contains("No comment not delivered"))
@@ -587,7 +713,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         do { _ = try await core.resyncAndDrainOutbox(); XCTFail("The second replay is interrupted") }
         catch InstallationTransportError.unexpectedServerFrame {}
         try live.refreshFromDurableStore()
-        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted,
+                       "A sent answer remains pending locally until its lifecycle terminal arrives.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         session.failReplayAfterSend = false
@@ -598,7 +725,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         try live.refreshFromDurableStore()
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
-        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertNil(live.request(for: key)?.receiptFacts,
+                     "The shared terminal projection replaces local operation attribution.")
     }
 
     func testNotificationRegistrationRefusalDoesNotDowngradeAcceptedAnswer() async throws {
@@ -621,7 +749,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNotNil(live.pushRegistrationWarning)
         XCTAssertNil(live.actionError)
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
-        XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertNil(live.request(for: key)?.receiptFacts,
+                     "Shared terminal state does not depend on which device sent the answer.")
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
     }
