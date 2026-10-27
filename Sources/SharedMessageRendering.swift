@@ -44,6 +44,7 @@ enum MessageTextLinks {
 /// Keep this separate from `MessageTextLinks`, which ConversationView uses.
 struct SystemDetectedMessageBody: UIViewRepresentable {
     let text: String
+    let foregroundColor: Color
 
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
@@ -56,14 +57,16 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
-        textView.textColor = .label
+        updateColors(on: textView)
         textView.text = text
         return textView
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        guard textView.text != text else { return }
-        textView.text = text
+        if textView.text != text {
+            textView.text = text
+        }
+        updateColors(on: textView)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize,
@@ -73,6 +76,27 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         let fittingSize = uiView.sizeThatFits(
             CGSize(width: width, height: .greatestFiniteMagnitude))
         return CGSize(width: width, height: fittingSize.height)
+    }
+
+    private func updateColors(on textView: UITextView) {
+        let color = UIColor(foregroundColor)
+        if textView.textColor?.isEqual(color) != true {
+            textView.textColor = color
+        }
+        if textView.tintColor?.isEqual(color) != true {
+            textView.tintColor = color
+        }
+
+        let currentLinkAttributes = textView.linkTextAttributes ?? [:]
+        let currentLinkColor = currentLinkAttributes[.foregroundColor] as? UIColor
+        let currentUnderline = (currentLinkAttributes[.underlineStyle] as? NSNumber)?.intValue
+        let underlineStyle = NSUnderlineStyle.single.rawValue
+        if currentLinkColor?.isEqual(color) != true || currentUnderline != underlineStyle {
+            textView.linkTextAttributes = [
+                .foregroundColor: color,
+                .underlineStyle: underlineStyle
+            ]
+        }
     }
 }
 

@@ -962,7 +962,8 @@ struct LiveRequestDetail: View {
                         .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                 }
                 if let body = request.body {
-                    SystemDetectedMessageBody(text: body.rawValue)
+                    SystemDetectedMessageBody(text: body.rawValue,
+                                               foregroundColor: detailColors.textColor)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if localExample?.message.kind == .review {
