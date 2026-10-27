@@ -47,8 +47,8 @@ public struct InboxReconciliationResponse: Equatable, Sendable {
     }
 }
 
-/// Exact FORMAT17 paging and receipt protocol on the enrolled-device relay.
-/// It only constructs read/reconciliation/checkpoint requests; it never sends an answer.
+/// Exact FORMAT17 inbox paging, reconciliation, and checkpoint protocol on the enrolled-device relay.
+/// Reconciliation carries stable operation copies; ordinary request-scoped answer sends remain separate.
 public struct InboxPagingWire: Sendable {
     private let relay: RelayWire
     private let profile: ProfileContext
