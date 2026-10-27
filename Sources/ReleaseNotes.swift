@@ -84,6 +84,21 @@ enum HarklightReleaseNotes {
             ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 72,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "superseded-message-links",
+                    symbol: "arrow.uturn.backward",
+                    title: LocalizedStringResource(
+                        "See what a message replaces",
+                        comment: "Release-note title for linked superseded messages."),
+                    detail: LocalizedStringResource(
+                        "Open an earlier message from its replacement without replying to it.",
+                        comment: "Release-note detail for read-only navigation to a superseded message."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 71,
             marketingVersion: "0.1.0",
             highlights: [

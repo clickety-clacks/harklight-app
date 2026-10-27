@@ -279,6 +279,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @State private var selection: InboxSelection?
+    @State private var supersedesNavigationPath: [SupersedesTarget] = []
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var isWarningPresented = false
     @State private var settings = false
@@ -541,8 +542,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
         } detail: {
-            detailContent(for: selection, inlineChat: inlineChat,
-                          geometry: geometry)
+            NavigationStack(path: $supersedesNavigationPath) {
+                detailContent(for: selection, inlineChat: inlineChat,
+                              geometry: geometry)
+            }
+            .onChange(of: selection) { _, _ in
+                supersedesNavigationPath.removeAll()
+            }
         }
     }
 
