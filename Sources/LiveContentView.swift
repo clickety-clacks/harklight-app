@@ -72,9 +72,9 @@ private struct ReplyEditorTarget: Hashable {
 }
 
 private enum ReplyInputSurfaceStyle {
-    static func fill(for colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? Color.black.opacity(0.10) : Color.white.opacity(0.10)
-    }
+    static let fill = Color.black
+    static let text = Color.white
+    static let placeholder = Color.white.opacity(0.72)
 }
 
 private struct ReplyChoiceCard: View {
@@ -112,8 +112,8 @@ private struct ReplyChoiceCard: View {
             if showsEditor {
                 TextEditor(text: $text)
                     .font(.body)
-                    .foregroundColor(Color(uiColor: .label))
-                    .tint(Color(uiColor: .label))
+                    .foregroundColor(ReplyInputSurfaceStyle.text)
+                    .tint(ReplyInputSurfaceStyle.text)
                     .scrollContentBackground(.hidden)
                     .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
                     .padding(.horizontal, 12)
@@ -127,6 +127,7 @@ private struct ReplyChoiceCard: View {
             } else if !text.isEmpty {
                 Text(text)
                     .font(.body)
+                    .foregroundStyle(ReplyInputSurfaceStyle.text)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
@@ -1374,11 +1375,16 @@ private struct LiveProjectedInputView: View {
     }
 
     private var textEditor: some View {
-        TextField(input.label.rawValue, text: textBinding, axis: .vertical)
+        TextField(
+            input.label.rawValue,
+            text: textBinding,
+            prompt: Text(input.label.rawValue).foregroundColor(ReplyInputSurfaceStyle.placeholder),
+            axis: .vertical
+        )
             .lineLimit(4...8)
             .textFieldStyle(.plain)
-            .foregroundStyle(detailColors.textColor)
-            .tint(detailColors.textColor)
+            .foregroundStyle(ReplyInputSurfaceStyle.text)
+            .tint(ReplyInputSurfaceStyle.text)
             .padding(8)
             .background(replyEditorSurface, in: RoundedRectangle(cornerRadius: 8))
             .accessibilityLabel(input.label.rawValue)
@@ -1387,7 +1393,7 @@ private struct LiveProjectedInputView: View {
     }
 
     private var replyEditorSurface: Color {
-        HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
+        ReplyInputSurfaceStyle.fill
     }
 
     private func activate(_ action: ProjectedAction) {
@@ -1428,7 +1434,7 @@ private struct LiveProjectedInputView: View {
                         textColor: detailColors.textColor,
                         selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
                         replySurface: replyEditorSurface,
-                        inputSurface: ReplyInputSurfaceStyle.fill(for: colorScheme),
+                        inputSurface: ReplyInputSurfaceStyle.fill,
                         target: target, isReadOnly: readOnly,
                         onOpen: { activate(action) })
     }
@@ -1681,8 +1687,8 @@ private struct LiveCompatibilityActions: View {
                         multiple: false, suggested: suggested, ownAnswer: false,
                         textColor: detailColors.textColor,
                         selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
-                        replySurface: HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor,
-                        inputSurface: ReplyInputSurfaceStyle.fill(for: colorScheme),
+                        replySurface: ReplyInputSurfaceStyle.fill,
+                        inputSurface: ReplyInputSurfaceStyle.fill,
                         target: target, isReadOnly: readOnly,
                         onOpen: { activate(action) })
     }

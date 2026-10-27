@@ -52,6 +52,20 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 enum HarklightReleaseNotes {
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            buildIdentifier: 68,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "reply-light-on-black",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Reply boxes are light on black",
+                        comment: "Release-note title for readable Reply fields in every appearance."),
+                    detail: LocalizedStringResource(
+                        "Reply text and the cursor stay light against a black background.",
+                        comment: "Release-note detail for the Reply fields' fixed black surface and light text."))
+            ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
             buildIdentifier: 67,
