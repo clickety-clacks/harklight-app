@@ -217,6 +217,34 @@ final class ReleaseNotesTests: XCTestCase {
             hasPriorAppState: true).isEmpty)
     }
 
+    func testBuildSixtyNineInvitationNoteIsHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 69 })
+
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["invitation-after-disconnect"])
+        XCTAssertEqual(entry.highlights.first?.symbol, "link")
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "68")
+                .compactMap(\.buildIdentifier),
+            [68, 67, 66, 65, 64, 63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "69")
+                .compactMap(\.buildIdentifier),
+            [69, 68, 67, 66, 65, 64, 63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "69",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 68,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [69])
+        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "69",
+            entries: HarklightReleaseNotes.entries,
+            lastSeenBuildIdentifier: 69,
+            hasPriorAppState: true).isEmpty)
+    }
+
     func testFreshInstallDoesNotPresentPreviouslyReleasedNotes() {
         let notes = [releaseNote(1), releaseNote(2)]
 
