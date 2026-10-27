@@ -26,8 +26,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
         let body = app.textViews["request-message-body"]
         XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(body.label.contains("https://example.invalid/detector-acceptance"), body.label)
-        XCTAssertTrue(body.label.contains("November 4, 2027 at 2:00 PM"), body.label)
+        let bodyText = body.value as? String ?? body.label
+        XCTAssertTrue(bodyText.contains("https://example.invalid/detector-acceptance"), bodyText)
+        XCTAssertTrue(bodyText.contains("November 4, 2027 at 2:00 PM"), bodyText)
 
         let detectedURL = app.links.matching(
             NSPredicate(format: "label CONTAINS %@", "example.invalid/detector-acceptance")
