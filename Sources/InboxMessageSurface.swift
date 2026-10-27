@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 
 extension EnvironmentValues {
@@ -33,15 +34,46 @@ struct InboxCardContext {
     }
 }
 
+@MainActor
+@Observable
+private final class MessageCardPullState {
+    var pull: CGFloat = 0
+    var armedDirection = 0
+}
+
+@MainActor
+private struct MessageCardPullPreview: View {
+    let state: MessageCardPullState
+    let previous: InboxCardPreview?
+    let next: InboxCardPreview?
+
+    var body: some View {
+        let pull = state.pull
+        let armedDirection = state.armedDirection
+        Color.clear
+            .overlay(alignment: pull > 0 ? .top : .bottom) {
+                if abs(pull) > 8, let neighbor = pull > 0 ? previous : next {
+                    MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0,
+                                           armed: armedDirection != 0)
+                        .frame(height: armedDirection != 0 ? 104 : min(80, abs(pull)),
+                               alignment: pull > 0 ? .bottom : .top)
+                        .clipped()
+                        .animation(.snappy, value: armedDirection)
+                }
+            }
+            .allowsHitTesting(false)
+    }
+}
+
 /// Native scroll and toolbar host shared by admitted messages and local examples.
+@MainActor
 struct MessageCardSurface<Content: View>: View {
     let context: InboxCardContext
     let replyEditorIsOpen: Bool
     private let onDownwardContentSwipe: () -> Void
     private let content: () -> Content
     @Environment(\.colorScheme) private var colorScheme
-    @State private var pull: CGFloat = 0
-    @State private var armedDirection = 0
+    @State private var pullState = MessageCardPullState()
     @State private var contentHeight: CGFloat = 0
     @State private var scrollIsInteracting = false
     @State private var movedContentDownDuringInteraction = false
@@ -103,10 +135,10 @@ struct MessageCardSurface<Content: View>: View {
                 if bottom > 0 { return -bottom }
                 return 0
             } action: { _, value in
-                pull = value
+                pullState.pull = value
                 let direction = value > 0 ? -1 : 1
                 let neighbor = direction < 0 ? context.previous : context.next
-                armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
+                pullState.armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
             }
             .onScrollPhaseChange { oldPhase, newPhase in
                 if newPhase == .interacting {
@@ -121,8 +153,8 @@ struct MessageCardSurface<Content: View>: View {
                 } else {
                     scrollIsInteracting = false
                 }
-                if oldPhase == .interacting && newPhase != .interacting && armedDirection != 0 {
-                    context.move(armedDirection)
+                if oldPhase == .interacting && newPhase != .interacting && pullState.armedDirection != 0 {
+                    context.move(pullState.armedDirection)
                 }
             }
             .background {
@@ -132,13 +164,9 @@ struct MessageCardSurface<Content: View>: View {
             }
             .toolbarBackground(.hidden, for: .navigationBar)
             .navigationBarTitleDisplayMode(.inline)
-            .overlay(alignment: pull > 0 ? .top : .bottom) {
-                if abs(pull) > 8, let neighbor = pull > 0 ? context.previous : context.next {
-                    MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0, armed: armedDirection != 0)
-                        .frame(height: armedDirection != 0 ? 104 : min(80, abs(pull)), alignment: pull > 0 ? .bottom : .top)
-                        .clipped().allowsHitTesting(false)
-                        .animation(.snappy, value: armedDirection)
-                }
+            .overlay {
+                MessageCardPullPreview(state: pullState,
+                                       previous: context.previous, next: context.next)
             }
             .toolbar {
                 ToolbarItem(placement: .principal) {
