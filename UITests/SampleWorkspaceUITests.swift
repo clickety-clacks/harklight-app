@@ -506,7 +506,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         let replyChoice = app.buttons.containing(.staticText, identifier: "Your own answer").firstMatch
         XCTAssertTrue(replyChoice.waitForExistence(timeout: 5), app.debugDescription)
         replyChoice.tap()
-        let editor = app.textViews.matching(identifier: "request-input-answer-response").firstMatch
+        let editor = app.descendants(matching: .any)
+            .matching(identifier: "request-input-answer-response").firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
         let editorCard = app.descendants(matching: .any)["request-input-answer-response-card"].firstMatch
         XCTAssertTrue(editorCard.waitForExistence(timeout: 5), app.debugDescription)
@@ -559,13 +560,17 @@ final class SampleWorkspaceUITests: XCTestCase {
                       "The inline reply field can be focused again after navigation.")
         XCTAssertGreaterThan(editor.frame.height, 0)
         capture("reply-editor-reopened", app)
-        let card = app.scrollViews["message-card-scroll"]
-        card.swipeDown()
-        XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
-                       "A downward swipe on the message content dismisses the reply keyboard.")
-        XCTAssertTrue(editor.exists, "Interactive dismissal keeps the reply editor open.")
+        let dismissKeyboard = keyboard.buttons.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Hide keyboard")
+        ).firstMatch
+        XCTAssertTrue(dismissKeyboard.waitForExistence(timeout: 5), app.debugDescription)
+        dismissKeyboard.tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5),
+                      "The keyboard's dismiss control hides it without pulling to another message.")
+        XCTAssertTrue(editor.waitForExistence(timeout: 5),
+                      "Dismissing the keyboard leaves the selected Reply editor available.")
         XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
-                       "Interactive dismissal preserves the unsent reply draft.")
+                       "Dismissing the keyboard preserves the unsent reply draft.")
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, "Chat is reachable after dismissing the keyboard.")
         chat.tap()
@@ -580,11 +585,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("reply-draft-after-chat-dismissal", app)
         editor.tap()
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
-                      "The reply editor can be focused again after interactive dismissal.")
+                      "The reply editor can be focused again after Chat is dismissed.")
         app.descendants(matching: .any)["sample-finish"].tap()
-        card.swipeDown()
-        XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
-                       "Dismiss the reply keyboard before using the stock Chat control.")
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5),
+                      "Finishing the local reply closes its keyboard before Chat is used.")
         XCTAssertTrue(chat.isHittable,
                       "Chat remains available after the reply is accepted and the keyboard is dismissed.")
         capture("text-response-submitted", app)
