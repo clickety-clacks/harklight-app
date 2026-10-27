@@ -1547,7 +1547,9 @@ final class LivePresentationStore {
     }
 
     var inboxRows: [InboxRequestRow] {
-        presentation.requests.compactMap { makeInboxRow(for: $0) }
+        presentation.requests
+            .filter { $0.lifecycleStatus != .superseded }
+            .compactMap { makeInboxRow(for: $0) }
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
@@ -1674,7 +1676,10 @@ final class LivePresentationStore {
     }
 
     var resolvedRequests: [PresentedRequest] {
-        presentation.requests.filter { $0.lifecycleStatus != .open && $0.lifecycleStatus != .pending }
+        presentation.requests.filter {
+            $0.lifecycleStatus != .open && $0.lifecycleStatus != .pending &&
+                $0.lifecycleStatus != .superseded
+        }
     }
 
     var selectedRequest: PresentedRequest? {

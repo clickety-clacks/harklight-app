@@ -24,12 +24,18 @@ struct InboxCardContext {
     let previous: InboxCardPreview?
     let next: InboxCardPreview?
     var inlineChat = false
+    var isSupersedesTarget = false
     var dismissToList: (() -> Void)? = nil
     var messageType: HarklightMessageType = .request
     let move: (Int) -> Void
 
     static var standalone: InboxCardContext {
         InboxCardContext(position: 1, total: 1, previous: nil, next: nil, move: { _ in })
+    }
+
+    static var supersedesTarget: InboxCardContext {
+        InboxCardContext(position: 1, total: 1, previous: nil, next: nil,
+                         isSupersedesTarget: true, move: { _ in })
     }
 }
 
