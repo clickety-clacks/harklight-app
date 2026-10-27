@@ -247,7 +247,7 @@ final class ConversationRelayTests: XCTestCase {
             .accepted(position: 1, eventSequence: 3, eventID: ExactText("read-3"), duplicate: false)]
         _ = try await core.resyncAndDrainOutbox()
 
-        let migrated = store.conversationSnapshot(context: context)
+        let migrated = try store.conversationSnapshot(context: context)
         XCTAssertEqual(migrated.chatReadPositionSupport, true)
         XCTAssertEqual(migrated.chatReadPositions?[first], 1)
         XCTAssertEqual(migrated.pendingChatReadPositions.first?.readThroughConversationSequence, 1)
