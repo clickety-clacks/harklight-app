@@ -518,7 +518,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "Selecting Reply focuses its editor.")
         capture("reply-editor-inline", app)
+        capture("reply-choice-note-empty", app)
         editor.typeText("Keep the smaller first step.")
+        capture("reply-choice-note-typed", app)
         let chat = app.buttons["Chat"]
         XCTAssertTrue(chat.exists,
                       "Replying does not remove Chat from the message screen.")
