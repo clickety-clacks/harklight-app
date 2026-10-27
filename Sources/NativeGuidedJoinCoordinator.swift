@@ -30,6 +30,7 @@ final class NativeGuidedJoinCoordinator {
     @ObservationIgnored var connectApproved: ((NativeEnrollmentRecord) async throws -> Bool)?
     @ObservationIgnored var notificationChoice: ((Bool) async -> Void)?
     @ObservationIgnored var didRemoveCurrentAccount: (() async -> Void)?
+    @ObservationIgnored var departureRecordsDidChange: (() -> Void)?
 
     init(store: NativeGuidedJoinStore = NativeGuidedJoinStore(),
          deviceName: String, isShowing: Bool = true,
@@ -46,6 +47,7 @@ final class NativeGuidedJoinCoordinator {
         diagnostics?.record(area: .enrollment, phase: .approvalCheck, transition: .began,
                             attemptID: epoch)
         do {
+            var unconfirmedDepartureDeviceID: String?
             if let departure = try store.departure() {
                 invitation = departure.replacement
                 if departure.removed {
@@ -59,14 +61,30 @@ final class NativeGuidedJoinCoordinator {
                     // A new request was already durable when cleanup was
                     // interrupted. Continue through normal saved-state restore.
                 } else {
-                    currentAccount = try store.approvedRecord()
-                    screen = .replacementConfirmation
-                    message = "Removing this device could not yet be confirmed. The original identity is kept so you can try again."
-                    return
+                    let saved = try store.loadAttempt()
+                    let current = try store.approvedRecord()
+                    let hasSuccessorAttempt = saved.map { $0.deviceID != departure.record.deviceID } ?? false
+                    let hasSuccessorEnrollment = current.map {
+                        $0.isApproved && $0.deviceID != departure.record.deviceID
+                    } ?? false
+                    if hasSuccessorAttempt || hasSuccessorEnrollment {
+                        unconfirmedDepartureDeviceID = departure.record.deviceID
+                        currentAccount = hasSuccessorEnrollment ? current : nil
+                    } else if departure.replacement == nil {
+                        currentAccount = current
+                        screen = .replacementConfirmation
+                        message = "The previous server may still have this phone registered. Its saved account is kept here while you retry removal."
+                        return
+                    } else {
+                        // The removal request is still available to retry, but
+                        // it does not stop the approved account from reconnecting.
+                        currentAccount = current
+                    }
                 }
             }
             attempt = try store.loadAttempt()
-            if let record = try store.approvedRecord(), record.isApproved {
+            if let record = try store.approvedRecord(), record.isApproved,
+               record.deviceID != unconfirmedDepartureDeviceID {
                 currentAccount = record
                 try await finishApproval(record, epoch: epoch, restoring: true)
             } else if let saved = attempt {
@@ -106,13 +124,19 @@ final class NativeGuidedJoinCoordinator {
         guard record.isApproved else { throw NativeJoinError.superseded }
         currentAccount = record
         _ = try store.prepareAccountDeparture(record)
+        departureRecordsDidChange?()
     }
 
-    func removeStandaloneAccount() async throws {
-        guard let departure = try store.departure(), departure.replacement == nil else {
-            throw NativeJoinError.superseded
+    func removeStandaloneAccount(_ departure: NativeAccountDeparture? = nil) async throws {
+        let target: NativeAccountDeparture
+        if let departure {
+            target = departure
+        } else {
+            guard let saved = try store.departure() else { throw NativeJoinError.superseded }
+            target = saved
         }
-        try await store.removeCurrentAccount(departure.record)
+        try await store.removeCurrentAccount(target.record, replacement: target.replacement)
+        departureRecordsDidChange?()
     }
 
     /// The app may move only the endpoint of the currently approved identity.
@@ -177,10 +201,7 @@ final class NativeGuidedJoinCoordinator {
 
     func receive(_ url: URL) async {
         guard !busy else { return }
-        if let departure = try? store.departure(), departure.replacement == nil, !departure.removed {
-            message = "Removal is still unconfirmed. Retry it with the original server before connecting again."
-            return
-        }
+            var unconfirmedDeparture: NativeAccountDeparture?
         let epoch = UUID()
         generation = epoch
         receivedInvitation = true
@@ -197,16 +218,20 @@ final class NativeGuidedJoinCoordinator {
                 if departure.removed {
                     if departure.replacement == nil { try store.finishConfirmedDeparture(departure) }
                     else { try store.dismissConfirmedDeparture() }
-                }
-                else {
-                    invitation = departure.replacement
-                    currentAccount = try store.approvedRecord()
-                    screen = .replacementConfirmation
-                    message = "Finish confirming removal with the current server before opening another invitation."
-                    return
+                } else {
+                    unconfirmedDeparture = departure
                 }
             }
-            currentAccount = try store.approvedRecord()
+            departureRecordsDidChange?()
+            if let unconfirmedDeparture,
+               let current = try store.approvedRecord(),
+               current.deviceID != unconfirmedDeparture.record.deviceID {
+                currentAccount = current
+            } else if unconfirmedDeparture != nil {
+                currentAccount = nil
+            } else {
+                currentAccount = try store.approvedRecord()
+            }
             let next = try NativeJoinInvitation.decode(url)
             invitation = next
             attempt = nil
@@ -236,6 +261,7 @@ final class NativeGuidedJoinCoordinator {
         do {
             let prepared = try store.prepare(invitation, deviceLabel: deviceName.trimmingCharacters(in: .whitespacesAndNewlines))
             attempt = prepared
+            departureRecordsDidChange?()
             let result = try await store.submit()
             guard generation == epoch else { return }
             try await accept(result, epoch: epoch)
@@ -446,20 +472,6 @@ final class NativeGuidedJoinCoordinator {
         let departureAttemptID = UUID()
         // Once removal has been sent, its result may already be committed.
         // Keep the recovery route until the old server confirms the outcome.
-        do {
-            if let departure = try store.departure(), !departure.removed {
-                diagnostics?.record(area: .enrollment, phase: .accountRemoval,
-                                    transition: .unresolved, attemptID: departureAttemptID)
-                message = "Removal is still unconfirmed. Try again with the current server before keeping or replacing this account."
-                return
-            }
-        } catch {
-            // Preserve the existing keep-account path while retaining the
-            // storage cause that the old `try?` discarded.
-            diagnostics?.record(area: .localStore, phase: .accountRemoval,
-                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
-                                error: error, attemptID: departureAttemptID)
-        }
         do { try store.dismissConfirmedDeparture() }
         catch {
             diagnostics?.record(area: .localStore, phase: .accountRemoval,
@@ -501,6 +513,14 @@ final class NativeGuidedJoinCoordinator {
             screen = .existingAccount
         } else if let saved = try store.loadAttempt(), !saved.isTerminal {
             let sameAccount = invitation.map { saved.invitation.sameAccount(as: $0) } == true
+            let departure = try store.departure()
+            let savedBelongsToDisconnectedAccount = departure.map {
+                !$0.removed && saved.deviceID == $0.record.deviceID && saved.phase == .approved
+            } ?? false
+            if savedBelongsToDisconnectedAccount && !sameAccount {
+                screen = .confirmation
+                return
+            }
             attempt = saved
             invitation = saved.invitation
             deviceName = saved.deviceLabel
@@ -518,7 +538,8 @@ final class NativeGuidedJoinCoordinator {
     }
 
     private func refreshSavedAttempt(_ saved: NativeJoinAttempt, epoch: UUID) async throws {
-        if let record = try store.approvedRecord(), record.isApproved {
+        if let record = try store.approvedRecord(), record.isApproved,
+           record.deviceID == saved.deviceID {
             try await finishApproval(record, epoch: epoch, restoring: false)
             return
         }
@@ -555,6 +576,7 @@ final class NativeGuidedJoinCoordinator {
                             transition: .began, attemptID: removalAttemptID)
         do {
             try await store.removeCurrentAccount(old, replacement: invitation)
+            departureRecordsDidChange?()
             diagnostics?.record(area: .enrollment, phase: .accountRemoval,
                                 transition: .completed, attemptID: removalAttemptID)
             await didRemoveCurrentAccount?()
@@ -563,6 +585,7 @@ final class NativeGuidedJoinCoordinator {
             attempt = nil
             screen = .confirmation
         } catch {
+            departureRecordsDidChange?()
             diagnostics?.record(area: .enrollment, phase: .accountRemoval,
                                 transition: NativeDiagnosticCauseCode.failureTransition(for: error),
                                 error: error, attemptID: removalAttemptID)

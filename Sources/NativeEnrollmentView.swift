@@ -11,6 +11,23 @@ struct NativeEnrollmentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    if flow.isShowing {
+                        if launch.unconfirmedAccountDepartures.isEmpty {
+                            if let warning = launch.unconfirmedDisconnectWarning {
+                                Label(warning, systemImage: "exclamationmark.triangle")
+                                    .font(.caption).padding(12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                            }
+                        } else {
+                            ForEach(launch.unconfirmedAccountDepartures, id: \.archiveID) { departure in
+                                UnconfirmedAccountRemovalNotice(launch: launch, departure: departure)
+                                    .font(.caption).padding(12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                    }
                     if let message = flow.message {
                         Label(message, systemImage: "info.circle")
                             .font(.caption).padding(12)
@@ -271,5 +288,27 @@ struct NativeEnrollmentView: View {
     private func primary(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action).buttonStyle(.borderedProminent)
             .buttonBorderShape(.capsule).disabled(flow.busy)
+    }
+}
+
+struct UnconfirmedAccountRemovalNotice: View {
+    let launch: NativeAppLaunch
+    let departure: NativeAccountDeparture
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let warning = launch.unconfirmedDisconnectWarning(for: departure) {
+                Label(warning, systemImage: "exclamationmark.triangle")
+            }
+            Button(launch.isDisconnectBusy(for: departure) ? "Retrying removal…" : "Retry removal") {
+                Task { await launch.retryDisconnectRemoval(for: departure) }
+            }
+            .buttonStyle(.bordered)
+            .disabled(launch.isDisconnectBusy(for: departure) ||
+                      !launch.canRetryUnconfirmedDisconnectRemoval(for: departure))
+            if let message = launch.disconnectRemovalMessage(for: departure) {
+                Text(message).foregroundStyle(.secondary)
+            }
+        }
     }
 }
