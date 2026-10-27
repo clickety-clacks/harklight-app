@@ -522,18 +522,18 @@ struct LiveInboxSettings: View {
                             }
                         }
                         if launch?.canMigrateDirectEndpointToGibson == true {
-                            Button(launch?.isEndpointMigrationBusy == true ? "Checking Gibson…" : "Move connection to Gibson…") {
+                            Button(launch?.isEndpointMigrationBusy == true ? "Checking new server…" : "Switch connection to new server…") {
                                 confirmingEndpointMigration = true
                             }
                             .disabled(launch?.isEndpointMigrationBusy == true)
-                            .confirmationDialog("Move this connection?", isPresented: $confirmingEndpointMigration,
+                            .confirmationDialog("Switch this connection?", isPresented: $confirmingEndpointMigration,
                                                 titleVisibility: .visible) {
-                                Button("Move connection to Gibson") {
+                                Button("Switch connection to new server") {
                                     Task { await launch?.migrateDirectEndpointToGibson() }
                                 }
                                 Button("Cancel", role: .cancel) {}
                             } message: {
-                                Text("Harklight will verify the confirmed server address before switching. Your approved account, device identity, trust certificate, messages and drafts stay on this phone. This does not unregister or enroll the device. If verification fails, the current connection remains active.")
+                                Text("Harklight will check the new server before switching. Your account, device identity, trust certificate, messages and drafts stay on this phone. This does not unregister or enroll the device. If the switch cannot be completed, your current connection stays active.")
                             }
                         }
                         if let message = launch?.endpointMigrationMessage {
