@@ -122,7 +122,7 @@ struct MessageCardSurface<Content: View>: View {
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 geometry.contentOffset.y + geometry.contentInsets.top
             } action: { previousOffset, offset in
-                if scrollIsInteracting,
+                if scrollIsInteracting, !movedContentDownDuringInteraction,
                    offset < previousOffset - 1 {
                     movedContentDownDuringInteraction = true
                 }
