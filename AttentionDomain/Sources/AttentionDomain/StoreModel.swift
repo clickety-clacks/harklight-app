@@ -495,23 +495,34 @@ public enum InboxOperationReceiptStatus: String, Equatable, Codable, Sendable {
     case committed
     case operationConflict = "operation_conflict"
     case notCommittedAtSnapshot = "not_committed_at_snapshot"
+    case refused
 }
 
-/// The server's read-only disposition for one exact locally retained original.
+public enum InboxOperationRefusalReason: String, Equatable, Codable, Sendable {
+    case staleRevision = "stale_revision"
+    case closed
+    case notFound = "not_found"
+    case invalidField = "invalid_field"
+}
+
+/// The server's per-operation disposition for one exact locally retained original.
 public struct InboxOperationReceipt: Equatable, Codable, Sendable {
     public let operationID: UUID
     public let status: InboxOperationReceiptStatus
     public let result: JSONValue?
     public let terminal: RelayEvent?
+    public let reason: String?
 
     public init(operationID: UUID,
                 status: InboxOperationReceiptStatus,
                 result: JSONValue? = nil,
-                terminal: RelayEvent? = nil) {
+                terminal: RelayEvent? = nil,
+                reason: String? = nil) {
         self.operationID = operationID
         self.status = status
         self.result = result
         self.terminal = terminal
+        self.reason = reason
     }
 }
 
@@ -519,11 +530,19 @@ public struct InboxReceiptBatch: Equatable, Codable, Sendable {
     public let batchID: String
     public let operationIDs: [UUID]
     public var results: [InboxOperationReceipt]?
+    /// Missing server results recorded as local unconfirmed outcomes. The
+    /// corresponding operation remains pending and retries with the same ID.
+    /// Optional so earlier checkpoints remain decodable.
+    public var missingOperationIDs: [UUID]?
 
-    public init(batchID: String, operationIDs: [UUID], results: [InboxOperationReceipt]? = nil) {
+    public init(batchID: String,
+                operationIDs: [UUID],
+                results: [InboxOperationReceipt]? = nil,
+                missingOperationIDs: [UUID]? = nil) {
         self.batchID = batchID
         self.operationIDs = operationIDs
         self.results = results
+        self.missingOperationIDs = missingOperationIDs
     }
 }
 

@@ -3,6 +3,22 @@ import XCTest
 import AttentionDomain
 
 final class ReleaseNotesTests: XCTestCase {
+    func testBuildSeventySevenInboxAnswerRecoveryNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 77 })
+
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 77)
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["inbox-answer-recovery"])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "76")
+                .compactMap(\.buildIdentifier).first,
+            76)
+        XCTAssertFalse(HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "76")
+            .contains { $0.buildIdentifier == 77 })
+        XCTAssertTrue(HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "77")
+            .contains { $0.buildIdentifier == 77 })
+    }
+
     func testBuildOneReleaseNoteShowsMarketingVersionAndRetainsBuildIdentity() throws {
         let first = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 1 })
 

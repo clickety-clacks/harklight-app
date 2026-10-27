@@ -1515,6 +1515,21 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return UInt64(number.lexeme)
     }
 
+    private static func recordInboxOperationFailure(_ submission: Submission,
+                                                    in state: inout PersistedAttentionState) {
+        var failed = submission
+        failed.disposition = .failed
+        state.intents[submission.intentID] = failed
+        state.outboxOrder.removeAll(where: { $0 == submission.intentID })
+        if state.intentByRequest[submission.requestKey] == submission.intentID {
+            state.intentByRequest.removeValue(forKey: submission.requestKey)
+        }
+        if var published = state.replayPublishedIntents {
+            published[submission.intentID] = failed
+            state.replayPublishedIntents = published
+        }
+    }
+
     public func applyRelayEvent(_ event: RelayEvent,
                                 context suppliedContext: ProfileContext) -> ApplyEventResult {
         if let result = deferUnloadedContiguousFact(event, context: suppliedContext) {
@@ -1919,6 +1934,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func saveInboxReceiptBatch(_ batchID: String,
                                       results: [InboxOperationReceipt],
+                                      missingOperationIDs: [UUID] = [],
                                       context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -1933,9 +1949,23 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.inboxCheckpointIncomplete
         }
         let batch = candidate.batches[index]
-        guard results.map(\.operationID) == batch.operationIDs else { throw AttentionStoreError.inboxPageConflict }
+        let resultIDs = results.map(\.operationID)
+        let resultIDSet = Set(resultIDs)
+        let missingIDSet = Set(missingOperationIDs)
+        let orderedResultIDs = batch.operationIDs.filter { resultIDSet.contains($0) }
+        guard resultIDSet.count == resultIDs.count,
+              missingIDSet.count == missingOperationIDs.count,
+              resultIDSet.isDisjoint(with: missingIDSet),
+              orderedResultIDs == resultIDs,
+              resultIDSet.union(missingIDSet) == Set(batch.operationIDs),
+              Set(batch.operationIDs).count == batch.operationIDs.count else {
+            throw AttentionStoreError.inboxPageConflict
+        }
         if let existing = batch.results {
-            guard existing == results else { throw AttentionStoreError.inboxPageConflict }
+            guard existing == results,
+                  (batch.missingOperationIDs ?? []) == missingOperationIDs else {
+                throw AttentionStoreError.inboxPageConflict
+            }
             return
         }
         var next = state
@@ -1954,8 +1984,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
                       case let .terminal(key, _, _) = terminal.body,
                       key == submission.requestKey,
                       terminal.sequence == sequence,
-                      terminal.sequence <= (candidate.highWater ?? 0) else {
+                      case let .bool(duplicate)? = result.uniqueValue(named: "duplicate") else {
                     throw AttentionStoreError.inboxPageConflict
+                }
+                if submission.isNoComment {
+                    guard result.uniqueValue(named: "terminal_kind")?.stringValue?.rawValue == "no_comment",
+                          case let .terminal(_, .noComment, _) = terminal.body,
+                          terminal.accountAnswerOutcome == .noComment else {
+                        throw AttentionStoreError.inboxPageConflict
+                    }
+                } else {
+                    guard duplicate,
+                          terminal.sequence <= (candidate.highWater ?? 0) else {
+                        throw AttentionStoreError.inboxPageConflict
+                    }
                 }
                 if case let .accepted(priorSequence) = submission.disposition {
                     guard priorSequence == sequence else { throw AttentionStoreError.inboxPageConflict }
@@ -1973,10 +2015,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 touchedKeys.insert(submission.requestKey)
                 refreshedKeys.insert(submission.requestKey)
             case .operationConflict:
-                guard receipt.result == nil, receipt.terminal == nil,
+                guard receipt.result == nil, receipt.terminal == nil, receipt.reason == nil,
                       !Self.isAccepted(submission) else { throw AttentionStoreError.inboxPageConflict }
+                Self.recordInboxOperationFailure(submission, in: &next)
             case .notCommittedAtSnapshot:
-                guard receipt.result == nil, !Self.isAccepted(submission) else {
+                guard receipt.result == nil, receipt.reason == nil,
+                      !Self.isAccepted(submission) else {
                     throw AttentionStoreError.inboxPageConflict
                 }
                 if let terminal = receipt.terminal {
@@ -1989,9 +2033,30 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     touchedKeys.insert(submission.requestKey)
                     refreshedKeys.insert(submission.requestKey)
                 }
+            case .refused:
+                guard receipt.result == nil, receipt.terminal == nil,
+                      let reason = receipt.reason,
+                      InboxOperationRefusalReason(rawValue: reason) != nil,
+                      !Self.isAccepted(submission) else {
+                    throw AttentionStoreError.inboxPageConflict
+                }
+                Self.recordInboxOperationFailure(submission, in: &next)
             }
         }
         candidate.batches[index].results = results
+        candidate.batches[index].missingOperationIDs = missingOperationIDs
+        for operationID in missingOperationIDs {
+            guard let submission = next.intents.values.first(where: { $0.operationID == operationID }) else {
+                throw AttentionStoreError.inboxCheckpointIncomplete
+            }
+            touchedKeys.insert(submission.requestKey)
+            switch submission.disposition {
+            case .pending, .accepted, .lost:
+                break
+            default:
+                throw AttentionStoreError.inboxPageConflict
+            }
+        }
         candidate.freshKeys = candidate.currentKeys.union(refreshedKeys)
         next.inboxCandidate = candidate
         try commit(next)
@@ -3023,7 +3088,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                         terminal: try receipt.terminal.map {
                             try externalizingConversationFiles(in: $0, using: references,
                                                               allowInlinePersistence: allowInlinePersistence)
-                        })
+                        }, reason: receipt.reason)
                 }
             }
             return updated
