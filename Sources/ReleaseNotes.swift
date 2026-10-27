@@ -99,6 +99,21 @@ enum HarklightReleaseNotes {
             ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 72,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "reply-and-detail-responsiveness",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Less repeated work while replying and scrolling",
+                        comment: "Release-note title for less repeated work while replying and scrolling."),
+                    detail: LocalizedStringResource(
+                        "Typing a Reply and scrolling within a message avoid repeated refreshes.",
+                        comment: "Release-note detail for Reply typing and message scrolling responsiveness."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 71,
             marketingVersion: "0.1.0",
             highlights: [
