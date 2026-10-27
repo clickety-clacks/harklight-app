@@ -634,6 +634,41 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(receipt.terminal?.sequence, 11)
     }
 
+    func testReconciliationAdoptsExistingNoCommentTerminalForUnseenOperationID() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("existing-no-comment-terminal"))
+        let payload = try JSONValue.parse(data(#"{"title":"No comment request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let noComment = try port.submitNoComment(context: port.context,
+            selector: selector, intentID: UUID())
+        session.snapshotHighWater = 10
+        session.reconciliationOverrides[noComment.opID] = try JSONValue.parse(data(#"{"op_id":"\#(noComment.opID.uuidString.lowercased())","status":"committed","result":{"v":1,"type":"ok","seq":11,"terminal_kind":"no_comment","duplicate":true},"terminal":{"v":1,"type":"lifecycle","seq":11,"sender_id":"sender","message_id":"existing-no-comment-terminal","origin":"installation-A","state":"answered","at":11,"by":"answer_no_comment","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"}}}"#))
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 10)
+
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 10,
+                       "Adopting a pre-existing terminal does not move the frozen snapshot checkpoint.")
+        XCTAssertEqual(snapshot.inboxCheckpoint?.highWater, 10)
+        XCTAssertEqual(snapshot.remoteStates[key]?.state, .noComment)
+        XCTAssertEqual(snapshot.remoteStates[key]?.eventSequence, 11)
+        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .accepted(sequence: 11))
+        XCTAssertTrue(snapshot.outbox.isEmpty,
+                      "A pre-existing No Comment terminal is adopted as success, not recorded as refusal.")
+        let receipt = try XCTUnwrap(snapshot.inboxCheckpoint?.batches.first?.results?.first)
+        XCTAssertEqual(receipt.status, .committed)
+        XCTAssertEqual(receipt.result?.uniqueValue(named: "duplicate"), .bool(true))
+        XCTAssertEqual(receipt.terminal?.sequence, 11)
+    }
+
     func testStaleAnswerDeclineReleasesTheRequestForItsCurrentRevision() async throws {
         let (context, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
