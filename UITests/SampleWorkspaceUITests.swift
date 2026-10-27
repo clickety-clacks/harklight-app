@@ -768,11 +768,26 @@ final class SampleWorkspaceUITests: XCTestCase {
         if dismissKeyboard.waitForExistence(timeout: 1) {
             dismissKeyboard.tap()
         } else {
-            // Compact keyboards may not expose a Hide key. The focused editor
-            // is scrolled into the lower card area, so drag from there into the
-            // keyboard instead of pulling down from the card's top boundary.
-            let start = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9))
-            let end = keyboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+            // The scroll view extends behind the keyboard, so lower normalized
+            // coordinates can hit keyboard suggestions instead of the card.
+            // Drag down in its visible left gutter, away from the editor and
+            // far enough from the top boundary to avoid changing messages.
+            let cardFrame = card.frame
+            let visibleBottom = min(cardFrame.maxY, keyboard.frame.minY)
+            let visibleHeight = visibleBottom - cardFrame.minY
+            guard cardFrame.width > 0, cardFrame.height > 0, visibleHeight > 0 else { return }
+
+            let startY = cardFrame.minY + visibleHeight * 0.45
+            let endY = min(startY + min(72, visibleHeight * 0.15), visibleBottom - 8)
+            let gutterX = cardFrame.minX + 8
+            let start = card.coordinate(withNormalizedOffset: CGVector(
+                dx: (gutterX - cardFrame.minX) / cardFrame.width,
+                dy: (startY - cardFrame.minY) / cardFrame.height
+            ))
+            let end = card.coordinate(withNormalizedOffset: CGVector(
+                dx: (gutterX - cardFrame.minX) / cardFrame.width,
+                dy: (endY - cardFrame.minY) / cardFrame.height
+            ))
             start.press(forDuration: 0.1, thenDragTo: end)
         }
     }
