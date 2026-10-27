@@ -271,9 +271,9 @@ final class ConversationRelayTests: XCTestCase {
         retrySession.onConversationOpen = {
             conversationOpenCount += 1
             guard conversationOpenCount == 2 else { return }
-            retrySession.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-                data(#"{"v":1,"type":"conversation","event_id":"read-3","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","kind":"read_position","read_through_conversation_seq":1}"#),
-                data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
+            retrySession.conversation = [self.data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+                self.data(#"{"v":1,"type":"conversation","event_id":"read-3","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","kind":"read_position","read_through_conversation_seq":1}"#),
+                self.data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
         }
         let retryCore = try NativeRelayCore(store: relaunchedStore, context: context, session: retrySession)
         _ = try await retryCore.resyncAndDrainOutbox()
