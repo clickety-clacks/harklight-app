@@ -294,6 +294,9 @@ public struct PresentedRequest: Equatable, Sendable {
     /// Whether lifecycle and Seen state were established by the accepted
     /// bounded snapshot, a receipt, or later contiguous relay activity.
     public let inboxStateIsCurrent: Bool
+    /// Message IDs listed on the original delivery, if any. Later revisions
+    /// cannot add or replace superseded targets.
+    public let supersedesMessageIDs: [ExactText]
 
     public var isResolved: Bool {
         lifecycleStatus != .open && lifecycleStatus != .pending
@@ -318,7 +321,8 @@ public struct PresentedRequest: Equatable, Sendable {
                 noCommentUnavailable: Bool = false,
                 answerNotDelivered: Bool = false,
                 staleAnswerRevision: StaleAnswerRevision? = nil,
-                inboxStateIsCurrent: Bool = true) {
+                inboxStateIsCurrent: Bool = true,
+                supersedesMessageIDs: [ExactText] = []) {
         self.key = key
         self.requestRevision = requestRevision
         self.acceptanceOrder = acceptanceOrder
@@ -339,6 +343,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.answerNotDelivered = answerNotDelivered
         self.staleAnswerRevision = staleAnswerRevision
         self.inboxStateIsCurrent = inboxStateIsCurrent
+        self.supersedesMessageIDs = supersedesMessageIDs
     }
 }
 
@@ -404,7 +409,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
               let draft = thread.answerDrafts?[revision], let stored = snapshot.requests[key] else { return nil }
         return try present(StoredRequest(key: key, originalPayload: payload), acceptanceOrder: stored.acceptanceOrder ?? 0,
             draft: draft, session: nil, remote: nil, submission: nil, selector: nil,
-            requestRevision: revision)
+            requestRevision: revision, supersedesMessageIDs: stored.supersedesMessageIDs)
     }
 
     public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) throws {
@@ -788,7 +793,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         answerNotDelivered: answerNotDelivered,
                         inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
                             $0.contains(item.request.key)
-                        } ?? true)
+                        } ?? true,
+                        supersedesMessageIDs: item.request.supersedesMessageIDs)
         }
         let displayRequests = requests.sorted { left, right in
             if left.inboxStateIsCurrent != right.inboxStateIsCurrent {
@@ -837,7 +843,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          staleAnswerRevision: StaleAnswerRevision? = nil,
                          noCommentUnavailable: Bool = false,
                          answerNotDelivered: Bool = false,
-                         inboxStateIsCurrent: Bool = true) throws -> PresentedRequest {
+                         inboxStateIsCurrent: Bool = true,
+                         supersedesMessageIDs: [ExactText] = []) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
@@ -980,7 +987,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 noCommentUnavailable: hasAccountTerminal ? false : noCommentUnavailable,
                                 answerNotDelivered: hasAccountTerminal ? false : answerNotDelivered,
                                 staleAnswerRevision: hasAccountTerminal ? nil : staleAnswerRevision,
-                                inboxStateIsCurrent: inboxStateIsCurrent)
+                                inboxStateIsCurrent: inboxStateIsCurrent,
+                                supersedesMessageIDs: supersedesMessageIDs)
     }
 
     private func informationalSeenStatus(for request: StoredRequest,

@@ -78,6 +78,10 @@ enum InboxSelection: Hashable {
     case sample(String)
 }
 
+struct SupersedesTarget: Hashable {
+    let key: RequestKey
+}
+
 enum InboxMessageTab: String, Hashable {
     case inbox
     case replied
@@ -493,7 +497,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .frame(maxWidth: .infinity)
             if inlineChat, case let .request(key)? = item, let conversationStore,
-               let request = conversationStore.request(for: key) {
+               let request = conversationStore.request(for: key),
+               request.lifecycleStatus != .superseded {
                 Divider()
                 ConversationPanel(store: conversationStore, key: key,
                     sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
@@ -505,6 +510,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 Divider()
                 SampleChatView(sender: message.sender, title: message.title, response: response)
                     .frame(width: min(360, geometry.size.width * 0.34))
+            }
+        }
+        .navigationDestination(for: SupersedesTarget.self) { target in
+            if conversationStore?.request(for: target.key) != nil {
+                requestDetail(target.key, .supersedesTarget)
+            } else {
+                ContentUnavailableView("Message not available", systemImage: "questionmark.folder")
             }
         }
         .toolbar(horizontalSizeClass == .compact && item != nil ? .hidden : .automatic,
