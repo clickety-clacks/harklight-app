@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 76,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "plain-connection-language",
+                    symbol: "arrow.triangle.2.circlepath",
+                    title: LocalizedStringResource(
+                        "Clearer connection messages",
+                        comment: "Release-note title for plain language in connection controls."),
+                    detail: LocalizedStringResource(
+                        "Connection controls explain server changes and when a switch cannot be completed.",
+                        comment: "Release-note detail for plain connection and server-switch wording."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 75,
             marketingVersion: "0.1.0",
             highlights: [

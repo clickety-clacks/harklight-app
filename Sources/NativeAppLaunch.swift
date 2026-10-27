@@ -322,7 +322,7 @@ final class NativeAppLaunch {
               let record = try? enrollment.load(), record == activeEnrollmentRecord,
               let migrated = try? NativeEndpointMigrationPolicy.candidate(from: record),
               let relayURL = URL(string: "wss://\(NativeEndpointMigrationPolicy.gibsonHost):\(NativeEndpointMigrationPolicy.gibsonRelayPort)/relay") else {
-            endpointMigrationMessage = "This saved enrollment cannot use the approved server address. Your current connection is unchanged."
+            endpointMigrationMessage = "This saved connection cannot switch to the new server address. Your current connection is unchanged."
             return
         }
         let generation = activationGeneration
@@ -339,11 +339,11 @@ final class NativeAppLaunch {
                 self.applyPersistedEndpointMigration(migrated)
             }
             guard activationGeneration == generation else { return }
-            endpointMigrationMessage = "The approved server address is saved. This account, device identity, trust certificate and local history are unchanged."
+            endpointMigrationMessage = "The new server address is saved. This account, device identity, trust certificate and local history are unchanged."
             Task { await refreshLive() }
         } catch {
             guard activationGeneration == generation else { return }
-            endpointMigrationMessage = "Gibson could not be verified, so Harklight kept the existing connection and server address. Try again when the new endpoint is available."
+            endpointMigrationMessage = "Harklight could not switch to the new server. Your current connection and saved server address are unchanged. Try again later."
         }
     }
 

@@ -189,6 +189,33 @@ final class ReleaseNotesTests: XCTestCase {
             [64])
     }
 
+    func testBuildSeventySixConnectionLanguageNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 76 })
+
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["plain-connection-language"])
+        XCTAssertEqual(entry.highlights.first?.symbol, "arrow.triangle.2.circlepath")
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "75")
+                .compactMap(\.buildIdentifier),
+            [75, 74, 73, 72, 71, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61, 59, 1])
+        XCTAssertEqual(
+            HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "76").first?.buildIdentifier,
+            76)
+        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "75",
+            entries: HarklightReleaseNotes.entries,
+            lastSeenBuildIdentifier: 75,
+            hasPriorAppState: true).isEmpty)
+        XCTAssertEqual(
+            ReleaseNotesLifecycle.notesToPresent(
+                currentBuildIdentifier: "76",
+                entries: HarklightReleaseNotes.entries,
+                lastSeenBuildIdentifier: 75,
+                hasPriorAppState: true).compactMap(\.buildIdentifier),
+            [76])
+    }
+
     func testBuildSixtySevenReplyInputNoteIsFixedAndHiddenUntilThatBuild() throws {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 67 })
 
