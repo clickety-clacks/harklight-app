@@ -129,7 +129,7 @@ private struct ReplyChoiceCard: View {
             } else if !text.isEmpty {
                 Text(text)
                     .font(.body)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Color.white)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
