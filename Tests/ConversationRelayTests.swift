@@ -231,7 +231,10 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertNil(try store.markConversationRead(first, context: context),
                      "An older server keeps the existing local read marker and receives no read-position write.")
         XCTAssertTrue(session.conversationReadPositionRequests.isEmpty)
-        XCTAssertFalse(try XCTUnwrap(store.conversationSnapshot(context: context).threads[first]).hasUnreadAgentReply)
+        let locallyRead = try XCTUnwrap(store.conversationSnapshot(context: context).threads[first])
+        XCTAssertEqual(locallyRead.latestAgentReply?.id, ExactText("reply-1"))
+        XCTAssertEqual(locallyRead.readThroughTurn, ExactText("reply-1"))
+        XCTAssertFalse(locallyRead.hasUnreadAgentReply)
         XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[second]).hasUnreadAgentReply)
 
         // The inbox replay is already at high water 2; this subsequent open
@@ -244,6 +247,10 @@ final class ConversationRelayTests: XCTestCase {
             .accepted(position: 1, eventSequence: 3, eventID: ExactText("read-3"), duplicate: false)]
         _ = try await core.resyncAndDrainOutbox()
 
+        let migrated = store.conversationSnapshot(context: context)
+        XCTAssertEqual(migrated.chatReadPositionSupport, true)
+        XCTAssertEqual(migrated.chatReadPositions?[first], 1)
+        XCTAssertEqual(migrated.pendingChatReadPositions.first?.readThroughConversationSequence, 1)
         let firstAttempt = try XCTUnwrap(session.conversationReadPositionRequests.first)
         let firstFrame = try JSONValue.parse(firstAttempt)
         XCTAssertEqual(firstFrame.uniqueValue(named: "type")?.stringValue?.rawValue, "conversation_read")

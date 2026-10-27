@@ -716,7 +716,7 @@ struct ConversationState: Codable, Equatable {
             guard var thread = threads[key] else { continue }
             let serverPosition = positions[key] ?? 0
             if let locallyReadTurn = thread.readThroughTurn,
-               let localPosition = thread.turns.first(where: { $0.id == locallyReadTurn })?.conversationSequence,
+               let localPosition = conversationSequence(for: locallyReadTurn, in: thread),
                localPosition > serverPosition {
                 if reconcileLocalRead,
                    (pending[key]?.readThroughConversationSequence ?? 0) < localPosition {
@@ -732,6 +732,22 @@ struct ConversationState: Codable, Equatable {
         }
         chatReadPositions = positions
         pendingChatReadPositions = pending
+    }
+
+    private func conversationSequence(for turnID: ExactText,
+                                      in thread: ConversationThread) -> UInt64? {
+        if let sequence = thread.turns.first(where: { $0.id == turnID })?.conversationSequence {
+            return sequence
+        }
+        return events.values.compactMap { event -> UInt64? in
+            guard event.binding.request == thread.request else { return nil }
+            switch event.fact {
+            case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
+                return turn.id == turnID ? event.sequence : nil
+            default:
+                return nil
+            }
+        }.min()
     }
 
     private func applySavedReadPosition(to thread: inout ConversationThread) {
