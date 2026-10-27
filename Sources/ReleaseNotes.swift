@@ -52,6 +52,21 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 enum HarklightReleaseNotes {
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
+            buildIdentifier: 69,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "invitation-after-disconnect",
+                    symbol: "link",
+                    title: LocalizedStringResource(
+                        "Invitation links work after Disconnect",
+                        comment: "Release-note title for joining another invitation while an earlier server removal is unconfirmed."),
+                    detail: LocalizedStringResource(
+                        "An earlier removal may still be pending; join the new invitation, then retry that removal later.",
+                        comment: "Release-note detail for joining another invitation while keeping an earlier removal retryable."))
+            ]),
         HarklightReleaseNote(
             buildIdentifier: 68,
             marketingVersion: "0.1.0",
