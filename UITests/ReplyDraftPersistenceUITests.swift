@@ -16,9 +16,11 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         reveal(editor, in: app)
         editor.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        capture("reply-free-text-empty", app)
 
         let longReply = String(repeating: "a", count: 256)
         editor.typeText(longReply)
+        capture("reply-free-text-typed", app)
         XCTAssertEqual(editor.value as? String, longReply)
 
         try await Task.sleep(for: .milliseconds(700))
@@ -46,5 +48,12 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         let scroll = app.scrollViews["message-card-scroll"]
         for _ in 0..<8 where !editor.isHittable { scroll.swipeUp() }
         XCTAssertTrue(editor.isHittable, app.debugDescription)
+    }
+
+    private func capture(_ name: String, _ app: XCUIApplication) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 }
