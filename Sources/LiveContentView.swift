@@ -114,8 +114,8 @@ private struct ReplyChoiceCard: View {
             if showsEditor {
                 TextEditor(text: $text)
                     .font(.body)
-                    .foregroundColor(Color(uiColor: .label))
-                    .tint(Color(uiColor: .label))
+                    .foregroundColor(Color.white)
+                    .tint(Color.white)
                     .scrollContentBackground(.hidden)
                     .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
                     .padding(.horizontal, 12)
@@ -1040,6 +1040,7 @@ struct LiveRequestDetail: View {
                                 .foregroundStyle(detailColors.secondaryTextColor)
                             Text(answerText.rawValue)
                                 .font(.subheadline)
+                                .foregroundStyle(Color.white)
                                 .textSelection(.enabled)
                                 .accessibilityIdentifier("request-account-answer")
                         }
@@ -1442,15 +1443,13 @@ private struct LiveProjectedInputView: View {
         TextField(
             input.label.rawValue,
             text: textBinding,
-            prompt: colorScheme == .dark
-                ? Text(input.label.rawValue).foregroundColor(ReplyInputSurfaceStyle.darkPlaceholder)
-                : nil,
+            prompt: Text(input.label.rawValue).foregroundColor(Color.white),
             axis: .vertical
         )
             .lineLimit(4...8)
             .textFieldStyle(.plain)
-            .foregroundStyle(detailColors.textColor)
-            .tint(detailColors.textColor)
+            .foregroundStyle(Color.white)
+            .tint(Color.white)
             .padding(8)
             .background(replyEditorSurface, in: RoundedRectangle(cornerRadius: 8))
             .accessibilityLabel(input.label.rawValue)
