@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 71,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "reply-familiar-backgrounds",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Reply keeps its usual background",
+                        comment: "Release-note title for restoring Reply surface colors."),
+                    detail: LocalizedStringResource(
+                        "Reply text stays easy to read in dark appearance.",
+                        comment: "Release-note detail for light Reply text and cursor in dark appearance."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 70,
             marketingVersion: "0.1.0",
             highlights: [
