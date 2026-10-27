@@ -324,6 +324,17 @@ public struct StoredRequest: Equatable, Codable, Sendable {
         return members.count == 1 ? members[0].value : nil
     }
 
+    /// IDs from the original delivery message that this request supersedes.
+    /// Malformed fields are absent, and later question revisions never replace
+    /// this relationship.
+    public var supersedesMessageIDs: [ExactText] {
+        guard let values = originalPayload.uniqueValue(named: "supersedes")?.arrayValues else {
+            return []
+        }
+        var seen = Set<ExactText>()
+        return values.compactMap(\.stringValue).filter { seen.insert($0).inserted }
+    }
+
     /// This is the one explicit informational convention supported by Spirit
     /// v19. Labels, body text, missing descriptors and unrelated values never
     /// imply that a message can be acknowledged as Seen.
