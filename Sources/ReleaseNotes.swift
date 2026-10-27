@@ -84,7 +84,7 @@ enum HarklightReleaseNotes {
             ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
-            buildIdentifier: 72,
+            buildIdentifier: 73,
             marketingVersion: "0.1.0",
             highlights: [
                 .init(
