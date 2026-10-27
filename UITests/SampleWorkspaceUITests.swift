@@ -560,13 +560,11 @@ final class SampleWorkspaceUITests: XCTestCase {
                       "The inline reply field can be focused again after navigation.")
         XCTAssertGreaterThan(editor.frame.height, 0)
         capture("reply-editor-reopened", app)
-        let dismissKeyboard = keyboard.buttons.matching(
-            NSPredicate(format: "label CONTAINS[c] %@", "Hide keyboard")
-        ).firstMatch
-        XCTAssertTrue(dismissKeyboard.waitForExistence(timeout: 5), app.debugDescription)
-        dismissKeyboard.tap()
+        let card = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
+        dismissReplyKeyboard(keyboard, in: card)
         XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5),
-                      "The keyboard's dismiss control hides it without pulling to another message.")
+                      "Dismissing the keyboard leaves the selected message in place.")
         XCTAssertTrue(editor.waitForExistence(timeout: 5),
                       "Dismissing the keyboard leaves the selected Reply editor available.")
         XCTAssertEqual(editor.value as? String, "Keep the smaller first step.",
@@ -761,6 +759,22 @@ final class SampleWorkspaceUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func dismissReplyKeyboard(_ keyboard: XCUIElement, in card: XCUIElement) {
+        let dismissKeyboard = keyboard.buttons.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Hide keyboard")
+        ).firstMatch
+        if dismissKeyboard.waitForExistence(timeout: 1) {
+            dismissKeyboard.tap()
+        } else {
+            // Compact keyboards may not expose a Hide key. The focused editor
+            // is scrolled into the lower card area, so drag from there into the
+            // keyboard instead of pulling down from the card's top boundary.
+            let start = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9))
+            let end = keyboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
     }
 
     private func dismissReplyChatPresentation(_ app: XCUIApplication, _ composer: XCUIElement) {
