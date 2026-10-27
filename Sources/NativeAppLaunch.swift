@@ -1692,13 +1692,16 @@ final class LivePresentationStore {
 #if DEBUG
         RedrawProbe.count("LivePresentationStore.draftRead")
 #endif
-        let presented: PresentedRequest?
-        if let revision {
-            presented = try? inspectedRequest(key, revision: revision)
-        } else {
-            presented = request(for: key)
+        // The displayed current revision is already projected and refreshed by
+        // observation or a successful draft save. Reading its text must not
+        // re-project every retained request whenever SwiftUI reads a binding.
+        if let current = request(for: key),
+           revision == nil || revision == current.requestRevision {
+            let bufferKey = DraftBufferKey(request: key, revision: current.requestRevision)
+            return pendingDrafts[bufferKey] ?? current.draft
         }
-        guard let presented else { return nil }
+        guard let revision,
+              let presented = try? inspectedRequest(key, revision: revision) else { return nil }
         let bufferKey = DraftBufferKey(request: key, revision: presented.requestRevision)
         return pendingDrafts[bufferKey] ?? presented.draft
     }
