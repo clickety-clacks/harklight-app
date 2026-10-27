@@ -317,6 +317,13 @@ final class ConversationPresentationTests: XCTestCase {
             binding: ConversationBinding(request: key, revision: 2),
             fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
 
+        // A newer revision may reach the store before the displayed projection
+        // catches up. Text staged against that old display must not be saved.
+        live.stageCompatibilityText("Late old-version text", action: ExactText("old"),
+                                    for: key, requestRevision: 1)
+        XCTAssertFalse(live.flushPendingDraft(for: key, requestRevision: 1))
+        try live.refreshFromDurableStore()
+
         let historical = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
         let current = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 2).requests.first)
         XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))

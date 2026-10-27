@@ -1686,13 +1686,15 @@ final class LivePresentationStore {
     }
 
     func draft(for key: RequestKey, revision: UInt64? = nil) -> RequestDraft? {
-        let presented: PresentedRequest?
-        if let revision {
-            presented = try? inspectedRequest(key, revision: revision)
-        } else {
-            presented = request(for: key)
+        // Binding reads use the revision already displayed by the observer.
+        // Historical revisions still need an explicit inspection.
+        if let current = request(for: key),
+           revision == nil || revision == current.requestRevision {
+            let bufferKey = DraftBufferKey(request: key, revision: current.requestRevision)
+            return pendingDrafts[bufferKey] ?? current.draft
         }
-        guard let presented else { return nil }
+        guard let revision,
+              let presented = try? inspectedRequest(key, revision: revision) else { return nil }
         let bufferKey = DraftBufferKey(request: key, revision: presented.requestRevision)
         return pendingDrafts[bufferKey] ?? presented.draft
     }
@@ -2034,8 +2036,11 @@ final class LivePresentationStore {
 
     private func stageDraftText(for key: RequestKey, revision: UInt64? = nil,
                                 _ change: (inout RequestDraft) -> Void) {
+        // Staging is local and tentative. The debounced save and any submit
+        // inspect the durable revision before writing or sending.
         guard !isReadOnly,
-              let request = try? inspectedRequest(key, revision: revision),
+              let request = request(for: key),
+              revision == nil || revision == request.requestRevision,
               !isRetracted(key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return }
         let bufferKey = DraftBufferKey(request: key, revision: request.requestRevision)
