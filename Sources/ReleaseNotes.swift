@@ -69,6 +69,21 @@ enum HarklightReleaseNotes {
             ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 74,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "message-data-detectors",
+                    symbol: "link",
+                    title: LocalizedStringResource(
+                        "Tap detected details in messages",
+                        comment: "Release-note title for system data detection in message details."),
+                    detail: LocalizedStringResource(
+                        "Links, dates, phone numbers, and addresses open with iOS actions.",
+                        comment: "Release-note detail for data detector tap actions in message details."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 72,
             marketingVersion: "0.1.0",
             highlights: [
