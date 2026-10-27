@@ -560,6 +560,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("HarklightInbox.body")
+#endif
         GeometryReader { geometry in
             let landscape = geometry.size.width > geometry.size.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
@@ -848,6 +851,9 @@ struct InboxList: View {
     @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
+#if DEBUG
+        let _ = RedrawProbe.count("InboxList.listContent")
+#endif
         let messageTab = tab.messageTab
         let visibleRows = filteredRows(in: tab)
         List(selection: listSelection) {
@@ -968,9 +974,15 @@ struct InboxList: View {
             return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
                 distanceToBottom: max(0, extent - top), contentFits: extent == 0)
         } action: { oldMetrics, newMetrics in
+#if DEBUG
+            RedrawProbe.count("InboxList.scrollGeometryCallback")
+#endif
             let canPageOnDrag = newMetrics.contentFits || newMetrics.distanceToBottom <= 80
             // Pixel offsets are for this callback only; publishing each one invalidates the list.
             if canRequestOlderPageOnDrag != canPageOnDrag {
+#if DEBUG
+                RedrawProbe.count("InboxList.pageEligibilityMutation")
+#endif
                 canRequestOlderPageOnDrag = canPageOnDrag
             }
             guard isUserScrolling,
@@ -979,6 +991,9 @@ struct InboxList: View {
             requestOlderPage()
         }
         .onScrollPhaseChange { oldPhase, newPhase in
+#if DEBUG
+            RedrawProbe.count("InboxList.scrollPhaseCallback")
+#endif
             let scrolling = newPhase == .interacting || newPhase == .decelerating
             if scrolling && !isUserScrolling { requestedInGesture = false }
             if isUserScrolling != scrolling { isUserScrolling = scrolling }
@@ -999,6 +1014,9 @@ struct InboxList: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("InboxList.body")
+#endif
         ScrollViewReader { proxy in
             listContent(for: tab, using: proxy)
                 .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
@@ -1037,6 +1055,9 @@ struct InboxRowContent: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("InboxRowContent.body")
+#endif
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 Text(displayInitials)

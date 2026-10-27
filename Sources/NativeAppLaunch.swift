@@ -6,6 +6,9 @@ import Observation
 import Security
 import UIKit
 import UserNotifications
+#if DEBUG
+import Dispatch
+#endif
 
 /// Material supplied only after an enrollment owner has verified the server's
 /// approved person/device record. This consumer never infers it from a push or
@@ -1686,6 +1689,9 @@ final class LivePresentationStore {
     }
 
     func draft(for key: RequestKey, revision: UInt64? = nil) -> RequestDraft? {
+#if DEBUG
+        RedrawProbe.count("LivePresentationStore.draftRead")
+#endif
         let presented: PresentedRequest?
         if let revision {
             presented = try? inspectedRequest(key, revision: revision)
@@ -1745,6 +1751,10 @@ final class LivePresentationStore {
 
     func stageText(_ text: String, input: ExactText, action: ExactText?, for key: RequestKey,
                    requestRevision: UInt64? = nil) {
+#if DEBUG
+        RedrawProbe.beginTypedChange()
+        RedrawProbe.count("LivePresentationStore.stageText")
+#endif
         let currentDraft = draft(for: key, revision: requestRevision)
         let currentText: ExactText?
         if let action {
@@ -1779,6 +1789,10 @@ final class LivePresentationStore {
 
     func stageCompatibilityText(_ text: String, action: ExactText, for key: RequestKey,
                                 requestRevision: UInt64? = nil) {
+#if DEBUG
+        RedrawProbe.beginTypedChange()
+        RedrawProbe.count("LivePresentationStore.stageCompatibilityText")
+#endif
         let currentText = draft(for: key, revision: requestRevision)?
             .compatibility.textByActionID[action]?.rawValue ?? ""
         let textChanged = currentText != text
@@ -2034,6 +2048,9 @@ final class LivePresentationStore {
 
     private func stageDraftText(for key: RequestKey, revision: UInt64? = nil,
                                 _ change: (inout RequestDraft) -> Void) {
+#if DEBUG
+        RedrawProbe.count("LivePresentationStore.stageDraftText")
+#endif
         guard !isReadOnly,
               let request = try? inspectedRequest(key, revision: revision),
               !isRetracted(key), request.lifecycleStatus == .open,
@@ -2118,6 +2135,10 @@ final class LivePresentationStore {
     }
 
     private func inspectedRequest(_ key: RequestKey, revision: UInt64? = nil) throws -> PresentedRequest {
+#if DEBUG
+        let inspectStart = DispatchTime.now().uptimeNanoseconds
+        defer { RedrawProbe.duration("LivePresentationStore.portInspect", since: inspectStart) }
+#endif
         let snapshot: PresentationSnapshot
         if let revision {
             snapshot = try port.inspect(context: port.context, request: key, revision: revision)
@@ -2218,6 +2239,9 @@ final class LivePresentationStore {
 
     private func clearActionError() {
         guard actionError != nil || actionErrorRequest != nil else { return }
+#if DEBUG
+        RedrawProbe.count("LivePresentationStore.actionErrorMutation")
+#endif
         actionError = nil
         actionErrorRequest = nil
     }

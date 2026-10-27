@@ -59,7 +59,13 @@ struct MessageCardSurface<Content: View>: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("MessageCardSurface.body")
+#endif
         GeometryReader { viewport in
+#if DEBUG
+            let _ = RedrawProbe.count("MessageCardSurface.viewportGeometry")
+#endif
             let availableHeight = max(0, viewport.size.height - bottomControlClearance)
             let needsBottomControlClearance = contentHeight > availableHeight + 1
 
@@ -70,6 +76,9 @@ struct MessageCardSurface<Content: View>: View {
                     .frame(maxWidth: .infinity)
                     .background {
                         GeometryReader { geometry in
+#if DEBUG
+                            let _ = RedrawProbe.count("MessageCardSurface.contentGeometry")
+#endif
                             Color.clear.preference(key: MessageCardContentHeightKey.self,
                                                    value: geometry.size.height)
                         }
@@ -79,7 +88,12 @@ struct MessageCardSurface<Content: View>: View {
             .accessibilityIdentifier("message-card-scroll")
             .scrollBounceBehavior(.always)
             .scrollDismissesKeyboard(.interactively)
-            .onPreferenceChange(MessageCardContentHeightKey.self) { contentHeight = $0 }
+            .onPreferenceChange(MessageCardContentHeightKey.self) { height in
+#if DEBUG
+                RedrawProbe.count("MessageCardSurface.contentHeightChanged")
+#endif
+                contentHeight = height
+            }
             // Only add scroll room when the card is taller than the usable area.
             // Short cards stay at the true boundary for the next/previous pull gesture.
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -92,6 +106,9 @@ struct MessageCardSurface<Content: View>: View {
             } action: { previousOffset, offset in
                 if scrollIsInteracting,
                    offset < previousOffset - 1 {
+#if DEBUG
+                    RedrawProbe.count("MessageCardSurface.downwardStateMutation")
+#endif
                     movedContentDownDuringInteraction = true
                 }
             }
@@ -103,12 +120,18 @@ struct MessageCardSurface<Content: View>: View {
                 if bottom > 0 { return -bottom }
                 return 0
             } action: { _, value in
+#if DEBUG
+                RedrawProbe.count("MessageCardSurface.overscrollStateMutation")
+#endif
                 pull = value
                 let direction = value > 0 ? -1 : 1
                 let neighbor = direction < 0 ? context.previous : context.next
                 armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
             }
             .onScrollPhaseChange { oldPhase, newPhase in
+#if DEBUG
+                RedrawProbe.count("MessageCardSurface.scrollPhaseChanged")
+#endif
                 if newPhase == .interacting {
                     scrollIsInteracting = true
                     movedContentDownDuringInteraction = false

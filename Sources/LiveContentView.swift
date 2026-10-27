@@ -96,6 +96,9 @@ private struct ReplyChoiceCard: View {
     let onOpen: () -> Void
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("ReplyChoiceCard.body")
+#endif
         let shape = RoundedRectangle(cornerRadius: 16)
         let inputShape = UnevenRoundedRectangle(
             topLeadingRadius: 0,
@@ -194,6 +197,9 @@ struct LiveContentView: View {
 #endif
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("LiveContentView.body")
+#endif
         let progress = launch?.foregroundConnectProgress
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
         let failureKey = launch?.foregroundConnectFailureKey
@@ -272,6 +278,7 @@ struct LiveContentView: View {
             }
             .onPreferenceChange(ReplyEditorFocusKey.self) { replyEditorFocused = $0 }
             .onAppear { applyPresentationTestFixtureIfNeeded() }
+            .redrawProbeControl()
         }
     }
 
@@ -909,6 +916,9 @@ struct LiveRequestDetail: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("LiveRequestDetail.body")
+#endif
         MessageCardSurface(context: context,
                            replyEditorIsOpen: activeReplyEditor != nil || focusedReplyActionID != nil,
                            onDownwardContentSwipe: {
@@ -1329,6 +1339,9 @@ private struct LiveProjectedSceneView: View {
     var enlargePicture: (SampleOption) -> Void = { _ in }
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("LiveProjectedSceneView.body")
+#endif
         switch node.kind {
         case let .stack(axis, children):
             if axis == .vertical {
@@ -1502,6 +1515,9 @@ private struct LiveProjectedInputView: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = RedrawProbe.count("LiveProjectedInputView.body")
+#endif
         switch input.kind {
         case let .response(actions):
             if let localExample,
