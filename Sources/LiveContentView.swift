@@ -803,15 +803,42 @@ struct LiveRequestDetail: View {
         Button(action: {}) {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark")
-                Text("Replied")
+                Text(Self.answeredStatusTitle(accountAnswerOutcome: request.accountAnswerOutcome,
+                                              isLiveRequest: localExample == nil && fixtureStore == nil))
             }
                 .padding(.horizontal, 6)
         }
         .tint(nil)
         .disabled(true)
-        .accessibilityLabel("Answered")
+        .accessibilityLabel(Self.answeredStatusTitle(accountAnswerOutcome: request.accountAnswerOutcome,
+                                                       isLiveRequest: localExample == nil && fixtureStore == nil))
         .accessibilityValue("Completed")
         .accessibilityIdentifier("request-answered")
+    }
+
+    static func answeredStatusTitle(accountAnswerOutcome: AccountAnswerOutcome?,
+                                    isLiveRequest: Bool) -> String {
+        switch accountAnswerOutcome {
+        case .some(.seen): "Seen"
+        case .some(.reply(_)): "Replied"
+        case .some(.noComment): "No comment"
+        case .none: isLiveRequest ? "Answered" : "Replied"
+        }
+    }
+
+    private var noCommentStatusButton: some View {
+        Button(action: {}) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                Text("No comment")
+            }
+                .padding(.horizontal, 6)
+        }
+        .tint(nil)
+        .disabled(true)
+        .accessibilityLabel("No comment")
+        .accessibilityValue("Completed")
+        .accessibilityIdentifier("request-no-comment-status")
     }
 
     private var noCommentSelected: Bool {
@@ -1004,6 +1031,17 @@ struct LiveRequestDetail: View {
                             .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                             .accessibilityIdentifier("request-lifecycle-status")
                     }
+                    if case let .reply(answerText)? = request.accountAnswerOutcome {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Reply")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(detailColors.secondaryTextColor)
+                            Text(answerText.rawValue)
+                                .font(.subheadline)
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("request-account-answer")
+                        }
+                    }
                     if let seenStatus = request.informationalSeenStatus,
                        seenStatus != .available {
                         Label(Self.informationalSeenText(seenStatus),
@@ -1080,6 +1118,8 @@ struct LiveRequestDetail: View {
                         .labelStyle(.iconOnly)
                         .disabled(!localExample.canFinishLocally || localExample.finished)
                         .accessibilityIdentifier("sample-finish")
+                    } else if request.lifecycleStatus == .noComment {
+                        noCommentStatusButton
                     } else if answerIsComplete {
                         answeredStatusButton
                     } else {
@@ -1201,7 +1241,7 @@ struct LiveRequestDetail: View {
         switch status {
         case .available: "Seen available"
         case .pending: "Seen pending confirmation"
-        case .confirmed: "Seen confirmed"
+        case .confirmed: "Seen"
         case .resolvedWithoutSeen: "Resolved without Seen confirmation"
         }
     }

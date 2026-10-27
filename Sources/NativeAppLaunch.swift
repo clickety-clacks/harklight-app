@@ -1262,11 +1262,16 @@ final class LivePresentationStore {
     /// Chat calls this while it is on screen. The mark is durable, so a reply
     /// replayed after a relaunch or background wake stays unread until shown.
     func markConversationRead(_ key: RequestKey) {
-        guard !isReadOnly, var thread = conversationThreads[key], thread.hasUnreadAgentReply else { return }
+        guard !isReadOnly, conversationThreads[key]?.latestAgentReply != nil else { return }
         do {
-            try port.markConversationRead(key, context: port.context)
-            thread.readThroughTurn = thread.latestAgentReply?.id
-            conversationThreads[key] = thread
+            let pending = try port.markConversationRead(key, context: port.context)
+            conversationThreads = try port.conversations(context: port.context).threads
+            if permitsDelivery, pending != nil {
+                let expected = profileContext
+                Task {
+                    await NativeRelayLifecycle.shared.sendPendingConversationReadPositions(expected: expected)
+                }
+            }
         } catch {
             UIDiagnostics.shared.record("store.markConversationRead \(UIDiagnostics.describe(key)) error=\(error)")
         }
@@ -1659,7 +1664,7 @@ final class LivePresentationStore {
         switch status {
         case .available: "Seen available"
         case .pending: "Seen pending"
-        case .confirmed: "Seen confirmed"
+        case .confirmed: "Seen"
         case .resolvedWithoutSeen: "Seen not confirmed"
         }
     }
