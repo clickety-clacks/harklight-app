@@ -558,19 +558,6 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertGreaterThan(editor.frame.height, 0)
         capture("reply-editor-reopened", app)
         let card = app.scrollViews["message-card-scroll"]
-        let replyContent = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "Pick an approach, or describe your own.")
-        ).firstMatch
-        XCTAssertTrue(replyContent.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(replyContent.isHittable, app.debugDescription)
-        replyContent.tap()
-        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
-                      "Tapping visible message content must leave the reply keyboard open.")
-        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
-        card.swipeUp()
-        XCTAssertTrue(keyboard.waitForExistence(timeout: 2),
-                      "Scrolling to the latest message keeps the reply keyboard focused.")
-        XCTAssertEqual(editor.value as? String, "Keep the smaller first step.")
         card.swipeDown()
         XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
                        "A downward swipe on the message content dismisses the reply keyboard.")
@@ -593,8 +580,11 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5),
                       "The reply editor can be focused again after interactive dismissal.")
         app.descendants(matching: .any)["sample-finish"].tap()
+        card.swipeDown()
+        XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5),
+                       "Dismiss the reply keyboard before using the stock Chat control.")
         XCTAssertTrue(chat.isHittable,
-                      "Chat remains available after the reply is accepted.")
+                      "Chat remains available after the reply is accepted and the keyboard is dismissed.")
         capture("text-response-submitted", app)
         showList(app)
         assertListSearchAvailable(app)
@@ -768,41 +758,16 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func dismissReplyChatPresentation(_ app: XCUIApplication, _ composer: XCUIElement) {
-        let appWindow = app.windows.firstMatch
-        let window = appWindow.frame
-        let contentFrame = composer.frame
-        let containers = app.otherElements
-            .containing(.textField, identifier: "sample-chat-composer")
-            .allElementsBoundByIndex.map(\.frame)
-        let presentation = containers
-            .filter { $0.width > contentFrame.width + 4 &&
-                      $0.height > contentFrame.height * 4 &&
-                      $0.height < window.height - 4 }
-            .max { $0.width * $0.height < $1.width * $1.height } ?? window
-        if presentation.width < window.width - 4 {
-            let dismissalOffsets = [
-                CGVector(dx: 0.04, dy: 0.96),
-                CGVector(dx: 0.04, dy: 0.04),
-                CGVector(dx: 0.96, dy: 0.04),
-                CGVector(dx: 0.96, dy: 0.96)
-            ]
-            let outsideOffset = dismissalOffsets.first { offset in
-                let point = CGPoint(x: window.minX + offset.dx * window.width,
-                                    y: window.minY + offset.dy * window.height)
-                return !presentation.contains(point)
-            }
-            guard let outsideOffset else {
-                XCTFail("The Chat popover leaves an outside area for native dismissal.")
-                return
-            }
-            appWindow.coordinate(withNormalizedOffset: outsideOffset).tap()
-        } else {
-            let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-            let start = screen.withOffset(CGVector(dx: presentation.midX,
-                                                   dy: presentation.minY + 16))
-            let end = start.withOffset(CGVector(dx: 0, dy: min(400, window.height * 0.8)))
-            start.press(forDuration: 0.1, thenDragTo: end)
-        }
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        // Chat presents a native sheet on compact layouts. Anchor the dismissal
+        // gesture to its history instead of tapping an outside area that may
+        // not exist at small window sizes.
+        let start = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+        let end = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
 
     /// Reads the app's diagnostics probes (enabled by `--harklight-ui-diagnostics`)

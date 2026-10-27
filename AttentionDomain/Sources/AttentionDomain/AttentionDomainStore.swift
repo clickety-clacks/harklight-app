@@ -2994,6 +2994,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         return RelayEvent(sequence: event.sequence, body: event.body, conversation: metadata,
                           origin: event.origin,
+                          accountAnswerOutcome: event.accountAnswerOutcome,
                           attentionTier: event.attentionTierWasProvided ? event.attentionTier : nil)
     }
 

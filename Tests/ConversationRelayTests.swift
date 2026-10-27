@@ -234,6 +234,10 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(store.conversationSnapshot(context: context).threads[first]).hasUnreadAgentReply)
         XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[second]).hasUnreadAgentReply)
 
+        // The inbox replay is already at high water 2; this subsequent open
+        // returns only the accepted frame and its matching checkpoint.
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"resynced","seq":2}"#)]
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2,"chat_read_positions":[]}"#)]
         session.conversationReadPositionResults = [.unresolved,
