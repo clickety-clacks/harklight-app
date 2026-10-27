@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 75,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "reply-text-light",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Reply text is light",
+                        comment: "Release-note title for light Reply text in every appearance."),
+                    detail: LocalizedStringResource(
+                        "Reply text stays light in both appearances, with a matching cursor and placeholder in editable fields.",
+                        comment: "Release-note detail for light text, cursor, and placeholder across Reply surfaces."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 71,
             marketingVersion: "0.1.0",
             highlights: [
