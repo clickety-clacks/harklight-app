@@ -61,7 +61,7 @@ enum HarklightReleaseNotes {
                     id: "reply-and-detail-responsiveness",
                     symbol: "square.and.pencil",
                     title: LocalizedStringResource(
-                        "Smoother Reply and message scrolling",
+                        "Less repeated work while replying and scrolling",
                         comment: "Release-note title for less repeated work while replying and scrolling."),
                     detail: LocalizedStringResource(
                         "Typing a Reply and scrolling within a message avoid repeated refreshes.",
