@@ -3,10 +3,27 @@ import XCTest
 import AttentionDomain
 
 final class ReleaseNotesTests: XCTestCase {
+    func testBuildSeventyEightReplyCheckmarkNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 78 })
+        let highlight = try XCTUnwrap(entry.highlights.first)
+
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 78)
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["reply-checkmark-commit"])
+        XCTAssertEqual(highlight.symbol, "square.and.pencil")
+        XCTAssertEqual(String(localized: highlight.title), "Reply waits for the checkmark")
+        XCTAssertEqual(String(localized: highlight.detail),
+                       "Your text and choices stay in the Reply box until you send your answer.")
+        XCTAssertFalse(HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "77")
+            .contains { $0.buildIdentifier == 78 })
+        XCTAssertEqual(HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "78")
+            .first?.buildIdentifier, 78)
+    }
+
     func testBuildSeventySevenInboxAnswerRecoveryNoteIsFixedAndHiddenUntilThatBuild() throws {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 77 })
 
-        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 77)
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 78)
         XCTAssertEqual(entry.marketingVersion, "0.1.0")
         XCTAssertEqual(entry.highlights.map(\.id), ["inbox-answer-recovery"])
         XCTAssertEqual(
