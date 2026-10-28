@@ -647,8 +647,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 supersedesNavigationPath.removeAll()
             }
         }
-        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
-        .searchPresentationToolbarBehavior(.avoidHidingContent)
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
@@ -929,6 +927,8 @@ struct InboxList: View {
             }
         }
         .listStyle(.plain)
+        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
+        .searchPresentationToolbarBehavior(.avoidHidingContent)
         .animation(reduceMotion ? nil : .default, value: tabMembershipIDs)
         .scrollContentBackground(.hidden)
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
