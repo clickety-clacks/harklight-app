@@ -1853,7 +1853,7 @@ private struct LiveProjectedInputView: View {
         let target = ReplyEditorTarget(inputID: input.id.rawValue,
                                        actionID: "input-text",
                                        isInputText: true)
-        TextField(
+        return TextField(
             input.label.rawValue,
             text: textBinding,
             prompt: Text(input.label.rawValue).foregroundColor(Color.white),
