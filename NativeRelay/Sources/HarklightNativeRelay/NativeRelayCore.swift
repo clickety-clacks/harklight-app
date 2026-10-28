@@ -634,15 +634,22 @@ public actor NativeRelayCore {
                 return submission
             }
             let ref = Self.inboxRef("reconcile")
+            let reconciliationOperations = try submissions.map {
+                try inboxWire.reconciliationOperation(for: $0)
+            }
             let reply = try await transport.inboxRequest(
                 inboxWire.inboxReconcile(snapshotID: snapshotID, batchID: batch.batchID,
-                    operations: submissions.map(\.operation), ref: ref), ref: ref)
+                    operations: reconciliationOperations, ref: ref), ref: ref)
             try validate()
-            let results = try inboxWire.decodeReconciliation(reply, ref: ref,
+            let reconciliation = try inboxWire.decodeReconciliation(reply, ref: ref,
                 snapshotID: snapshotID, highWater: highWater,
                 batchID: batch.batchID,
-                operationIDs: batch.operationIDs)
-            try store.saveInboxReceiptBatch(batch.batchID, results: results, context: context)
+                operationIDs: batch.operationIDs,
+                noCommentOperationIDs: Set(submissions.filter(\.isNoComment).map(\.operationID)))
+            try store.saveInboxReceiptBatch(batch.batchID,
+                results: reconciliation.receipts,
+                missingOperationIDs: reconciliation.missingOperationIDs,
+                context: context)
         }
     }
 

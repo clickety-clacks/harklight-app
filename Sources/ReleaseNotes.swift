@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 77,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "inbox-answer-recovery",
+                    symbol: "tray",
+                    title: LocalizedStringResource(
+                        "Answers keep the inbox moving",
+                        comment: "Release-note title for keeping inbox delivery moving when one answer cannot be reconciled."),
+                    detail: LocalizedStringResource(
+                        "Saved answers keep the same identity when syncing, and one unavailable answer will not stop other messages.",
+                        comment: "Release-note detail for stable answer identity and isolated inbox recovery."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 76,
             marketingVersion: "0.1.0",
             highlights: [

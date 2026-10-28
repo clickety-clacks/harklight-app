@@ -110,6 +110,7 @@ final class NativeRelayCoreTests: XCTestCase {
         var olderPages: [String: [JSONValue]] = [:]
         var checkpointWasAccepted = false
         var reconciliationOverrides: [UUID: JSONValue] = [:]
+        var missingReconciliationOperationIDs = Set<UUID>()
         private var postCheckpointEvents: [Data] = []
         private var postCheckpointEventWaiters: [CheckedContinuation<Data, any Error>] = []
         private var postCheckpointAcknowledgementWaiters: [CheckedContinuation<Data, Never>] = []
@@ -161,6 +162,7 @@ final class NativeRelayCoreTests: XCTestCase {
                 let results: [JSONValue] = operations.compactMap { operation in
                     guard let opIDText = operation.uniqueValue(named: "op_id")?.stringValue?.rawValue,
                           let opID = UUID(uuidString: opIDText) else { return nil }
+                    if missingReconciliationOperationIDs.contains(opID) { return nil }
                     if let override = reconciliationOverrides[opID] { return override }
                     return .object([
                         JSONMember("op_id", .string(ExactText(opIDText))),
@@ -452,6 +454,219 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try port.lookupIntent(context: port.context, intentID: receipt.intentID)?.localState,
                        .unsupported)
+    }
+
+    func testInboxReconciliationAddsPersistedNoCommentIDWithoutChangingOrdinaryFrame() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("reconcile-no-comment"))
+        let payload = try JSONValue.parse(data(#"{"title":"No comment request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key)
+            .requests.first?.selector)
+        let submitted = try port.submitNoComment(context: port.context,
+                                                 selector: selector,
+                                                 intentID: UUID())
+        let persisted = try XCTUnwrap(store.lookupIntent(submitted.intentID, context: context))
+        XCTAssertNil(persisted.operation.uniqueValue(named: "op_id"),
+                     "The ordinary no-comment frame keeps its request-scoped legacy shape.")
+        XCTAssertEqual(String(decoding: persisted.wireFrame, as: UTF8.self),
+                       #"{"type":"answer_no_comment","request_id":"reconcile-no-comment","request_revision":1}"# + "\n")
+
+        session.snapshotHighWater = 10
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let reconciliation = try XCTUnwrap(try session.requests.map(JSONValue.parse).first {
+            $0.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_reconcile"
+        })
+        let reconciled = try XCTUnwrap(reconciliation.uniqueValue(named: "operations")?.arrayValues?.first)
+        XCTAssertEqual(reconciled.uniqueValue(named: "op_id")?.stringValue?.rawValue,
+                       persisted.operationID.uuidString.lowercased())
+        XCTAssertEqual(reconciled.uniqueValue(named: "type")?.stringValue?.rawValue,
+                       "answer_no_comment")
+        XCTAssertEqual(reconciled.uniqueValue(named: "request_id")?.stringValue?.rawValue,
+                       "reconcile-no-comment")
+
+        XCTAssertEqual(String(decoding: try XCTUnwrap(session.sent.first?.0), as: UTF8.self),
+                       String(decoding: persisted.wireFrame, as: UTF8.self),
+                       "Ordinary delivery must continue using the unchanged persisted frame.")
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID),
+                       [persisted.operationID],
+                       "An unresolved ordinary send keeps the same durable operation pending.")
+    }
+
+    func testMissingInboxResultStaysPendingWhileOtherResultsCheckpointAndDeliveryContinue() async throws {
+        let (context, store, session) = try setup()
+        let noCommentKey = RequestKey(accountScope: context.identity.personID,
+                                      senderID: ExactText("sender"), messageID: ExactText("missing-result"))
+        let noCommentPayload = try JSONValue.parse(data(#"{"title":"No comment request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: noCommentKey, originalPayload: noCommentPayload), .message)), context: context)
+        let answerKey = RequestKey(accountScope: context.identity.personID,
+                                   senderID: ExactText("sender"), messageID: ExactText("answer-continues"))
+        let answerPayload = try JSONValue.parse(data(#"{"title":"Answer request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 2,
+            body: .delivery(StoredRequest(key: answerKey, originalPayload: answerPayload), .message)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let noCommentSelector = try XCTUnwrap(port.inspect(context: port.context, request: noCommentKey)
+            .requests.first?.selector)
+        let noComment = try port.submitNoComment(context: port.context,
+            selector: noCommentSelector, intentID: UUID())
+        let answerSelector = try XCTUnwrap(port.inspect(context: port.context, request: answerKey)
+            .requests.first?.selector)
+        let answer = try port.submit(SubmitIntent(context: port.context,
+            selector: answerSelector, intentID: UUID(),
+            inputs: [.compatibilityValue(action: ExactText("yes"))]))
+
+        session.snapshotHighWater = 10
+        session.missingReconciliationOperationIDs = [noComment.opID]
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 10)
+
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .pending)
+        XCTAssertEqual(Set(snapshot.outbox.map(\.operationID)), Set([noComment.opID, answer.opID]))
+        XCTAssertEqual(snapshot.cursor, 10)
+        XCTAssertTrue(snapshot.inboxCheckpoint?.checkpointAccepted == true,
+                      "One missing operation result must not block the rest of the checkpoint.")
+        XCTAssertEqual(Set(session.sent.map(\.1)), Set([noComment.opID, answer.opID]),
+                       "Both unresolved operations continue through ordinary delivery using their stored identities.")
+        XCTAssertEqual(String(decoding: try XCTUnwrap(session.sent.first(where: { $0.1 == noComment.opID })?.0), as: UTF8.self),
+                       String(decoding: try XCTUnwrap(store.lookupIntent(noComment.intentID, context: context)?.wireFrame), as: UTF8.self),
+                       "A missing reconciliation result must not change the ordinary no-comment frame.")
+
+        let savedBatch = try XCTUnwrap(snapshot.inboxCheckpoint?.batches.first)
+        XCTAssertEqual(savedBatch.results?.map(\.operationID), [answer.opID])
+        XCTAssertEqual(savedBatch.missingOperationIDs, [noComment.opID])
+    }
+
+    func testRefusedInboxOperationDisablesOnlyThatIntentAndContinuesOtherDelivery() async throws {
+        let (context, store, session) = try setup()
+        let refusedKey = RequestKey(accountScope: context.identity.personID,
+                                    senderID: ExactText("sender"), messageID: ExactText("refused-no-comment"))
+        let refusedPayload = try JSONValue.parse(data(#"{"title":"No comment request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: refusedKey, originalPayload: refusedPayload), .message)), context: context)
+        let answerKey = RequestKey(accountScope: context.identity.personID,
+                                   senderID: ExactText("sender"), messageID: ExactText("answer-after-refusal"))
+        let answerPayload = try JSONValue.parse(data(#"{"title":"Answer request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 2,
+            body: .delivery(StoredRequest(key: answerKey, originalPayload: answerPayload), .message)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let refusedSelector = try XCTUnwrap(port.inspect(context: port.context, request: refusedKey)
+            .requests.first?.selector)
+        let refused = try port.submitNoComment(context: port.context,
+            selector: refusedSelector, intentID: UUID())
+        let answerSelector = try XCTUnwrap(port.inspect(context: port.context, request: answerKey)
+            .requests.first?.selector)
+        let answer = try port.submit(SubmitIntent(context: port.context,
+            selector: answerSelector, intentID: UUID(),
+            inputs: [.compatibilityValue(action: ExactText("yes"))]))
+
+        session.snapshotHighWater = 10
+        session.reconciliationOverrides[refused.opID] = try JSONValue.parse(data(#"{"op_id":"\#(refused.opID.uuidString.lowercased())","status":"refused","reason":"invalid_field"}"#))
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 10)
+
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertEqual(snapshot.intents[refused.intentID]?.disposition, .failed)
+        XCTAssertEqual(snapshot.outbox.map(\.operationID), [answer.opID])
+        XCTAssertEqual(snapshot.cursor, 10)
+        XCTAssertTrue(snapshot.inboxCheckpoint?.checkpointAccepted == true)
+        XCTAssertEqual(session.sent.map(\.1), [answer.opID],
+                       "The refusal disables only its operation while the other answer is still delivered.")
+        XCTAssertEqual(try port.lookupIntent(context: port.context, intentID: refused.intentID)?.localState,
+                       .notDelivered)
+        XCTAssertEqual(try port.inspect(context: port.context, request: refusedKey)
+            .requests.first?.lifecycleStatus, .open)
+        let refusedReceipt = try XCTUnwrap(snapshot.inboxCheckpoint?.batches.first?.results?.first {
+            $0.operationID == refused.opID
+        })
+        XCTAssertEqual(refusedReceipt.status, .refused)
+        XCTAssertEqual(refusedReceipt.reason, InboxOperationRefusalReason.invalidField.rawValue)
+        XCTAssertNil(refusedReceipt.result)
+        XCTAssertNil(refusedReceipt.terminal)
+        XCTAssertNotEqual(snapshot.remoteStates[refusedKey]?.state, .noComment,
+                          "A refusal must not claim that no-comment was applied.")
+    }
+
+    func testReconciledNoCommentMayProjectBeyondSnapshotWithoutAdvancingCheckpoint() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("no-comment-after-watermark"))
+        let payload = try JSONValue.parse(data(#"{"title":"No comment request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let noComment = try port.submitNoComment(context: port.context,
+            selector: selector, intentID: UUID())
+        session.snapshotHighWater = 10
+        session.reconciliationOverrides[noComment.opID] = try JSONValue.parse(data(#"{"op_id":"\#(noComment.opID.uuidString.lowercased())","status":"committed","result":{"v":1,"type":"ok","seq":11,"terminal_kind":"no_comment","duplicate":false},"terminal":{"v":1,"type":"lifecycle","seq":11,"sender_id":"sender","message_id":"no-comment-after-watermark","origin":"installation-A","state":"answered","at":11,"by":"answer_no_comment","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"}}}"#))
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 10)
+
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 10,
+                       "The snapshot checkpoint stays at its frozen high-water even when a reconciliation applies a newer terminal.")
+        XCTAssertEqual(snapshot.inboxCheckpoint?.highWater, 10)
+        XCTAssertEqual(snapshot.remoteStates[key]?.state, .noComment)
+        XCTAssertEqual(snapshot.remoteStates[key]?.eventSequence, 11)
+        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .accepted(sequence: 11))
+        XCTAssertTrue(snapshot.outbox.isEmpty)
+        let receipt = try XCTUnwrap(snapshot.inboxCheckpoint?.batches.first?.results?.first)
+        XCTAssertEqual(receipt.status, .committed)
+        XCTAssertEqual(receipt.terminal?.sequence, 11)
+    }
+
+    func testReconciliationAdoptsExistingNoCommentTerminalForUnseenOperationID() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("existing-no-comment-terminal"))
+        let payload = try JSONValue.parse(data(#"{"title":"No comment request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let noComment = try port.submitNoComment(context: port.context,
+            selector: selector, intentID: UUID())
+        session.snapshotHighWater = 10
+        session.reconciliationOverrides[noComment.opID] = try JSONValue.parse(data(#"{"op_id":"\#(noComment.opID.uuidString.lowercased())","status":"committed","result":{"v":1,"type":"ok","seq":11,"terminal_kind":"no_comment","duplicate":true},"terminal":{"v":1,"type":"lifecycle","seq":11,"sender_id":"sender","message_id":"existing-no-comment-terminal","origin":"installation-A","state":"answered","at":11,"by":"answer_no_comment","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"}}}"#))
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 10)
+
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 10,
+                       "Adopting a pre-existing terminal does not move the frozen snapshot checkpoint.")
+        XCTAssertEqual(snapshot.inboxCheckpoint?.highWater, 10)
+        XCTAssertEqual(snapshot.remoteStates[key]?.state, .noComment)
+        XCTAssertEqual(snapshot.remoteStates[key]?.eventSequence, 11)
+        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .accepted(sequence: 11))
+        XCTAssertTrue(snapshot.outbox.isEmpty,
+                      "A pre-existing No Comment terminal is adopted as success, not recorded as refusal.")
+        let receipt = try XCTUnwrap(snapshot.inboxCheckpoint?.batches.first?.results?.first)
+        XCTAssertEqual(receipt.status, .committed)
+        XCTAssertEqual(receipt.result?.uniqueValue(named: "duplicate"), .bool(true))
+        XCTAssertEqual(receipt.terminal?.sequence, 11)
     }
 
     func testStaleAnswerDeclineReleasesTheRequestForItsCurrentRevision() async throws {

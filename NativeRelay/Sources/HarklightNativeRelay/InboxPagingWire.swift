@@ -35,8 +35,20 @@ public struct InboxReceiptPageResponse: Equatable, Sendable {
     }
 }
 
-/// Exact FORMAT17 paging and receipt protocol on the enrolled-device relay.
-/// It only constructs read/reconciliation/checkpoint requests; it never sends an answer.
+public struct InboxReconciliationResponse: Equatable, Sendable {
+    public let receipts: [InboxOperationReceipt]
+    /// Requested operations for which the server returned no result. These are
+    /// local unconfirmed outcomes, not fabricated server receipts.
+    public let missingOperationIDs: [UUID]
+
+    public init(receipts: [InboxOperationReceipt], missingOperationIDs: [UUID]) {
+        self.receipts = receipts
+        self.missingOperationIDs = missingOperationIDs
+    }
+}
+
+/// Exact FORMAT17 inbox paging, reconciliation, and checkpoint protocol on the enrolled-device relay.
+/// Reconciliation carries stable operation copies; ordinary request-scoped answer sends remain separate.
 public struct InboxPagingWire: Sendable {
     private let relay: RelayWire
     private let profile: ProfileContext
@@ -76,6 +88,19 @@ public struct InboxPagingWire: Sendable {
                ("batch_id", .string(ExactText(batchID))),
                ("operations", .array(operations)),
                ("ref", .string(ExactText(ref)))])
+    }
+
+    /// Adds the durable local identity to a reconciliation copy without
+    /// changing the operation retained for its ordinary request-scoped send.
+    func reconciliationOperation(for submission: Submission) throws -> JSONValue {
+        guard let members = submission.operation.objectMembers,
+              submission.operation.hasUniqueObjectKeys else {
+            throw InboxPagingWireError.invalidFrame
+        }
+        let withoutStoredID = members.filter { $0.key.rawValue != "op_id" }
+        return .object(withoutStoredID + [
+            JSONMember("op_id", .string(ExactText(submission.operationID.uuidString.lowercased())))
+        ])
     }
 
     public func inboxReceipts(snapshotID: String, cursor: String, ref: String) -> Data {
@@ -162,50 +187,105 @@ public struct InboxPagingWire: Sendable {
 
     public func decodeReconciliation(_ bytes: Data, ref: String, snapshotID: String,
                                      highWater: UInt64, batchID: String,
-                                     operationIDs: [UUID]) throws -> [InboxOperationReceipt] {
+                                     operationIDs: [UUID],
+                                     noCommentOperationIDs: Set<UUID> = []) throws -> InboxReconciliationResponse {
         let value = try success(bytes, ref: ref)
+        let expectedIDs = Set(operationIDs)
         guard text(value, "snapshot_id") == snapshotID,
               uint64(value.uniqueValue(named: "high_water")) == highWater,
               text(value, "batch_id") == batchID,
               let rawResults = value.uniqueValue(named: "results")?.arrayValues,
-              rawResults.count == operationIDs.count else { throw InboxPagingWireError.invalidFrame }
-        var results: [InboxOperationReceipt] = []
-        for (raw, expectedID) in zip(rawResults, operationIDs) {
-            guard let idText = text(raw, "op_id"),
-                  let id = UUID(uuidString: idText), id == expectedID,
-                  let statusText = text(raw, "status"),
-                  let status = InboxOperationReceiptStatus(rawValue: statusText) else {
-                throw InboxPagingWireError.invalidFrame
+              Set(operationIDs).count == operationIDs.count,
+              noCommentOperationIDs.isSubset(of: expectedIDs) else { throw InboxPagingWireError.invalidFrame }
+        var resultsByID: [UUID: InboxOperationReceipt] = [:]
+        var seenIDs = Set<UUID>()
+        var invalidIDs = Set<UUID>()
+        for raw in rawResults {
+            guard case .object = raw, raw.hasUniqueObjectKeys,
+                  let idText = text(raw, "op_id"),
+                  let id = UUID(uuidString: idText), expectedIDs.contains(id) else {
+                continue
             }
-            let resultValue = raw.uniqueValue(named: "result")
-            let terminalValue = raw.uniqueValue(named: "terminal")
-            let terminal: RelayEvent?
-            if let terminalValue, terminalValue != .null {
-                terminal = try relay.decodeEvent(Data((terminalValue.jsonString + "\n").utf8))
-                guard case .terminal = terminal?.body else { throw InboxPagingWireError.invalidFrame }
-            } else {
-                terminal = nil
+            guard seenIDs.insert(id).inserted else {
+                resultsByID.removeValue(forKey: id)
+                invalidIDs.insert(id)
+                continue
             }
-            switch status {
-            case .committed:
-                guard let resultValue, case .object = resultValue,
-                      resultValue.hasUniqueObjectKeys,
-                      text(resultValue, "type") == "ok",
-                      resultValue.uniqueValue(named: "v")?.integerValue == 1,
-                      resultValue.uniqueValue(named: "duplicate") == .bool(true),
-                      uint64(resultValue.uniqueValue(named: "seq")) != nil,
-                      let terminal else { throw InboxPagingWireError.invalidFrame }
-                results.append(InboxOperationReceipt(operationID: id, status: status,
-                    result: resultValue, terminal: terminal))
-            case .operationConflict:
-                guard resultValue == nil, terminalValue == nil else { throw InboxPagingWireError.invalidFrame }
-                results.append(InboxOperationReceipt(operationID: id, status: status))
-            case .notCommittedAtSnapshot:
-                guard resultValue == nil else { throw InboxPagingWireError.invalidFrame }
-                results.append(InboxOperationReceipt(operationID: id, status: status, terminal: terminal))
+            do {
+                guard let statusText = text(raw, "status"),
+                      let status = InboxOperationReceiptStatus(rawValue: statusText) else {
+                    invalidIDs.insert(id)
+                    continue
+                }
+                let resultValue = raw.uniqueValue(named: "result")
+                let terminalValue = raw.uniqueValue(named: "terminal")
+                let reason = text(raw, "reason")
+                let terminal: RelayEvent?
+                if let terminalValue, terminalValue != .null {
+                    terminal = try relay.decodeEvent(Data((terminalValue.jsonString + "\n").utf8))
+                    guard case .terminal = terminal?.body else { throw InboxPagingWireError.invalidFrame }
+                } else {
+                    terminal = nil
+                }
+                switch status {
+                case .committed:
+                    guard reason == nil,
+                          let resultValue, case .object = resultValue,
+                          resultValue.hasUniqueObjectKeys,
+                          text(resultValue, "type") == "ok",
+                          resultValue.uniqueValue(named: "v")?.integerValue == 1,
+                          case let .bool(duplicate)? = resultValue.uniqueValue(named: "duplicate"),
+                          let sequence = uint64(resultValue.uniqueValue(named: "seq")),
+                          let terminal,
+                          terminal.sequence == sequence else {
+                        throw InboxPagingWireError.invalidFrame
+                    }
+                    if noCommentOperationIDs.contains(id) {
+                        guard text(resultValue, "terminal_kind") == "no_comment",
+                              case let .terminal(_, state, _) = terminal.body,
+                              state == .noComment,
+                              terminal.accountAnswerOutcome == .noComment else {
+                            throw InboxPagingWireError.invalidFrame
+                        }
+                    } else {
+                        guard duplicate else { throw InboxPagingWireError.invalidFrame }
+                    }
+                    resultsByID[id] = InboxOperationReceipt(operationID: id, status: status,
+                        result: resultValue, terminal: terminal)
+                case .operationConflict:
+                    guard resultValue == nil, terminalValue == nil, reason == nil else {
+                        throw InboxPagingWireError.invalidFrame
+                    }
+                    resultsByID[id] = InboxOperationReceipt(operationID: id, status: status,
+                        reason: reason)
+                case .notCommittedAtSnapshot:
+                    guard resultValue == nil, reason == nil,
+                          terminal.map({ $0.sequence <= highWater }) ?? true else {
+                        throw InboxPagingWireError.invalidFrame
+                    }
+                    resultsByID[id] = InboxOperationReceipt(operationID: id, status: status,
+                        terminal: terminal)
+                case .refused:
+                    guard resultValue == nil, terminalValue == nil,
+                          let reason,
+                          InboxOperationRefusalReason(rawValue: reason) != nil else {
+                        throw InboxPagingWireError.invalidFrame
+                    }
+                    resultsByID[id] = InboxOperationReceipt(operationID: id, status: status,
+                        reason: reason)
+                }
+            } catch {
+                resultsByID.removeValue(forKey: id)
+                invalidIDs.insert(id)
             }
         }
-        return results
+        return InboxReconciliationResponse(
+            receipts: operationIDs.compactMap { id in
+                invalidIDs.contains(id) ? nil : resultsByID[id]
+            },
+            missingOperationIDs: operationIDs.filter {
+                invalidIDs.contains($0) || resultsByID[$0] == nil
+            })
     }
 
     public func decodeCheckpointStatus(_ bytes: Data, ref: String, snapshotID: String,
