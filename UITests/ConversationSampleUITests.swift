@@ -352,7 +352,7 @@ final class ConversationSampleUITests: XCTestCase {
         capture("upload-cleanup-portrait-retained-draft", app)
     }
 
-    func testEdgePullDoesNotChangeSelectedMessageAndBackRestoresIt() {
+    func testEdgePullDoesNotChangeSelectedMessageAndBackReturnsToEntryTab() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--harklight-ui-diagnostics"]
@@ -374,24 +374,32 @@ final class ConversationSampleUITests: XCTestCase {
         let counter = app.staticTexts.matching(NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")).firstMatch
         XCTAssertTrue(counter.waitForExistence(timeout: 5), app.debugDescription)
         let originalPosition = counter.label
+        recordDiagnostics("before-edge-pull", app)
+        let probe = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(probe.label.contains("selection=request:sample-information-1 "), probe.label)
         let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
         let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
         lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow, thenHoldForDuration: 0.3)
+        recordDiagnostics("after-bottom-edge-pull", app)
+        XCTAssertTrue(probe.label.contains("selection=request:sample-information-1 "), probe.label)
         XCTAssertEqual(counter.label, originalPosition,
                        "Pulling past the bottom of a message must not select another one.")
         upper.press(forDuration: 0.1, thenDragTo: lower, withVelocity: .slow, thenHoldForDuration: 0.3)
+        recordDiagnostics("after-top-edge-pull", app)
+        XCTAssertTrue(probe.label.contains("selection=request:sample-information-1 "), probe.label)
         XCTAssertEqual(counter.label, originalPosition,
                        "Pulling past the top of a message must not select another one.")
-        recordDiagnostics("after-edge-pull", app)
-        let probe = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
         XCTAssertTrue(probe.label.contains("lastViewed=request:sample-information-1 "), probe.label)
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
-        let shown = NSPredicate { _, _ in opened.exists && self.unobscured(opened, in: list, app: app) }
-        let result = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: shown, object: nil)], timeout: 5)
+        XCTAssertTrue(card.waitForNonExistence(timeout: 5), app.debugDescription)
+        let inboxTab = workspaceTab("Inbox", in: app)
+        XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(inboxTab.isSelected,
+                      "Back without switching messages returns to the Inbox entry tab.")
         recordDiagnostics("after-back", app)
-        XCTAssertEqual(result, .completed, "Back after an edge pull must restore the same selected message: \(app.debugDescription)")
     }
 
     func testRetractedItemKeepsItsSelectedChoiceHistoryAndUnsentDiscussion() {
