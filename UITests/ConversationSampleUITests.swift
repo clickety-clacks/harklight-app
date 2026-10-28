@@ -352,17 +352,15 @@ final class ConversationSampleUITests: XCTestCase {
         capture("upload-cleanup-portrait-retained-draft", app)
     }
 
-    func testBackAfterSwitchingMessagesShowsTheLastViewedMessage() {
+    func testEdgePullDoesNotChangeSelectedMessageAndBackRestoresIt() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         let list = listContainer(app)
-        // The information, warning, error and note examples are short cards, so a pull past
-        // their end moves between them. Open the first one while the last one is out of view.
+        // Open the information example after placing its row in view.
         let opened = app.descendants(matching: .any)["request-row-sample-information-1"]
-        let lastViewed = app.descendants(matching: .any)["request-row-sample-note-1"]
         XCTAssertTrue(app.descendants(matching: .any)["request-row-sample-information-2"].waitForExistence(timeout: 10), app.debugDescription)
         for _ in 0..<30 where !unobscured(opened, in: list, app: app) {
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
@@ -370,26 +368,30 @@ final class ConversationSampleUITests: XCTestCase {
                         withVelocity: .slow, thenHoldForDuration: 0.3)
         }
         XCTAssertTrue(unobscured(opened, in: list, app: app), app.debugDescription)
-        XCTAssertFalse(unobscured(lastViewed, in: list, app: app),
-                       "The last-viewed message must start outside the visible list so Back has to bring it into view.")
         opened.tap()
         let card = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
         let counter = app.staticTexts.matching(NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")).firstMatch
         XCTAssertTrue(counter.waitForExistence(timeout: 5), app.debugDescription)
-        for _ in 0..<3 {
-            guard showNextMessage(card: card, counter: counter, app: app) else { return }
-        }
-        recordDiagnostics("after-switching", app)
+        let originalPosition = counter.label
+        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow, thenHoldForDuration: 0.3)
+        XCTAssertEqual(counter.label, originalPosition,
+                       "Pulling past the bottom of a message must not select another one.")
+        upper.press(forDuration: 0.1, thenDragTo: lower, withVelocity: .slow, thenHoldForDuration: 0.3)
+        XCTAssertEqual(counter.label, originalPosition,
+                       "Pulling past the top of a message must not select another one.")
+        recordDiagnostics("after-edge-pull", app)
         let probe = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
-        XCTAssertTrue(probe.label.contains("lastViewed=request:sample-note-1 "), probe.label)
+        XCTAssertTrue(probe.label.contains("lastViewed=request:sample-information-1 "), probe.label)
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
-        let shown = NSPredicate { _, _ in lastViewed.exists && self.unobscured(lastViewed, in: list, app: app) }
+        let shown = NSPredicate { _, _ in opened.exists && self.unobscured(opened, in: list, app: app) }
         let result = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: shown, object: nil)], timeout: 5)
         recordDiagnostics("after-back", app)
-        XCTAssertEqual(result, .completed, "Back after switching messages must show the last-viewed message: \(app.debugDescription)")
+        XCTAssertEqual(result, .completed, "Back after an edge pull must restore the same selected message: \(app.debugDescription)")
     }
 
     func testRetractedItemKeepsItsSelectedChoiceHistoryAndUnsentDiscussion() {
@@ -529,22 +531,6 @@ final class ConversationSampleUITests: XCTestCase {
         let listScrollViews = app.scrollViews.matching(NSPredicate(format: "identifier != %@", "message-card-scroll"))
         let scrollView = listScrollViews.firstMatch
         return scrollView
-    }
-
-    /// Pulls past the end of the open message until the next one opens.
-    private func showNextMessage(card: XCUIElement, counter: XCUIElement, app: XCUIApplication) -> Bool {
-        let before = counter.label
-        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
-        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
-        for _ in 0..<8 {
-            lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow, thenHoldForDuration: 0.5)
-            let moved = NSPredicate { _, _ in counter.exists && counter.label != before }
-            if XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: moved, object: nil)], timeout: 2) == .completed {
-                return true
-            }
-        }
-        XCTFail("Pulling past the end of message \(before) did not open the next message: \(app.debugDescription)")
-        return false
     }
 
     /// Whether the whole row is inside the list, above its bottom tab and search controls.

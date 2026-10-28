@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 79,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "detail-edge-pull-removal",
+                    symbol: "arrow.up.arrow.down",
+                    title: LocalizedStringResource(
+                        "Message scrolling stays in place",
+                        comment: "Release-note title for keeping the selected message when the person pulls past its edge."),
+                    detail: LocalizedStringResource(
+                        "Pulling past the top or bottom of a message no longer switches to another one.",
+                        comment: "Release-note detail for removing edge-pull message navigation."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 78,
             marketingVersion: "0.1.0",
             highlights: [

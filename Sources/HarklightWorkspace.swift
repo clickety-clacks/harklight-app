@@ -343,10 +343,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         testNotificationNavigation = NativeInboxNavigation(serial: serial, request: key)
     }
 
-    private func preview(for id: InboxSelection) -> InboxCardPreview? {
-        rows.first { $0.id == id }?.preview
-    }
-
     private func currentItem(for selection: InboxSelection) -> InboxItem? {
         if case let .request(key) = selection,
            let request = conversationStore?.inboxRow(for: key) {
@@ -555,15 +551,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
         let ids = cardNavigationIDs
         let index = ids.firstIndex(of: id)
-        let previous = index.flatMap { position in
-            position > 0 ? preview(for: ids[position - 1]) : nil
-        }
-        let next = index.flatMap { position in
-            position + 1 < ids.count ? preview(for: ids[position + 1]) : nil
-        }
+        let hasPrevious = index.map { $0 > 0 } ?? false
+        let hasNext = index.map { $0 + 1 < ids.count } ?? false
         return InboxCardContext(position: (index ?? 0) + 1, total: ids.count,
-            previous: previous,
-            next: next,
+            hasPrevious: hasPrevious,
+            hasNext: hasNext,
             inlineChat: inlineChat,
             dismissToList: { navigate(to: nil) },
             messageType: rows.first(where: { $0.id == id })?.resolvedMessageType ?? .request) { direction in

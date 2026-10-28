@@ -1,4 +1,3 @@
-import Observation
 import SwiftUI
 
 extension EnvironmentValues {
@@ -13,17 +12,11 @@ private struct MessageCardContentHeightKey: PreferenceKey {
     }
 }
 
-struct InboxCardPreview {
-    let sender: String
-    let title: String
-    let body: String
-}
-
 struct InboxCardContext {
     let position: Int
     let total: Int
-    let previous: InboxCardPreview?
-    let next: InboxCardPreview?
+    let hasPrevious: Bool
+    let hasNext: Bool
     var inlineChat = false
     var isSupersedesTarget = false
     var dismissToList: (() -> Void)? = nil
@@ -31,43 +24,12 @@ struct InboxCardContext {
     let move: (Int) -> Void
 
     static var standalone: InboxCardContext {
-        InboxCardContext(position: 1, total: 1, previous: nil, next: nil, move: { _ in })
+        InboxCardContext(position: 1, total: 1, hasPrevious: false, hasNext: false, move: { _ in })
     }
 
     static var supersedesTarget: InboxCardContext {
-        InboxCardContext(position: 1, total: 1, previous: nil, next: nil,
+        InboxCardContext(position: 1, total: 1, hasPrevious: false, hasNext: false,
                          isSupersedesTarget: true, move: { _ in })
-    }
-}
-
-@MainActor
-@Observable
-private final class MessageCardPullState {
-    var pull: CGFloat = 0
-    var armedDirection = 0
-}
-
-@MainActor
-private struct MessageCardPullPreview: View {
-    let state: MessageCardPullState
-    let previous: InboxCardPreview?
-    let next: InboxCardPreview?
-
-    var body: some View {
-        let pull = state.pull
-        let armedDirection = state.armedDirection
-        Color.clear
-            .overlay(alignment: pull > 0 ? .top : .bottom) {
-                if abs(pull) > 8, let neighbor = pull > 0 ? previous : next {
-                    MessageNeighborPreview(preview: neighbor, showingBottom: pull > 0,
-                                           armed: armedDirection != 0)
-                        .frame(height: armedDirection != 0 ? 104 : min(80, abs(pull)),
-                               alignment: pull > 0 ? .bottom : .top)
-                        .clipped()
-                        .animation(.snappy, value: armedDirection)
-                }
-            }
-            .allowsHitTesting(false)
     }
 }
 
@@ -79,7 +41,6 @@ struct MessageCardSurface<Content: View>: View {
     private let onDownwardContentSwipe: () -> Void
     private let content: () -> Content
     @Environment(\.colorScheme) private var colorScheme
-    @State private var pullState = MessageCardPullState()
     @State private var contentHeight: CGFloat = 0
     @State private var scrollIsInteracting = false
     @State private var movedContentDownDuringInteraction = false
@@ -118,8 +79,7 @@ struct MessageCardSurface<Content: View>: View {
             .scrollBounceBehavior(.always)
             .scrollDismissesKeyboard(.interactively)
             .onPreferenceChange(MessageCardContentHeightKey.self) { contentHeight = $0 }
-            // Only add scroll room when the card is taller than the usable area.
-            // Short cards stay at the true boundary for the next/previous pull gesture.
+            // Add scroll room only when message content would extend beneath the bottom controls.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if needsBottomControlClearance {
                     Color.clear.frame(height: bottomControlClearance).accessibilityHidden(true)
@@ -132,19 +92,6 @@ struct MessageCardSurface<Content: View>: View {
                    offset < previousOffset - 1 {
                     movedContentDownDuringInteraction = true
                 }
-            }
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                let top = geometry.contentOffset.y + geometry.contentInsets.top
-                let extent = max(0, geometry.contentSize.height - geometry.containerSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom)
-                let bottom = top - extent
-                if top < 0 { return -top }
-                if bottom > 0 { return -bottom }
-                return 0
-            } action: { _, value in
-                pullState.pull = value
-                let direction = value > 0 ? -1 : 1
-                let neighbor = direction < 0 ? context.previous : context.next
-                pullState.armedDirection = abs(value) >= 80 && neighbor != nil ? direction : 0
             }
             .onScrollPhaseChange { oldPhase, newPhase in
                 if newPhase == .interacting {
@@ -159,9 +106,6 @@ struct MessageCardSurface<Content: View>: View {
                 } else {
                     scrollIsInteracting = false
                 }
-                if oldPhase == .interacting && newPhase != .interacting && pullState.armedDirection != 0 {
-                    context.move(pullState.armedDirection)
-                }
             }
             .background {
                 HarklightDesignSystem.palette(for: colorScheme)
@@ -170,10 +114,6 @@ struct MessageCardSurface<Content: View>: View {
             }
             .toolbarBackground(.hidden, for: .navigationBar)
             .navigationBarTitleDisplayMode(.inline)
-            .overlay {
-                MessageCardPullPreview(state: pullState,
-                                       previous: context.previous, next: context.next)
-            }
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Text("\(context.position) of \(context.total)").font(.subheadline.monospacedDigit())
@@ -182,39 +122,8 @@ struct MessageCardSurface<Content: View>: View {
                         .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
                 }
             }
-            .accessibilityAction(named: "Previous message") { if context.previous != nil { context.move(-1) } }
-            .accessibilityAction(named: "Next message") { if context.next != nil { context.move(1) } }
-        }
-    }
-}
-
-struct MessageNeighborPreview: View {
-    let preview: InboxCardPreview
-    let showingBottom: Bool
-    let armed: Bool
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var neutral: HarklightDesignSource.Neutral {
-        HarklightDesignSystem.palette(for: colorScheme).neutral
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(preview.sender).font(.subheadline.weight(.semibold))
-            Text(preview.title).font(.title.bold())
-            Text(preview.body).font(.body)
-        }
-        .padding(22).frame(maxWidth: .infinity, alignment: .leading)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxHeight: .infinity, alignment: showingBottom ? .bottom : .top)
-        .clipped().background(neutral.backgroundColor)
-        .foregroundStyle(neutral.textColor)
-        .padding(showingBottom ? .bottom : .top, 8).background(neutral.backgroundColor)
-        .overlay(alignment: .trailing) {
-            if armed {
-                Image(systemName: showingBottom ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
-                    .padding().foregroundStyle(neutral.textColor)
-            }
+            .accessibilityAction(named: "Previous message") { if context.hasPrevious { context.move(-1) } }
+            .accessibilityAction(named: "Next message") { if context.hasNext { context.move(1) } }
         }
     }
 }

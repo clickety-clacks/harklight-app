@@ -3,11 +3,28 @@ import XCTest
 import AttentionDomain
 
 final class ReleaseNotesTests: XCTestCase {
+    func testBuildSeventyNineEdgePullRemovalNoteIsFixedAndHiddenUntilThatBuild() throws {
+        let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 79 })
+        let highlight = try XCTUnwrap(entry.highlights.first)
+
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 79)
+        XCTAssertEqual(entry.marketingVersion, "0.1.0")
+        XCTAssertEqual(entry.highlights.map(\.id), ["detail-edge-pull-removal"])
+        XCTAssertEqual(highlight.symbol, "arrow.up.arrow.down")
+        XCTAssertEqual(String(localized: highlight.title), "Message scrolling stays in place")
+        XCTAssertEqual(String(localized: highlight.detail),
+                       "Pulling past the top or bottom of a message no longer switches to another one.")
+        XCTAssertFalse(HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "78")
+            .contains { $0.buildIdentifier == 79 })
+        XCTAssertEqual(HarklightReleaseNotes.releasedEntries(currentBuildIdentifier: "79")
+            .first?.buildIdentifier, 79)
+    }
+
     func testBuildSeventyEightReplyCheckmarkNoteIsFixedAndHiddenUntilThatBuild() throws {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 78 })
         let highlight = try XCTUnwrap(entry.highlights.first)
 
-        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 78)
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 79)
         XCTAssertEqual(entry.marketingVersion, "0.1.0")
         XCTAssertEqual(entry.highlights.map(\.id), ["reply-checkmark-commit"])
         XCTAssertEqual(highlight.symbol, "square.and.pencil")
@@ -23,7 +40,7 @@ final class ReleaseNotesTests: XCTestCase {
     func testBuildSeventySevenInboxAnswerRecoveryNoteIsFixedAndHiddenUntilThatBuild() throws {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 77 })
 
-        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 78)
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 79)
         XCTAssertEqual(entry.marketingVersion, "0.1.0")
         XCTAssertEqual(entry.highlights.map(\.id), ["inbox-answer-recovery"])
         XCTAssertEqual(
