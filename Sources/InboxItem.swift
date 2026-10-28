@@ -20,6 +20,19 @@ enum InboxItem: Identifiable {
         }
     }
 
+    func matchesSearch(_ query: String) -> Bool {
+        switch self {
+        case let .request(row):
+            row.title.localizedCaseInsensitiveContains(query) ||
+            row.sender.localizedCaseInsensitiveContains(query) ||
+            (row.bodyText ?? "").localizedCaseInsensitiveContains(query)
+        case let .example(message, _):
+            message.title.localizedCaseInsensitiveContains(query) ||
+            message.sender.localizedCaseInsensitiveContains(query) ||
+            message.body.localizedCaseInsensitiveContains(query)
+        }
+    }
+
     @MainActor var belongsToReplied: Bool {
         switch self {
         case let .request(row): row.belongsToReplied

@@ -107,11 +107,7 @@ enum InboxListProjection {
         let inTab = rows.filter { $0.belongsToReplied == (messageTab == .replied) }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return inTab }
-        return inTab.filter {
-            $0.preview.title.localizedCaseInsensitiveContains(query) ||
-            $0.preview.sender.localizedCaseInsensitiveContains(query) ||
-            $0.preview.body.localizedCaseInsensitiveContains(query)
-        }
+        return inTab.filter { $0.matchesSearch(query) }
     }
 }
 
