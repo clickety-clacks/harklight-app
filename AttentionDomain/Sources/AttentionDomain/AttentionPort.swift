@@ -75,15 +75,20 @@ public struct SubmitIntent: Equatable, Sendable {
     public let selector: BoundDocumentSelector
     public let intentID: UUID
     public let inputs: [TypedInputRecord]
+    /// Reply editors may commit their local values without retaining an
+    /// editable draft alongside the durable submission.
+    public let persistAnswerDraft: Bool
 
     public init(context: PortContext,
                 selector: BoundDocumentSelector,
                 intentID: UUID,
-                inputs: [TypedInputRecord]) {
+                inputs: [TypedInputRecord],
+                persistAnswerDraft: Bool = true) {
         self.context = context
         self.selector = selector
         self.intentID = intentID
         self.inputs = inputs
+        self.persistAnswerDraft = persistAnswerDraft
     }
 }
 
@@ -277,6 +282,9 @@ public struct PresentedRequest: Equatable, Sendable {
     public let originalContentJSON: String
     public let selector: BoundDocumentSelector?
     public let draft: RequestDraft
+    /// The submitted answer projected from its durable intent, not from
+    /// editable draft storage.
+    public let submittedAnswer: RequestDraft?
     public let lifecycleStatus: AppLifecycleStatus
     public let receiptFacts: ReceiptPresentationFacts?
     public let intentReceipt: IntentReceipt?
@@ -311,6 +319,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 originalContentJSON: String,
                 selector: BoundDocumentSelector?,
                 draft: RequestDraft,
+                submittedAnswer: RequestDraft? = nil,
                 lifecycleStatus: AppLifecycleStatus,
                 receiptFacts: ReceiptPresentationFacts?,
                 intentReceipt: IntentReceipt?,
@@ -332,6 +341,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.originalContentJSON = originalContentJSON
         self.selector = selector
         self.draft = draft
+        self.submittedAnswer = submittedAnswer
         self.lifecycleStatus = lifecycleStatus
         self.receiptFacts = receiptFacts
         self.intentReceipt = intentReceipt
@@ -533,18 +543,21 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                       typedInputs: intent.inputs,
                                       draft: draft,
                                       selector: intent.selector,
-                                      context: profileContext)
+                                      context: profileContext,
+                                      persistAnswerDraft: intent.persistAnswerDraft)
         return receipt(stored, context: context)
     }
 
     @discardableResult
     public func submitNoComment(context suppliedContext: PortContext,
                                 selector: BoundDocumentSelector,
-                                intentID: UUID) throws -> IntentReceipt {
+                                intentID: UUID,
+                                discardDraft: Bool = false) throws -> IntentReceipt {
         try validate(suppliedContext)
         let stored = try store.submitNoComment(intentID: intentID,
                                                selector: selector,
-                                               context: profileContext)
+                                               context: profileContext,
+                                               discardDraft: discardDraft)
         return receipt(stored, context: context)
     }
 
@@ -976,6 +989,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 originalContentJSON: request.originalPayload.canonicalJSON,
                                 selector: selector,
                                 draft: draft,
+                                submittedAnswer: submittedAnswer(for: submission,
+                                                                 interface: request.interface),
                                 lifecycleStatus: status,
                                 receiptFacts: hasAccountTerminal ? nil : receiptFacts,
                                 intentReceipt: hasAccountTerminal ? nil : submission.map { receipt($0, context: context) },
@@ -989,6 +1004,37 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 staleAnswerRevision: hasAccountTerminal ? nil : staleAnswerRevision,
                                 inboxStateIsCurrent: inboxStateIsCurrent,
                                 supersedesMessageIDs: supersedesMessageIDs)
+    }
+
+    private func submittedAnswer(for submission: Submission?,
+                                 interface: RequestInterface) -> RequestDraft? {
+        guard let submission else { return nil }
+        var answer = RequestDraft(interface: interface)
+        if submission.isNoComment {
+            answer.noCommentSelected = true
+            return answer
+        }
+        for input in submission.typedInputs {
+            switch input {
+            case let .responseValue(inputID, actionID):
+                answer.inputs[inputID]?.selectedActionID = actionID
+            case let .responseText(inputID, actionID, text):
+                answer.inputs[inputID]?.selectedActionID = actionID
+                answer.inputs[inputID]?.textByActionID[actionID] = text
+            case let .text(inputID, text):
+                answer.inputs[inputID]?.text = text
+            case let .point(inputID, point):
+                answer.inputs[inputID]?.point = point
+                answer.inputs[inputID]?.horizontalText = ExactText(String(point.x))
+                answer.inputs[inputID]?.verticalText = ExactText(String(point.y))
+            case let .compatibilityValue(actionID):
+                answer.compatibility.selectedActionID = actionID
+            case let .compatibilityText(actionID, text):
+                answer.compatibility.selectedActionID = actionID
+                answer.compatibility.textByActionID[actionID] = text
+            }
+        }
+        return answer
     }
 
     private func informationalSeenStatus(for request: StoredRequest,

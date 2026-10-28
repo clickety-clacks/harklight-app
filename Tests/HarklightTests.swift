@@ -913,56 +913,6 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).outbox.count, 1)
     }
 
-    @MainActor
-    func testReplyDraftIsSavedAfterTypingPauseAndSurvivesStoreRestart() async throws {
-        let fixtures = try loadFixtures()
-        let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
-        guard case let .sender(document) = fixture.interface else { return XCTFail("Expected the facilities sender document.") }
-        let noteInput = try XCTUnwrap(document.inputs.first(where: { if case .text = $0.kind { return true }; return false }))
-
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("attention-debounced-draft-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = FileAttentionStatePersistence(directoryURL: directory)
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-                                       personID: fixtures.accountScope,
-                                       deviceID: ExactText("device-a"))
-        let context = ProfileContext(identity: identity, transportMode: .relay)
-        let requestKey = RequestKey(accountScope: context.identity.personID,
-                                    senderID: fixture.key.senderID,
-                                    messageID: fixture.key.messageID)
-        func makeRelayStore() throws -> AttentionDomainStore {
-            let store = try AttentionDomainStore(context: context, persistence: persistence)
-            _ = try store.apply(RelayEvent(sequence: 1,
-                body: .delivery(StoredRequest(key: requestKey,
-                                              originalPayload: fixture.originalPayload), .message)),
-                context: context)
-            return store
-        }
-        let firstStore = try makeRelayStore()
-        let editor = try LivePresentationStore(store: firstStore, context: context)
-        let longReply = String(repeating: "Near the east entrance; please keep the access path clear. ", count: 8)
-
-        editor.updateText(longReply, input: noteInput.id, action: nil, for: requestKey)
-        let beforePause = try makeRelayStore()
-        XCTAssertNotEqual(try beforePause.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
-                          longReply,
-                          "Typing remains in view state until the debounce interval expires.")
-
-        try await Task.sleep(for: .milliseconds(600))
-        let afterPause = try makeRelayStore()
-        XCTAssertEqual(try afterPause.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
-                       longReply,
-                       "The paused draft is durable and available after a new store opens.")
-
-        let flushedReply = longReply + " Still here."
-        editor.updateText(flushedReply, input: noteInput.id, action: nil, for: requestKey)
-        editor.flushPendingDrafts()
-        let afterFlush = try makeRelayStore()
-        XCTAssertEqual(try afterFlush.snapshot(context: context).drafts[requestKey]?.inputs[noteInput.id]?.text?.rawValue,
-                       flushedReply,
-                       "A forced flush durably saves the latest draft without waiting for another pause.")
-    }
-
     func testDurableFenceRejectsLateOriginalSubmitAfterRestartAndChangedDraft() throws {
         let fixtures = try loadFixtures()
         let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))

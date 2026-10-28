@@ -1,9 +1,32 @@
+import Foundation
 import XCTest
 @testable import Harklight
 import AttentionDomain
 
-/// A refresh temporarily makes inbox freshness unknown. Reply editing and
-/// submission remain available against the exact request revision on screen.
+private final class CountingAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+    private let lock = NSLock()
+    private let backing = MemoryAttentionStatePersistence()
+    private var writes = 0
+
+    var writeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return writes
+    }
+
+    func load(identity: ProfileIdentity) throws -> Data? {
+        try backing.load(identity: identity)
+    }
+
+    func commit(_ data: Data, identity: ProfileIdentity) throws {
+        lock.lock()
+        writes += 1
+        lock.unlock()
+        try backing.commit(data, identity: identity)
+    }
+}
+
+/// Reply selections and contents remain local until the checkmark commits them.
 final class ReplyFocusDuringSyncTests: XCTestCase {
     private func makeContext() -> ProfileContext {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
@@ -25,82 +48,133 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
     }
 
     @MainActor
-    func testFocusedReplyEditorStaysEditableAndKeepsTextAcrossInboxCandidate() throws {
+    func testReplySelectionAndTextStayLocalUntilCheckmarkCommit() async throws {
         let context = makeContext()
+        let persistence = CountingAttentionStatePersistence()
         let domain = try AttentionDomainStore(context: context,
-                                              persistence: MemoryAttentionStatePersistence())
+                                              persistence: persistence)
         let key = try deliverTextRequest(to: domain, context: context)
-        _ = try domain.beginInboxCandidate(startupID: "accepted", since: 1, batches: [],
-                                           context: context)
-        try domain.saveInboxInitialPage(snapshotID: "accepted-empty", highWater: 1, items: [],
-                                        nextCursor: nil, receiptCursor: nil, context: context)
-        _ = try domain.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try domain.acceptInboxCheckpoint(snapshotID: "accepted-empty", highWater: 1,
-                                             context: context)
         let visible = try LivePresentationStore(store: domain, context: context)
+        let writesBeforeEditing = persistence.writeCount
 
         let request = try XCTUnwrap(visible.request(for: key))
         guard case let .compatibility(actions) = request.projection,
               let reply = actions.first, reply.kind == .text else {
             return XCTFail("A plain sender message offers one deliberate text reply.")
         }
-        visible.selectAction(reply.id, input: nil, for: key)
-        visible.updateCompatibilityText("Half-typed reply", action: reply.id, for: key)
-        let before = LiveRequestDetail(request: try XCTUnwrap(visible.request(for: key)),
-                                       store: visible)
-        XCTAssertTrue(before.canEdit)
-        XCTAssertTrue(before.canAnswer)
+        let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
+        session.selectAction(reply.id, inputID: nil)
+        session.updateText("Typed locally", target: ReplyEditorTarget(inputID: nil,
+                                                                       actionID: reply.id.rawValue))
 
-        let since = try domain.snapshot(context: context).cursor
-        _ = try domain.beginInboxCandidate(startupID: "startup", since: since, batches: [],
-                                           context: context)
-        try visible.refreshFromDurableStore()
+        let beforePause = try domain.snapshot(context: context)
+        XCTAssertNil(beforePause.drafts[key], "Reply edits do not write a saved draft.")
+        XCTAssertTrue(beforePause.outbox.isEmpty, "Typing does not create an answer operation.")
+        XCTAssertEqual(persistence.writeCount, writesBeforeEditing,
+                       "Selections and text stay out of durable storage.")
 
-        let during = try XCTUnwrap(visible.request(for: key))
-        XCTAssertFalse(during.inboxStateIsCurrent,
-                       "The candidate clears the current keys; the request is briefly not current.")
-        let detail = LiveRequestDetail(request: during, store: visible)
-        XCTAssertTrue(detail.canEdit,
-                      "The focused editor stays enabled while the snapshot runs.")
-        XCTAssertTrue(detail.canAnswer,
-                      "Freshness checks must not disable the answer controls.")
-        XCTAssertEqual(visible.draft(for: key)?.compatibility.textByActionID[reply.id],
-                       ExactText("Half-typed reply"),
-                       "Typed text survives the inbox candidate.")
-        XCTAssertEqual(visible.draft(for: key)?.compatibility.selectedActionID, reply.id)
+        try await Task.sleep(for: .milliseconds(600))
+        let afterPause = try domain.snapshot(context: context)
+        XCTAssertNil(afterPause.drafts[key], "Pausing does not save Reply contents.")
+        XCTAssertTrue(afterPause.outbox.isEmpty, "Pausing does not submit an answer.")
+        XCTAssertEqual(persistence.writeCount, writesBeforeEditing,
+                       "A typing pause does not write Reply state.")
 
-        XCTAssertTrue(visible.submitFromUser(key, requestRevision: during.requestRevision),
-                      "An answer can be submitted while the refresh candidate is pending.")
-        let submission = try XCTUnwrap(domain.snapshot(context: context).outbox.first)
-        XCTAssertEqual(submission.requestRevision, during.requestRevision,
-                       "The answer uses the exact revision the user saw.")
+        XCTAssertTrue(visible.submitFromUser(key,
+                                            answerDraft: session.draft,
+                                            requestRevision: session.requestRevision))
+        let committed = try domain.snapshot(context: context)
+        XCTAssertNil(committed.drafts[key], "Submitting does not create a resumable draft.")
+        let submission = try XCTUnwrap(committed.outbox.first)
+        XCTAssertEqual(submission.requestRevision, request.requestRevision)
+        XCTAssertEqual(submission.typedInputs,
+                       [.compatibilityText(action: reply.id, text: ExactText("Typed locally"))],
+                       "The checkmark commits the selected action and complete Reply text together.")
+        XCTAssertEqual(visible.request(for: key)?.submittedAnswer?.compatibility
+            .textByActionID[reply.id], ExactText("Typed locally"),
+                       "The committed answer remains visible from its submission record.")
+        XCTAssertGreaterThan(persistence.writeCount, writesBeforeEditing,
+                             "The checkmark is the first durable write for this Reply.")
     }
 
     @MainActor
-    func testDraftWithSelectedTextActionRoundTripsThroughRequestDraft() throws {
+    func testSenderReplyCommitsTextAndPointTogetherWithoutSavingDraft() throws {
         let context = makeContext()
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = CountingAttentionStatePersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let fixtures = try FixtureSet.loadBundled(from: Bundle(for: HarklightTests.self))
+        let fixture = try XCTUnwrap(fixtures.requests.first {
+            $0.key.messageID == ExactText("facilities-01")
+        })
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: fixture.key.senderID,
+                             messageID: fixture.key.messageID)
+        _ = try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: fixture.originalPayload), .message)),
+            context: context)
+        let visible = try LivePresentationStore(store: domain, context: context)
+        let writesBeforeEditing = persistence.writeCount
+        let request = try XCTUnwrap(visible.request(for: key))
+        let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
+        let point = PointValue(x: 140, y: 625)
+
+        session.setPoint(point, inputID: ExactText("location"))
+        session.updateText("Please check the partition.",
+                           target: ReplyEditorTarget(inputID: "note", actionID: "input-text",
+                                                     isInputText: true))
+
+        XCTAssertNil(try domain.snapshot(context: context).drafts[key])
+        XCTAssertEqual(persistence.writeCount, writesBeforeEditing)
+        XCTAssertTrue(visible.submitFromUser(key,
+                                             answerDraft: session.draft,
+                                             requestRevision: session.requestRevision))
+
+        let submission = try XCTUnwrap(domain.snapshot(context: context).outbox.first)
+        XCTAssertEqual(submission.typedInputs,
+                       [.point(input: ExactText("location"), point: point),
+                        .text(input: ExactText("note"), text: ExactText("Please check the partition."))],
+                       "The checkmark commits every edited sender field together.")
+        let submittedAnswer = try XCTUnwrap(visible.request(for: key)?.submittedAnswer)
+        XCTAssertEqual(submittedAnswer.inputs[ExactText("location")]?.effectivePoint, point)
+        XCTAssertEqual(submittedAnswer.inputs[ExactText("note")]?.text,
+                       ExactText("Please check the partition."))
+        XCTAssertNil(try domain.snapshot(context: context).drafts[key],
+                     "Submitting does not leave a resumable Reply draft.")
+    }
+
+    @MainActor
+    func testCheckmarkKeepsTheDisplayedRevisionAndRejectsAnUpdatedRequest() throws {
+        let context = makeContext()
+        let persistence = CountingAttentionStatePersistence()
         let domain = try AttentionDomainStore(context: context, persistence: persistence)
         let key = try deliverTextRequest(to: domain, context: context)
-        let visible = try LivePresentationStore(store: domain, context: context)
+        let firstPayload = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        let revisedPayload = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("origin"), payload: firstPayload)), context: context)
+        let live = try LivePresentationStore(store: domain, context: context)
+        let displayed = try XCTUnwrap(live.request(for: key))
+        let session = ReplyEditorDraftSession(request: displayed, canSubmitFromSnapshot: true)
+        session.selectAction(ExactText("reply"), inputID: nil)
+        session.updateText("Answer for the first wording",
+                           target: ReplyEditorTarget(inputID: nil, actionID: "reply"))
 
-        let request = try XCTUnwrap(visible.request(for: key))
-        guard case let .compatibility(actions) = request.projection,
-              let reply = actions.first else {
-            return XCTFail("The open request should expose its reply action.")
-        }
-        visible.selectAction(reply.id, input: nil, for: key)
-        visible.updateCompatibilityText("Saved draft text", action: reply.id, for: key)
-        XCTAssertTrue(visible.flushPendingDraft(for: key))
+        try domain.applyConversation(ConversationEvent(sequence: 2,
+            binding: ConversationBinding(request: key, revision: 2),
+            fact: .request(sessionHandle: ExactText("origin"), payload: revisedPayload)), context: context)
+        let beforeCheckmark = persistence.writeCount
 
-        let saved = try XCTUnwrap(visible.request(for: key)).draft
-        XCTAssertEqual(saved.compatibility.selectedActionID, reply.id)
-        XCTAssertEqual(saved.compatibility.textByActionID[reply.id], ExactText("Saved draft text"))
-
-        let restoredDomain = try AttentionDomainStore(context: context, persistence: persistence)
-        let restored = try LivePresentationStore(store: restoredDomain, context: context)
-        let readBack = try XCTUnwrap(restored.request(for: key)).draft
-        XCTAssertEqual(readBack.compatibility.selectedActionID, reply.id)
-        XCTAssertEqual(readBack.compatibility.textByActionID[reply.id], ExactText("Saved draft text"))
+        XCTAssertFalse(live.submitFromUser(key, answerDraft: session.draft,
+                                           requestRevision: session.requestRevision),
+                       "The checkmark validates the original revision and does not send its answer for newer wording.")
+        XCTAssertEqual(persistence.writeCount, beforeCheckmark,
+                       "A stale checkmark does not persist an editable draft or answer operation.")
+        XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
+        XCTAssertNil(try domain.snapshot(context: context).drafts[key])
+        XCTAssertEqual(live.request(for: key)?.requestRevision, 2,
+                       "The latest wording is shown after the failed checkmark.")
+        XCTAssertEqual(live.actionError,
+                       "This message changed. Review the latest version before answering.")
     }
 }

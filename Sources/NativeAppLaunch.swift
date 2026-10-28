@@ -1823,20 +1823,47 @@ final class LivePresentationStore {
     func submit(_ key: RequestKey,
                 explicitCompatibilityAction: ExactText? = nil,
                 requestRevision: UInt64? = nil) throws -> IntentReceipt {
+        try submit(key,
+                   answerDraftOverride: nil,
+                   explicitCompatibilityAction: explicitCompatibilityAction,
+                   requestRevision: requestRevision)
+    }
+
+    /// Submits the Reply box's in-memory contents without first saving them as
+    /// a resumable draft. The displayed revision is still checked by the same
+    /// submit path before the answer is committed.
+    @discardableResult
+    func submit(_ key: RequestKey,
+                answerDraft: RequestDraft,
+                requestRevision: UInt64) throws -> IntentReceipt {
+        try submit(key,
+                   answerDraftOverride: answerDraft,
+                   explicitCompatibilityAction: nil,
+                   requestRevision: requestRevision)
+    }
+
+    private func submit(_ key: RequestKey,
+                        answerDraftOverride: RequestDraft?,
+                        explicitCompatibilityAction: ExactText?,
+                        requestRevision: UInt64?) throws -> IntentReceipt {
         guard !isReadOnly else { throw LiveReplyError.disconnected }
         guard permitsDelivery else { throw LiveReplyError.localExample }
         let inspected = try inspectedRequest(key, revision: requestRevision)
         let revision = inspected.requestRevision
         let bufferKey = DraftBufferKey(request: key, revision: revision)
-        let answerDraft = pendingDrafts[bufferKey] ?? inspected.draft
+        let answerDraft = answerDraftOverride ?? pendingDrafts[bufferKey] ?? inspected.draft
         guard !isRetracted(key), inspected.lifecycleStatus == .open,
               inspected.intentReceipt == nil,
               let selector = inspected.selector else {
             throw LiveReplyError.notOpen
         }
         if answerDraft.noCommentSelected {
-            try persistPendingDraft(for: bufferKey)
-            return try submitNoComment(key, requestRevision: revision)
+            if answerDraftOverride == nil {
+                try persistPendingDraft(for: bufferKey)
+            }
+            return try submitNoComment(key,
+                                       request: inspected,
+                                       discardDraft: answerDraftOverride != nil)
         }
 
         let records = try typedInputs(for: inspected, draft: answerDraft,
@@ -1853,16 +1880,19 @@ final class LivePresentationStore {
         }
         guard hasAnswerContent else { throw LiveReplyError.incomplete }
 
-        try persistPendingDraft(for: bufferKey)
-        let request = try inspectedRequest(key, revision: revision)
-        guard !isRetracted(bufferKey.request), request.lifecycleStatus == .open,
-              request.intentReceipt == nil else {
-            throw LiveReplyError.notOpen
+        if answerDraftOverride == nil {
+            try persistPendingDraft(for: bufferKey)
+            let request = try inspectedRequest(key, revision: revision)
+            guard !isRetracted(bufferKey.request), request.lifecycleStatus == .open,
+                  request.intentReceipt == nil else {
+                throw LiveReplyError.notOpen
+            }
         }
         let receipt = try port.submit(SubmitIntent(context: port.context,
                                                    selector: selector,
                                                    intentID: UUID(),
-                                                   inputs: records))
+                                                   inputs: records,
+                                                   persistAnswerDraft: answerDraftOverride == nil))
         do { try refreshFromDurableStore() }
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         clearActionError()
@@ -1883,9 +1913,42 @@ final class LivePresentationStore {
         if selectedNoComment {
             return submitNoCommentFromUser(key, requestRevision: requestRevision)
         }
+        return submitAnswerFromUser(key,
+                                    answerDraftOverride: nil,
+                                    explicitCompatibilityAction: explicitCompatibilityAction,
+                                    requestRevision: requestRevision)
+    }
+
+    /// Commits a Reply box session directly, without reading or saving the
+    /// shared draft buffer first.
+    @discardableResult
+    func submitFromUser(_ key: RequestKey,
+                        answerDraft: RequestDraft,
+                        requestRevision: UInt64) -> Bool {
+        guard permitsDelivery, !isReadOnly else { return false }
+        if answerDraft.noCommentSelected {
+            return submitNoCommentFromUser(key, requestRevision: requestRevision,
+                                           selectionIsLocal: true)
+        }
+        return submitAnswerFromUser(key,
+                                    answerDraftOverride: answerDraft,
+                                    explicitCompatibilityAction: nil,
+                                    requestRevision: requestRevision)
+    }
+
+    private func submitAnswerFromUser(_ key: RequestKey,
+                                      answerDraftOverride: RequestDraft?,
+                                      explicitCompatibilityAction: ExactText?,
+                                      requestRevision: UInt64?) -> Bool {
         do {
-            _ = try submit(key, explicitCompatibilityAction: explicitCompatibilityAction,
-                           requestRevision: requestRevision)
+            if let answerDraftOverride {
+                guard let requestRevision else { return false }
+                _ = try submit(key, answerDraft: answerDraftOverride,
+                               requestRevision: requestRevision)
+            } else {
+                _ = try submit(key, explicitCompatibilityAction: explicitCompatibilityAction,
+                               requestRevision: requestRevision)
+            }
             retryPendingDelivery()
             return true
         } catch {
@@ -1908,6 +1971,9 @@ final class LivePresentationStore {
                 actionErrorRequest = key
                 if let current, current.lifecycleStatus != .open {
                     actionError = "This request is no longer open for an answer."
+                } else if let requestRevision, let current,
+                          current.requestRevision != requestRevision {
+                    actionError = "This message changed. Review the latest version before answering."
                 } else if case .some(.incomplete) = error as? LiveReplyError {
                     actionError = "Complete the response before sending your answer."
                 } else {
@@ -1922,16 +1988,25 @@ final class LivePresentationStore {
     /// Returns whether an intent for this request now exists, so callers can
     /// avoid treating a validation refusal as a submission.
     @discardableResult
-    func submitNoCommentFromUser(_ key: RequestKey, requestRevision: UInt64? = nil) -> Bool {
-        guard permitsDelivery, !isReadOnly,
-              let request = try? inspectedRequest(key, revision: requestRevision),
-              !isRetracted(key), request.lifecycleStatus == .open,
-              request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
-        let revision = request.requestRevision
-        selectNoComment(for: key, requestRevision: revision)
-        guard flushPendingDraft(for: key, requestRevision: revision) else { return false }
+    func submitNoCommentFromUser(_ key: RequestKey,
+                                 requestRevision: UInt64? = nil,
+                                 selectionIsLocal: Bool = false) -> Bool {
+        guard permitsDelivery, !isReadOnly else { return false }
+        let revision: UInt64?
+        if !selectionIsLocal {
+            guard let request = try? inspectedRequest(key, revision: requestRevision),
+                  !isRetracted(key), request.lifecycleStatus == .open,
+                  request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
+            revision = request.requestRevision
+            selectNoComment(for: key, requestRevision: revision)
+            guard flushPendingDraft(for: key, requestRevision: revision) else { return false }
+        } else {
+            revision = requestRevision
+        }
         do {
-            _ = try submitNoComment(key, requestRevision: revision)
+            _ = try submitNoComment(key,
+                                    requestRevision: revision,
+                                    discardDraft: selectionIsLocal)
             retryPendingDelivery()
             return true
         } catch {
@@ -1950,15 +2025,30 @@ final class LivePresentationStore {
                 return true
             } else {
                 actionErrorRequest = key
-                actionError = "No comment could not be confirmed. Check its saved status before trying again."
+                if let current, current.lifecycleStatus != .open {
+                    actionError = "This request is no longer open for an answer."
+                } else if let revision, let current, current.requestRevision != revision {
+                    actionError = "This message changed. Review the latest version before answering."
+                } else {
+                    actionError = "No comment could not be confirmed. Check its saved status before trying again."
+                }
                 return false
             }
         }
     }
 
     @discardableResult
-    private func submitNoComment(_ key: RequestKey, requestRevision: UInt64? = nil) throws -> IntentReceipt {
+    private func submitNoComment(_ key: RequestKey,
+                                 requestRevision: UInt64? = nil,
+                                 discardDraft: Bool = false) throws -> IntentReceipt {
         let request = try inspectedRequest(key, revision: requestRevision)
+        return try submitNoComment(key, request: request, discardDraft: discardDraft)
+    }
+
+    @discardableResult
+    private func submitNoComment(_ key: RequestKey,
+                                 request: PresentedRequest,
+                                 discardDraft: Bool = false) throws -> IntentReceipt {
         guard !isRetracted(key),
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil,
@@ -1966,7 +2056,8 @@ final class LivePresentationStore {
               canSubmitNoComment(request) else { throw LiveReplyError.notOpen }
         let receipt = try port.submitNoComment(context: port.context,
                                                selector: selector,
-                                               intentID: UUID())
+                                               intentID: UUID(),
+                                               discardDraft: discardDraft)
         do { try refreshFromDurableStore() }
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         clearActionError()

@@ -1,4 +1,5 @@
 import AttentionDomain
+import Observation
 import SwiftUI
 import UIKit
 
@@ -52,9 +53,10 @@ struct ReplyEditorFocusKey: PreferenceKey {
     }
 }
 
-private struct ReplyEditorTarget: Hashable {
+struct ReplyEditorTarget: Hashable {
     let inputID: String?
     let actionID: String
+    var isInputText: Bool = false
 
     var actionIdentifier: String { actionID }
 
@@ -69,6 +71,102 @@ private struct ReplyEditorTarget: Hashable {
     }
 
     var editorCardIdentifier: String { "\(fieldIdentifier)-card" }
+}
+
+@MainActor
+@Observable
+final class ReplyEditorDraftSession {
+    let requestKey: RequestKey
+    private(set) var requestRevision: UInt64
+    private(set) var canSubmitFromSnapshot: Bool
+    private(set) var draft: RequestDraft
+    private(set) var noCommentSelected: Bool
+    private(set) var hasLocalChanges = false
+
+    init(request: PresentedRequest, canSubmitFromSnapshot: Bool) {
+        requestKey = request.key
+        requestRevision = request.requestRevision
+        self.canSubmitFromSnapshot = canSubmitFromSnapshot
+        draft = Self.initialDraft(for: request)
+        noCommentSelected = draft.noCommentSelected
+    }
+
+    func updateText(_ text: String, target: ReplyEditorTarget) {
+        var updated = draft
+        updated.noCommentSelected = false
+        if let inputID = target.inputID {
+            let input = ExactText(inputID)
+            if target.isInputText {
+                updated.inputs[input]?.text = ExactText(text)
+            } else {
+                updated.inputs[input]?.textByActionID[ExactText(target.actionID)] = ExactText(text)
+            }
+        } else {
+            updated.compatibility.textByActionID[ExactText(target.actionID)] = ExactText(text)
+        }
+        store(updated)
+    }
+
+    func selectAction(_ actionID: ExactText, inputID: ExactText?) {
+        var updated = draft
+        updated.noCommentSelected = false
+        if let inputID {
+            updated.inputs[inputID]?.selectedActionID = actionID
+        } else {
+            updated.compatibility.selectedActionID = actionID
+        }
+        store(updated)
+    }
+
+    func setPoint(_ point: PointValue, inputID: ExactText) {
+        var updated = draft
+        updated.noCommentSelected = false
+        updated.inputs[inputID]?.point = point
+        updated.inputs[inputID]?.horizontalText = ExactText(String(point.x))
+        updated.inputs[inputID]?.verticalText = ExactText(String(point.y))
+        store(updated)
+    }
+
+    func selectNoComment() {
+        var updated = draft
+        updated.noCommentSelected = true
+        updated.compatibility.selectedActionID = nil
+        for inputID in Array(updated.inputs.keys) {
+            updated.inputs[inputID]?.selectedActionID = nil
+        }
+        store(updated)
+    }
+
+    func adoptUneditedRequest(_ request: PresentedRequest, canSubmit: Bool) {
+        guard request.key == requestKey, !hasLocalChanges else { return }
+        requestRevision = request.requestRevision
+        canSubmitFromSnapshot = canSubmit
+        draft = Self.initialDraft(for: request)
+        noCommentSelected = draft.noCommentSelected
+    }
+
+    private func store(_ updated: RequestDraft) {
+        draft = updated
+        if noCommentSelected != updated.noCommentSelected {
+            noCommentSelected = updated.noCommentSelected
+        }
+        hasLocalChanges = true
+    }
+
+    private static func initialDraft(for request: PresentedRequest) -> RequestDraft {
+        var inputs: [ExactText: InputDraft] = [:]
+        if case let .sender(sender) = request.projection {
+            for input in sender.inputs {
+                switch input.kind {
+                case .text:
+                    inputs[input.id] = InputDraft(text: ExactText(""))
+                case .response(_), .point(_):
+                    inputs[input.id] = InputDraft()
+                }
+            }
+        }
+        return RequestDraft(inputs: inputs)
+    }
 }
 
 private enum ReplyInputSurfaceStyle {
@@ -580,6 +678,14 @@ struct LiveInboxSettings: View {
 }
 
 struct LiveRequestDetail: View {
+    private struct StorePresentationSnapshot: Equatable {
+        let conversationRevision: UInt64?
+        let hasAcceptedUpdate: Bool
+        let isRetracted: Bool
+        let retractionLabel: String
+        let conversationIndicator: Bool?
+    }
+
     let request: PresentedRequest
     let store: LivePresentationStore
     var context: InboxCardContext = .standalone
@@ -596,7 +702,35 @@ struct LiveRequestDetail: View {
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
     @State private var activeReplyEditor: ReplyEditorTarget?
+    @State private var replyDraftSession: ReplyEditorDraftSession?
+    @State private var localReplyEditingActive = false
+    @State private var storePresentationSnapshot: StorePresentationSnapshot
     @FocusState private var focusedReplyActionID: String?
+
+    init(request: PresentedRequest,
+         store: LivePresentationStore,
+         context: InboxCardContext = .standalone,
+         localExample: SampleResponse? = nil,
+         fixtureStore: PrototypeStore? = nil,
+         noCommentUnavailableOverride: Bool? = nil) {
+        self.request = request
+        self.store = store
+        self.context = context
+        self.localExample = localExample
+        self.fixtureStore = fixtureStore
+        self.noCommentUnavailableOverride = noCommentUnavailableOverride
+        _storePresentationSnapshot = State(initialValue: Self.storePresentationSnapshot(
+            request: request, store: store))
+        let canSubmit = localExample == nil &&
+            Self.canEditSnapshot(request: request, store: store, context: context)
+        if canSubmit {
+            _replyDraftSession = State(initialValue: ReplyEditorDraftSession(
+                request: request,
+                canSubmitFromSnapshot: canSubmit))
+        } else {
+            _replyDraftSession = State(initialValue: nil)
+        }
+    }
 
     private var detailColors: HarklightDesignSource.MessageType {
         HarklightDesignSystem.palette(for: colorScheme).messageType(context.messageType)
@@ -615,7 +749,67 @@ struct LiveRequestDetail: View {
         HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
     }
 
+    private static func canEditSnapshot(request: PresentedRequest,
+                                        store: LivePresentationStore,
+                                        context: InboxCardContext) -> Bool {
+        guard !context.isSupersedesTarget,
+              !store.isReadOnly, !store.isRetracted(request.key),
+              request.lifecycleStatus == .open,
+              request.intentReceipt == nil else { return false }
+        switch request.projection {
+        case .sender:
+            return true
+        case let .compatibility(actions):
+            if request.informationalSeenStatus != nil {
+                return request.informationalSeenStatus == .available && actions.count == 1
+            }
+            return !actions.isEmpty
+        case .unsupported:
+            return false
+        }
+    }
+
+    private static func storePresentationSnapshot(request: PresentedRequest,
+                                                  store: LivePresentationStore) -> StorePresentationSnapshot {
+        let thread = store.conversation(for: request.key)
+        let retractionOutcome: UInt64? = {
+            guard let outcome = request.intentReceipt?.relayOutcome,
+                  case let .refusedByRetraction(retractedAtMilliseconds) = outcome else { return nil }
+            return retractedAtMilliseconds
+        }()
+        let retractionTimestamp = thread?.retraction?.retractedAtMilliseconds
+            ?? thread?.reportedRetractedAtMilliseconds
+            ?? retractionOutcome
+        let label = retractionTimestamp.map {
+            "Retracted · " + Date(timeIntervalSince1970: Double($0) / 1_000)
+                .formatted(date: .abbreviated, time: .shortened)
+        } ?? "Retracted"
+        return StorePresentationSnapshot(
+            conversationRevision: thread?.currentRevision,
+            hasAcceptedUpdate: thread?.acceptedUpdates.isEmpty == false,
+            isRetracted: thread?.isRetracted == true || retractionOutcome != nil,
+            retractionLabel: label,
+            conversationIndicator: thread.map { $0.hasUnreadAgentReply })
+    }
+
+    private var localReplySession: ReplyEditorDraftSession? {
+        guard localExample == nil,
+              let session = replyDraftSession,
+              session.requestKey == request.key else { return nil }
+        return session
+    }
+
+    private var isEditingLocalReply: Bool {
+        localReplyEditingActive && localReplySession?.canSubmitFromSnapshot == true
+    }
+
+    private func markLocalReplyInteraction() {
+        guard localReplySession?.canSubmitFromSnapshot == true else { return }
+        if !localReplyEditingActive { localReplyEditingActive = true }
+    }
+
     private func openReplyEditor(_ target: ReplyEditorTarget) {
+        markLocalReplyInteraction()
         activeReplyEditor = target
         focusedReplyActionID = target.actionIdentifier
     }
@@ -626,9 +820,27 @@ struct LiveRequestDetail: View {
     }
 
     private func replyTextBinding(for target: ReplyEditorTarget) -> Binding<String> {
-        Binding(
+        if let session = localReplySession {
+            return Binding(
+                get: {
+                    if let inputID = target.inputID {
+                        return session.draft.inputs[ExactText(inputID)]?
+                            .textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
+                    }
+                    return session.draft.compatibility.textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
+                },
+                set: { text in
+                    guard !controlsReadOnly else { return }
+                    markLocalReplyInteraction()
+                    session.updateText(text, target: target)
+                })
+        }
+        return Binding(
             get: {
-                guard let draft = store.draft(for: request.key, revision: request.requestRevision) else {
+                let draft = (controlsReadOnly ? request.submittedAnswer : nil)
+                    ?? store.draft(for: request.key, revision: request.requestRevision)
+                    ?? request.draft
+                guard draft.hasEdits else {
                     return ""
                 }
                 if let inputID = target.inputID {
@@ -654,6 +866,9 @@ struct LiveRequestDetail: View {
         if let localExample {
             return store.isReadOnly || request.lifecycleStatus != .open ||
                 request.intentReceipt != nil || store.isRetracted(request.key) || localExample.finished
+        }
+        if isEditingLocalReply {
+            return localReplySession?.canSubmitFromSnapshot != true
         }
         return !canEdit
     }
@@ -748,7 +963,7 @@ struct LiveRequestDetail: View {
 
     private var answerIsComplete: Bool {
         guard localExample == nil, request.informationalSeenStatus == nil,
-              !store.isRetracted(request.key) else { return false }
+              !storePresentationSnapshot.isRetracted else { return false }
         return Self.answerStatusIsComplete(lifecycleStatus: request.lifecycleStatus,
                                            ownOutcome: request.receiptFacts?.ownOutcome,
                                            answerNotDelivered: request.answerNotDelivered)
@@ -849,17 +1064,25 @@ struct LiveRequestDetail: View {
     }
 
     private var noCommentSelected: Bool {
-        localExample?.noCommentSelected ??
-            store.draft(for: request.key, revision: request.requestRevision)?.noCommentSelected ?? false
+        if let localReplySession { return localReplySession.noCommentSelected }
+        return localExample?.noCommentSelected
+            ?? request.submittedAnswer?.noCommentSelected
+            ?? request.draft.noCommentSelected
     }
 
     private var canSubmitCurrentAnswer: Bool {
+        if let session = localReplySession {
+            return session.noCommentSelected
+                ? session.canSubmitFromSnapshot && request.informationalSeenStatus == nil
+                : session.canSubmitFromSnapshot
+        }
         if noCommentSelected { return canOfferNoComment }
         return canAnswer
     }
 
     private var canOfferNoComment: Bool {
         guard !isSupersedesReadOnly, request.informationalSeenStatus == nil else { return false }
+        if let localReplySession { return localReplySession.canSubmitFromSnapshot }
         if let localExample { return localExample.canDeclineLocally }
         if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
         guard !store.isReadOnly,
@@ -876,7 +1099,12 @@ struct LiveRequestDetail: View {
 
     private func selectNoCommentAction() {
         closeReplyEditor()
-        store.selectNoComment(for: request.key, requestRevision: request.requestRevision)
+        if let session = localReplySession {
+            session.selectNoComment()
+            markLocalReplyInteraction()
+        } else {
+            store.selectNoComment(for: request.key, requestRevision: request.requestRevision)
+        }
     }
 
     private func submitSeenAction(_ action: ExactText) {
@@ -896,18 +1124,8 @@ struct LiveRequestDetail: View {
     /// transient freshness. Every submission carries request.requestRevision;
     /// the server can decline that exact version if the message changed.
     var canEdit: Bool {
-        guard !isSupersedesReadOnly, !store.isReadOnly,
-              !store.isRetracted(request.key), request.lifecycleStatus == .open,
-              request.intentReceipt == nil else { return false }
-        switch request.projection {
-        case .sender: return true
-        case let .compatibility(actions):
-            if request.informationalSeenStatus != nil {
-                return request.informationalSeenStatus == .available && actions.count == 1
-            }
-            return !actions.isEmpty
-        case .unsupported: return false
-        }
+        if isEditingLocalReply { return true }
+        return Self.canEditSnapshot(request: request, store: store, context: context)
     }
 
     private var submitLabel: String {
@@ -976,12 +1194,12 @@ struct LiveRequestDetail: View {
                                 : "request-local-answer-status")
                     }
                 }
-                if let thread = store.conversation(for: request.key), thread.currentRevision > 1 {
-                    Text(store.hasAcceptedUpdate(for: request.key) ? "Updated · version \(thread.currentRevision)" : "Question version \(thread.currentRevision)")
+                if let revision = storePresentationSnapshot.conversationRevision, revision > 1 {
+                    Text(storePresentationSnapshot.hasAcceptedUpdate ? "Updated · version \(revision)" : "Question version \(revision)")
                         .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                         .accessibilityIdentifier("request-update-fact")
                 }
-                if store.isRetracted(request.key) {
+                if storePresentationSnapshot.isRetracted {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
                         .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                 }
@@ -1004,9 +1222,11 @@ struct LiveRequestDetail: View {
                                                hideAnswerControls: isSupersedesReadOnly,
                                                focusedReplyActionID: $focusedReplyActionID,
                                                activeReplyEditor: activeReplyEditor,
+                                               localReplyDraftSession: localReplySession,
                                                openReplyEditor: { openReplyEditor($0) },
                                                replyTextBinding: { replyTextBinding(for: $0) },
                                                closeReplyEditor: closeReplyEditor,
+                                               onLocalReplyInteraction: markLocalReplyInteraction,
                                                localExample: localExample,
                                                enlargePicture: { enlargedPicture = $0 })
                         if canOfferNoComment { noCommentChoice }
@@ -1029,9 +1249,11 @@ struct LiveRequestDetail: View {
                                              onSelectNoComment: selectNoCommentAction,
                                              focusedReplyActionID: $focusedReplyActionID,
                                              replyTextBinding: { replyTextBinding(for: $0) },
+                                             localReplyDraftSession: localReplySession,
                                              activeReplyEditor: activeReplyEditor,
                                              openReplyEditor: { openReplyEditor($0) },
-                                             closeReplyEditor: closeReplyEditor)
+                                             closeReplyEditor: closeReplyEditor,
+                                             onLocalReplyInteraction: markLocalReplyInteraction)
                 case .unsupported:
                     VStack(alignment: .leading, spacing: 10) {
                         Text("This request uses an unsupported answer format.")
@@ -1050,8 +1272,8 @@ struct LiveRequestDetail: View {
                         .accessibilityIdentifier("request-no-comment-unavailable")
                 }
                 if request.inboxStateIsCurrent {
-                    if store.isRetracted(request.key) {
-                        Text(store.retractionLabel(request.key))
+                    if storePresentationSnapshot.isRetracted {
+                        Text(storePresentationSnapshot.retractionLabel)
                             .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                             .accessibilityIdentifier("request-lifecycle-status")
                     } else if isSupersedesReadOnly {
@@ -1153,30 +1375,14 @@ struct LiveRequestDetail: View {
                             .labelStyle(.iconOnly)
                             .disabled(!localExample.canFinishLocally || localExample.finished)
                             .accessibilityIdentifier("sample-finish")
+                        } else if isEditingLocalReply {
+                            submitReplyButton
                         } else if request.lifecycleStatus == .noComment {
                             noCommentStatusButton
                         } else if answerIsComplete {
                             answeredStatusButton
                         } else {
-                            Button(submitLabel, systemImage: "checkmark") {
-                                if let fixtureStore {
-                                    let sent = store.draft(for: request.key,
-                                                           revision: request.requestRevision)?.noCommentSelected == true
-                                        ? fixtureStore.sendNoCommentLocally(for: request.key)
-                                        : fixtureStore.sendSelectedAnswer(for: request.key)
-                                    guard sent else { return }
-                                    closeReplyEditor()
-                                    try? store.refreshFromDurableStore()
-                                } else {
-                                    guard store.submitFromUser(request.key,
-                                                               requestRevision: request.requestRevision) else { return }
-                                    closeReplyEditor()
-                                }
-                                returnToListIfSinglePane()
-                            }
-                            .labelStyle(.iconOnly)
-                            .disabled(fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)
-                            .accessibilityIdentifier("request-finish")
+                            submitReplyButton
                         }
                     }
                 }
@@ -1194,7 +1400,122 @@ struct LiveRequestDetail: View {
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
         }
+        .onChange(of: request) { _, _ in
+            refreshStorePresentationSnapshot()
+            refreshUneditedReplySession()
+        }
+        .onChange(of: store.conversationThreads) { _, _ in
+            refreshStorePresentationSnapshot()
+            refreshUneditedReplySession()
+        }
+        .onChange(of: request.key) { _, _ in
+            closeReplyEditor()
+            localReplyEditingActive = false
+            let canSubmit = localExample == nil &&
+                Self.canEditSnapshot(request: request, store: store, context: context)
+            if canSubmit {
+                replyDraftSession = ReplyEditorDraftSession(
+                    request: request,
+                    canSubmitFromSnapshot: canSubmit)
+            } else {
+                replyDraftSession = nil
+            }
+        }
         .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
+    }
+
+    private func refreshUneditedReplySession() {
+        guard !localReplyEditingActive else { return }
+        let canSubmit = localExample == nil &&
+            Self.canEditSnapshot(request: request, store: store, context: context)
+        if canSubmit {
+            if let session = localReplySession {
+                session.adoptUneditedRequest(request, canSubmit: true)
+            } else {
+                replyDraftSession = ReplyEditorDraftSession(request: request,
+                                                            canSubmitFromSnapshot: true)
+            }
+        } else {
+            replyDraftSession = nil
+        }
+    }
+
+    private func refreshStorePresentationSnapshot() {
+        storePresentationSnapshot = Self.storePresentationSnapshot(request: request, store: store)
+    }
+
+    private var submitReplyButton: some View {
+        Button(submitLabel, systemImage: "checkmark") {
+            let submitted: Bool
+            if let fixtureStore {
+                let sent: Bool
+                if let session = localReplySession {
+                    if session.noCommentSelected {
+                        sent = fixtureStore.sendNoCommentLocally(for: request.key,
+                                                                 selectionIsLocal: true)
+                    } else {
+                        sent = fixtureStore.sendSelectedAnswer(for: request.key,
+                                                               answerDraft: session.draft)
+                    }
+                } else {
+                    sent = store.draft(for: request.key,
+                                       revision: request.requestRevision)?.noCommentSelected == true
+                        ? fixtureStore.sendNoCommentLocally(for: request.key)
+                        : fixtureStore.sendSelectedAnswer(for: request.key)
+                }
+                guard sent else { return }
+                submitted = true
+                try? store.refreshFromDurableStore()
+            } else if let session = localReplySession {
+                if session.noCommentSelected {
+                    submitted = store.submitNoCommentFromUser(request.key,
+                                                             requestRevision: session.requestRevision,
+                                                             selectionIsLocal: true)
+                } else {
+                    submitted = store.submitFromUser(request.key,
+                                                     answerDraft: session.draft,
+                                                     requestRevision: session.requestRevision)
+                }
+                guard submitted else {
+                    endLocalReplyIfRequestChanged(session)
+                    return
+                }
+            } else {
+                submitted = store.submitFromUser(request.key,
+                                                 requestRevision: request.requestRevision)
+                guard submitted else { return }
+            }
+            localReplyEditingActive = false
+            replyDraftSession = nil
+            closeReplyEditor()
+            returnToListIfSinglePane()
+        }
+        .labelStyle(.iconOnly)
+        .disabled(isEditingLocalReply
+                  ? !canSubmitCurrentAnswer
+                  : (fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer))
+        .accessibilityIdentifier("request-finish")
+    }
+
+    private func endLocalReplyIfRequestChanged(_ session: ReplyEditorDraftSession) {
+        guard let current = store.request(for: session.requestKey) else {
+            localReplyEditingActive = false
+            replyDraftSession = nil
+            closeReplyEditor()
+            return
+        }
+        let isSameEligibleRequest = current.requestRevision == session.requestRevision &&
+            Self.canEditSnapshot(request: current, store: store, context: context) &&
+            (!session.noCommentSelected || current.informationalSeenStatus == nil)
+        guard !isSameEligibleRequest else { return }
+
+        localReplyEditingActive = false
+        let canEditCurrentRequest = localExample == nil &&
+            Self.canEditSnapshot(request: current, store: store, context: context)
+        replyDraftSession = canEditCurrentRequest
+            ? ReplyEditorDraftSession(request: current, canSubmitFromSnapshot: true)
+            : nil
+        closeReplyEditor()
     }
 
     private var chatButton: some View {
@@ -1254,7 +1575,7 @@ struct LiveRequestDetail: View {
             return localExample.message.hasChat
                 ? localExample.message.chatUnread && !localExample.chatRead : nil
         }
-        return store.conversation(for: request.key) == nil ? nil : store.hasUnreadAgentReply(request.key)
+        return storePresentationSnapshot.conversationIndicator
     }
 
     private var noticeTextColor: Color {
@@ -1359,9 +1680,11 @@ private struct LiveProjectedSceneView: View {
     var hideAnswerControls = false
     @FocusState.Binding var focusedReplyActionID: String?
     var activeReplyEditor: ReplyEditorTarget? = nil
+    var localReplyDraftSession: ReplyEditorDraftSession? = nil
     var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
     var replyTextBinding: (ReplyEditorTarget) -> Binding<String>
     var closeReplyEditor: () -> Void = {}
+    var onLocalReplyInteraction: () -> Void = {}
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
 
@@ -1402,9 +1725,11 @@ private struct LiveProjectedSceneView: View {
                                        localExample: localExample,
                                        enlargePicture: enlargePicture,
                                        activeReplyEditor: activeReplyEditor,
+                                       localReplyDraftSession: localReplyDraftSession,
                                        openReplyEditor: openReplyEditor,
                                        replyTextBinding: replyTextBinding,
-                                       closeReplyEditor: closeReplyEditor)
+                                       closeReplyEditor: closeReplyEditor,
+                                       onLocalReplyInteraction: onLocalReplyInteraction)
             }
         case let .resultPoint(illustrationID, label, point):
             if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
@@ -1427,9 +1752,11 @@ private struct LiveProjectedSceneView: View {
                                hideAnswerControls: hideAnswerControls,
                                focusedReplyActionID: $focusedReplyActionID,
                                activeReplyEditor: activeReplyEditor,
+                               localReplyDraftSession: localReplyDraftSession,
                                openReplyEditor: openReplyEditor,
                                replyTextBinding: replyTextBinding,
                                closeReplyEditor: closeReplyEditor,
+                               onLocalReplyInteraction: onLocalReplyInteraction,
                                localExample: localExample, enlargePicture: enlargePicture)
     }
 }
@@ -1447,9 +1774,11 @@ private struct LiveProjectedInputView: View {
     var localExample: SampleResponse? = nil
     var enlargePicture: (SampleOption) -> Void = { _ in }
     var activeReplyEditor: ReplyEditorTarget? = nil
+    var localReplyDraftSession: ReplyEditorDraftSession? = nil
     var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
     var replyTextBinding: (ReplyEditorTarget) -> Binding<String>
     var closeReplyEditor: () -> Void = {}
+    var onLocalReplyInteraction: () -> Void = {}
     @State private var pointGestureCapture = PointGestureCapture()
     @State private var typedInputTextByRevision: [UInt64: String] = [:]
     @GestureState private var pointGestureActive = false
@@ -1490,12 +1819,27 @@ private struct LiveProjectedInputView: View {
     }
 
     private var draft: InputDraft? {
-        readOnly ? request.draft.inputs[input.id]
+        if let localReplyDraftSession {
+            return localReplyDraftSession.draft.inputs[input.id]
+        }
+        return readOnly ? (request.submittedAnswer ?? request.draft).inputs[input.id]
             : store.draft(for: request.key, revision: request.requestRevision)?.inputs[input.id]
     }
 
     private var textBinding: Binding<String> {
-        Binding(
+        if let localReplyDraftSession {
+            let target = ReplyEditorTarget(inputID: input.id.rawValue,
+                                           actionID: "input-text",
+                                           isInputText: true)
+            return Binding(
+                get: { localReplyDraftSession.draft.inputs[input.id]?.text?.rawValue ?? "" },
+                set: {
+                    guard !readOnly else { return }
+                    onLocalReplyInteraction()
+                    localReplyDraftSession.updateText($0, target: target)
+                })
+        }
+        return Binding(
             get: { typedInputTextByRevision[request.requestRevision] ?? draft?.text?.rawValue ?? "" },
             set: {
                 typedInputTextByRevision[request.requestRevision] = $0
@@ -1506,6 +1850,9 @@ private struct LiveProjectedInputView: View {
     }
 
     private var textEditor: some View {
+        let target = ReplyEditorTarget(inputID: input.id.rawValue,
+                                       actionID: "input-text",
+                                       isInputText: true)
         TextField(
             input.label.rawValue,
             text: textBinding,
@@ -1520,6 +1867,12 @@ private struct LiveProjectedInputView: View {
             .background(replyEditorSurface, in: RoundedRectangle(cornerRadius: 8))
             .accessibilityLabel(input.label.rawValue)
             .accessibilityIdentifier("request-input-" + input.id.rawValue)
+            .focused($focusedReplyActionID, equals: target.actionIdentifier)
+            .onChange(of: focusedReplyActionID) { _, focused in
+                guard focused == target.actionIdentifier else { return }
+                onLocalReplyInteraction()
+                openReplyEditor(target)
+            }
             .disabled(readOnly)
     }
 
@@ -1529,7 +1882,10 @@ private struct LiveProjectedInputView: View {
 
     private func activate(_ action: ProjectedAction) {
         withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
-            if let localExample, action.id.rawValue == "own" {
+            if let localReplyDraftSession {
+                localReplyDraftSession.selectAction(action.id, inputID: input.id)
+                onLocalReplyInteraction()
+            } else if let localExample, action.id.rawValue == "own" {
                 if localExample.message.kind == .multipleChoice {
                     localExample.choices = []
                 }
@@ -1653,8 +2009,13 @@ private struct LiveProjectedInputView: View {
                                                     guard !readOnly else { return }
                                                     var capture = pointGestureCapture
                                                     if let point = capture.finish(at: value.location, in: bounds) {
-                                                        store.setPoint(point, input: input.id, for: request.key,
-                                                                        requestRevision: request.requestRevision)
+                                                        if let localReplyDraftSession {
+                                                            localReplyDraftSession.setPoint(point, inputID: input.id)
+                                                            onLocalReplyInteraction()
+                                                        } else {
+                                                            store.setPoint(point, input: input.id, for: request.key,
+                                                                            requestRevision: request.requestRevision)
+                                                        }
                                                     }
                                                     pointGestureCapture = capture
                                                 }, isEnabled: !readOnly)
@@ -1676,8 +2037,13 @@ private struct LiveProjectedInputView: View {
                                 .accessibilityHint(readOnly ? "Read-only illustration." : "Tap or drag to select a point.")
                                 .accessibilityAction(named: "Set point at center") {
                                     guard !readOnly else { return }
-                                    store.setPoint(PointValue(x: 500, y: 500), input: input.id, for: request.key,
-                                                   requestRevision: request.requestRevision)
+                                    if let localReplyDraftSession {
+                                        localReplyDraftSession.setPoint(PointValue(x: 500, y: 500), inputID: input.id)
+                                        onLocalReplyInteraction()
+                                    } else {
+                                        store.setPoint(PointValue(x: 500, y: 500), input: input.id, for: request.key,
+                                                       requestRevision: request.requestRevision)
+                                    }
                                 }
                                 .accessibilityIdentifier("request-point-" + input.id.rawValue)
                             if let point = draft?.effectivePoint {
@@ -1703,8 +2069,13 @@ private struct LiveProjectedInputView: View {
                             multiple: false,
                             swatch: localExample.message.kind == .colorChoice ? option.id : nil,
                             sound: localExample.message.kind == .soundChoice) {
-                store.selectAction(action.id, input: input.id, for: request.key,
-                                   requestRevision: request.requestRevision)
+                if let localReplyDraftSession {
+                    localReplyDraftSession.selectAction(action.id, inputID: input.id)
+                    onLocalReplyInteraction()
+                } else {
+                    store.selectAction(action.id, input: input.id, for: request.key,
+                                       requestRevision: request.requestRevision)
+                }
             }
             .disabled(readOnly)
         } else {
@@ -1751,9 +2122,11 @@ private struct LiveCompatibilityActions: View {
     var onSelectNoComment: () -> Void = {}
     @FocusState.Binding var focusedReplyActionID: String?
     var replyTextBinding: (ReplyEditorTarget) -> Binding<String>
+    var localReplyDraftSession: ReplyEditorDraftSession? = nil
     var activeReplyEditor: ReplyEditorTarget? = nil
     var openReplyEditor: (ReplyEditorTarget) -> Void = { _ in }
     var closeReplyEditor: () -> Void = {}
+    var onLocalReplyInteraction: () -> Void = {}
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
@@ -1766,7 +2139,10 @@ private struct LiveCompatibilityActions: View {
     }
 
     private var selected: ExactText? {
-        readOnly ? request.draft.compatibility.selectedActionID
+        if let localReplyDraftSession {
+            return localReplyDraftSession.draft.compatibility.selectedActionID
+        }
+        return readOnly ? (request.submittedAnswer ?? request.draft).compatibility.selectedActionID
             : store.draft(for: request.key, revision: request.requestRevision)?.compatibility.selectedActionID
     }
 
@@ -1796,8 +2172,13 @@ private struct LiveCompatibilityActions: View {
 
     private func activate(_ action: ProjectedAction) {
         withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
-            store.selectAction(action.id, input: nil, for: request.key,
-                               requestRevision: request.requestRevision)
+            if let localReplyDraftSession {
+                localReplyDraftSession.selectAction(action.id, inputID: nil)
+                onLocalReplyInteraction()
+            } else {
+                store.selectAction(action.id, input: nil, for: request.key,
+                                   requestRevision: request.requestRevision)
+            }
         } completion: {
             if action.kind == .text {
                 openReplyEditor(ReplyEditorTarget(inputID: nil, actionID: action.id.rawValue))
@@ -1885,9 +2266,11 @@ private struct LiveCompatibilityActions: View {
                 ForEach(actions, id: \.id) { action in
                     let option = localExample?.message.options.first { $0.id == action.id.rawValue }
                     let isSelected = selected == action.id
-                    let replyText = (readOnly ? request.draft.compatibility
-                                              : store.draft(for: request.key, revision: request.requestRevision)?.compatibility)?
-                        .textByActionID[action.id]?.rawValue ?? ""
+                    let compatibilityDraft: CompatibilityDraft? = readOnly
+                        ? (request.submittedAnswer ?? request.draft).compatibility :
+                        (localReplyDraftSession?.draft.compatibility ??
+                         store.draft(for: request.key, revision: request.requestRevision)?.compatibility)
+                    let replyText = compatibilityDraft?.textByActionID[action.id]?.rawValue ?? ""
                     if action.kind == .text && (isSelected || !replyText.isEmpty) {
                         compatibilityChoice(action, selected: isSelected, detail: option?.detail ?? "",
                                             text: replyText)
