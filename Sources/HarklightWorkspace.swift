@@ -542,6 +542,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 supersedesNavigationPath.removeAll()
             }
         }
+        .searchable(text: $search, prompt: "Search messages")
+        .searchPresentationToolbarBehavior(.avoidHidingContent)
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
@@ -923,8 +925,6 @@ struct InboxList: View {
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
-        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
-        .searchPresentationToolbarBehavior(.avoidHidingContent)
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
