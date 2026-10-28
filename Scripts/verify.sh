@@ -9,6 +9,7 @@ fail() {
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ACTION=${1:-test}
 DEVICE_ID=${HARKLIGHT_SIMULATOR_ID:-}
+NATIVE_RELAY_ONLY_TESTING=${HARKLIGHT_NATIVE_RELAY_ONLY_TESTING:-}
 BUNDLE_ID=co.clicketyclacks.Harklight
 
 case "$ACTION" in
@@ -34,6 +35,29 @@ if [ "$ACTION" = host-test ] || [ "$ACTION" = host-run ]; then
         exec python3 "$ROOT/HostFixture/host.py" --port "${ATTENTION_FIXTURE_PORT:-0}" --pair-secret-file "$ATTENTION_FIXTURE_PAIR_FILE"
     fi
     exec python3 "$ROOT/HostFixture/host.py" --port "${ATTENTION_FIXTURE_PORT:-0}"
+fi
+if [ "$ACTION" = test ] && [ -n "$NATIVE_RELAY_ONLY_TESTING" ]; then
+    native_relay_filter=
+    for test_name in $NATIVE_RELAY_ONLY_TESTING; do
+        case "$test_name" in
+            test*) ;;
+            *) fail "Native Relay selectors must be space-separated XCTest method names" ;;
+        esac
+        case "$test_name" in
+            *[!A-Za-z0-9_]*) fail "Invalid Native Relay test method name: $test_name" ;;
+        esac
+        if [ -n "$native_relay_filter" ]; then
+            native_relay_filter="$native_relay_filter|"
+        fi
+        native_relay_filter="$native_relay_filter$test_name"
+    done
+    if [ -z "$native_relay_filter" ]; then
+        fail "HARKLIGHT_NATIVE_RELAY_ONLY_TESTING must name at least one XCTest method"
+    fi
+    (cd "$ROOT/NativeRelay" && xcrun swift test --filter "$native_relay_filter")
+    if [ -z "${HARKLIGHT_ONLY_TESTING:-}" ]; then
+        exit 0
+    fi
 fi
 if [ "$ACTION" = test ] || [ "$ACTION" = test-guided-tls ]; then
     "$ROOT/Scripts/prepare-test-tls.sh"
