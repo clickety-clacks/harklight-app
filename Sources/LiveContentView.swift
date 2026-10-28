@@ -87,8 +87,9 @@ final class ReplyEditorDraftSession {
         requestKey = request.key
         requestRevision = request.requestRevision
         self.canSubmitFromSnapshot = canSubmitFromSnapshot
-        draft = Self.initialDraft(for: request)
-        noCommentSelected = draft.noCommentSelected
+        let initialDraft = Self.initialDraft(for: request)
+        draft = initialDraft
+        noCommentSelected = initialDraft.noCommentSelected
     }
 
     func updateText(_ text: String, target: ReplyEditorTarget) {
