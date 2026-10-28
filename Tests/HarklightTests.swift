@@ -25,6 +25,12 @@ final class HarklightTests: XCTestCase {
         let inboxResults = InboxListProjection.filteredRows(
             rows, in: .inbox, search: " archive ")
         XCTAssertEqual(inboxResults.map(\.id), [.request(inboxMatch.key)])
+        XCTAssertEqual(InboxListProjection.filteredRows(
+            rows, in: .inbox, search: "planning assistant").map(\.id),
+            [.request(inboxMatch.key), .request(inboxOther.key)])
+        XCTAssertEqual(InboxListProjection.filteredRows(
+            rows, in: .inbox, search: "copy of the sketches").map(\.id),
+            [.request(inboxMatch.key)])
 
         let repliedResults = InboxListProjection.filteredRows(
             rows, in: .replied, search: "archive")

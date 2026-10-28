@@ -20,10 +20,16 @@ enum InboxItem: Identifiable {
         }
     }
 
-    var preview: InboxCardPreview {
+    func matchesSearch(_ query: String) -> Bool {
         switch self {
-        case let .request(row): InboxCardPreview(sender: row.sender, title: row.title, body: row.bodyText ?? "")
-        case let .example(message, _): InboxCardPreview(sender: message.sender, title: message.title, body: message.body)
+        case let .request(row):
+            row.title.localizedCaseInsensitiveContains(query) ||
+            row.sender.localizedCaseInsensitiveContains(query) ||
+            (row.bodyText ?? "").localizedCaseInsensitiveContains(query)
+        case let .example(message, _):
+            message.title.localizedCaseInsensitiveContains(query) ||
+            message.sender.localizedCaseInsensitiveContains(query) ||
+            message.body.localizedCaseInsensitiveContains(query)
         }
     }
 
