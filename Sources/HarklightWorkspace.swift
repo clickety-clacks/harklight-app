@@ -516,23 +516,46 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                  for: .tabBar)
     }
 
-    private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
-                                geometry: GeometryProxy) -> some View {
-        NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
-            InboxList(tab: tab, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
+    private func inboxList(for tab: InboxWorkspaceTab) -> some View {
+        InboxList(tab: tab, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
-                      workspaceTab: $workspaceTab, search: $search,
-                      lastViewedSelection: lastViewedSelection,
-                      restoreLastViewed: restoreLastViewedOnReturn,
-                      didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                      showSettings: { settings = true }, markSeen: markSeen,
-                      markNoComment: markNoComment,
-                      clearRetracted: clearRetracted,
-                      fetchOlderInboxPage: fetchOlderInboxPage,
-                      notificationNavigation: activeNotificationNavigation,
-                      triggerNotification: exposesNotificationTestAction
-                          ? { triggerNotificationTestAction() } : nil)
+                  workspaceTab: $workspaceTab, search: $search,
+                  lastViewedSelection: lastViewedSelection,
+                  restoreLastViewed: restoreLastViewedOnReturn,
+                  didRestoreLastViewed: { restoreLastViewedOnReturn = false },
+                  showSettings: { settings = true }, markSeen: markSeen,
+                  markNoComment: markNoComment,
+                  clearRetracted: clearRetracted,
+                  fetchOlderInboxPage: fetchOlderInboxPage,
+                  notificationNavigation: activeNotificationNavigation,
+                  triggerNotification: exposesNotificationTestAction
+                      ? { triggerNotificationTestAction() } : nil)
+    }
+
+    private func inboxSidebar() -> some View {
+        TabView(selection: $workspaceTab) {
+            Tab(value: .inbox) {
+                inboxList(for: .inbox)
+            } label: {
+                // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
+                Label {
+                    Text("Inbox")
+                } icon: {
+                    Image(uiImage: UIImage(systemName: "envelope.badge")!)
+                }
+            }
+
+            Tab("Replied", systemImage: "envelope.open", value: .replied) {
+                inboxList(for: .replied)
+            }
+        }
+        .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+    }
+
+    private func inboxSplitView(inlineChat: Bool, geometry: GeometryProxy) -> some View {
+        NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
+            inboxSidebar()
         } detail: {
             NavigationStack(path: $supersedesNavigationPath) {
                 detailContent(for: selection, inlineChat: inlineChat,
@@ -542,8 +565,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 supersedesNavigationPath.removeAll()
             }
         }
-        .searchable(text: $search, prompt: "Search messages")
-        .searchPresentationToolbarBehavior(.avoidHidingContent)
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
@@ -572,26 +593,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let landscape = geometry.size.width > geometry.size.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && landscape
-            let tabs = TabView(selection: $workspaceTab) {
-                Tab(value: .inbox) {
-                    inboxSplitView(for: .inbox, inlineChat: inlineChat,
-                                   geometry: geometry)
-                } label: {
-                    // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
-                    Label {
-                        Text("Inbox")
-                    } icon: {
-                        Image(uiImage: UIImage(systemName: "envelope.badge")!)
-                    }
-                }
-
-                Tab("Replied", systemImage: "envelope.open", value: .replied) {
-                    inboxSplitView(for: .replied, inlineChat: inlineChat,
-                                   geometry: geometry)
-                }
-
-            }
-            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+            let splitView = inboxSplitView(inlineChat: inlineChat, geometry: geometry)
+            splitView
             .onChange(of: workspaceTab) { oldTab, newTab in
                 if oldTab != newTab { isWarningPresented = false }
                 selectedTab = newTab.messageTab
@@ -602,7 +605,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: visibleWarnings, initial: true) { _, newWarnings in
                 dismissWarningWhenCleared(newWarnings)
             }
-            tabs
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route else { return }
                 settings = false
@@ -925,6 +927,8 @@ struct InboxList: View {
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
+        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
+        .searchPresentationToolbarBehavior(.avoidHidingContent)
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
