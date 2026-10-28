@@ -2,7 +2,7 @@ import XCTest
 
 @MainActor
 final class ReplyDraftPersistenceUITests: XCTestCase {
-    func testLongReplyDraftSurvivesAppRelaunch() async throws {
+    func testReplyContentsAreNotSavedAcrossAppRelaunch() async throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
@@ -40,8 +40,8 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         let reopenedEditor = app.textFields["request-input-note"]
         XCTAssertTrue(reopenedEditor.waitForExistence(timeout: 5), app.debugDescription)
         reveal(reopenedEditor, in: app)
-        XCTAssertEqual(reopenedEditor.value as? String, longReply,
-                       "A reply that paused before the app was killed must survive relaunch.")
+        XCTAssertNotEqual(reopenedEditor.value as? String, longReply,
+                          "Reply contents are not saved when the app closes before the checkmark is tapped.")
     }
 
     private func reveal(_ editor: XCUIElement, in app: XCUIApplication) {

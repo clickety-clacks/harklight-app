@@ -300,13 +300,18 @@ final class PrototypeStore {
     }
 
     @discardableResult
-    func sendNoCommentLocally(for key: RequestKey) -> Bool {
+    func sendNoCommentLocally(for key: RequestKey, selectionIsLocal: Bool = false) -> Bool {
         guard canSendNoCommentLocally(for: key), let port,
               let selector = try? boundSelector(for: key) else { return false }
-        guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
+        if !selectionIsLocal {
+            guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
+        }
         refreshSnapshot()
         do {
-            _ = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+            _ = try port.submitNoComment(context: port.context,
+                                         selector: selector,
+                                         intentID: UUID(),
+                                         discardDraft: selectionIsLocal)
             refreshSnapshot()
             persistenceError = nil
             return true
@@ -318,21 +323,26 @@ final class PrototypeStore {
 
     @discardableResult
     func sendSelectedAnswer(for key: RequestKey,
+                            answerDraft: RequestDraft? = nil,
                             explicitCompatibilityAction: ExactText? = nil) -> Bool {
-        guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
+        if answerDraft == nil {
+            guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
+        }
         refreshSnapshot()
         guard let session = sessions[key], case .open = session.lifecycle else { return false }
-        if session.draft.noCommentSelected {
-            return sendNoCommentLocally(for: key)
+        let draft = answerDraft ?? session.draft
+        if draft.noCommentSelected {
+            return sendNoCommentLocally(for: key, selectionIsLocal: answerDraft != nil)
         }
-        guard let port, let records = typedRecords(for: key, draft: session.draft,
+        guard let port, let records = typedRecords(for: key, draft: draft,
                                                    explicitCompatibilityAction: explicitCompatibilityAction),
               let selector = try? boundSelector(for: key) else { return false }
         do {
             let intent = SubmitIntent(context: port.context,
                                       selector: selector,
                                       intentID: UUID(),
-                                      inputs: records)
+                                      inputs: records,
+                                      persistAnswerDraft: answerDraft == nil)
             _ = try port.submit(intent)
             refreshSnapshot()
             return true

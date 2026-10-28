@@ -391,7 +391,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                        typedInputs: [TypedInputRecord] = [],
                        draft: RequestDraft,
                        selector: BoundDocumentSelector,
-                       context suppliedContext: ProfileContext) throws -> Submission {
+                       context suppliedContext: ProfileContext,
+                       persistAnswerDraft: Bool = true) throws -> Submission {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -453,12 +454,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    requestRevision: selector.requestRevision)
 
         var next = state
-        storeAnswerDraft(draft, for: request.key, revision: selector.requestRevision, in: &next)
+        if persistAnswerDraft {
+            storeAnswerDraft(draft, for: request.key, revision: selector.requestRevision, in: &next)
+        } else {
+            discardAnswerDraft(for: request.key, revision: selector.requestRevision, in: &next)
+        }
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
         next.outboxOrder.append(intentID)
         if suppliedContext.transportMode == .fixture {
-            next.fixtureSessions[request.key] = RequestSession(draft: draft, lifecycle: .pending(submission))
+            let sessionDraft = persistAnswerDraft ? draft : RequestDraft(interface: request.interface)
+            next.fixtureSessions[request.key] = RequestSession(draft: sessionDraft,
+                                                               lifecycle: .pending(submission))
         }
         try commit(next)
         return submission
@@ -469,7 +476,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func submitNoComment(intentID: UUID,
                                 selector: BoundDocumentSelector,
-                                context suppliedContext: ProfileContext) throws -> Submission {
+                                context suppliedContext: ProfileContext,
+                                discardDraft: Bool = false) throws -> Submission {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -514,9 +522,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
         ])
         let frame = Data((operation.jsonString + "\n").utf8)
         guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
-        let draft = state.conversation?.threads[request.key]?.answerDrafts?[requestRevision] ??
-            (state.conversation?.threads[request.key]?.currentRevision == requestRevision
-                ? state.drafts[request.key] : nil) ?? RequestDraft(interface: request.interface)
+        let draft = discardDraft ? RequestDraft(interface: request.interface) :
+            (state.conversation?.threads[request.key]?.answerDrafts?[requestRevision] ??
+                (state.conversation?.threads[request.key]?.currentRevision == requestRevision
+                    ? state.drafts[request.key] : nil) ?? RequestDraft(interface: request.interface))
         let submission = Submission(requestKey: request.key,
                                     answer: .null,
                                     answerKind: .noComment,
@@ -532,6 +541,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
         next.outboxOrder.append(intentID)
+        if discardDraft {
+            discardAnswerDraft(for: request.key, revision: requestRevision, in: &next)
+        }
         if suppliedContext.transportMode == .fixture {
             next.fixtureSessions[request.key] = RequestSession(draft: draft, lifecycle: .pending(submission))
         }
@@ -2858,6 +2870,26 @@ public final class AttentionDomainStore: @unchecked Sendable {
             conversation.threads[request] = thread
             proposedState.conversation = conversation
         }
+    }
+
+    private func discardAnswerDraft(for request: RequestKey,
+                                     revision: UInt64,
+                                     in proposedState: inout PersistedAttentionState) {
+        guard var conversation = proposedState.conversation,
+              var thread = conversation.threads[request] else {
+            proposedState.drafts.removeValue(forKey: request)
+            return
+        }
+        var drafts = thread.answerDrafts ?? [:]
+        drafts.removeValue(forKey: revision)
+        thread.answerDrafts = drafts.isEmpty ? nil : drafts
+        if thread.currentRevision == revision {
+            proposedState.drafts.removeValue(forKey: request)
+        }
+        // The active revision's draft is stored separately in `drafts`;
+        // older revisions live in the thread's archived answer drafts.
+        conversation.threads[request] = thread
+        proposedState.conversation = conversation
     }
 
     private func boundRequest(_ selector: BoundDocumentSelector,

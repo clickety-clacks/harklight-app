@@ -461,24 +461,29 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(saved.accountAnswerOutcome)
     }
 
-    func testNoCommentKeepsTypedDraftSavedWithoutPuttingItInTheFrame() throws {
+    func testNoCommentCheckmarkCommitsWithoutSavingReplyContents() throws {
         let (context, store, live, key) = try setupReplyOnly()
-        live.updateCompatibilityText("Keep this as an unsent draft.", action: ExactText("reply"), for: key)
-        live.flushPendingDraft(for: key)
-        live.selectNoComment(for: key)
-
-        XCTAssertTrue(live.request(for: key)?.draft.noCommentSelected == true)
+        let draftBeforeEditing = try XCTUnwrap(store.snapshot(context: context).drafts[key])
+        let request = try XCTUnwrap(live.request(for: key))
+        let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
+        session.selectAction(ExactText("reply"), inputID: nil)
+        session.updateText("Keep this local.", target: ReplyEditorTarget(inputID: nil,
+                                                                          actionID: "reply"))
+        session.selectNoComment()
+        XCTAssertTrue(session.noCommentSelected)
+        XCTAssertEqual(try store.snapshot(context: context).drafts[key], draftBeforeEditing,
+                       "Selecting No comment does not save Reply contents over the request's empty baseline.")
         XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
-                       "Selecting No comment is still an unsent draft.")
-        live.submitFromUser(key)
+                       "Selecting No comment does not submit before the checkmark is tapped.")
+        XCTAssertTrue(live.submitNoCommentFromUser(key,
+                                                   requestRevision: request.requestRevision,
+                                                   selectionIsLocal: true))
 
         let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"reply-only","request_revision":1}"# + "\n")
-        let savedDraft = try store.snapshot(context: context).drafts[key]
-        XCTAssertEqual(savedDraft?.compatibility
-            .textByActionID[ExactText("reply")], ExactText("Keep this as an unsent draft."))
-        XCTAssertTrue(savedDraft?.noCommentSelected == true)
+        XCTAssertNil(try store.snapshot(context: context).drafts[key])
+        XCTAssertTrue(try XCTUnwrap(live.request(for: key)).submittedAnswer?.noCommentSelected == true)
         XCTAssertEqual(submitted.answerKind, .noComment)
     }
 

@@ -54,6 +54,21 @@ enum HarklightReleaseNotes {
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
+            buildIdentifier: 78,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "reply-checkmark-commit",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Reply waits for the checkmark",
+                        comment: "Release-note title for committing a Reply only when the person taps the checkmark."),
+                    detail: LocalizedStringResource(
+                        "Your text and choices stay in the Reply box until you send your answer.",
+                        comment: "Release-note detail for keeping Reply contents local until submission."))
+            ]),
+        // Conservative estimate; adjust if the archive reports a different build.
+        HarklightReleaseNote(
             buildIdentifier: 77,
             marketingVersion: "0.1.0",
             highlights: [
