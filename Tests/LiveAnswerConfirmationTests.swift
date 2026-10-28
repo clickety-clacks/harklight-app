@@ -463,6 +463,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
     func testNoCommentCheckmarkCommitsWithoutSavingReplyContents() throws {
         let (context, store, live, key) = try setupReplyOnly()
+        let draftBeforeEditing = try XCTUnwrap(store.snapshot(context: context).drafts[key])
         let request = try XCTUnwrap(live.request(for: key))
         let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
         session.selectAction(ExactText("reply"), inputID: nil)
@@ -470,8 +471,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                                                                           actionID: "reply"))
         session.selectNoComment()
         XCTAssertTrue(session.noCommentSelected)
-        XCTAssertNil(try store.snapshot(context: context).drafts[key],
-                     "Selecting No comment does not save the Reply field contents.")
+        XCTAssertEqual(try store.snapshot(context: context).drafts[key], draftBeforeEditing,
+                       "Selecting No comment does not save Reply contents over the request's empty baseline.")
         XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
                        "Selecting No comment does not submit before the checkmark is tapped.")
         XCTAssertTrue(live.submitNoCommentFromUser(key,

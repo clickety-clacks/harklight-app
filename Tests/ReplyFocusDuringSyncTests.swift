@@ -56,6 +56,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         let key = try deliverTextRequest(to: domain, context: context)
         let visible = try LivePresentationStore(store: domain, context: context)
         let writesBeforeEditing = persistence.writeCount
+        let draftBeforeEditing = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
 
         let request = try XCTUnwrap(visible.request(for: key))
         guard case let .compatibility(actions) = request.projection,
@@ -68,14 +69,16 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                                                                        actionID: reply.id.rawValue))
 
         let beforePause = try domain.snapshot(context: context)
-        XCTAssertNil(beforePause.drafts[key], "Reply edits do not write a saved draft.")
+        XCTAssertEqual(beforePause.drafts[key], draftBeforeEditing,
+                       "Reply edits do not change the empty draft seeded when the request arrived.")
         XCTAssertTrue(beforePause.outbox.isEmpty, "Typing does not create an answer operation.")
         XCTAssertEqual(persistence.writeCount, writesBeforeEditing,
                        "Selections and text stay out of durable storage.")
 
         try await Task.sleep(for: .milliseconds(600))
         let afterPause = try domain.snapshot(context: context)
-        XCTAssertNil(afterPause.drafts[key], "Pausing does not save Reply contents.")
+        XCTAssertEqual(afterPause.drafts[key], draftBeforeEditing,
+                       "Pausing does not save Reply contents over the request's empty baseline.")
         XCTAssertTrue(afterPause.outbox.isEmpty, "Pausing does not submit an answer.")
         XCTAssertEqual(persistence.writeCount, writesBeforeEditing,
                        "A typing pause does not write Reply state.")
@@ -116,6 +119,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         let writesBeforeEditing = persistence.writeCount
         let request = try XCTUnwrap(visible.request(for: key))
         let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
+        let draftBeforeEditing = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
         let point = PointValue(x: 140, y: 625)
 
         session.setPoint(point, inputID: ExactText("location"))
@@ -123,7 +127,8 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                            target: ReplyEditorTarget(inputID: "note", actionID: "input-text",
                                                      isInputText: true))
 
-        XCTAssertNil(try domain.snapshot(context: context).drafts[key])
+        XCTAssertEqual(try domain.snapshot(context: context).drafts[key], draftBeforeEditing,
+                       "Local sender-field edits leave the request's empty draft baseline unchanged.")
         XCTAssertEqual(persistence.writeCount, writesBeforeEditing)
         XCTAssertTrue(visible.submitFromUser(key,
                                              answerDraft: session.draft,
@@ -155,15 +160,24 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
             fact: .request(sessionHandle: ExactText("origin"), payload: firstPayload)), context: context)
         let live = try LivePresentationStore(store: domain, context: context)
         let displayed = try XCTUnwrap(live.request(for: key))
+        let draftBeforeEditing = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
+        let writesBeforeEditing = persistence.writeCount
         let session = ReplyEditorDraftSession(request: displayed, canSubmitFromSnapshot: true)
         session.selectAction(ExactText("reply"), inputID: nil)
         session.updateText("Answer for the first wording",
                            target: ReplyEditorTarget(inputID: nil, actionID: "reply"))
+        XCTAssertEqual(try domain.snapshot(context: context).drafts[key], draftBeforeEditing,
+                       "Editing remains local before the request changes.")
+        XCTAssertEqual(persistence.writeCount, writesBeforeEditing,
+                       "Editing does not write the persisted draft.")
 
         try domain.applyConversation(ConversationEvent(sequence: 2,
             binding: ConversationBinding(request: key, revision: 2),
             fact: .request(sessionHandle: ExactText("origin"), payload: revisedPayload)), context: context)
         let beforeCheckmark = persistence.writeCount
+        let draftAtCurrentRevision = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
+        XCTAssertEqual(draftAtCurrentRevision, draftBeforeEditing,
+                       "The request update does not carry locally edited Reply text into durable state.")
 
         XCTAssertFalse(live.submitFromUser(key, answerDraft: session.draft,
                                            requestRevision: session.requestRevision),
@@ -171,7 +185,8 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         XCTAssertEqual(persistence.writeCount, beforeCheckmark,
                        "A stale checkmark does not persist an editable draft or answer operation.")
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
-        XCTAssertNil(try domain.snapshot(context: context).drafts[key])
+        XCTAssertEqual(try domain.snapshot(context: context).drafts[key], draftAtCurrentRevision,
+                       "Rejecting a stale checkmark leaves the request's unedited baseline intact.")
         XCTAssertEqual(live.request(for: key)?.requestRevision, 2,
                        "The latest wording is shown after the failed checkmark.")
         XCTAssertEqual(live.actionError,
