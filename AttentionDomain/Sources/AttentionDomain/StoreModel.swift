@@ -251,6 +251,7 @@ public enum InboxMessagePriority: String, Equatable, Codable, Sendable {
 /// Unknown styles intentionally map to the ordinary presentation.
 public enum MessageChoiceStyle: String, Equatable, Codable, Sendable {
     case primary
+    case secondary
     case destructive
 }
 

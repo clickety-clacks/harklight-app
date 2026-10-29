@@ -186,6 +186,9 @@ private func liveChoiceButton<Label: View>(style: MessageChoiceStyle?,
     case .primary:
         Button(action: action, label: label)
             .buttonStyle(.borderedProminent)
+    case .secondary:
+        Button(action: action, label: label)
+            .buttonStyle(.bordered)
     case .destructive:
         Button(role: .destructive, action: action, label: label)
             .buttonStyle(.bordered)

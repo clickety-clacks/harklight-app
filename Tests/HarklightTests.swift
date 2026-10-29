@@ -104,7 +104,7 @@ final class HarklightTests: XCTestCase {
                                              persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("agent"), messageID: ExactText("fields"))
-        let payload = try JSONValue.parse(Data(#"{"title":"Choose","urgency":"now","stake":"The review deadline slips.","by_when":1793300000000,"choice_styles":{"accept":"destructive","reply":"primary","ordinary":"loud","missing":"primary"},"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"accept","label":"Accept","kind":"value","value":true},{"id":"reply","label":"Reply","kind":"text"},{"id":"ordinary","label":"Ordinary","kind":"value","value":false}]}}"#.utf8))
+        let payload = try JSONValue.parse(Data(#"{"title":"Choose","urgency":"now","stake":"The review deadline slips.","by_when":1793300000000,"choice_styles":{"accept":"destructive","reply":"primary","ordinary":"loud","missing":"primary","later":"secondary"},"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"accept","label":"Accept","kind":"value","value":true},{"id":"reply","label":"Reply","kind":"text"},{"id":"ordinary","label":"Ordinary","kind":"value","value":false},{"id":"later","label":"Later","kind":"value","value":false}]}}"#.utf8))
         try store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
@@ -126,7 +126,7 @@ final class HarklightTests: XCTestCase {
         guard case let .compatibility(actions) = request.projection else {
             return XCTFail("A malformed optional style must leave the answer interface usable.")
         }
-        XCTAssertEqual(actions.map(\.style), [.destructive, .primary, nil])
+        XCTAssertEqual(actions.map(\.style), [.destructive, .primary, nil, .secondary])
 
         let malformed = try JSONValue.parse(Data(#"{"title":"Still readable","stake":7,"by_when":"tomorrow","choice_styles":"unknown","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#.utf8))
         let tolerant = StoredRequest(key: RequestKey(accountScope: identity.personID,
