@@ -121,6 +121,10 @@ public actor NativeRelayCore {
     private var activeInboxStartupID: String?
     private var postCheckpointInboxConsumerTask: Task<Void, Never>?
     private var postCheckpointInboxFailure: (any Error)?
+    private var inboxViewRequestedOnConnection = false
+    private var inboxViewUnsupportedForConnection = false
+    private var inboxViewFetchInProgress = false
+    private var pendingInboxViewRevision: ExactText?
     private var postCheckpointAcknowledgementGateOpen = false
     private var postCheckpointAcknowledgedCursor: UInt64?
     private var pendingPostCheckpointAcknowledgement: UInt64?
@@ -455,6 +459,10 @@ public actor NativeRelayCore {
                let conversationSession = session as? any AuthenticatedConversationSession {
                 try await replayConversationAndAcknowledge(using: conversationSession)
             }
+            if !inboxViewRequestedOnConnection {
+                inboxViewRequestedOnConnection = true
+                await refreshInboxView(using: pagingSession)
+            }
             let durableCursor = try store.snapshot(context: context).cursor
             try validate()
             onProgress(.postAckDrainFinished(.completed))
@@ -467,9 +475,9 @@ public actor NativeRelayCore {
         }
     }
 
-    /// A page request originates only from a deliberate downward-scroll signal.
-    /// Coalesce queued scroll demand while another relay operation owns the
-    /// socket, then return only after the page has been durably saved.
+    /// A page request originates from downward scrolling or from loading the
+    /// held server view. Coalesce queued demand while another relay operation
+    /// owns the socket, then return only after the page is durably saved.
     @discardableResult
     public func fetchNextInboxPage() async throws -> Bool {
         guard let pagingSession = session as? any AuthenticatedInboxPagingSession else {
@@ -787,10 +795,16 @@ public actor NativeRelayCore {
         do {
             while !Task.isCancelled {
                 let frame = try await eventStream.nextPostCheckpointInboxEvent()
+                let update = try wire.decodeUpdate(frame)
+                if case let .viewChanged(revision) = update {
+                    await refreshInboxView(using: eventStream, noticedRevision: revision)
+                    continue
+                }
+                if case .ignoredUnsequenced = update { continue }
                 let previousCursor = try validatedRelayCursor()
                 let durableCursor: UInt64
                 let sequence: UInt64
-                switch try wire.decodeUpdate(frame) {
+                switch update {
                 case let .event(event):
                     sequence = event.sequence
                     switch store.applyRelayEvent(event, context: context) {
@@ -807,6 +821,10 @@ public actor NativeRelayCore {
                     durableCursor = try store.advanceRelayCursor(
                         overIgnoredUpdateAt: ignoredSequence, context: context)
                     diagnose(.relay, .ordinaryReplay, .observed, causeCode: "unknown_update_kind")
+                case .viewChanged:
+                    continue
+                case .ignoredUnsequenced:
+                    continue
                 }
                 if sequence > previousCursor {
                     guard previousCursor < UInt64.max,
@@ -830,6 +848,83 @@ public actor NativeRelayCore {
             failPostCheckpointInbox(error)
             diagnose(.relay, .ordinaryReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+        }
+    }
+
+    private func refreshInboxView(using transport: any AuthenticatedInboxPagingSession,
+                                  noticedRevision: ExactText? = nil) async {
+        guard !inboxViewUnsupportedForConnection else { return }
+        let heldRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
+        if let noticedRevision, heldRevision == noticedRevision { return }
+        if inboxViewFetchInProgress {
+            pendingInboxViewRevision = noticedRevision
+            return
+        }
+        inboxViewFetchInProgress = true
+        defer { inboxViewFetchInProgress = false }
+
+        var noticeToResolve = noticedRevision
+        while active {
+            let knownRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
+            if let noticeToResolve, noticeToResolve == knownRevision { break }
+            pendingInboxViewRevision = nil
+            let ref = Self.inboxRef("view")
+            do {
+                let reply = try await transport.inboxRequest(
+                    inboxWire.viewGet(knownRevision: knownRevision, ref: ref), ref: ref)
+                switch inboxWire.decodeViewGet(reply, ref: ref, knownRevision: knownRevision) {
+                case let .updated(view):
+                    try store.setInboxView(view, context: context)
+                    scheduleInboxViewPageLoad()
+                case .unchanged:
+                    scheduleInboxViewPageLoad()
+                case .unsupported:
+                    inboxViewUnsupportedForConnection = true
+                    try? store.setInboxView(nil, context: context)
+                case .unavailable:
+                    try? store.setInboxView(nil, context: context)
+                }
+                if inboxViewUnsupportedForConnection { break }
+            } catch {
+                try? store.setInboxView(nil, context: context)
+                break
+            }
+            let pending = pendingInboxViewRevision
+            pendingInboxViewRevision = nil
+            let currentRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
+            guard let pending, pending != currentRevision else {
+                break
+            }
+            noticeToResolve = pending
+        }
+    }
+
+    private func scheduleInboxViewPageLoad() {
+        Task { [weak self] in
+            await self?.loadPagesUntilInboxViewIsHeld()
+        }
+    }
+
+    private func loadPagesUntilInboxViewIsHeld() async {
+        while active {
+            guard let snapshot = try? store.snapshot(context: context),
+                  let view = snapshot.inboxView,
+                  let checkpoint = snapshot.inboxCheckpoint,
+                  checkpoint.checkpointAccepted,
+                  checkpoint.hasInitialPage else { return }
+            if Set(view.entries.map(\.key)).isSubset(of: Set(snapshot.requests.keys)) { return }
+            if checkpoint.loadedKeys.contains(where: { snapshot.remoteStates[$0]?.isTerminal == true }) {
+                return
+            }
+            guard checkpoint.nextCursor != nil else { return }
+            let loadedBefore = checkpoint.loadedKeys
+            guard (try? await fetchNextInboxPage()) == true else { return }
+            guard let next = try? store.snapshot(context: context),
+                  let nextCheckpoint = next.inboxCheckpoint else { return }
+            let newlyLoaded = nextCheckpoint.loadedKeys.subtracting(loadedBefore)
+            if newlyLoaded.contains(where: { next.remoteStates[$0]?.isTerminal == true }) { return }
+            if nextCheckpoint.loadedKeys == loadedBefore,
+               nextCheckpoint.nextCursor == checkpoint.nextCursor { return }
         }
     }
 
@@ -1003,6 +1098,9 @@ public actor NativeRelayCore {
             _ = try store.advanceRelayCursor(overIgnoredUpdateAt: sequence, context: context)
             replay.expected = sequence
             diagnose(.relay, .ordinaryReplay, .observed, causeCode: "unknown_update_kind")
+        case .viewChanged, .ignoredUnsequenced:
+            activeInboxReplay = replay
+            return
         }
         activeInboxReplay = replay
     }
@@ -1185,6 +1283,9 @@ public actor NativeRelayCore {
                 _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
                 replay.expected = sequence
                 diagnose(.conversation, .conversationReplay, .observed, causeCode: "unknown_update_kind")
+            case .viewChanged, .ignoredUnsequenced:
+                conversationReplay = replay
+                return
             }
         }
         conversationReplay = replay

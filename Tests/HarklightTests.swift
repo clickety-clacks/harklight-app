@@ -38,6 +38,127 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testThreadProjectionFoldsOnlyAdjacentExactSenderAndThreadEntries() {
+        func item(_ id: String, senderID: String = "sender", thread: String? = "thread",
+                  hasEntry: Bool = true, resolved: Bool = false) -> InboxItem {
+            .request(InboxRequestRow(
+                key: RequestKey(accountScope: ExactText("person"), senderID: ExactText(senderID),
+                                messageID: ExactText(id)),
+                title: "Message \(id)", sender: "Same display name", status: "",
+                isResolved: resolved, thread: thread.map(ExactText.init),
+                hasInboxViewEntry: hasEntry))
+        }
+
+        let rows = [
+            item("a1"), item("a2"),
+            item("different-thread", thread: "other"),
+            item("different-sender", senderID: "other-sender"),
+            item("no-view-entry", hasEntry: false),
+            item("after-missing-entry"),
+            item("resolved", resolved: true),
+            item("after-resolved")
+        ]
+        let entries = InboxThreadListProjection.grouped(rows)
+
+        XCTAssertEqual(entries.count, 7)
+        guard case let .thread(thread, members) = entries[0] else {
+            return XCTFail("The first adjacent pair should be folded.")
+        }
+        XCTAssertEqual(thread, ExactText("thread"))
+        XCTAssertEqual(members.map(\.id), [.request(RequestKey(accountScope: ExactText("person"),
+            senderID: ExactText("sender"), messageID: ExactText("a1"))),
+            .request(RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                messageID: ExactText("a2")))])
+        XCTAssertTrue(entries.dropFirst().allSatisfy { if case .row = $0 { return true }; return false },
+                      "A different thread, sender, missing entry, resolved row or singleton is a plain row.")
+    }
+
+    @MainActor
+    func testSearchDoesNotJoinThreadRowsAcrossAFilteredBarrier() {
+        func item(_ id: String, thread: String, title: String) -> InboxItem {
+            .request(InboxRequestRow(
+                key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                messageID: ExactText(id)),
+                title: title, sender: "Planning assistant", status: "",
+                thread: ExactText(thread), hasInboxViewEntry: true))
+        }
+        let first = item("first", thread: "t", title: "Match one")
+        let barrier = item("barrier", thread: "other", title: "Gap")
+        let last = item("last", thread: "t", title: "Match two")
+        let rows = [first, barrier, last]
+
+        let entries = InboxListProjection.visibleEntries(rows, in: .inbox, search: "match")
+        XCTAssertEqual(entries.flatMap(\.members).map(\.id),
+                       InboxListProjection.filteredRows(rows, in: .inbox, search: "match").map(\.id))
+        XCTAssertTrue(entries.allSatisfy { if case .row = $0 { return true }; return false },
+                      "Filtering cannot make separated members adjacent for folding.")
+    }
+
+    @MainActor
+    func testMessageFieldsUseServerViewAndIgnoreMalformedOptionalMembersIndependently() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("field-reader"),
+                                       deviceID: ExactText("field-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("agent"), messageID: ExactText("fields"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Choose","urgency":"now","stake":"The review deadline slips.","by_when":1793300000000,"choice_styles":{"accept":"destructive","reply":"primary","ordinary":"loud","missing":"primary"},"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"accept","label":"Accept","kind":"value","value":true},{"id":"reply","label":"Reply","kind":"text"},{"id":"ordinary","label":"Ordinary","kind":"value","value":false}]}}"#.utf8))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+            InboxViewEntry(key: key, priority: .normal, thread: ExactText("review"),
+                           dueAtMilliseconds: 1793300000000, reason: ExactText("server order"))
+        ]), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let request = try XCTUnwrap(try port.observe(context: port.context).requests.first)
+        XCTAssertEqual(request.inboxPriority, .normal,
+                       "The visible level comes from the post-attenuation view, not urgency.")
+        XCTAssertEqual(request.inboxThread, ExactText("review"))
+        XCTAssertEqual(request.inboxDueAtMilliseconds, 1_793_300_000_000)
+        XCTAssertEqual(request.inboxReason, ExactText("server order"))
+        XCTAssertEqual(request.stakeText, ExactText("The review deadline slips."))
+        XCTAssertEqual(request.byWhenMilliseconds, 1_793_300_000_000)
+        XCTAssertEqual(request.attentionTier, .middle,
+                       "A legacy attention tier is not projected to the app.")
+        guard case let .compatibility(actions) = request.projection else {
+            return XCTFail("A malformed optional style must leave the answer interface usable.")
+        }
+        XCTAssertEqual(actions.map(\.style), [.destructive, .primary, nil])
+
+        let malformed = try JSONValue.parse(Data(#"{"title":"Still readable","stake":7,"by_when":"tomorrow","choice_styles":"unknown","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#.utf8))
+        let tolerant = StoredRequest(key: RequestKey(accountScope: identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("malformed")), originalPayload: malformed)
+        XCTAssertNil(tolerant.stakeText)
+        XCTAssertNil(tolerant.byWhenMilliseconds)
+        XCTAssertTrue(tolerant.choiceStyles.isEmpty)
+        if case .compatibility = tolerant.interface {
+            // The optional fields did not make the message or answer controls unavailable.
+        } else {
+            XCTFail("An invalid optional field must not invalidate answer controls.")
+        }
+    }
+
+    func testDuePhraseUsesLocalCalendarDayAndTime() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let locale = Locale(identifier: "en_US_POSIX")
+        let now = ISO8601DateFormatter().date(from: "2026-10-29T12:00:00Z")!
+        func milliseconds(_ value: String) -> Int {
+            Int(ISO8601DateFormatter().date(from: value)!.timeIntervalSince1970 * 1_000)
+        }
+
+        XCTAssertTrue(InboxDuePhrase.label(for: milliseconds("2026-10-29T15:30:00Z"),
+            now: now, calendar: calendar, locale: locale).hasPrefix("Due today at "))
+        XCTAssertTrue(InboxDuePhrase.label(for: milliseconds("2026-10-30T15:30:00Z"),
+            now: now, calendar: calendar, locale: locale).hasPrefix("Due tomorrow at "))
+        XCTAssertTrue(InboxDuePhrase.label(for: milliseconds("2026-10-28T15:30:00Z"),
+            now: now, calendar: calendar, locale: locale).hasPrefix("Was due yesterday at "))
+    }
+
+    @MainActor
     func testNotificationDestinationSelectsTheRequestTabAndClearsSearch() {
         let replied = InboxRequestRow(
             key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),

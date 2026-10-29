@@ -187,15 +187,31 @@ public struct ProjectedAction: Equatable, Sendable {
     public let label: ExactText
     public let kind: ProjectedActionKind
     public let illustrationID: ExactText?
+    public let value: JSONValue?
+    public let style: MessageChoiceStyle?
 
     public init(id: ExactText,
                 label: ExactText,
                 kind: ProjectedActionKind,
-                illustrationID: ExactText? = nil) {
+                illustrationID: ExactText? = nil,
+                value: JSONValue? = nil,
+                style: MessageChoiceStyle? = nil) {
         self.id = id
         self.label = label
         self.kind = kind
         self.illustrationID = illustrationID
+        self.value = value
+        self.style = style
+    }
+}
+
+public struct ProjectedActionReference: Equatable, Sendable {
+    public let inputID: ExactText?
+    public let actionID: ExactText
+
+    public init(inputID: ExactText?, actionID: ExactText) {
+        self.inputID = inputID
+        self.actionID = actionID
     }
 }
 
@@ -292,7 +308,20 @@ public struct PresentedRequest: Equatable, Sendable {
     public let informationalSeenStatus: InformationalSeenStatus?
     /// The server's account-wide terminal outcome, when supported.
     public let accountAnswerOutcome: AccountAnswerOutcome?
+    /// The first value action matching a default outcome in the current revision.
+    /// A historical revision is never marked as the winner for a later default.
+    public let defaultAnswerAction: ProjectedActionReference?
     public let attentionTier: AttentionTier
+    /// Current fields from the server's account inbox view. Absence means the
+    /// server has not supplied a usable entry for this row.
+    public let inboxPriority: InboxMessagePriority?
+    public let inboxThread: ExactText?
+    public let inboxDueAtMilliseconds: Int?
+    public let inboxReason: ExactText?
+    public let hasInboxViewEntry: Bool
+    /// Sender-authored fields from the message's current revision.
+    public let stakeText: ExactText?
+    public let byWhenMilliseconds: Int?
     /// The relay explicitly rejected No comment; other answer methods remain usable.
     public let noCommentUnavailable: Bool
     /// The relay explicitly rejected the latest answer operation.
@@ -326,7 +355,15 @@ public struct PresentedRequest: Equatable, Sendable {
                 projection: AdmittedRequestProjection,
                 informationalSeenStatus: InformationalSeenStatus? = nil,
                 accountAnswerOutcome: AccountAnswerOutcome? = nil,
+                defaultAnswerAction: ProjectedActionReference? = nil,
                 attentionTier: AttentionTier = .middle,
+                inboxPriority: InboxMessagePriority? = nil,
+                inboxThread: ExactText? = nil,
+                inboxDueAtMilliseconds: Int? = nil,
+                inboxReason: ExactText? = nil,
+                hasInboxViewEntry: Bool = false,
+                stakeText: ExactText? = nil,
+                byWhenMilliseconds: Int? = nil,
                 noCommentUnavailable: Bool = false,
                 answerNotDelivered: Bool = false,
                 staleAnswerRevision: StaleAnswerRevision? = nil,
@@ -348,13 +385,42 @@ public struct PresentedRequest: Equatable, Sendable {
         self.projection = projection
         self.informationalSeenStatus = informationalSeenStatus
         self.accountAnswerOutcome = accountAnswerOutcome
+        self.defaultAnswerAction = defaultAnswerAction
         self.attentionTier = attentionTier
+        self.inboxPriority = inboxPriority
+        self.inboxThread = inboxThread
+        self.inboxDueAtMilliseconds = inboxDueAtMilliseconds
+        self.inboxReason = inboxReason
+        self.hasInboxViewEntry = hasInboxViewEntry
+        self.stakeText = stakeText
+        self.byWhenMilliseconds = byWhenMilliseconds
         self.noCommentUnavailable = noCommentUnavailable
         self.answerNotDelivered = answerNotDelivered
         self.staleAnswerRevision = staleAnswerRevision
         self.inboxStateIsCurrent = inboxStateIsCurrent
         self.supersedesMessageIDs = supersedesMessageIDs
     }
+
+    public var defaultAnswerActionID: ExactText? { defaultAnswerAction?.actionID }
+
+    public var defaultAnswerWords: String? {
+        guard let accountAnswerOutcome,
+              case let .defaultAnswer(_, text) = accountAnswerOutcome else { return nil }
+        return text?.rawValue
+    }
+
+    public var isDefaultAnswered: Bool {
+        guard let accountAnswerOutcome else { return false }
+        if case .defaultAnswer = accountAnswerOutcome { return true }
+        return false
+    }
+
+    public var defaultAnswerStatusText: String? {
+        guard isDefaultAnswered else { return nil }
+        guard let words = defaultAnswerWords, !words.isEmpty else { return "Answered by default" }
+        return "Answered by default: \(words)"
+    }
+
 }
 
 public struct StaleAnswerRevision: Equatable, Sendable {
@@ -417,9 +483,25 @@ public final class AttentionDomainPort: @unchecked Sendable {
         let snapshot = try store.snapshot(context: profileContext)
         guard let thread = snapshot.conversationThreads[key], let payload = thread.revisions[revision],
               let draft = thread.answerDrafts?[revision], let stored = snapshot.requests[key] else { return nil }
+        let currentPayload = thread.revisions[thread.currentRevision] ?? stored.originalPayload
+        let currentRequest = StoredRequest(key: key, originalPayload: currentPayload)
+            .assigningAcceptanceOrder(stored.acceptanceOrder ?? 0)
+        let viewSlot = snapshot.inboxView.map {
+            Self.viewSlots(for: Array(snapshot.requests.keys), in: $0,
+                           remoteStates: snapshot.remoteStates)[key]
+        } ?? nil
+        let inboxViewEntry: InboxViewEntry? = if let viewSlot, viewSlot.isInherited {
+            InboxViewEntry(key: key, priority: viewSlot.entry.priority,
+                           thread: viewSlot.entry.thread,
+                           dueAtMilliseconds: currentRequest.byWhenMilliseconds)
+        } else {
+            viewSlot?.entry
+        }
         return try present(StoredRequest(key: key, originalPayload: payload), acceptanceOrder: stored.acceptanceOrder ?? 0,
             draft: draft, session: nil, remote: nil, submission: nil, selector: nil,
-            requestRevision: revision, supersedesMessageIDs: stored.supersedesMessageIDs)
+            requestRevision: revision, supersedesMessageIDs: stored.supersedesMessageIDs,
+            currentRevisionByWhenMilliseconds: currentRequest.byWhenMilliseconds,
+            inboxViewEntry: inboxViewEntry)
     }
 
     public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) throws {
@@ -732,6 +814,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
         guard Set(orderedRequests.map(\.order)).count == orderedRequests.count else {
             throw AttentionStoreError.duplicateAcceptanceOrder
         }
+        let currentView = snapshot.inboxView
+        let currentViewSlots = currentView.map {
+            Self.viewSlots(for: orderedRequests.map { $0.request.key }, in: $0,
+                           remoteStates: snapshot.remoteStates)
+        } ?? [:]
         let requests = try orderedRequests.map { item in
             let session = snapshot.fixtureSessions[item.request.key]
             let thread = snapshot.conversationThreads[item.request.key]
@@ -743,12 +830,27 @@ public final class AttentionDomainPort: @unchecked Sendable {
             }
             let currentIntents = snapshot.intents.values.filter(matchesCurrentRevision)
             let projectedRequest: StoredRequest
-            if let selector = selectors?[item.request.key], selector.requestRevision != conversationRevision,
-               let payload = thread?.revisions[selector.requestRevision] {
-                let historical = StoredRequest(key: item.request.key, originalPayload: payload)
-                projectedRequest = historical.assigningAcceptanceOrder(item.order)
+            if let payload = thread?.revisions[presentedRevision] {
+                projectedRequest = StoredRequest(key: item.request.key, originalPayload: payload)
+                    .assigningAcceptanceOrder(item.order)
             } else {
                 projectedRequest = item.request
+            }
+            let currentRevisionRequest: StoredRequest
+            if let payload = thread?.revisions[conversationRevision] {
+                currentRevisionRequest = StoredRequest(key: item.request.key, originalPayload: payload)
+                    .assigningAcceptanceOrder(item.order)
+            } else {
+                currentRevisionRequest = item.request
+            }
+            let viewSlot = currentViewSlots[item.request.key]
+            let inboxViewEntry: InboxViewEntry? = if let viewSlot, viewSlot.isInherited {
+                InboxViewEntry(key: item.request.key,
+                               priority: viewSlot.entry.priority,
+                               thread: viewSlot.entry.thread,
+                               dueAtMilliseconds: currentRevisionRequest.byWhenMilliseconds)
+            } else {
+                viewSlot?.entry
             }
             let currentDraft: RequestDraft
             if presentedRevision == conversationRevision {
@@ -801,13 +903,19 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         submission: submission,
                         selector: selectors?[item.request.key],
                         requestRevision: presentedRevision,
+                        currentRevisionByWhenMilliseconds: currentRevisionRequest.byWhenMilliseconds,
+                        defaultAnswerAction: presentedRevision == conversationRevision
+                            ? Self.defaultAnswerAction(for: snapshot.remoteStates[item.request.key]?.accountAnswerOutcome,
+                                                        interface: currentRevisionRequest.interface)
+                            : nil,
                         staleAnswerRevision: staleAnswerRevision,
                         noCommentUnavailable: noCommentUnavailable,
                         answerNotDelivered: answerNotDelivered,
                         inboxStateIsCurrent: snapshot.inboxCurrentKeys.map {
                             $0.contains(item.request.key)
                         } ?? true,
-                        supersedesMessageIDs: item.request.supersedesMessageIDs)
+                        supersedesMessageIDs: item.request.supersedesMessageIDs,
+                        inboxViewEntry: inboxViewEntry)
         }
         let displayRequests = requests.sorted { left, right in
             if left.inboxStateIsCurrent != right.inboxStateIsCurrent {
@@ -822,8 +930,27 @@ public final class AttentionDomainPort: @unchecked Sendable {
             }
             return left.key.messageID.rawValue < right.key.messageID.rawValue
         }
-        var sourceOrderedRequests = displayRequests
-        if let sourceOrder = snapshot.inboxSourceOrder {
+        var sourceOrderedRequests: [PresentedRequest]
+        if let currentView {
+            let localRank = Dictionary(uniqueKeysWithValues: displayRequests.enumerated().map {
+                ($0.element.key, $0.offset)
+            })
+            sourceOrderedRequests = displayRequests.filter { !$0.isResolved }.sorted { left, right in
+                let leftRank = currentViewSlots[left.key]?.rank
+                let rightRank = currentViewSlots[right.key]?.rank
+                switch (leftRank, rightRank) {
+                case let (.some(leftRank), .some(rightRank)) where leftRank != rightRank:
+                    return leftRank < rightRank
+                case (.some, .none): return true
+                case (.none, .some): return false
+                default: return localRank[left.key, default: .max] < localRank[right.key, default: .max]
+                }
+            }
+            sourceOrderedRequests += displayRequests.filter(\.isResolved)
+        } else {
+            sourceOrderedRequests = displayRequests
+        }
+        if currentView == nil, let sourceOrder = snapshot.inboxSourceOrder {
             var sourceRank: [RequestKey: Int] = [:]
             for (index, key) in sourceOrder.enumerated() where sourceRank[key] == nil {
                 sourceRank[key] = index
@@ -845,6 +972,65 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     requests: sourceOrderedRequests)
     }
 
+    private static func viewSlots(for keys: [RequestKey],
+                                  in view: InboxView,
+                                  remoteStates: [RequestKey: RemoteRequestState])
+        -> [RequestKey: (rank: Int, entry: InboxViewEntry, isInherited: Bool)] {
+        var entriesByKey: [RequestKey: (rank: Int, entry: InboxViewEntry)] = [:]
+        for (rank, entry) in view.entries.enumerated() where entriesByKey[entry.key] == nil {
+            entriesByKey[entry.key] = (rank, entry)
+        }
+        func resolve(_ candidate: RequestKey, visited: Set<RequestKey>)
+            -> (rank: Int, entry: InboxViewEntry)? {
+            if let direct = entriesByKey[candidate] { return direct }
+            guard !visited.contains(candidate),
+                  let target = remoteStates[candidate]?.supersedesOriginTarget else { return nil }
+            return resolve(target, visited: visited.union([candidate]))
+        }
+        var result: [RequestKey: (rank: Int, entry: InboxViewEntry, isInherited: Bool)] = [:]
+        for key in keys {
+            if let slot = resolve(key, visited: []) {
+                let inherited = slot.entry.key != key
+                let entry = inherited
+                    ? InboxViewEntry(key: key, priority: slot.entry.priority, thread: slot.entry.thread)
+                    : slot.entry
+                result[key] = (slot.rank, entry, inherited)
+            }
+        }
+        return result
+    }
+
+    private static func defaultAnswerAction(for outcome: AccountAnswerOutcome?,
+                                            interface: RequestInterface) -> ProjectedActionReference? {
+        guard let outcome, case let .defaultAnswer(optionalValue, _) = outcome,
+              let value = optionalValue else { return nil }
+        if case .null = value { return nil }
+        return firstValueAction(matching: value, in: interface)
+    }
+
+    private static func firstValueAction(matching value: JSONValue,
+                                         in interface: RequestInterface) -> ProjectedActionReference? {
+        switch interface {
+        case let .sender(document):
+            for input in document.inputs {
+                guard case let .response(actions) = input.kind else { continue }
+                for action in actions {
+                    guard case let .value(actionValue) = action.kind,
+                          actionValue.semanticallyEquals(value) else { continue }
+                    return ProjectedActionReference(inputID: input.id, actionID: action.id)
+                }
+            }
+        case let .compatibility(form):
+            for action in form.actions where action.kind == .value &&
+                action.value?.semanticallyEquals(value) == true {
+                return ProjectedActionReference(inputID: nil, actionID: action.id)
+            }
+        case .unsupported:
+            break
+        }
+        return nil
+    }
+
     private func present(_ request: StoredRequest,
                          acceptanceOrder: UInt64,
                          draft: RequestDraft,
@@ -857,7 +1043,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          noCommentUnavailable: Bool = false,
                          answerNotDelivered: Bool = false,
                          inboxStateIsCurrent: Bool = true,
-                         supersedesMessageIDs: [ExactText] = []) throws -> PresentedRequest {
+                         supersedesMessageIDs: [ExactText] = [],
+                         currentRevisionByWhenMilliseconds: Int? = nil,
+                         inboxViewEntry: InboxViewEntry? = nil) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
@@ -954,10 +1142,17 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 switch input.kind {
                 case let .response(actions):
                     kind = .response(actions.map { action in
-                        ProjectedAction(id: action.id,
-                                        label: action.label,
-                                        kind: action.kind.isValue ? .value : .text,
-                                        illustrationID: action.illustrationID)
+                        let value: JSONValue?
+                        switch action.kind {
+                        case let .value(rawValue): value = rawValue
+                        case .text: value = nil
+                        }
+                        return ProjectedAction(id: action.id,
+                                               label: action.label,
+                                               kind: action.kind.isValue ? .value : .text,
+                                               illustrationID: action.illustrationID,
+                                               value: value,
+                                               style: request.choiceStyles[action.id])
                     })
                 case .text:
                     kind = .text
@@ -974,7 +1169,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
             projection = .compatibility(form.actions.map { action in
                 ProjectedAction(id: action.id,
                                 label: action.label,
-                                kind: action.kind == .value ? .value : .text)
+                                kind: action.kind == .value ? .value : .text,
+                                value: action.value,
+                                style: request.choiceStyles[action.id])
             })
         case let .unsupported(reason):
             projection = .unsupported(reason)
@@ -998,7 +1195,20 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 informationalSeenStatus: informationalSeenStatus(for: request,
                                     status: status, remote: remote, submission: submission),
                                 accountAnswerOutcome: remote?.accountAnswerOutcome,
-                                attentionTier: remote?.attentionTier ?? .middle,
+                                defaultAnswerAction: defaultAnswerAction,
+                                attentionTier: .middle,
+                                inboxPriority: status == .open || status == .pending
+                                    ? inboxViewEntry?.priority : nil,
+                                inboxThread: status == .open || status == .pending
+                                    ? inboxViewEntry?.thread : nil,
+                                inboxDueAtMilliseconds: status == .open || status == .pending
+                                    ? inboxViewEntry?.dueAtMilliseconds : nil,
+                                inboxReason: status == .open || status == .pending
+                                    ? inboxViewEntry?.reason : nil,
+                                hasInboxViewEntry: (status == .open || status == .pending) &&
+                                    inboxViewEntry != nil,
+                                stakeText: request.stakeText,
+                                byWhenMilliseconds: currentRevisionByWhenMilliseconds,
                                 noCommentUnavailable: hasAccountTerminal ? false : noCommentUnavailable,
                                 answerNotDelivered: hasAccountTerminal ? false : answerNotDelivered,
                                 staleAnswerRevision: hasAccountTerminal ? nil : staleAnswerRevision,

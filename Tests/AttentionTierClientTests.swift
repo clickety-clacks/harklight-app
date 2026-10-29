@@ -11,12 +11,12 @@ final class AttentionTierClientTests: XCTestCase {
 
     private func data(_ value: String) -> Data { Data(value.utf8) }
 
-    func testInboxPageTierIsDecodedFromWrapperAndMissingValueDefaultsToMiddle() throws {
+    func testInboxPageAttentionTierIsIgnoredAndInvalidValueDoesNotDropMessage() throws {
         let frame = #"{"v":1,"type":"ok","ref":"start","paging_version":1,"snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"top-row","origin":"source","as":"message","message":{"title":"Top"}},"attention_tier":"top"},{"acceptance":{"v":1,"type":"delivery","seq":2,"sender_id":"sender","message_id":"legacy-row","origin":"source","as":"message","message":{"title":"Legacy"}}}],"next_cursor":null,"receipt_cursor":null}"#
         let wire = try InboxPagingWire(profile: context())
         let page = try wire.decodeStart(data(frame), ref: "start")
 
-        XCTAssertEqual(page.items.map(\.attentionTier), [.top, .middle])
+        XCTAssertEqual(page.items.map(\.attentionTier), [.middle, .middle])
         if case let .delivery(request, _) = page.items[0].acceptance.body {
             XCTAssertNil(request.originalPayload.uniqueValue(named: "attention_tier"),
                          "The wrapper tier must not be inserted into the original message.")
@@ -26,14 +26,14 @@ final class AttentionTierClientTests: XCTestCase {
 
         let invalid = data(frame.replacingOccurrences(of: #""attention_tier":"top""#,
                                                       with: #""attention_tier":"urgent""#))
-        XCTAssertThrowsError(try wire.decodeStart(invalid, ref: "start"))
+        XCTAssertEqual(try wire.decodeStart(invalid, ref: "start").items.count, 2)
     }
 
-    func testLiveDeliveryTierIsAValidatedSiblingAndDefaultsToMiddle() throws {
+    func testLiveDeliveryDoesNotPresentAttentionTierAndInvalidValueIsTolerated() throws {
         let wire = try RelayWire(profile: context())
         let high = data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"source","as":"knock","message":{"title":"Question"},"attention_tier":"low"}"#)
         let decoded = try wire.decodeEvent(high)
-        XCTAssertEqual(decoded.attentionTier, .low)
+        XCTAssertEqual(decoded.attentionTier, .middle)
         guard case let .delivery(request, classification) = decoded.body else {
             return XCTFail("Expected a delivery")
         }
@@ -47,10 +47,10 @@ final class AttentionTierClientTests: XCTestCase {
         let invalid = data(String(decoding: high, as: UTF8.self)
             .replacingOccurrences(of: #""attention_tier":"low""#,
                                   with: #""attention_tier":"urgent""#))
-        XCTAssertThrowsError(try wire.decodeEvent(invalid))
+        XCTAssertEqual(try wire.decodeEvent(invalid).attentionTier, .middle)
 
         let originReference = try wire.decodeEvent(data(#"{"v":1,"type":"delivery","seq":3,"sender_id":"sender","message_id":"origin-row","origin":"reader","attention_tier":"top"}"#))
-        XCTAssertEqual(originReference.attentionTier, .top)
+        XCTAssertEqual(originReference.attentionTier, .middle)
         guard case .originReference = originReference.body else {
             return XCTFail("The origin delivery must remain a content-free reference")
         }
@@ -137,19 +137,47 @@ final class AttentionTierClientTests: XCTestCase {
         XCTAssertNil(restoredCheckpoint.sourceOrder)
     }
 
-    func testRelayTierChangeUsesExistingIdentityAndRequiresAValidTier() throws {
+    func testRelayAttentionTierUpdateIsIgnoredAndDoesNotBreakDelivery() throws {
         let profile = context()
         let wire = try RelayWire(profile: profile)
         let frame = #"{"v":1,"type":"attention_tier","seq":3,"sender_id":"sender","message_id":"request","origin":"source","attention_tier":"top"}"#
-        let decoded = try wire.decodeEvent(data(frame))
-        XCTAssertEqual(decoded.sequence, 3)
-        XCTAssertEqual(decoded.attentionTier, .top)
-        XCTAssertEqual(decoded.origin, ExactText("source"))
-        XCTAssertEqual(decoded.body, .attentionTierChange(RequestKey(accountScope: profile.identity.personID,
-            senderID: ExactText("sender"), messageID: ExactText("request"))))
+        XCTAssertEqual(try wire.decodeUpdate(data(frame)), .ignored(sequence: 3))
 
         let missing = data(#"{"v":1,"type":"attention_tier","seq":3,"sender_id":"sender","message_id":"request","origin":"source"}"#)
-        XCTAssertThrowsError(try wire.decodeEvent(missing))
+        XCTAssertEqual(try wire.decodeUpdate(missing), .ignored(sequence: 3))
+        let invalidDelivery = data(#"{"v":1,"type":"delivery","seq":4,"sender_id":"sender","message_id":"request","origin":"source","as":"message","message":{"title":"Still visible"},"attention_tier":"urgent"}"#)
+        guard case let .event(event) = try wire.decodeUpdate(invalidDelivery) else {
+            return XCTFail("An unsupported tier field must not drop an otherwise valid delivery.")
+        }
+        XCTAssertEqual(event.attentionTier, .middle)
+    }
+
+    func testUnsequencedViewChangedAndViewEntryFieldTolerance() throws {
+        let profile = context()
+        let relay = try RelayWire(profile: profile)
+        XCTAssertEqual(try relay.decodeUpdate(data(#"{"v":1,"type":"view_changed","view_rev":"view-2"}"#)),
+                       .viewChanged(ExactText("view-2")))
+        XCTAssertEqual(try relay.decodeUpdate(data(#"{"v":1,"type":"view_changed","view_rev":7}"#)),
+                       .ignoredUnsequenced)
+
+        let wire = try InboxPagingWire(profile: profile)
+        let request = try JSONValue.parse(wire.viewGet(knownRevision: ExactText("view-1"), ref: "get"))
+        XCTAssertEqual(request.uniqueValue(named: "type"), .string(ExactText("view_get")))
+        XCTAssertEqual(request.uniqueValue(named: "known_view_rev"), .string(ExactText("view-1")))
+        let response = data(#"{"v":1,"type":"ok","ref":"get","view_rev":"view-2","entries":[{"sender_id":"sender","message_id":"malformed-optionals","priority":"urgent","thread":4,"due_at":"tomorrow","reason":false,"new_field":true},{"sender_id":"sender","message_id":"valid","priority":"now","thread":"release","due_at":1793300000000,"reason":"deadline","new_field":"ignored"}]}"#)
+        guard case let .updated(view) = wire.decodeViewGet(response, ref: "get") else {
+            return XCTFail("Invalid optional entry fields must not discard the view.")
+        }
+        XCTAssertEqual(view.entries.count, 2)
+        XCTAssertEqual(view.entries[0].key.messageID, ExactText("malformed-optionals"))
+        XCTAssertNil(view.entries[0].priority)
+        XCTAssertNil(view.entries[0].thread)
+        XCTAssertNil(view.entries[0].dueAtMilliseconds)
+        XCTAssertNil(view.entries[0].reason)
+        XCTAssertEqual(view.entries[1].priority, .now)
+        XCTAssertEqual(view.entries[1].thread, ExactText("release"))
+        XCTAssertEqual(view.entries[1].dueAtMilliseconds, 1_793_300_000_000)
+        XCTAssertEqual(view.entries[1].reason, ExactText("deadline"))
     }
 
     func testRelayTierChangeUpdatesTheExistingRequestWithoutAnotherDelivery() throws {
@@ -174,7 +202,7 @@ final class AttentionTierClientTests: XCTestCase {
         XCTAssertEqual(snapshot.requests.count, 1)
         XCTAssertEqual(snapshot.remoteStates[key]?.attentionTier, .low)
         let port = AttentionDomainPort(store: store)
-        XCTAssertEqual(try port.observe(context: port.context).requests.first?.attentionTier, .low)
+        XCTAssertEqual(try port.observe(context: port.context).requests.first?.attentionTier, .middle)
     }
 
     func testConversationTierChangeAllowsUnboundMessageWithoutInventingHandle() throws {
@@ -213,7 +241,7 @@ final class AttentionTierClientTests: XCTestCase {
         let presentation = try port.observe(context: port.context)
         XCTAssertEqual(presentation.requests.map { $0.key.messageID.rawValue },
                        ["fourth", "third", "second", "first"])
-        XCTAssertEqual(presentation.requests.map(\.attentionTier), [.low, .middle, .top, .top])
+        XCTAssertEqual(presentation.requests.map(\.attentionTier), [.middle, .middle, .middle, .middle])
     }
 
     func testLiveTierChangeRedrawsPagedRowWithoutMovingIt() throws {
@@ -243,7 +271,7 @@ final class AttentionTierClientTests: XCTestCase {
         let port = AttentionDomainPort(store: restored)
         let initial = try port.observe(context: port.context)
         XCTAssertEqual(initial.requests.map { $0.key.messageID.rawValue }, ["first", "second"])
-        XCTAssertEqual(initial.requests.map(\.attentionTier), [.low, .top])
+        XCTAssertEqual(initial.requests.map(\.attentionTier), [.middle, .middle])
 
         let firstKey = first.key
         _ = restored.applyRelayEvent(RelayEvent(sequence: 3,
@@ -251,7 +279,7 @@ final class AttentionTierClientTests: XCTestCase {
             context: profile)
         let changed = try port.observe(context: port.context)
         XCTAssertEqual(changed.requests.map { $0.key.messageID.rawValue }, ["first", "second"])
-        XCTAssertEqual(changed.requests.map(\.attentionTier), [.middle, .top])
+        XCTAssertEqual(changed.requests.map(\.attentionTier), [.middle, .middle])
         let checkpoint = try restored.snapshot(context: profile).inboxCheckpoint
         XCTAssertEqual(checkpoint?.highWater, 2, "The live tier fact must not move the frozen page high water.")
         XCTAssertEqual(try restored.snapshot(context: profile).cursor, 3)

@@ -415,15 +415,93 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(request.receiptFacts)
     }
 
+    func testDefaultOutcomeShowsServerWordsAndMarksTheMatchingCurrentChoice() throws {
+        let (context, _, _, key) = try setup()
+        let initialPayload = try JSONValue.parse(Data(#"{"title":"Choose","stake":"Earlier stake","by_when":1793200000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"value","value":1}]}}"#.utf8))
+        // Replace the setup message with a fresh store to keep the event sequence coherent.
+        let freshStore = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        _ = try freshStore.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: initialPayload), .message)),
+            context: context)
+        let revisedPayload = try JSONValue.parse(Data(#"{"title":"Choose","stake":"The review deadline slips.","by_when":1793300000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"first","label":"Later","kind":"value","value":1},{"id":"second","label":"Later","kind":"value","value":2}]}}"#.utf8))
+        let binding = ConversationBinding(request: key, revision: 2)
+        let revision = ConversationTurn(id: ExactText("revision-2"), binding: binding,
+            author: .origin, sessionHandle: ExactText("origin"), text: ExactText("Choose"), kind: .revision)
+        try freshStore.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .revision(revision, payload: revisedPayload)), context: context)
+        let defaultFrame = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"server","state":"answered","by":"default","answer_outcome":{"kind":"default","value":2,"text":"Hold for now"}}"#.utf8)
+        _ = try freshStore.apply(RelayWire(profile: context).decodeEvent(defaultFrame), context: context)
+        let live = try LivePresentationStore(store: freshStore, context: context)
+
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertTrue(request.isDefaultAnswered)
+        XCTAssertEqual(request.defaultAnswerAction,
+                       ProjectedActionReference(inputID: nil, actionID: ExactText("second")))
+        XCTAssertEqual(request.defaultAnswerWords, "Hold for now",
+                       "Display words come from the shared outcome, not the duplicate action label.")
+        XCTAssertEqual(request.defaultAnswerStatusText, "Answered by default: Hold for now")
+        XCTAssertEqual(LiveRequestDetail.answeredStatusTitle(
+            accountAnswerOutcome: request.accountAnswerOutcome, isLiveRequest: true), "Answered by default")
+        XCTAssertEqual(request.byWhenMilliseconds, 1_793_300_000_000)
+        XCTAssertEqual(request.stakeText, ExactText("The review deadline slips."))
+        let port = AttentionDomainPort(store: freshStore)
+        let historical = try XCTUnwrap(port.inspect(context: port.context, request: key,
+                                                     revision: 1).requests.first)
+        XCTAssertEqual(historical.byWhenMilliseconds, 1_793_300_000_000,
+                       "The detail deadline comes from the current revision, even in history.")
+        XCTAssertNil(historical.defaultAnswerAction,
+                     "A historical choice is never marked as the winning current-revision choice.")
+        let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertTrue(row.belongsToReplied)
+        XCTAssertEqual(row.defaultAnswerStatus, "Answered by default: Hold for now")
+    }
+
+    func testDefaultOutcomeWithoutValueStillShowsTextAndDefaultStatus() throws {
+        let (context, _, _, key) = try setup()
+        let store = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let payload = try JSONValue.parse(Data(#"{"title":"Choose","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let frame = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"server","state":"answered","answer_outcome":{"kind":"default","text":"Yes, automatically"}}"#.utf8)
+        _ = try store.apply(RelayWire(profile: context).decodeEvent(frame), context: context)
+
+        let live = try LivePresentationStore(store: store, context: context)
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertNil(request.defaultAnswerAction)
+        XCTAssertEqual(request.defaultAnswerWords, "Yes, automatically")
+        XCTAssertEqual(try XCTUnwrap(live.inboxRows.first { $0.key == key }).defaultAnswerStatus,
+                       "Answered by default: Yes, automatically")
+    }
+
     func testTerminalInboxPageCarriesTheSharedAccountOutcome() throws {
-        let (context, _, _, _) = try setup()
+        let (context, _, _, key) = try setup()
         let paging = try InboxPagingWire(profile: context)
-        let page = Data(#"{"v":1,"type":"ok","paging_version":1,"ref":"page","snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"sample","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123},"terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"reply","text":"Exact shared reply"}}}],"next_cursor":null}"#.utf8)
+        let page = Data(#"{"v":1,"type":"ok","paging_version":1,"ref":"page","snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"sample","origin":"origin","as":"message","message":{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"first","label":"Later","kind":"value","value":1},{"id":"second","label":"Later","kind":"value","value":2}]}},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123},"terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"default","value":2,"text":"Hold for now"}}}],"next_cursor":null}"#.utf8)
 
         let decoded = try paging.decodePage(page, ref: "page", snapshotID: "snapshot", highWater: 2)
 
         XCTAssertEqual(decoded.items.first?.terminal?.accountAnswerOutcome,
-                       .reply(ExactText("Exact shared reply")))
+                       .defaultAnswer(value: .number(JSONNumber(lexeme: "2")),
+                                      text: ExactText("Hold for now")))
+
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
+        try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+            items: decoded.items, nextCursor: nil, receiptCursor: nil, context: context)
+        _ = try store.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
+        let reconnected = try AttentionDomainStore(context: context, persistence: persistence)
+        let live = try LivePresentationStore(store: reconnected, context: context)
+        let request = try XCTUnwrap(live.request(for: key))
+        XCTAssertTrue(request.isDefaultAnswered)
+        XCTAssertEqual(request.defaultAnswerAction,
+                       ProjectedActionReference(inputID: nil, actionID: ExactText("second")))
+        XCTAssertEqual(request.defaultAnswerWords, "Hold for now")
+        XCTAssertEqual(try XCTUnwrap(live.inboxRows.first { $0.key == key }).defaultAnswerStatus,
+                       "Answered by default: Hold for now")
     }
 
     func testOlderServerOriginOnlyAnswerDoesNotCreatePhoneSpecificSeenState() throws {

@@ -586,7 +586,7 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(later.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":7,"ref":"native-conversation-ack"}"# + "\n")])
         await resumed.deactivate()
     }
-    func testUnboundTierFactIsDurableBeforeACKAndAppliesWhenDeliveryArrives() async throws {
+    func testUnboundTierFactStaysInternalAndIsNotPresentedWhenDeliveryArrives() async throws {
         let (context, persistence, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("future"))
@@ -619,8 +619,8 @@ final class ConversationRelayTests: XCTestCase {
         let port = AttentionDomainPort(store: restored)
         let rows = try port.observe(context: port.context).requests.filter { $0.key == key }
         XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows.first?.attentionTier, .low,
-                       "The later ordinary delivery must retain the conversation-feed tier.")
+        XCTAssertEqual(rows.first?.attentionTier, .middle,
+                       "A stored attention tier is not presented by the client.")
     }
     func testOriginSourceResultCommitsBeforeItsACKAndKeepsAgentTerminalAsTheOnlyClosure() async throws {
         let (context, _, store, session) = try setup()

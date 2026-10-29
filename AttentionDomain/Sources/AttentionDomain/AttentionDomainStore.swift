@@ -1003,6 +1003,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
             updated.accountAnswerOutcome = event.accountAnswerOutcome ?? previous.accountAnswerOutcome
             updated.eventSequence = event.sequence
             next.remoteStates[requestKey] = updated
+            if terminalState == .superseded {
+                try recordSupersedesOriginTarget(for: requestKey, terminalEvent: event, in: &next)
+            }
             if let intentID = next.intentByRequest[requestKey], var intent = next.intents[intentID] {
                 if case let .refusedByRetraction(retractedAt) = intent.disposition {
                     guard terminalState == .cleared,
@@ -1262,7 +1265,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     attentionTier: previous?.attentionTier,
                     attentionTierSequence: previous?.attentionTierSequence,
                     attentionTierFeed: previous?.attentionTierFeed,
-                    attentionTierOrigin: previous?.attentionTierOrigin)
+                    attentionTierOrigin: previous?.attentionTierOrigin,
+                    supersedesOriginTarget: previous?.supersedesOriginTarget)
                 if hasContent {
                     next.remoteStates[key] = current
                     // The acceptance opens the thread that the terminal's retraction is recorded on.
@@ -1272,6 +1276,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     var references = next.inboxReferences ?? [:]
                     references[key] = current
                     next.inboxReferences = references
+                }
+                if terminalState == .superseded {
+                    try recordSupersedesOriginTarget(for: key, terminalEvent: terminal, in: &next)
                 }
             }
         } else {
@@ -1285,7 +1292,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     attentionTier: previous?.attentionTier,
                     attentionTierSequence: previous?.attentionTierSequence,
                     attentionTierFeed: previous?.attentionTierFeed,
-                    attentionTierOrigin: previous?.attentionTierOrigin)
+                    attentionTierOrigin: previous?.attentionTierOrigin,
+                    supersedesOriginTarget: previous?.supersedesOriginTarget)
                 if hasContent {
                     next.remoteStates[key] = current
                 } else {
@@ -1404,7 +1412,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 attentionTier: currentPrevious.attentionTier,
                 attentionTierSequence: currentPrevious.attentionTierSequence,
                 attentionTierFeed: currentPrevious.attentionTierFeed,
-                attentionTierOrigin: currentPrevious.attentionTierOrigin)
+                attentionTierOrigin: currentPrevious.attentionTierOrigin,
+                supersedesOriginTarget: currentPrevious.supersedesOriginTarget)
             if hasContent {
                 next.remoteStates[key] = updated
                 try applyOrdinaryConversationMetadata(event, to: &next)
@@ -1412,6 +1421,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 var references = next.inboxReferences ?? [:]
                 references[key] = updated
                 next.inboxReferences = references
+            }
+            if terminalState == .superseded {
+                try recordSupersedesOriginTarget(for: key, terminalEvent: event, in: &next)
             }
         case .originReference:
             if event.sequence < (currentPrevious.eventSequence ?? 0) { return }
@@ -1442,6 +1454,39 @@ public final class AttentionDomainStore: @unchecked Sendable {
         case .delivery:
             throw AttentionStoreError.inboxPageConflict
         }
+    }
+
+    /// The supersedes contract emits the replacement delivery immediately
+    /// before each target's superseded lifecycle. Recover that relation from
+    /// the adjacent event or from an accepted inbox-page request.
+    private func recordSupersedesOriginTarget(for target: RequestKey,
+                                              terminalEvent: RelayEvent,
+                                              in next: inout PersistedAttentionState) throws {
+        guard terminalEvent.sequence > 1 else { return }
+        let replacementKey: RequestKey
+        if let previousEvent = next.appliedEvents[terminalEvent.sequence - 1] {
+            switch previousEvent.body {
+            case let .delivery(request, _): replacementKey = request.key
+            case let .originReference(key): replacementKey = key
+            case .terminal, .attentionTierChange: return
+            }
+        } else {
+            let adjacentRequests = next.requests.values.filter {
+                $0.acceptanceOrder == terminalEvent.sequence - 1
+            }
+            guard adjacentRequests.count == 1,
+                  let adjacent = adjacentRequests.first else { return }
+            replacementKey = adjacent.key
+        }
+        guard replacementKey.senderID == target.senderID,
+              let replacement = next.requests[replacementKey],
+              replacement.supersedesMessageIDs.contains(target.messageID) else { return }
+        var state = next.remoteStates[replacementKey] ?? RemoteRequestState()
+        if let priorTarget = state.supersedesOriginTarget, priorTarget != target {
+            throw AttentionStoreError.eventConflict(terminalEvent.sequence)
+        }
+        state.supersedesOriginTarget = target
+        next.remoteStates[replacementKey] = state
     }
 
     private func updateAttentionTier(_ tier: AttentionTier,
@@ -1861,6 +1906,31 @@ public final class AttentionDomainStore: @unchecked Sendable {
         refreshAcceptedReplayIndexes(for: keys)
     }
 
+    /// Replaces the unsequenced, server-reported ordering view without moving
+    /// the ordinary relay cursor. A failed view fetch clears only this cache.
+    public func setInboxView(_ view: InboxView?,
+                             context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        if let view {
+            let keys = view.entries.map(\.key)
+            guard Set(keys).count == keys.count,
+                  keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
+                throw AttentionStoreError.inboxPageConflict
+            }
+        }
+        guard state.inboxView != view else { return }
+        var next = state
+        next.inboxView = view
+        try commit(next)
+    }
+
     public func saveInboxOlderPage(snapshotID: String,
                                    highWater: UInt64,
                                    cursor: String,
@@ -2225,6 +2295,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       inboxCheckpoint: state.inboxCheckpoint,
                                       inboxCandidate: state.inboxCandidate,
                                       inboxSourceOrder: inboxSourceOrder,
+                                      inboxView: state.inboxView,
                                       inboxCurrentKeys: inboxCurrentKeys,
                                       pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
                                       inboxReferences: state.inboxReferences ?? [:])
@@ -3428,6 +3499,7 @@ private struct PersistedAttentionState: Codable {
     // Optional fields preserve readability of existing schema-2 profile files.
     var inboxCheckpoint: InboxPagingCheckpoint?
     var inboxCandidate: InboxPagingCheckpoint?
+    var inboxView: InboxView?
     var pendingRelayOverlays: [UInt64: RelayEvent]?
     var inboxReferences: [RequestKey: RemoteRequestState]?
     // Optional keeps existing schema-2 account files readable without resetting their data.
