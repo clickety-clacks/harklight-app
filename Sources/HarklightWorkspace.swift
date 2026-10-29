@@ -1318,9 +1318,9 @@ struct InboxTierReferenceScreen: View {
             title: "Review the collection plan?",
             sender: "Release assistant",
             status: "",
+            tier: .middle,
             duePhrase: InboxDuePhrase.label(for: deadline),
-            orderingReason: "Waiting on the scheduled handoff",
-            tier: .middle)
+            orderingReason: "Waiting on the scheduled handoff")
         return [
             ("Deadline and server reason", dueAndReason),
             ("Top · 8 lines", row("top", "Project assistant", "PA", "Approve the collection plan?", .top, 0)),
