@@ -1214,7 +1214,8 @@ struct InboxRowContent: View {
                     .font(.caption2)
                     .foregroundStyle(palette.neutral.secondaryTextColor)
                     .accessibilityIdentifier("inbox-due-phrase")
-            } else if let reason = row.orderingReason {
+            }
+            if let reason = row.orderingReason {
                 Text(reason)
                     .font(.caption2)
                     .foregroundStyle(palette.neutral.secondaryTextColor)
@@ -1309,7 +1310,19 @@ struct InboxTierReferenceScreen: View {
                             symbol: "text.bubble", createdAt: date(daysAgo),
                             initials: initials, tier: tier)
         }
+        let deadline = Int(now.addingTimeInterval(60 * 60).timeIntervalSince1970 * 1_000)
+        let dueAndReason = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("reference"),
+                            senderID: ExactText("Release assistant"),
+                            messageID: ExactText("due-and-reason")),
+            title: "Review the collection plan?",
+            sender: "Release assistant",
+            status: "",
+            duePhrase: InboxDuePhrase.label(for: deadline),
+            orderingReason: "Waiting on the scheduled handoff",
+            tier: .middle)
         return [
+            ("Deadline and server reason", dueAndReason),
             ("Top · 8 lines", row("top", "Project assistant", "PA", "Approve the collection plan?", .top, 0)),
             ("Middle · 4 lines", row("middle", "Design assistant", "DA", "Which layout should we use?", .middle, 1)),
             ("Low · 2 lines", row("low", "Setup assistant", "SA", "Prepare the display", .low, 4)),
