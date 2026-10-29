@@ -278,6 +278,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var supersedesNavigationPath: [SupersedesTarget] = []
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var isWarningPresented = false
+    @State private var warningContentHeight: CGFloat = 0
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
@@ -516,23 +517,127 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                  for: .tabBar)
     }
 
-    private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
-                                geometry: GeometryProxy) -> some View {
+    private func inboxList(for tab: InboxWorkspaceTab) -> some View {
+        InboxList(tab: tab, rows: rows, selected: navigationSelection,
+                  workspaceTab: $workspaceTab, search: $search,
+                  lastViewedSelection: lastViewedSelection,
+                  restoreLastViewed: restoreLastViewedOnReturn,
+                  didRestoreLastViewed: { restoreLastViewedOnReturn = false },
+                  markSeen: markSeen,
+                  markNoComment: markNoComment,
+                  clearRetracted: clearRetracted,
+                  fetchOlderInboxPage: fetchOlderInboxPage,
+                  notificationNavigation: activeNotificationNavigation,
+                  triggerNotification: exposesNotificationTestAction
+                      ? { triggerNotificationTestAction() } : nil)
+    }
+
+    private var brandAndStatusHeader: some View {
+        HStack(spacing: 8) {
+            HarklightBrand().accessibilityIdentifier("inbox-brand")
+            if isRefreshing {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.small)
+                    Text("Refreshing").font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+                .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(HarklightDesignSystem.palette(for: colorScheme).accent.color.opacity(0.14),
+                            in: Capsule())
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Refreshing")
+                .accessibilityIdentifier("inbox-refreshing-badge")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var warningButton: some View {
+        if !visibleWarnings.isEmpty {
+            Button {
+                isWarningPresented = true
+            } label: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme)
+                        .neutral.secondaryTextColor)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Warnings")
+            .accessibilityIdentifier("inbox-warning-button")
+            .popover(isPresented: warningPresentationBinding(for: workspaceTab)) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
+                            .font(.headline)
+                            .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme)
+                                .neutral.secondaryTextColor)
+                        ForEach(visibleWarnings.indices, id: \.self) { index in
+                            Text(visibleWarnings[index])
+                                .font(.body)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("inbox-warning-message")
+                        }
+                    }
+                    .padding(16)
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { height in
+                        warningContentHeight = height
+                    }
+                }
+                .frame(width: 320, height: min(max(warningContentHeight, 88), 440))
+                .presentationCompactAdaptation(.popover)
+            }
+        }
+    }
+
+    private var settingsButton: some View {
+        Button("Settings", systemImage: "gearshape") { settings = true }
+            .labelStyle(.iconOnly)
+            .accessibilityIdentifier("inbox-settings")
+    }
+
+    private func inboxSidebar() -> some View {
+        TabView(selection: $workspaceTab) {
+            Tab(value: .inbox) {
+                inboxList(for: .inbox)
+            } label: {
+                // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
+                Label {
+                    Text("Inbox")
+                } icon: {
+                    Image(uiImage: UIImage(systemName: "envelope.badge")!)
+                }
+            }
+
+            Tab("Replied", systemImage: "envelope.open", value: .replied) {
+                inboxList(for: .replied)
+            }
+        }
+        .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+        .navigationTitle("Harklight")
+        .toolbarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                brandAndStatusHeader
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                settingsButton
+                warningButton
+            }
+        }
+        .toolbarMinimizationBehavior(.onScrollDown, for: .navigationBar)
+        .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
+    }
+
+    private func inboxSplitView(inlineChat: Bool, geometry: GeometryProxy) -> some View {
         NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
-            InboxList(tab: tab, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
-                  isWarningPresented: warningPresentationBinding(for: tab),
-                  selected: navigationSelection,
-                      workspaceTab: $workspaceTab, search: $search,
-                      lastViewedSelection: lastViewedSelection,
-                      restoreLastViewed: restoreLastViewedOnReturn,
-                      didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                      showSettings: { settings = true }, markSeen: markSeen,
-                      markNoComment: markNoComment,
-                      clearRetracted: clearRetracted,
-                      fetchOlderInboxPage: fetchOlderInboxPage,
-                      notificationNavigation: activeNotificationNavigation,
-                      triggerNotification: exposesNotificationTestAction
-                          ? { triggerNotificationTestAction() } : nil)
+            inboxSidebar()
         } detail: {
             NavigationStack(path: $supersedesNavigationPath) {
                 detailContent(for: selection, inlineChat: inlineChat,
@@ -570,26 +675,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let landscape = geometry.size.width > geometry.size.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && landscape
-            let tabs = TabView(selection: $workspaceTab) {
-                Tab(value: .inbox) {
-                    inboxSplitView(for: .inbox, inlineChat: inlineChat,
-                                   geometry: geometry)
-                } label: {
-                    // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
-                    Label {
-                        Text("Inbox")
-                    } icon: {
-                        Image(uiImage: UIImage(systemName: "envelope.badge")!)
-                    }
-                }
-
-                Tab("Replied", systemImage: "envelope.open", value: .replied) {
-                    inboxSplitView(for: .replied, inlineChat: inlineChat,
-                                   geometry: geometry)
-                }
-
-            }
-            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+            let splitView = inboxSplitView(inlineChat: inlineChat, geometry: geometry)
+            splitView
             .onChange(of: workspaceTab) { oldTab, newTab in
                 if oldTab != newTab { isWarningPresented = false }
                 selectedTab = newTab.messageTab
@@ -600,7 +687,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: visibleWarnings, initial: true) { _, newWarnings in
                 dismissWarningWhenCleared(newWarnings)
             }
-            tabs
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route else { return }
                 settings = false
@@ -666,16 +752,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 struct InboxList: View {
     let tab: InboxWorkspaceTab
     let rows: [InboxItem]
-    let warnings: [String]
-    var isRefreshing = false
-    @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var workspaceTab: InboxWorkspaceTab
     @Binding var search: String
     let lastViewedSelection: InboxSelection?
     let restoreLastViewed: Bool
     let didRestoreLastViewed: () -> Void
-    let showSettings: () -> Void
     let markSeen: (InboxSelection) -> Void
     let markNoComment: (InboxSelection) -> Void
     let clearRetracted: (InboxSelection) -> Void
@@ -688,7 +770,6 @@ struct InboxList: View {
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
-    @State private var warningContentHeight: CGFloat = 0
 
     private var designPalette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
@@ -700,74 +781,6 @@ struct InboxList: View {
 
     private var tabMembershipIDs: Set<InboxSelection> {
         Set(rows.filter { $0.belongsToReplied == (tab.messageTab == .replied) }.map(\.id))
-    }
-
-    private var brandAndStatusHeader: some View {
-        HStack(spacing: 8) {
-            HarklightBrand().accessibilityIdentifier("inbox-brand")
-            if isRefreshing {
-                HStack(spacing: 5) {
-                    ProgressView().controlSize(.small)
-                    Text("Refreshing").font(.caption2.weight(.semibold))
-                }
-                .foregroundStyle(designPalette.accent.color)
-                .tint(designPalette.accent.color)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(designPalette.accent.color.opacity(0.14), in: Capsule())
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Refreshing")
-                .accessibilityIdentifier("inbox-refreshing-badge")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var warningButton: some View {
-        if !warnings.isEmpty {
-            Button {
-                isWarningPresented = true
-            } label: {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(designPalette.neutral.secondaryTextColor)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Warnings")
-            .accessibilityIdentifier("inbox-warning-button")
-            .popover(isPresented: $isWarningPresented) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
-                            .font(.headline)
-                            .foregroundStyle(designPalette.neutral.secondaryTextColor)
-                        ForEach(warnings.indices, id: \.self) { index in
-                            Text(warnings[index])
-                                .font(.body)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .accessibilityIdentifier("inbox-warning-message")
-                        }
-                    }
-                    .padding(16)
-                    .onGeometryChange(for: CGFloat.self) { proxy in
-                        proxy.size.height
-                    } action: { height in
-                        warningContentHeight = height
-                    }
-                }
-                .frame(width: 320,
-                       height: min(max(warningContentHeight, 88), 440))
-                .presentationCompactAdaptation(.popover)
-            }
-        }
-    }
-
-    private var settingsButton: some View {
-        Button("Settings", systemImage: "gearshape", action: showSettings)
-            .labelStyle(.iconOnly)
-            .accessibilityIdentifier("inbox-settings")
     }
 
     private func restoreLastViewed(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
@@ -792,10 +805,6 @@ struct InboxList: View {
     private func showFirstRow(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
         guard let first = filteredRows(in: tab).first else { return }
         proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: first.id), anchor: .top)
-    }
-
-    private func openSettings() {
-        showSettings()
     }
 
     private var diagnosticSummary: String {
@@ -918,26 +927,13 @@ struct InboxList: View {
             }
         }
         .listStyle(.plain)
+        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
+        .searchPresentationToolbarBehavior(.avoidHidingContent)
         .animation(reduceMotion ? nil : .default, value: tabMembershipIDs)
         .scrollContentBackground(.hidden)
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
-        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
-        .searchPresentationToolbarBehavior(.avoidHidingContent)
-        .navigationTitle("Harklight")
-        .toolbarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                brandAndStatusHeader
-            }
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                settingsButton
-                warningButton
-            }
-        }
-        .toolbarMinimizationBehavior(.onScrollDown, for: .navigationBar)
-        .toolbarMinimizationRestoration(.automatic, for: .navigationBar)
         .onAppear {
             guard workspaceTab == tab else { return }
             restoreLastViewed(using: proxy, in: tab)
