@@ -238,6 +238,64 @@ public enum AttentionTier: String, Equatable, Codable, Sendable {
     case low
 }
 
+/// Priority assigned by the server's current inbox view. Sender urgency is a
+/// separate input and is never part of the client projection.
+public enum InboxMessagePriority: String, Equatable, Codable, Sendable {
+    case low
+    case normal
+    case high
+    case now
+}
+
+/// The subset of top-level choice styles that has a stock control treatment.
+/// Unknown styles intentionally map to the ordinary presentation.
+public enum MessageChoiceStyle: String, Equatable, Codable, Sendable {
+    case primary
+    case secondary
+    case destructive
+}
+
+/// One entry from the server's current waiting-message view. Invalid optional
+/// entry fields are represented as absent so the rest of the entry survives.
+public struct InboxViewEntry: Equatable, Codable, Sendable {
+    public let key: RequestKey
+    public let priority: InboxMessagePriority?
+    public let thread: ExactText?
+    public let dueAtMilliseconds: Int?
+    public let reason: ExactText?
+
+    public init(key: RequestKey,
+                priority: InboxMessagePriority? = nil,
+                thread: ExactText? = nil,
+                dueAtMilliseconds: Int? = nil,
+                reason: ExactText? = nil) {
+        self.key = key
+        self.priority = priority
+        self.thread = thread
+        self.dueAtMilliseconds = dueAtMilliseconds
+        self.reason = reason
+    }
+}
+
+/// The latest fetched server ordering and its opaque revision. It is retained
+/// with the account state so a reconnect can send the revision it already holds.
+public struct InboxView: Equatable, Codable, Sendable {
+    public let revision: ExactText
+    public let algorithm: ExactText?
+    public let basis: ExactText?
+    public let entries: [InboxViewEntry]
+
+    public init(revision: ExactText,
+                algorithm: ExactText? = nil,
+                basis: ExactText? = nil,
+                entries: [InboxViewEntry]) {
+        self.revision = revision
+        self.algorithm = algorithm
+        self.basis = basis
+        self.entries = entries
+    }
+}
+
 /// The feed whose cursor orders the latest tier projection for one request.
 public enum AttentionTierFeed: String, Equatable, Codable, Sendable {
     case relay
@@ -250,6 +308,7 @@ public enum AccountAnswerOutcome: Equatable, Codable, Sendable {
     case seen
     case reply(ExactText)
     case noComment
+    case defaultAnswer(value: JSONValue?, text: ExactText?)
 }
 
 public struct RemoteRequestState: Equatable, Codable, Sendable {
@@ -263,6 +322,9 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
     public var attentionTierSequence: UInt64?
     public var attentionTierFeed: AttentionTierFeed?
     public var attentionTierOrigin: ExactText?
+    /// The immediately superseded row whose held view slot this message takes.
+    /// Optional so existing account state remains readable.
+    public var supersedesOriginTarget: RequestKey?
 
     public init(state: TerminalState? = nil,
                 authorizedOriginAnswer: JSONValue? = nil,
@@ -272,7 +334,8 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
                 attentionTier: AttentionTier? = nil,
                 attentionTierSequence: UInt64? = nil,
                 attentionTierFeed: AttentionTierFeed? = nil,
-                attentionTierOrigin: ExactText? = nil) {
+                attentionTierOrigin: ExactText? = nil,
+                supersedesOriginTarget: RequestKey? = nil) {
         self.state = state
         self.authorizedOriginAnswer = authorizedOriginAnswer
         self.accountAnswerOutcome = accountAnswerOutcome
@@ -282,6 +345,7 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
         self.attentionTierSequence = attentionTierSequence
         self.attentionTierFeed = attentionTierFeed
         self.attentionTierOrigin = attentionTierOrigin
+        self.supersedesOriginTarget = supersedesOriginTarget
     }
 
     public var isTerminal: Bool { state != nil }
@@ -307,6 +371,33 @@ public struct StoredRequest: Equatable, Codable, Sendable {
             return nil
         }
         return Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+    }
+
+    /// Optional message fields are read independently. An invalid value does
+    /// not affect the admitted request or its answer interface.
+    public var stakeText: ExactText? {
+        guard let value = originalPayload.uniqueValue(named: "stake")?.stringValue,
+              !value.rawValue.isEmpty else { return nil }
+        return value
+    }
+
+    public var byWhenMilliseconds: Int? {
+        originalPayload.uniqueValue(named: "by_when")?.integerValue
+    }
+
+    public var choiceStyles: [ExactText: MessageChoiceStyle] {
+        guard case .object? = originalPayload.uniqueValue(named: "choice_styles"),
+              let members = originalPayload.uniqueValue(named: "choice_styles")?.objectMembers else {
+            return [:]
+        }
+        let grouped = Dictionary(grouping: members, by: \.key)
+        var styles: [ExactText: MessageChoiceStyle] = [:]
+        for (id, values) in grouped where !id.rawValue.isEmpty && values.count == 1 {
+            guard let rawStyle = values[0].value.stringValue,
+                  let style = MessageChoiceStyle(rawValue: rawStyle.rawValue) else { continue }
+            styles[id] = style
+        }
+        return styles
     }
 
     init(key: RequestKey, originalPayload: JSONValue, acceptanceOrder: UInt64) {
@@ -665,6 +756,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let inboxCheckpoint: InboxPagingCheckpoint?
     public let inboxCandidate: InboxPagingCheckpoint?
     public let inboxSourceOrder: [RequestKey]?
+    public let inboxView: InboxView?
     /// `nil` before bounded paging is established; an empty set while a new
     /// candidate is being reconciled; otherwise identities current at H plus
     /// subsequently applied live events and allowed page/receipt projections.
@@ -686,6 +778,7 @@ public struct AttentionStoreSnapshot: Sendable {
                 inboxCheckpoint: InboxPagingCheckpoint? = nil,
                 inboxCandidate: InboxPagingCheckpoint? = nil,
                 inboxSourceOrder: [RequestKey]? = nil,
+                inboxView: InboxView? = nil,
                 inboxCurrentKeys: Set<RequestKey>? = nil,
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
                 inboxReferences: [RequestKey: RemoteRequestState] = [:]) {
@@ -703,6 +796,7 @@ public struct AttentionStoreSnapshot: Sendable {
         self.inboxCheckpoint = inboxCheckpoint
         self.inboxCandidate = inboxCandidate
         self.inboxSourceOrder = inboxSourceOrder
+        self.inboxView = inboxView
         self.inboxCurrentKeys = inboxCurrentKeys
         self.pendingRelayOverlays = pendingRelayOverlays
         self.inboxReferences = inboxReferences

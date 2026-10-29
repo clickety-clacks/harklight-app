@@ -230,8 +230,8 @@ final class ConversationPresentationTests: XCTestCase {
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
-        let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
-        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
+        let first = try JSONValue.parse(Data(#"{"title":"First wording","by_when":1793200000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
+        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","by_when":1793300000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
         try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
         let b1 = ConversationBinding(request: key, revision: 1)
         let b2 = ConversationBinding(request: key, revision: 2)
@@ -244,6 +244,9 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(try domain.lookupIntent(old.intentID, context: context)?.requestRevision, 1)
         try domain.applyConversation(ConversationEvent(sequence: 2, binding: b2,
             fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
+        try domain.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+            InboxViewEntry(key: key, priority: .high, thread: ExactText("release"))
+        ]), context: context)
         let revised = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
         XCTAssertEqual(revised.title, ExactText("Revised wording"))
         XCTAssertNil(revised.intentReceipt, "The earlier answer must not become the new version's receipt")
@@ -260,6 +263,10 @@ final class ConversationPresentationTests: XCTestCase {
         let historical = try XCTUnwrap(port.inspectAnswerDraft(context: port.context,
                                                                request: key, revision: 1))
         XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
+        XCTAssertEqual(historical.byWhenMilliseconds, 1_793_300_000_000,
+                       "A historical answer draft keeps showing the current revision deadline.")
+        XCTAssertEqual(historical.inboxPriority, .high)
+        XCTAssertEqual(historical.inboxThread, ExactText("release"))
         let liveAfterDecline = try LivePresentationStore(store: domain, context: context)
         XCTAssertEqual(liveAfterDecline.staleAnswerDialog?.currentRevision, 2)
         XCTAssertTrue(liveAfterDecline.staleAnswerDialog?.message.contains("Revised wording") == true)

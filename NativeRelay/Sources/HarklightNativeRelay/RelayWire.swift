@@ -12,6 +12,10 @@ public enum RelayWireUpdate: Equatable, Sendable {
     case event(RelayEvent)
     /// The relay supplied a sequenced update this build does not understand.
     case ignored(sequence: UInt64)
+    /// An unsequenced notice that the account's current inbox view changed.
+    case viewChanged(ExactText)
+    /// An unsequenced optional notice that cannot be used as a revision hint.
+    case ignoredUnsequenced
 }
 
 /// Decode the server's authenticated projection without re-encoding sender JSON.
@@ -36,12 +40,19 @@ public struct RelayWire: Sendable {
     /// type or lifecycle state. A usable sequence is required to advance safely.
     public func decodeUpdate(_ bytes: Data) throws -> RelayWireUpdate {
         let value = try parseFrame(bytes)
+        let eventType = try text(value, "type")
+        if eventType == "view_changed" {
+            guard let revision = value.uniqueValue(named: "view_rev")?.stringValue,
+                  !revision.rawValue.isEmpty else { return .ignoredUnsequenced }
+            return .viewChanged(revision)
+        }
         let seq = try sequence(value)
         guard seq > 0 else { throw RelayWireError.invalidFrame }
-        let eventType = try text(value, "type")
         switch eventType {
-        case "delivery", "attention_tier":
+        case "delivery":
             return .event(try decodeKnownEvent(value))
+        case "attention_tier":
+            return .ignored(sequence: seq)
         case "lifecycle":
             let state = try text(value, "state")
             guard TerminalState(rawValue: state) != nil else { return .ignored(sequence: seq) }
@@ -67,19 +78,13 @@ public struct RelayWire: Sendable {
         let accountAnswerOutcome = eventType == "lifecycle"
             ? decodeAccountAnswerOutcome(value.uniqueValue(named: "answer_outcome"))
             : nil
-        let attentionTier: AttentionTier?
-        switch eventType {
-        case "delivery": attentionTier = try decodeAttentionTier(value, required: false)
-        case "attention_tier": attentionTier = try decodeAttentionTier(value, required: true)
-        default: attentionTier = nil
-        }
         switch eventType {
         case "delivery":
             if isOrigin {
                 guard value.uniqueValue(named: "message") == nil,
                       value.uniqueValue(named: "as") == nil else { throw RelayWireError.invalidFrame }
                 return RelayEvent(sequence: seq, body: .originReference(key), conversation: conversation,
-                                  origin: ExactText(origin), attentionTier: attentionTier)
+                                  origin: ExactText(origin))
             }
             guard let payload = value.uniqueValue(named: "message"),
                   case .object = payload,
@@ -88,7 +93,7 @@ public struct RelayWire: Sendable {
             }
             return RelayEvent(sequence: seq,
                               body: .delivery(StoredRequest(key: key, originalPayload: payload), classification),
-                              conversation: conversation, origin: ExactText(origin), attentionTier: attentionTier)
+                              conversation: conversation, origin: ExactText(origin))
         case "lifecycle":
             guard let wireState = TerminalState(rawValue: try text(value, "state")) else {
                 throw RelayWireError.invalidFrame
@@ -110,7 +115,7 @@ public struct RelayWire: Sendable {
         case "attention_tier":
             guard seq > 0 else { throw RelayWireError.invalidFrame }
             return RelayEvent(sequence: seq, body: .attentionTierChange(key),
-                              origin: ExactText(origin), attentionTier: attentionTier)
+                              origin: ExactText(origin))
         default:
             throw RelayWireError.unsupportedEvent
         }
@@ -193,20 +198,9 @@ public struct RelayWire: Sendable {
                    messageID: ExactText(try text(value, "message_id")))
     }
 
-    private func decodeAttentionTier(_ value: JSONValue, required: Bool) throws -> AttentionTier? {
-        guard let raw = value.uniqueValue(named: "attention_tier") else {
-            guard !required else { throw RelayWireError.invalidFrame }
-            return nil
-        }
-        guard let string = raw.stringValue?.rawValue,
-              let tier = AttentionTier(rawValue: string) else { throw RelayWireError.invalidFrame }
-        return tier
-    }
-
     private func decodeAccountAnswerOutcome(_ raw: JSONValue?) -> AccountAnswerOutcome? {
         guard let raw,
               case .object = raw,
-              raw.hasUniqueObjectKeys,
               let kind = raw.uniqueValue(named: "kind")?.stringValue?.rawValue else { return nil }
         switch kind {
         case "seen":
@@ -216,6 +210,9 @@ public struct RelayWire: Sendable {
             return .reply(text)
         case "no_comment":
             return .noComment
+        case "default":
+            return .defaultAnswer(value: raw.uniqueValue(named: "value"),
+                                  text: raw.uniqueValue(named: "text")?.stringValue)
         default:
             // This optional projection must not prevent the lifecycle event
             // from applying. Unknown values fall back to generic Answered.

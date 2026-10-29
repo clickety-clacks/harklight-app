@@ -109,6 +109,23 @@ enum InboxListProjection {
         guard !query.isEmpty else { return inTab }
         return inTab.filter { $0.matchesSearch(query) }
     }
+
+    static func visibleEntries(_ rows: [InboxItem], in tab: InboxWorkspaceTab,
+                               search: String) -> [InboxListEntry] {
+        let isRepliedTab = tab.messageTab == .replied
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return InboxThreadListProjection.grouped(rows).compactMap { entry in
+            let matches = entry.members.filter { item in
+                item.belongsToReplied == isRepliedTab &&
+                    (query.isEmpty || item.matchesSearch(query))
+            }
+            guard !matches.isEmpty else { return nil }
+            guard case let .thread(thread, _) = entry, matches.count > 1 else {
+                return .row(matches[0])
+            }
+            return .thread(thread: thread, members: matches)
+        }
+    }
 }
 
 @MainActor
@@ -170,6 +187,12 @@ struct InboxRequestRow: Identifiable {
     var emphasis: InboxRowEmphasis = .standard
     var messageType: HarklightMessageType? = nil
     var tier: InboxAttentionTier = .middle
+    var priority: InboxMessagePriority? = nil
+    var thread: ExactText? = nil
+    var hasInboxViewEntry = false
+    var duePhrase: String? = nil
+    var orderingReason: String? = nil
+    var defaultAnswerStatus: String? = nil
     var id: RequestKey { key }
 
     var resolvedMessageType: HarklightMessageType {
@@ -259,6 +282,7 @@ enum InboxSenderDisplay {
 @MainActor
 struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let requests: [InboxRequestRow]
+    var showsBasicOrderMarker = false
     let samples: SampleLibrary
     let selectRequest: (RequestKey) -> Void
     var markSeenRequest: (RequestKey, UInt64) -> Void = { _, _ in }
@@ -519,7 +543,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
-            InboxList(tab: tab, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
+            InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
+                  showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab, search: $search,
@@ -667,6 +692,7 @@ struct InboxList: View {
     let tab: InboxWorkspaceTab
     let rows: [InboxItem]
     let warnings: [String]
+    var showsBasicOrderMarker = false
     var isRefreshing = false
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
@@ -689,6 +715,7 @@ struct InboxList: View {
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
     @State private var warningContentHeight: CGFloat = 0
+    @State private var expandedThreadGroups: Set<InboxListEntryID> = []
 
     private var designPalette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
@@ -782,6 +809,7 @@ struct InboxList: View {
             search = ""
             return
         }
+        expandThreadContaining(lastViewedSelection, in: tab)
         proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: lastViewedSelection), anchor: .center)
         didRestoreLastViewed()
     }
@@ -791,7 +819,17 @@ struct InboxList: View {
     /// filter change starts the list again at its first row.
     private func showFirstRow(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
         guard let first = filteredRows(in: tab).first else { return }
+        expandThreadContaining(first.id, in: tab)
         proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: first.id), anchor: .top)
+    }
+
+    private func expandThreadContaining(_ selection: InboxSelection, in tab: InboxWorkspaceTab) {
+        guard let group = InboxListProjection.visibleEntries(rows, in: tab, search: search)
+            .first(where: { entry in
+                guard case .thread = entry else { return false }
+                return entry.members.contains { $0.id == selection }
+            }) else { return }
+        expandedThreadGroups.insert(group.id)
     }
 
     private func openSettings() {
@@ -852,63 +890,126 @@ struct InboxList: View {
     }
 
     @ViewBuilder
+    private func listRow(for row: InboxItem, in tab: InboxWorkspaceTab) -> some View {
+        let messageTab = tab.messageTab
+        rowContent(for: row)
+            .tag(row.id)
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
+                    Button { clearRetracted(row.id) } label: {
+                        Label("Clear", systemImage: "xmark")
+                    }
+                    .tint(designPalette.neutral.secondaryTextColor)
+                    .accessibilityIdentifier("inbox-clear-retracted")
+                } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
+                    Button { markSeen(row.id) } label: {
+                        Label("Seen", systemImage: "checkmark")
+                    }
+                    .tint(designPalette.accent.seenColor)
+                    .accessibilityIdentifier("inbox-mark-seen")
+                } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
+                    Button { markNoComment(row.id) } label: {
+                        Label("No comment", systemImage: "hand.raised")
+                    }
+                    .tint(designPalette.neutral.secondaryTextColor)
+                    .accessibilityIdentifier("inbox-no-comment")
+                }
+            }
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
+                    Button { clearRetracted(row.id) } label: {
+                        Label("Clear", systemImage: "xmark")
+                    }
+                    .tint(designPalette.neutral.secondaryTextColor)
+                    .accessibilityIdentifier("inbox-clear-retracted")
+                } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
+                    Button { markSeen(row.id) } label: {
+                        Label("Seen", systemImage: "checkmark")
+                    }
+                    .tint(designPalette.accent.seenColor)
+                    .accessibilityIdentifier("inbox-mark-seen")
+                } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
+                    Button { markNoComment(row.id) } label: {
+                        Label("No comment", systemImage: "hand.raised")
+                    }
+                    .tint(designPalette.neutral.secondaryTextColor)
+                    .accessibilityIdentifier("inbox-no-comment")
+                }
+            }
+            .id(InboxListRowScrollTarget(tab: tab, selection: row.id))
+            .accessibilityIdentifier(row.accessibilityID)
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+    }
+
+    private func threadExpansionBinding(for id: InboxListEntryID) -> Binding<Bool> {
+        Binding(
+            get: { expandedThreadGroups.contains(id) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedThreadGroups.insert(id)
+                } else {
+                    expandedThreadGroups.remove(id)
+                }
+            })
+    }
+
+    private func threadGroupLabel(members: [InboxItem]) -> some View {
+        let sender = members.first.map { item -> String in
+            switch item {
+            case let .request(row): InboxSenderDisplay.name(for: row.sender)
+            case let .example(message, _): InboxSenderDisplay.name(for: message.sender)
+            }
+        } ?? String(localized: "Sender")
+        return HStack(spacing: 10) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .foregroundStyle(designPalette.neutral.secondaryTextColor)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(String(localized: "\(members.count) messages from \(sender)"))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(designPalette.neutral.textColor)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(String(localized: "\(members.count) messages from \(sender), in one thread"))
+    }
+
+    @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
-        let messageTab = tab.messageTab
-        let visibleRows = filteredRows(in: tab)
+        let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
         List(selection: listSelection) {
-            ForEach(visibleRows) { row in
-                rowContent(for: row)
-                .tag(row.id)
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
-                        Button { clearRetracted(row.id) } label: {
-                            Label("Clear", systemImage: "xmark")
-                        }
-                        .tint(designPalette.neutral.secondaryTextColor)
-                        .accessibilityIdentifier("inbox-clear-retracted")
-                    } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
-                        Button { markSeen(row.id) } label: {
-                            Label("Seen", systemImage: "checkmark")
-                        }
-                        .tint(designPalette.accent.seenColor)
-                        .accessibilityIdentifier("inbox-mark-seen")
-                    } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
-                        Button { markNoComment(row.id) } label: {
-                            Label("No comment", systemImage: "hand.raised")
-                        }
-                        .tint(designPalette.neutral.secondaryTextColor)
-                        .accessibilityIdentifier("inbox-no-comment")
-                    }
-                }
-                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
-                        Button { clearRetracted(row.id) } label: {
-                            Label("Clear", systemImage: "xmark")
-                        }
-                        .tint(designPalette.neutral.secondaryTextColor)
-                        .accessibilityIdentifier("inbox-clear-retracted")
-                    } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
-                        Button { markSeen(row.id) } label: {
-                            Label("Seen", systemImage: "checkmark")
-                        }
-                        .tint(designPalette.accent.seenColor)
-                        .accessibilityIdentifier("inbox-mark-seen")
-                    } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
-                        Button { markNoComment(row.id) } label: {
-                            Label("No comment", systemImage: "hand.raised")
-                        }
-                        .tint(designPalette.neutral.secondaryTextColor)
-                        .accessibilityIdentifier("inbox-no-comment")
-                    }
-                }
-                .id(InboxListRowScrollTarget(tab: tab, selection: row.id))
-                .accessibilityIdentifier(row.accessibilityID)
-                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
+            if tab == .inbox && showsBasicOrderMarker {
+                Text("Basic order")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(designPalette.neutral.secondaryTextColor)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .listRowSeparator(.hidden)
+                    .accessibilityIdentifier("inbox-basic-order")
             }
-            if visibleRows.isEmpty, let triggerNotification {
+            ForEach(visibleEntries) { entry in
+                switch entry {
+                case let .row(row):
+                    listRow(for: row, in: tab)
+                case let .thread(_, members):
+                    DisclosureGroup(isExpanded: threadExpansionBinding(for: entry.id)) {
+                        ForEach(members) { row in
+                            listRow(for: row, in: tab)
+                        }
+                    } label: {
+                        threadGroupLabel(members: members)
+                    }
+                    .accessibilityIdentifier("inbox-thread-group-\(members[0].accessibilityID)")
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+            }
+            if visibleEntries.isEmpty, let triggerNotification {
                 Button("Open notification", action: triggerNotification)
                     .accessibilityIdentifier("harklight-test-notification")
             }
@@ -1076,6 +1177,16 @@ struct InboxRowContent: View {
                     .font(titleFont)
                     .foregroundStyle(titleColor)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                if let priority = row.priority {
+                    Text("Priority \(priority.rawValue)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(priorityColor(for: priority))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(priorityColor(for: priority).opacity(0.14), in: Capsule())
+                        .accessibilityLabel("Priority \(priority.rawValue)")
+                        .accessibilityIdentifier("inbox-priority-\(priority.rawValue)")
+                }
                 if let chatUnread = row.chatUnread {
                     Image(systemName: chatUnread
                           ? "bubble.left.and.bubble.right.fill"
@@ -1098,7 +1209,22 @@ struct InboxRowContent: View {
                     .lineLimit(row.tier.bodyLineLimit)
                     .truncationMode(.tail)
             }
-            if !row.isResolved && !row.status.isEmpty && row.status != "Open" {
+            if let duePhrase = row.duePhrase {
+                Text(duePhrase)
+                    .font(.caption2)
+                    .foregroundStyle(palette.neutral.secondaryTextColor)
+                    .accessibilityIdentifier("inbox-due-phrase")
+            }
+            if let reason = row.orderingReason {
+                Text(reason)
+                    .font(.caption2)
+                    .foregroundStyle(palette.neutral.secondaryTextColor)
+                    .accessibilityIdentifier("inbox-ordering-reason")
+            }
+            if let defaultAnswerStatus = row.defaultAnswerStatus {
+                Text(defaultAnswerStatus).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
+                    .accessibilityIdentifier("inbox-default-answer-status")
+            } else if !row.isResolved && !row.status.isEmpty && row.status != "Open" {
                 Text(row.status).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
             }
             if let localStatus = row.localStatus {
@@ -1144,6 +1270,15 @@ struct InboxRowContent: View {
         row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor
     }
 
+    private func priorityColor(for priority: InboxMessagePriority) -> Color {
+        switch priority {
+        case .low: palette.neutral.secondaryTextColor
+        case .normal: palette.accent.color
+        case .high: .orange
+        case .now: .red
+        }
+    }
+
     private var displayInitials: String {
         if !row.initials.isEmpty { return row.initials }
         let words = InboxSenderDisplay.name(for: row.sender)
@@ -1175,7 +1310,19 @@ struct InboxTierReferenceScreen: View {
                             symbol: "text.bubble", createdAt: date(daysAgo),
                             initials: initials, tier: tier)
         }
+        let deadline = Int(now.addingTimeInterval(60 * 60).timeIntervalSince1970 * 1_000)
+        let dueAndReason = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("reference"),
+                            senderID: ExactText("Release assistant"),
+                            messageID: ExactText("due-and-reason")),
+            title: "Review the collection plan?",
+            sender: "Release assistant",
+            status: "",
+            tier: .middle,
+            duePhrase: InboxDuePhrase.label(for: deadline),
+            orderingReason: "Waiting on the scheduled handoff")
         return [
+            ("Deadline and server reason", dueAndReason),
             ("Top · 8 lines", row("top", "Project assistant", "PA", "Approve the collection plan?", .top, 0)),
             ("Middle · 4 lines", row("middle", "Design assistant", "DA", "Which layout should we use?", .middle, 1)),
             ("Low · 2 lines", row("low", "Setup assistant", "SA", "Prepare the display", .low, 4)),

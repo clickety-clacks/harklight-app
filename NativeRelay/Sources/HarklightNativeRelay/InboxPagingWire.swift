@@ -23,6 +23,13 @@ public struct InboxPageResponse: Equatable, Sendable {
     }
 }
 
+public enum InboxViewFetchResult: Equatable, Sendable {
+    case updated(InboxView)
+    case unchanged(ExactText)
+    case unsupported
+    case unavailable
+}
+
 public struct InboxReceiptPageResponse: Equatable, Sendable {
     public let highWater: UInt64
     public let events: [RelayEvent]
@@ -75,6 +82,67 @@ public struct InboxPagingWire: Sendable {
                ("snapshot_id", .string(ExactText(snapshotID))),
                ("cursor", .string(ExactText(cursor))),
                ("ref", .string(ExactText(ref)))])
+    }
+
+    public func viewGet(knownRevision: ExactText? = nil, ref: String) -> Data {
+        var members: [(String, JSONValue)] = [
+            ("v", .number(JSONNumber(lexeme: "1"))),
+            ("type", .string(ExactText("view_get"))),
+            ("ref", .string(ExactText(ref)))
+        ]
+        if let knownRevision {
+            members.append(("known_view_rev", .string(knownRevision)))
+        }
+        return frame(members)
+    }
+
+    /// A view failure is additive: callers keep inbox delivery and paging
+    /// available while falling back to the snapshot order they already hold.
+    public func decodeViewGet(_ bytes: Data, ref: String,
+                              knownRevision: ExactText? = nil) -> InboxViewFetchResult {
+        guard let value = try? parse(bytes),
+              case .object = value,
+              value.hasUniqueObjectKeys,
+              text(value, "ref") == ref else { return .unavailable }
+        if text(value, "type") == "error" {
+            return text(value, "reason") == "unknown_type" ? .unsupported : .unavailable
+        }
+        guard text(value, "type") == "ok",
+              let rawRevision = text(value, "view_rev"), !rawRevision.isEmpty else {
+            return .unavailable
+        }
+        let revision = ExactText(rawRevision)
+        if case .bool(true)? = value.uniqueValue(named: "unchanged") {
+            return knownRevision == revision ? .unchanged(revision) : .unavailable
+        }
+        guard let rawEntries = value.uniqueValue(named: "entries")?.arrayValues else {
+            return .unavailable
+        }
+        var entries: [InboxViewEntry] = []
+        var seen = Set<RequestKey>()
+        for raw in rawEntries {
+            guard case .object = raw,
+                  let sender = raw.uniqueValue(named: "sender_id")?.stringValue,
+                  !sender.rawValue.isEmpty,
+                  let message = raw.uniqueValue(named: "message_id")?.stringValue,
+                  !message.rawValue.isEmpty else { continue }
+            let key = RequestKey(accountScope: profile.identity.personID,
+                                 senderID: sender, messageID: message)
+            guard seen.insert(key).inserted else { continue }
+            let priority = raw.uniqueValue(named: "priority")?.stringValue
+                .flatMap { InboxMessagePriority(rawValue: $0.rawValue) }
+            let thread = raw.uniqueValue(named: "thread")?.stringValue
+                .flatMap { $0.rawValue.isEmpty ? nil : $0 }
+            let dueAt = raw.uniqueValue(named: "due_at")?.integerValue
+            let reason = raw.uniqueValue(named: "reason")?.stringValue
+            entries.append(InboxViewEntry(key: key, priority: priority,
+                                          thread: thread, dueAtMilliseconds: dueAt,
+                                          reason: reason))
+        }
+        return .updated(InboxView(revision: revision,
+                                  algorithm: text(value, "algorithm").map(ExactText.init),
+                                  basis: text(value, "basis").map(ExactText.init),
+                                  entries: entries))
     }
 
     public func inboxReconcile(snapshotID: String,
@@ -346,7 +414,6 @@ public struct InboxPagingWire: Sendable {
             guard let acceptanceValue = raw.uniqueValue(named: "acceptance") else {
                 throw InboxPagingWireError.invalidFrame
             }
-            let attentionTier = try decodeAttentionTier(raw)
             let acceptance = try relay.decodeEvent(Data((acceptanceValue.jsonString + "\n").utf8))
             switch acceptance.body {
             case .delivery, .originReference:
@@ -372,8 +439,7 @@ public struct InboxPagingWire: Sendable {
             guard key.accountScope == profile.identity.personID,
                   identities.insert(key).inserted,
                   acceptance.sequence <= highWater else { throw InboxPagingWireError.invalidFrame }
-            items.append(InboxSnapshotItem(acceptance: acceptance, terminal: terminal,
-                                           attentionTier: attentionTier))
+            items.append(InboxSnapshotItem(acceptance: acceptance, terminal: terminal))
         }
         return InboxPageResponse(snapshotID: snapshotID, highWater: highWater, items: items,
                                  nextCursor: next, receiptCursor: receiptCursor)
@@ -422,13 +488,6 @@ public struct InboxPagingWire: Sendable {
     private func uint64(_ value: JSONValue?) -> UInt64? {
         guard let value, case let .number(number) = value else { return nil }
         return UInt64(number.lexeme)
-    }
-
-    private func decodeAttentionTier(_ item: JSONValue) throws -> AttentionTier {
-        guard let raw = item.uniqueValue(named: "attention_tier") else { return .middle }
-        guard let value = raw.stringValue?.rawValue,
-              let tier = AttentionTier(rawValue: value) else { throw InboxPagingWireError.invalidFrame }
-        return tier
     }
 
     private static func key(_ body: RelayEventBody) -> RequestKey {

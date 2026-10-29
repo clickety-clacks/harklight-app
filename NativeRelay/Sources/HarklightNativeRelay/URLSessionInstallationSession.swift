@@ -794,7 +794,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     }
                     guard conversationReplayReading else { continue }
                 }
-                if kind == "delivery" || kind == "lifecycle" {
+                if kind == "delivery" || kind == "lifecycle" || kind == "view_changed" {
                     try await enqueuePostCheckpointInboxEvent(frame)
                 } else if !responseWaiters.isEmpty {
                     responseWaiters.removeFirst().resume(returning: frame)

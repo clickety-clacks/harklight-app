@@ -178,6 +178,23 @@ private enum ReplyInputSurfaceStyle {
     static let darkPlaceholder = Color.white.opacity(0.72)
 }
 
+@ViewBuilder
+private func liveChoiceButton<Label: View>(style: MessageChoiceStyle?,
+                                           perform action: @escaping () -> Void,
+                                           @ViewBuilder label: () -> Label) -> some View {
+    switch style {
+    case .primary:
+        Button(action: action, label: label)
+            .buttonStyle(.borderedProminent)
+    case .destructive:
+        Button(role: .destructive, action: action, label: label)
+            .buttonStyle(.bordered)
+    case .secondary, nil:
+        Button(action: action, label: label)
+            .buttonStyle(.plain)
+    }
+}
+
 private struct ReplyChoiceCard: View {
     let title: String
     let detail: String
@@ -188,6 +205,7 @@ private struct ReplyChoiceCard: View {
     let multiple: Bool
     let suggested: Bool
     let ownAnswer: Bool
+    let style: MessageChoiceStyle?
     let textColor: Color
     let selectedColor: Color
     let replySurface: Color
@@ -249,10 +267,9 @@ private struct ReplyChoiceCard: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(target.editorCardIdentifier)
         } else {
-            Button(action: onOpen) {
+            liveChoiceButton(style: style, perform: onOpen) {
                 card
             }
-            .buttonStyle(.plain)
             .accessibilityAddTraits(.isButton)
             .accessibilityIdentifier(target.summaryIdentifier)
             .accessibilityHint(text.isEmpty ? "Opens the reply field." : "Edit your reply.")
@@ -319,7 +336,8 @@ struct LiveContentView: View {
                         row.chatUnread = store.hasUnreadAgentReply(row.key)
                     }
                     return row
-                }, samples: samples, selectRequest: { store.selectRequest($0) },
+                }, showsBasicOrderMarker: store.presentation.showsBasicOrderMarker,
+                samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { key, revision in markSeen(key, requestRevision: revision) },
                 markNoCommentRequest: { key, revision in
                     store.submitNoCommentFromUser(key, requestRevision: revision)
@@ -997,6 +1015,11 @@ struct LiveRequestDetail: View {
                                      answeredFromThisDevice: request.intentReceipt != nil)
     }
 
+    private var byWhenDate: Date? {
+        guard let milliseconds = request.byWhenMilliseconds else { return nil }
+        return Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+    }
+
     /// Plain-language send status for the content area. Internal evidence
     /// wording stays in the request details sheet.
     static func answerStatusText(lifecycleStatus: AppLifecycleStatus,
@@ -1045,6 +1068,7 @@ struct LiveRequestDetail: View {
         case .some(.seen): "Seen"
         case .some(.reply(_)): "Replied"
         case .some(.noComment): "No comment"
+        case .some(.defaultAnswer(_, _)): "Answered by default"
         case .none: isLiveRequest ? "Answered" : "Replied"
         }
     }
@@ -1160,6 +1184,30 @@ struct LiveRequestDetail: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("request-heading")
                 .accessibilityHint("Open request details")
+                if let priority = request.inboxPriority {
+                    Label("Priority \(priority.rawValue)", systemImage: "flag.fill")
+                        .font(.caption.weight(.semibold))
+                        .accessibilityIdentifier("request-priority")
+                }
+                if let deadline = byWhenDate {
+                    Label("Deadline · \(deadline.formatted(date: .omitted, time: .shortened))",
+                          systemImage: "calendar")
+                        .font(.subheadline)
+                        .accessibilityIdentifier("request-deadline")
+                }
+                if let stake = request.stakeText {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("What’s at stake")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(detailColors.secondaryTextColor)
+                        Text(stake.rawValue)
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("request-stake")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if !request.supersedesMessageIDs.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Supersedes")
@@ -1311,6 +1359,22 @@ struct LiveRequestDetail: View {
                         .accessibilityIdentifier("inbox-status-unrefreshed")
                     if let localStatus = Self.cachedOperationStatus(request.intentReceipt?.localState) {
                         Text(localStatus).font(.caption).foregroundStyle(detailColors.secondaryTextColor)
+                    }
+                }
+                if request.isDefaultAnswered {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Answered by default", systemImage: "clock")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(detailColors.secondaryTextColor)
+                            .accessibilityIdentifier("request-default-answer-status")
+                        if let answerWords = request.defaultAnswerWords, !answerWords.isEmpty {
+                            Text(answerWords)
+                                .font(.subheadline)
+                                .foregroundStyle(Color.white)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("request-default-answer")
+                        }
                     }
                 }
                 if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
@@ -1919,6 +1983,7 @@ private struct LiveProjectedInputView: View {
                         isEditing: activeReplyEditor == target,
                         multiple: false, suggested: false,
                         ownAnswer: action.id.rawValue == "own",
+                        style: action.style,
                         textColor: detailColors.textColor,
                         selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
                         replySurface: replyEditorSurface,
@@ -2060,7 +2125,9 @@ private struct LiveProjectedInputView: View {
 
     @ViewBuilder
     private func actionButton(_ action: ProjectedAction) -> some View {
-        let selected = draft?.selectedActionID == action.id
+        let selected = request.isDefaultAnswered
+            ? request.defaultAnswerAction == ProjectedActionReference(inputID: input.id, actionID: action.id)
+            : draft?.selectedActionID == action.id
         let replyText = draft?.textByActionID[action.id]?.rawValue ?? ""
         if action.kind == .text && (selected || !replyText.isEmpty) {
             inlineReplyAction(action, selected: selected, text: replyText)
@@ -2080,9 +2147,7 @@ private struct LiveProjectedInputView: View {
             }
             .disabled(readOnly)
         } else {
-            Button {
-                activate(action)
-            } label: {
+            liveChoiceButton(style: action.style, perform: { activate(action) }) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let artID = action.illustrationID,
                        let illustration = sender.illustrations.first(where: { $0.id == artID }) {
@@ -2096,7 +2161,6 @@ private struct LiveProjectedInputView: View {
                                        ownAnswer: action.id.rawValue == "own")
                 }
             }
-            .buttonStyle(.plain)
             .accessibilityAddTraits(selected ? .isSelected : [])
             .accessibilityValue(selected ? "Selected" : "Not selected")
             .disabled(readOnly)
@@ -2140,6 +2204,10 @@ private struct LiveCompatibilityActions: View {
     }
 
     private var selected: ExactText? {
+        if request.isDefaultAnswered {
+            return request.defaultAnswerAction?.inputID == nil
+                ? request.defaultAnswerAction?.actionID : nil
+        }
         if let localReplyDraftSession {
             return localReplyDraftSession.draft.compatibility.selectedActionID
         }
@@ -2203,6 +2271,7 @@ private struct LiveCompatibilityActions: View {
                         focusedActionID: $focusedReplyActionID,
                         isEditing: activeReplyEditor == target,
                         multiple: false, suggested: suggested, ownAnswer: false,
+                        style: action.style,
                         textColor: detailColors.textColor,
                         selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
                         replySurface: HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor,
@@ -2276,13 +2345,12 @@ private struct LiveCompatibilityActions: View {
                         compatibilityChoice(action, selected: isSelected, detail: option?.detail ?? "",
                                             text: replyText)
                     } else {
-                        Button { activate(action) } label: {
+                        liveChoiceButton(style: action.style, perform: { activate(action) }) {
                             MessageChoiceLabel(title: action.label.rawValue,
                                     detail: option?.detail ?? "",
                                     selected: isSelected, multiple: false,
                                     suggested: option.map { if case .suggested = $0.role { true } else { false } } ?? false)
                         }
-                        .buttonStyle(.plain)
                         .accessibilityAddTraits(isSelected ? .isSelected : [])
                         .accessibilityValue(isSelected ? "Selected" : "Not selected")
                         .disabled(readOnly)

@@ -1576,7 +1576,8 @@ final class LivePresentationStore {
         if request.inboxStateIsCurrent {
             if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
             let lifecycle = retracted ? retractionLabel(for: request) :
-                String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
+                request.defaultAnswerStatusText ??
+                    String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
             statusParts.append(lifecycle)
             if request.answerNotDelivered { statusParts.append("Answer not delivered") }
             if request.noCommentUnavailable, receiptStatus != .failed,
@@ -1589,6 +1590,9 @@ final class LivePresentationStore {
         } else {
             if let localStatus = cachedOperationStatus(request.intentReceipt?.localState) {
                 statusParts.append(localStatus)
+            }
+            if let defaultStatus = request.defaultAnswerStatusText {
+                statusParts.append(defaultStatus)
             }
             statusParts.append("Cached history · status not refreshed")
         }
@@ -1618,7 +1622,13 @@ final class LivePresentationStore {
                 request.lifecycleStatus == .noComment,
             hasFailedResponse: receiptStatus == .failed,
             isRetracted: retracted,
-            tier: request.attentionTier.inboxRowStyleTier)
+            tier: .middle,
+            priority: request.inboxPriority,
+            thread: request.inboxThread,
+            hasInboxViewEntry: request.hasInboxViewEntry,
+            duePhrase: request.inboxDueAtMilliseconds.map { InboxDuePhrase.label(for: $0) },
+            orderingReason: request.inboxReason?.rawValue,
+            defaultAnswerStatus: request.defaultAnswerStatusText)
     }
 
     private func isRetracted(_ request: PresentedRequest) -> Bool {

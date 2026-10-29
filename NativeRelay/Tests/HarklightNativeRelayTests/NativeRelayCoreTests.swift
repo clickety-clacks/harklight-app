@@ -108,6 +108,8 @@ final class NativeRelayCoreTests: XCTestCase {
         var initialItems: [JSONValue] = []
         var nextItemCursor: String?
         var olderPages: [String: [JSONValue]] = [:]
+        var inboxViewEntries: [JSONValue]?
+        var inboxViewRevision = "view-test"
         var checkpointWasAccepted = false
         var reconciliationOverrides: [UUID: JSONValue] = [:]
         var missingReconciliationOperationIDs = Set<UUID>()
@@ -184,6 +186,22 @@ final class NativeRelayCoreTests: XCTestCase {
                     ("snapshot_id", .string(ExactText(snapshotID))),
                     ("high_water", .number(JSONNumber(lexeme: String(snapshotHighWater ?? 0)))),
                     ("events", .array([])), ("next_cursor", .null)
+                ])
+            case "view_get":
+                guard let inboxViewEntries else {
+                    return response([
+                        ("v", .number(JSONNumber(lexeme: "1"))),
+                        ("type", .string(ExactText("error"))),
+                        ("ref", .string(ExactText(ref))),
+                        ("reason", .string(ExactText("unknown_type")))
+                    ])
+                }
+                return response([
+                    ("v", .number(JSONNumber(lexeme: "1"))),
+                    ("type", .string(ExactText("ok"))),
+                    ("ref", .string(ExactText(ref))),
+                    ("view_rev", .string(ExactText(inboxViewRevision))),
+                    ("entries", .array(inboxViewEntries))
                 ])
             case "inbox_checkpoint_ack":
                 checkpointWasAccepted = true
@@ -759,7 +777,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let startupTypes = try session.requests.map(JSONValue.parse).compactMap {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue
         }
-        XCTAssertEqual(startupTypes, ["inbox_start", "inbox_checkpoint_ack", "inbox_attach"])
+        XCTAssertEqual(startupTypes, ["inbox_start", "inbox_checkpoint_ack", "inbox_attach", "view_get"])
         let checkpoint = try XCTUnwrap(try session.requests.map(JSONValue.parse).first {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_checkpoint_ack"
         })
@@ -777,7 +795,38 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(afterScroll.inboxCurrentKeys?.count, 21)
         XCTAssertEqual(try session.requests.map(JSONValue.parse).compactMap {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue
-        }, ["inbox_start", "inbox_checkpoint_ack", "inbox_attach", "inbox_page"])
+        }, ["inbox_start", "inbox_checkpoint_ack", "inbox_attach", "view_get", "inbox_page"])
+    }
+
+    func testServerInboxViewIsFetchedAfterCheckpointAndStoredWithoutMovingCursor() async throws {
+        let (context, store, session) = try setup()
+        session.snapshotHighWater = 1
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        let acceptance = try JSONValue.parse(data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"viewed","origin":"source","as":"message","message":{"title":"View row"}}"#))
+        session.initialItems = [.object([JSONMember("acceptance", acceptance)])]
+        session.inboxViewEntries = [.object([
+            JSONMember("sender_id", .string(ExactText("sender"))),
+            JSONMember("message_id", .string(ExactText("viewed"))),
+            JSONMember("priority", .string(ExactText("now"))),
+            JSONMember("thread", .string(ExactText("release"))),
+            JSONMember("due_at", .number(JSONNumber(lexeme: "1793300000000"))),
+            JSONMember("future", .bool(true))
+        ])]
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 1, "The unsequenced view does not move the relay cursor.")
+        XCTAssertEqual(snapshot.inboxView?.revision, ExactText("view-test"))
+        XCTAssertEqual(snapshot.inboxView?.entries.first?.priority, .now)
+        XCTAssertEqual(snapshot.inboxView?.entries.first?.thread, ExactText("release"))
+        XCTAssertEqual(snapshot.inboxView?.entries.first?.dueAtMilliseconds, 1_793_300_000_000)
+        let request = try XCTUnwrap(try session.requests.map(JSONValue.parse).first {
+            $0.uniqueValue(named: "type")?.stringValue?.rawValue == "view_get"
+        })
+        XCTAssertNil(request.uniqueValue(named: "since"))
+        XCTAssertNil(request.uniqueValue(named: "known_view_rev"))
     }
 
     func testCheckpointKeepsCachedRowsAnswerableUntilTheirStablePageArrives() async throws {

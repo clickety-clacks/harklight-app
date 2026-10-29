@@ -983,7 +983,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         guard case let .compatibility(seenActions) = seen.projection else {
             return XCTFail("The exact informational descriptor must map to one Seen value action.")
         }
-        XCTAssertEqual(seenActions, [ProjectedAction(id: ExactText("seen"), label: ExactText("Seen"), kind: .value)])
+        let seenAnswer = try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8))
+        XCTAssertEqual(seenActions, [ProjectedAction(id: ExactText("seen"), label: ExactText("Seen"), kind: .value,
+                                                      value: seenAnswer)])
 
         let structured = try XCTUnwrap(port.inspect(context: port.context, request: structuredKey).requests.first)
         guard case let .compatibility(structuredActions) = structured.projection else {
@@ -1000,7 +1002,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(legacyActions.map(\.label), [ExactText("Reply")])
 
         let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
-        let seenAnswer = try JSONValue.parse(Data(#"{"acknowledgment":"seen"}"#.utf8))
         XCTAssertEqual(receipt.exactAnswer, seenAnswer)
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
 
