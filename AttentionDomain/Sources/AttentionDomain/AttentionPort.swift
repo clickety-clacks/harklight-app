@@ -677,7 +677,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 do {
                     var lastRevision = afterRevision
                     var hasEmitted = false
-                    for await revision in revisions {
+                    for await _ in revisions {
                         try Task.checkCancellation()
                         let snapshot = try self.observe(context: suppliedContext)
                         guard !hasEmitted || snapshot.revision > lastRevision else { continue }
@@ -903,11 +903,6 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         submission: submission,
                         selector: selectors?[item.request.key],
                         requestRevision: presentedRevision,
-                        currentRevisionByWhenMilliseconds: currentRevisionRequest.byWhenMilliseconds,
-                        defaultAnswerAction: presentedRevision == conversationRevision
-                            ? Self.defaultAnswerAction(for: snapshot.remoteStates[item.request.key]?.accountAnswerOutcome,
-                                                        interface: currentRevisionRequest.interface)
-                            : nil,
                         staleAnswerRevision: staleAnswerRevision,
                         noCommentUnavailable: noCommentUnavailable,
                         answerNotDelivered: answerNotDelivered,
@@ -915,6 +910,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
                             $0.contains(item.request.key)
                         } ?? true,
                         supersedesMessageIDs: item.request.supersedesMessageIDs,
+                        currentRevisionByWhenMilliseconds: currentRevisionRequest.byWhenMilliseconds,
+                        defaultAnswerAction: presentedRevision == conversationRevision
+                            ? Self.defaultAnswerAction(for: snapshot.remoteStates[item.request.key]?.accountAnswerOutcome,
+                                                        interface: currentRevisionRequest.interface)
+                            : nil,
                         inboxViewEntry: inboxViewEntry)
         }
         let displayRequests = requests.sorted { left, right in
@@ -1045,6 +1045,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          inboxStateIsCurrent: Bool = true,
                          supersedesMessageIDs: [ExactText] = [],
                          currentRevisionByWhenMilliseconds: Int? = nil,
+                         defaultAnswerAction: ProjectedActionReference? = nil,
                          inboxViewEntry: InboxViewEntry? = nil) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
