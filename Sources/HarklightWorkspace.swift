@@ -282,6 +282,7 @@ enum InboxSenderDisplay {
 @MainActor
 struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     let requests: [InboxRequestRow]
+    var showsBasicOrderMarker = false
     let samples: SampleLibrary
     let selectRequest: (RequestKey) -> Void
     var markSeenRequest: (RequestKey, UInt64) -> Void = { _, _ in }
@@ -542,7 +543,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
         NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
-            InboxList(tab: tab, rows: rows, warnings: visibleWarnings, isRefreshing: isRefreshing,
+            InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
+                  showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab, search: $search,
@@ -690,6 +692,7 @@ struct InboxList: View {
     let tab: InboxWorkspaceTab
     let rows: [InboxItem]
     let warnings: [String]
+    var showsBasicOrderMarker = false
     var isRefreshing = false
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
@@ -980,6 +983,14 @@ struct InboxList: View {
                              using proxy: ScrollViewProxy) -> some View {
         let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
         List(selection: listSelection) {
+            if tab == .inbox && showsBasicOrderMarker {
+                Text("Basic order")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(designPalette.neutral.secondaryTextColor)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .listRowSeparator(.hidden)
+                    .accessibilityIdentifier("inbox-basic-order")
+            }
             ForEach(visibleEntries) { entry in
                 switch entry {
                 case let .row(row):

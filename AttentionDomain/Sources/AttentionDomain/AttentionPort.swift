@@ -440,17 +440,24 @@ public struct PresentationSnapshot: Equatable, Sendable {
     public let cursor: UInt64
     public let replayBarrier: UInt64?
     public let repairIssues: [StoreRepairIssue]
+    public let inboxViewBasis: ExactText?
     public let requests: [PresentedRequest]
+
+    public var showsBasicOrderMarker: Bool {
+        inboxViewBasis == ExactText("fallback")
+    }
 
     public init(revision: UInt64,
                 cursor: UInt64,
                 replayBarrier: UInt64?,
                 repairIssues: [StoreRepairIssue],
+                inboxViewBasis: ExactText? = nil,
                 requests: [PresentedRequest]) {
         self.revision = revision
         self.cursor = cursor
         self.replayBarrier = replayBarrier
         self.repairIssues = repairIssues
+        self.inboxViewBasis = inboxViewBasis
         self.requests = requests
     }
 }
@@ -969,6 +976,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     cursor: snapshot.cursor,
                                     replayBarrier: snapshot.replayBarrier,
                                     repairIssues: snapshot.repairIssues,
+                                    inboxViewBasis: snapshot.inboxView?.basis,
                                     requests: sourceOrderedRequests)
     }
 
@@ -1332,6 +1340,7 @@ private extension PresentationSnapshot {
                              cursor: cursor,
                              replayBarrier: replayBarrier,
                              repairIssues: repairIssues,
+                             inboxViewBasis: inboxViewBasis,
                              requests: requests.filter { $0.key == key })
     }
 }

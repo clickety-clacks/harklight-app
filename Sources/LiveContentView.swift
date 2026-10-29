@@ -186,13 +186,10 @@ private func liveChoiceButton<Label: View>(style: MessageChoiceStyle?,
     case .primary:
         Button(action: action, label: label)
             .buttonStyle(.borderedProminent)
-    case .secondary:
-        Button(action: action, label: label)
-            .buttonStyle(.bordered)
     case .destructive:
         Button(role: .destructive, action: action, label: label)
             .buttonStyle(.bordered)
-    case nil:
+    case .secondary, nil:
         Button(action: action, label: label)
             .buttonStyle(.plain)
     }
@@ -339,7 +336,8 @@ struct LiveContentView: View {
                         row.chatUnread = store.hasUnreadAgentReply(row.key)
                     }
                     return row
-                }, samples: samples, selectRequest: { store.selectRequest($0) },
+                }, showsBasicOrderMarker: store.presentation.showsBasicOrderMarker,
+                samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { key, revision in markSeen(key, requestRevision: revision) },
                 markNoCommentRequest: { key, revision in
                     store.submitNoCommentFromUser(key, requestRevision: revision)

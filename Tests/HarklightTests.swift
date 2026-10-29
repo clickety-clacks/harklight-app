@@ -107,13 +107,20 @@ final class HarklightTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Choose","urgency":"now","stake":"The review deadline slips.","by_when":1793300000000,"choice_styles":{"accept":"destructive","reply":"primary","ordinary":"loud","missing":"primary","later":"secondary"},"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"accept","label":"Accept","kind":"value","value":true},{"id":"reply","label":"Reply","kind":"text"},{"id":"ordinary","label":"Ordinary","kind":"value","value":false},{"id":"later","label":"Later","kind":"value","value":false}]}}"#.utf8))
         try store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
-        try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+        try store.setInboxView(InboxView(revision: ExactText("view-1"),
+            algorithm: ExactText("jev-set"), basis: ExactText("fallback"), entries: [
             InboxViewEntry(key: key, priority: .normal, thread: ExactText("review"),
                            dueAtMilliseconds: 1793300000000, reason: ExactText("server order"))
         ]), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let request = try XCTUnwrap(try port.observe(context: port.context).requests.first)
+        let presentation = try port.observe(context: port.context)
+        XCTAssertTrue(presentation.showsBasicOrderMarker,
+                      "Fallback basis must surface one inbox-level basic-order marker.")
+        XCTAssertTrue(try port.inspect(context: port.context, request: key)
+            .showsBasicOrderMarker,
+                      "Filtering presentation to a detail must retain the inbox-level basis.")
+        let request = try XCTUnwrap(presentation.requests.first)
         XCTAssertEqual(request.inboxPriority, .normal,
                        "The visible level comes from the post-attenuation view, not urgency.")
         XCTAssertEqual(request.inboxThread, ExactText("review"))
@@ -127,6 +134,12 @@ final class HarklightTests: XCTestCase {
             return XCTFail("A malformed optional style must leave the answer interface usable.")
         }
         XCTAssertEqual(actions.map(\.style), [.destructive, .primary, nil, .secondary])
+
+        try store.setInboxView(InboxView(revision: ExactText("view-2"),
+            algorithm: ExactText("jev-set"), basis: ExactText("selected"),
+            entries: [InboxViewEntry(key: key, priority: .normal)]), context: context)
+        XCTAssertFalse(try port.observe(context: port.context).showsBasicOrderMarker,
+                       "Selected basis must not show the fallback-only marker.")
 
         let malformed = try JSONValue.parse(Data(#"{"title":"Still readable","stake":7,"by_when":"tomorrow","choice_styles":"unknown","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#.utf8))
         let tolerant = StoredRequest(key: RequestKey(accountScope: identity.personID,
