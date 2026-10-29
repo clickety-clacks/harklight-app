@@ -931,7 +931,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             return left.key.messageID.rawValue < right.key.messageID.rawValue
         }
         var sourceOrderedRequests: [PresentedRequest]
-        if let currentView {
+        if currentView != nil {
             let localRank = Dictionary(uniqueKeysWithValues: displayRequests.enumerated().map {
                 ($0.element.key, $0.offset)
             })
