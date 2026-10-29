@@ -424,11 +424,15 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         _ = try freshStore.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: initialPayload), .message)),
             context: context)
+        try freshStore.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("origin"), payload: initialPayload)),
+            context: context)
         let revisedPayload = try JSONValue.parse(Data(#"{"title":"Choose","stake":"The review deadline slips.","by_when":1793300000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"first","label":"Later","kind":"value","value":1},{"id":"second","label":"Later","kind":"value","value":2}]}}"#.utf8))
         let binding = ConversationBinding(request: key, revision: 2)
         let revision = ConversationTurn(id: ExactText("revision-2"), binding: binding,
             author: .origin, sessionHandle: ExactText("origin"), text: ExactText("Choose"), kind: .revision)
-        try freshStore.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try freshStore.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .revision(revision, payload: revisedPayload)), context: context)
         let defaultFrame = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"server","state":"answered","by":"default","answer_outcome":{"kind":"default","value":2,"text":"Hold for now"}}"#.utf8)
         _ = try freshStore.apply(RelayWire(profile: context).decodeEvent(defaultFrame), context: context)

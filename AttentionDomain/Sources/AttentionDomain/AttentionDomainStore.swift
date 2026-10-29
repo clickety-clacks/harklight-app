@@ -1482,10 +1482,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
               let replacement = next.requests[replacementKey],
               replacement.supersedesMessageIDs.contains(target.messageID) else { return }
         var state = next.remoteStates[replacementKey] ?? RemoteRequestState()
-        if let priorTarget = state.supersedesOriginTarget, priorTarget != target {
+        let originTarget = next.remoteStates[target]?.supersedesOriginTarget ?? target
+        if let priorTarget = state.supersedesOriginTarget, priorTarget != originTarget {
             throw AttentionStoreError.eventConflict(terminalEvent.sequence)
         }
-        state.supersedesOriginTarget = target
+        state.supersedesOriginTarget = originTarget
         next.remoteStates[replacementKey] = state
     }
 
