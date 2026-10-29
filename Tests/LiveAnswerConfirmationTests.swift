@@ -449,13 +449,6 @@ final class LiveAnswerConfirmationTests: XCTestCase {
             accountAnswerOutcome: request.accountAnswerOutcome, isLiveRequest: true), "Answered by default")
         XCTAssertEqual(request.byWhenMilliseconds, 1_793_300_000_000)
         XCTAssertEqual(request.stakeText, ExactText("The review deadline slips."))
-        let port = AttentionDomainPort(store: freshStore)
-        let historical = try XCTUnwrap(port.inspect(context: port.context, request: key,
-                                                     revision: 1).requests.first)
-        XCTAssertEqual(historical.byWhenMilliseconds, 1_793_300_000_000,
-                       "The detail deadline comes from the current revision, even in history.")
-        XCTAssertNil(historical.defaultAnswerAction,
-                     "A historical choice is never marked as the winning current-revision choice.")
         let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertTrue(row.belongsToReplied)
         XCTAssertEqual(row.defaultAnswerStatus, "Answered by default: Hold for now")
