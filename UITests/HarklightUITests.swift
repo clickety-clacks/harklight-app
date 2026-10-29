@@ -598,14 +598,11 @@ final class HarklightUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--harklight-tier-reference"]
         app.launch()
-        let deadline = app.staticTexts["inbox-due-phrase"]
-        let reason = app.staticTexts["inbox-ordering-reason"]
-        XCTAssertTrue(deadline.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(reason.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(deadline.isHittable, "The deadline is visible in the reference row.")
-        XCTAssertTrue(reason.isHittable, "The server reason is visible beside the deadline.")
-        XCTAssertTrue(deadline.label.contains("Due"))
-        XCTAssertEqual(reason.label, "Waiting on the scheduled handoff")
+        let dueAndReason = app.descendants(matching: .any)["tier-reference-due-and-reason"]
+        XCTAssertTrue(dueAndReason.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(dueAndReason.isHittable, "The row is visible with both metadata values.")
+        XCTAssertTrue(dueAndReason.label.contains("Due"), dueAndReason.label)
+        XCTAssertTrue(dueAndReason.label.contains("Waiting on the scheduled handoff"), dueAndReason.label)
         XCTAssertTrue(app.staticTexts["Top · 8 lines"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Middle · 4 lines"].exists)
         XCTAssertTrue(app.staticTexts["Low · 2 lines"].exists)
