@@ -1283,9 +1283,6 @@ public actor NativeRelayCore {
                 _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
                 replay.expected = sequence
                 diagnose(.conversation, .conversationReplay, .observed, causeCode: "unknown_update_kind")
-            case .viewChanged, .ignoredUnsequenced:
-                conversationReplay = replay
-                return
             }
         }
         conversationReplay = replay
