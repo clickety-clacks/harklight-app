@@ -2124,13 +2124,9 @@ private struct LiveProjectedInputView: View {
 
     @ViewBuilder
     private func actionButton(_ action: ProjectedAction) -> some View {
-        let selected: Bool
-        if request.isDefaultAnswered {
-            selected = request.defaultAnswerAction == ProjectedActionReference(
-                inputID: input.id, actionID: action.id)
-        } else {
-            selected = draft?.selectedActionID == action.id
-        }
+        let selected = request.isDefaultAnswered
+            ? request.defaultAnswerAction == ProjectedActionReference(inputID: input.id, actionID: action.id)
+            : draft?.selectedActionID == action.id
         let replyText = draft?.textByActionID[action.id]?.rawValue ?? ""
         if action.kind == .text && (selected || !replyText.isEmpty) {
             inlineReplyAction(action, selected: selected, text: replyText)
