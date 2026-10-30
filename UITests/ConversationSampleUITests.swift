@@ -90,7 +90,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(seenAction.exists, "The message's Seen response remains available outside the no-chat view.")
     }
 
-    func testChatPanelRemovesHeaderAndKeepsComposerControlsAlignedAsPromptGrows() {
+    func testChatPanelRemovesRedundantRowsAndKeepsComposerControlsAlignedAsPromptGrows() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launch()
@@ -114,13 +114,14 @@ final class ConversationSampleUITests: XCTestCase {
                       "The Chat presentation exposes its composer surface.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "About ")).firstMatch.exists,
                        "The conversation panel no longer shows request-context title text.")
-        let availability = app.staticTexts["conversation-availability"]
-        XCTAssertTrue(availability.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(availability.label, "Example · Agent listening · delivery shown per message")
-        XCTAssertLessThan(availability.frame.maxY, inputSurface.frame.minY,
-                          "Listening status appears directly above the composer.")
+        XCTAssertFalse(app.staticTexts["Local conversation · nothing sent"].exists,
+                       "The redundant conversation footer is not shown.")
+        XCTAssertFalse(app.staticTexts["conversation-availability"].exists,
+                       "The standalone listening row is not shown.")
         XCTAssertFalse(app.buttons["Close"].exists,
                        "The conversation panel no longer needs a large toolbar X.")
+        XCTAssertFalse(send.isEnabled,
+                       "Removing the footer and listening row does not make an empty draft sendable.")
 
         let singleLineTextHeight = composer.frame.height
         let singleLineControlHeight = inputSurface.frame.height
@@ -134,6 +135,8 @@ final class ConversationSampleUITests: XCTestCase {
 
         composer.tap()
         composer.typeText("This prompt grows onto multiple lines inside the native chat panel.")
+        XCTAssertTrue(send.isEnabled,
+                      "A nonempty draft remains sendable after removing the redundant rows.")
         let multilineTextHeight = composer.frame.height
         let multilineSurfaceHeight = inputSurface.frame.height
         XCTAssertGreaterThan(multilineTextHeight, singleLineTextHeight + 8,
