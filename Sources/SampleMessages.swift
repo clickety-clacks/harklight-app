@@ -511,7 +511,17 @@ final class SampleLibrary {
 }
 
 enum SampleCatalog {
-    static let messages: [SampleMessage] = (0..<3).flatMap { variation in
+    static var messages: [SampleMessage] {
+        let messages = standardMessages
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--harklight-data-detector-acceptance") {
+            return messages + [dataDetectorAcceptanceMessage]
+        }
+        #endif
+        return messages
+    }
+
+    private static let standardMessages: [SampleMessage] = (0..<3).flatMap { variation in
         SampleKind.allCases.enumerated().map { index, kind in
             let context = ["studio", "garden", "library"][variation]
             let content = content(for: kind, context: context)
@@ -527,6 +537,23 @@ enum SampleCatalog {
                                     + (variation * SampleKind.allCases.count + index) * 60_000)
         }
     }
+
+    #if DEBUG
+    private static let dataDetectorAcceptanceMessage = SampleMessage(
+        id: "sample-data-detector-acceptance",
+        kind: .information,
+        sender: "Calendar assistant",
+        initials: "CA",
+        title: "Detector acceptance",
+        body: "Select this sentence to verify that copying remains available.\n\nhttps://example.invalid/detector-acceptance\n\nNovember 4, 2027 at 2:00 PM.",
+        options: [],
+        deadline: nil,
+        missed: false,
+        revised: false,
+        chatUnread: false,
+        hasChat: false,
+        fixtureCreatedAtMilliseconds: 1_790_000_000_000)
+    #endif
 
     private struct Content {
         let sender: String

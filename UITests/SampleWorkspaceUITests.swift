@@ -10,6 +10,45 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testMessageDetailDetectedURLUsesSystemHandlerAndBodyCanBeCopied() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-data-detector-acceptance"]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+
+        enterSearch("Detector acceptance", in: app)
+        let row = app.descendants(matching: .any)["sample-data-detector-acceptance"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        let detail = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        let body = app.textViews["request-message-body"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+        let bodyText = body.value as? String ?? body.label
+        XCTAssertTrue(bodyText.contains("https://example.invalid/detector-acceptance"), bodyText)
+        XCTAssertTrue(bodyText.contains("November 4, 2027 at 2:00 PM"), bodyText)
+
+        let detectedURL = app.links.matching(
+            NSPredicate(format: "label CONTAINS %@", "example.invalid/detector-acceptance")
+        ).firstMatch
+        XCTAssertTrue(detectedURL.waitForExistence(timeout: 5), app.debugDescription)
+        detectedURL.tap()
+
+        let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10), app.debugDescription)
+        app.activate()
+        XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+
+        body.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.1))
+            .press(forDuration: 1)
+        let copy = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Copy")).firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 5), app.debugDescription)
+        copy.tap()
+    }
+
     func testOrdinaryInboxKeepsRequestsWhenExamplesAreAdded() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]

@@ -59,6 +59,7 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         textView.adjustsFontForContentSizeCategory = true
         updateColors(on: textView)
         textView.text = text
+        textView.accessibilityIdentifier = "request-message-body"
         return textView
     }
 
