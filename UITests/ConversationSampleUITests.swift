@@ -23,6 +23,10 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(prompt.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(reply.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(agentReply.waitForExistence(timeout: 5), app.debugDescription)
+        let versionOneLabel = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "version 1")).firstMatch
+        XCTAssertFalse(versionOneLabel.exists,
+                       "Original-revision message headers omit the version-one label.")
         XCTAssertLessThan(prompt.frame.minY, reply.frame.minY,
                           "A reply must appear below the prompt it answers even when its ID sorts first")
         XCTAssertLessThan(reply.frame.minY, agentReply.frame.minY,
@@ -229,7 +233,7 @@ final class ConversationSampleUITests: XCTestCase {
         app.buttons["Chat"].tap()
         XCTAssertTrue(app.staticTexts["Updated"].waitForExistence(timeout: 5))
         app.buttons["conversation-revision-picker"].tap()
-        app.buttons["Version 1 · draft"].tap()
+        app.buttons["Original · draft"].tap()
         app.buttons["conversation-earlier-answer"].tap()
         XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(
@@ -441,7 +445,7 @@ final class ConversationSampleUITests: XCTestCase {
         let picker = app.buttons["conversation-revision-picker"]
         XCTAssertTrue(picker.exists, app.debugDescription)
         picker.tap()
-        app.buttons["Version 1 · draft"].tap()
+        app.buttons["Original · draft"].tap()
         app.buttons["conversation-earlier-answer"].tap()
         XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
         capture("conversation-archived-answer", app)
