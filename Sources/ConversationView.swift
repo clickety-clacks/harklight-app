@@ -320,7 +320,8 @@ private struct ConversationComposer: View {
                     .padding(.top, 8)
                 }
                 TextField("Write a message…", text: Binding(get: { stagedText }, set: { text in
-                    if text == stagedText + "\n" {
+                    if text.hasSuffix("\n") {
+                        stagedText = String(text.dropLast())
                         sendStagedText()
                         return
                     }
