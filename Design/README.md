@@ -28,7 +28,9 @@ Don't assign color meaning to anything else. In particular, don't give senders o
 
 ## Master list
 
-- Every row has the same neutral background. Rows are not tinted by type.
+- Every row uses the shared neutral background by default. Rows are not tinted by message type.
+- Top-tier rows use the `rowTop` neutral shade: `#E6E2DA` in light mode and `#201F1D` in dark mode.
+- The row for the message you last viewed (the one you came back from) uses the `rowSelected` neutral shade: `#E7EBE4` in light mode and `#29302B` in dark mode.
 - Each row's type icon uses its type color. In dark mode the icon uses the lighter shade of the same hue (`listIcon` in `tokens.json`), because the dark backgrounds are too dark to read at icon size.
 - The message you came back from has a bar on the right edge of its row, in that message's detail background color. The bar's left corners are rounded and its right edge is square. On wide screens, where the list and detail sit side by side, the bar meets the detail pane and reads as one piece with it.
 - Chat flag: a small chat bubble next to the time once a chat has started. It is an outline in secondary text color, and a filled bubble in the accent color when a new chat message is waiting.
