@@ -14,18 +14,20 @@ final class ConversationSampleUITests: XCTestCase {
         app.buttons["Chat"].tap()
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
         composer.tap()
         composer.typeText("A note submitted with Send.")
         let send = app.buttons["Send locally"]
         XCTAssertTrue(send.isEnabled)
         send.tap()
-        XCTAssertTrue(app.staticTexts["A note submitted with Send."].waitForExistence(timeout: 5),
+        XCTAssertTrue(history.staticTexts["A note submitted with Send."].waitForExistence(timeout: 5),
                       app.debugDescription)
         XCTAssertEqual(composer.value as? String, "Write a message…")
         XCTAssertFalse(send.isEnabled)
         composer.tap()
         composer.typeText("A note submitted with Return.\n")
-        XCTAssertTrue(app.staticTexts["A note submitted with Return."].waitForExistence(timeout: 5),
+        XCTAssertTrue(history.staticTexts["A note submitted with Return."].waitForExistence(timeout: 5),
                       app.debugDescription)
         XCTAssertEqual(composer.value as? String, "Write a message…")
         XCTAssertFalse(send.isEnabled)

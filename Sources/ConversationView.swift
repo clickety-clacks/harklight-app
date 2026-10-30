@@ -320,17 +320,18 @@ private struct ConversationComposer: View {
                     .padding(.top, 8)
                 }
                 TextField("Write a message…", text: Binding(get: { stagedText }, set: { text in
-                    if text.hasSuffix("\n") {
-                        stagedText = String(text.dropLast())
-                        sendStagedText()
-                        return
-                    }
                     stagedText = text
                     scheduleTextSave()
                 }), axis: .vertical)
                     .lineLimit(1...5).disabled(frozen || !allowsDiscussion)
                     .padding(.vertical, 11)
                     .submitLabel(.send)
+                    .onChange(of: stagedText) { _, text in
+                        guard text.hasSuffix("\n") else { return }
+                        textSaveTask?.cancel()
+                        stagedText = String(text.dropLast())
+                        sendStagedText()
+                    }
                     .onSubmit { sendStagedText() }
                     .accessibilityIdentifier("sample-chat-composer")
             }
