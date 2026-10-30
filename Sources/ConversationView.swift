@@ -320,6 +320,10 @@ private struct ConversationComposer: View {
                     .padding(.top, 8)
                 }
                 TextField("Write a message…", text: Binding(get: { stagedText }, set: { text in
+                    if text == stagedText + "\n" {
+                        sendStagedText()
+                        return
+                    }
                     stagedText = text
                     scheduleTextSave()
                 }), axis: .vertical)

@@ -17,7 +17,7 @@ final class ConversationPresentationTests: XCTestCase {
         let binding = ConversationBinding(request: key, revision: 1)
         try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
-        let model = try LivePresentationStore(store: domain, context: context)
+        let model = try LivePresentationStore(localFixtureStore: domain, context: context)
 
         persistence.failNextCommit()
         XCTAssertFalse(model.updateConversation(for: key, revision: 1, text: "Latest unsent text"))
