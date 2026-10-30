@@ -6,6 +6,17 @@ import XCTest
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testAcceptedDiscussionClearsOnlyTheSubmittedText() {
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: true, submitted: "Sent", current: "Sent"), "")
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: true, submitted: "Sent", current: "A later edit"), "A later edit")
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: false, submitted: "Sent", current: "Sent"), "Sent")
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: false, submitted: "Sent", current: "A later edit"), "A later edit")
+    }
+
     func testConversationAvailabilityMustBeConfirmedBeforeShowingNoChatState() {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),
