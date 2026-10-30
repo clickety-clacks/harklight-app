@@ -54,7 +54,9 @@ struct ConversationPanel: View {
                 if thread.revisionNumbers.count > 1 {
                     Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
                         ForEach(thread.revisionNumbers, id: \.self) { value in
-                            Text("Version \(value)\(thread.drafts[value] == nil && thread.answerDrafts?[value] == nil ? "" : " · draft")").tag(value)
+                            let hasDraft = thread.drafts[value] != nil || thread.answerDrafts?[value] != nil
+                            let revisionLabel = value == 1 ? "Original" : "Version \(value)"
+                            Text(revisionLabel + (hasDraft ? " · draft" : "")).tag(value)
                     }
                     }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
                 }
@@ -95,7 +97,8 @@ struct ConversationPanel: View {
                 }
                 HStack {
                     Spacer(minLength: 0)
-                    Text(store.isLocalExample ? "Local conversation · nothing sent" : "Discussion · version \(revision)")
+                    Text(store.isLocalExample ? "Local conversation · nothing sent" :
+                        revision == 1 ? "Discussion" : "Discussion · version \(revision)")
                         .font(.caption2).foregroundStyle(.secondary)
                 }.padding(.horizontal)
                 ConversationDraftStatus(disposition: draft.disposition)
@@ -466,7 +469,9 @@ private struct ConversationTurnView: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(authorLabel)
-                Text("· version \(turn.binding.revision)")
+                if turn.binding.revision != 1 {
+                    Text("· version \(turn.binding.revision)")
+                }
             }.font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             if let replyContext {
                 Text("Replying to: " + replyContext).lineLimit(2).font(.caption2).foregroundStyle(.secondary)
