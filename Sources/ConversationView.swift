@@ -263,6 +263,7 @@ private struct ConversationComposer: View {
     @State private var savedText = ""
     @State private var stagedBinding: ConversationBinding?
     @State private var textSaveTask: Task<Void, Never>?
+    @Environment(\.scenePhase) private var scenePhase
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var allowsDiscussion: Bool { thread?.allowsDiscussion == true }
@@ -375,6 +376,12 @@ private struct ConversationComposer: View {
         .onDisappear {
             textSaveTask?.cancel()
             _ = persistStagedText()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                textSaveTask?.cancel()
+                _ = persistStagedText()
+            }
         }
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {
