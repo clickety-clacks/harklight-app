@@ -321,17 +321,22 @@ private struct ConversationComposer: View {
                     }
                     .padding(.top, 8)
                 }
-                TextField("Write a message…", text: Binding(get: { stagedText }, set: { text in
-                    guard stagedText != text else { return }
-                    textEditRevision &+= 1
-                    stagedText = text
-                    scheduleTextSave()
-                }), axis: .vertical)
-                    .lineLimit(1...5).disabled(frozen || !allowsDiscussion)
-                    .padding(.vertical, 11)
-                    .submitLabel(.send)
-                    .onSubmit { sendStagedText() }
-                    .accessibilityIdentifier("sample-chat-composer")
+                ZStack(alignment: .topLeading) {
+                    ConversationReturnTextView(text: Binding(get: { stagedText }, set: { text in
+                        guard stagedText != text else { return }
+                        textEditRevision &+= 1
+                        stagedText = text
+                        scheduleTextSave()
+                    }), isEnabled: !frozen && allowsDiscussion, onReturn: sendStagedText)
+                        .padding(.vertical, 11)
+                    if stagedText.isEmpty {
+                        Text("Write a message…")
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 11)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
             }
             .padding(.horizontal, 12)
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))

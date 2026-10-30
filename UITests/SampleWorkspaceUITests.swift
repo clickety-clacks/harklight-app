@@ -608,7 +608,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, "Chat is reachable after dismissing the keyboard.")
         chat.tap()
-        let chatComposer = app.textFields["sample-chat-composer"]
+        let chatComposer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(chatComposer.waitForExistence(timeout: 5), app.debugDescription)
         capture("reply-draft-chat-open", app)
         dismissReplyChatPresentation(app, chatComposer)
@@ -777,7 +777,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             }
         }
         app.buttons["Chat"].tap()
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         app.buttons["Add sample attachment"].tap()
         let photo = app.buttons["Sample photo"]
@@ -849,7 +849,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         enterSearch("Thursday", in: app)
         app.descendants(matching: .any)["sample-information-0"].tap()
         app.buttons["Chat"].tap()
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         let surface = app.otherElements["sample-chat-input-surface"]
         XCTAssertTrue(surface.exists, app.debugDescription)
@@ -897,7 +897,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             app.buttons["Chat"].tap()
             let sheet = app.sheets.firstMatch
             XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
-            let composer = sheet.textFields["sample-chat-composer"]
+            let composer = sheet.textViews["sample-chat-composer"]
             XCTAssertTrue(composer.waitForExistence(timeout: 5))
             composer.tap(); composer.typeText("Local orientation " + name)
             let send = sheet.buttons["Send locally"]
@@ -1120,9 +1120,9 @@ final class SampleWorkspaceUITests: XCTestCase {
                              "Chat is trailing in the bottom toolbar.")
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         chat.tap()
-        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5))
         capture("adaptive-portrait-chat", app)
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         composer.tap(); composer.typeText("Local keyboard check")
         XCTAssertTrue(app.buttons["Send locally"].isHittable, "Keyboard must leave the send control usable")
         capture("adaptive-portrait-keyboard", app)
@@ -1130,7 +1130,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Local keyboard check"].waitForExistence(timeout: 5))
         XCUIDevice.shared.orientation = .landscapeLeft
         app.activate()
-        let composers = app.textFields.matching(identifier: "sample-chat-composer")
+        let composers = app.textViews.matching(identifier: "sample-chat-composer")
         let singleComposer = expectation(for: NSPredicate(format: "count == 1"), evaluatedWith: composers)
         wait(for: [singleComposer], timeout: 5)
         composers.firstMatch.tap(); composers.firstMatch.typeText("Local landscape check")

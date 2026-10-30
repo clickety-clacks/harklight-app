@@ -25,7 +25,7 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(chat.isHittable, app.debugDescription)
 
         chat.tap()
-        XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5),
                       app.debugDescription)
     }
 
@@ -70,7 +70,7 @@ final class DetailChatButtonUITests: XCTestCase {
         wait(for: [inputSurfaceAppears], timeout: 5)
         let inputSurfaces = inputSurfaceQuery.allElementsBoundByIndex
         let composerContainers = app.descendants(matching: .any)
-            .containing(.textField, identifier: "sample-chat-composer")
+            .containing(.textView, identifier: "sample-chat-composer")
             .allElementsBoundByIndex
         let presentations = inputSurfaces.compactMap { surface -> (XCUIElement, CGRect)? in
             let frames = centeredPresentationFrames(
@@ -85,7 +85,7 @@ final class DetailChatButtonUITests: XCTestCase {
             return
         }
         let (chatInputSurface, presentationFrame) = presentations[0]
-        let composers = chatInputSurface.textFields.matching(
+        let composers = chatInputSurface.textViews.matching(
             identifier: "sample-chat-composer")
         guard composers.count == 1 else {
             XCTFail("Expected one composer inside the native chat presentation's composer surface. \(app.debugDescription)")
@@ -124,7 +124,7 @@ final class DetailChatButtonUITests: XCTestCase {
                        "The native toolbar badge must expose the unread chat count.")
         attachScreenshot("unread-chat-toolbar-badge")
         chat.tap()
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5),
                       app.debugDescription)
         XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
@@ -166,7 +166,7 @@ final class DetailChatButtonUITests: XCTestCase {
         add(hierarchy)
 
         chat.tap()
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(app.buttons["Close"].exists, app.debugDescription)
         attachScreenshot("chat-sheet-without-header-or-close-\(appearance.lowercased())")
@@ -206,7 +206,7 @@ final class DetailChatButtonUITests: XCTestCase {
         let window = app.windows.firstMatch.frame
         let contentFrame = composer.frame
         let containers = app.otherElements
-            .containing(.textField, identifier: "sample-chat-composer")
+            .containing(.textView, identifier: "sample-chat-composer")
             .allElementsBoundByIndex.map(\.frame)
         let presentation = containers
             .filter { $0.width > contentFrame.width + 4 &&

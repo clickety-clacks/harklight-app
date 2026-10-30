@@ -1,11 +1,36 @@
 import AttentionDomain
 import CryptoKit
 import Foundation
+import SwiftUI
+import UIKit
 import XCTest
 @testable import Harklight
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testPastedNewlineRemainsInTheComposerWithoutSending() {
+        var text = "Before "
+        var sendCount = 0
+        let editor = ConversationReturnTextView(
+            text: Binding(get: { text }, set: { text = $0 }),
+            isEnabled: true, onReturn: { sendCount += 1 })
+        let coordinator = editor.makeCoordinator()
+        let view = UITextView()
+        view.text = text
+        view.delegate = coordinator
+        let end = view.endOfDocument
+        let insertion = view.textRange(from: end, to: end)!
+
+        _ = coordinator.textPasteConfigurationSupporting(
+            view, performPasteOf: NSAttributedString(string: "pasted text\n"), to: insertion)
+        XCTAssertEqual(text, "Before pasted text\n")
+        XCTAssertEqual(sendCount, 0)
+
+        XCTAssertFalse(coordinator.textView(view, shouldChangeTextIn: NSRange(location: view.text.utf16.count, length: 0),
+                                            replacementText: "\n"))
+        XCTAssertEqual(sendCount, 1)
+    }
+
     func testFailedComposerSaveKeepsTheLatestTextAvailableForRetryInThisSession() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"), deviceID: ExactText("device"))
