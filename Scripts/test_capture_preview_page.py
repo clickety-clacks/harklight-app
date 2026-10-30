@@ -9,6 +9,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+import zlib
 import unittest
 from unittest import mock
 
@@ -100,6 +101,52 @@ def run_main_with_unavailable_capture(
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
         result = capture_page.main()
     return result, stdout.getvalue(), stderr.getvalue()
+
+
+class PreviewPageImageOrientationTests(unittest.TestCase):
+    def test_exif_rotated_simulator_png_is_verified_in_display_orientation(self) -> None:
+        width, height, orientation = 1206, 2622, 8
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        exif = (
+            b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 1)
+            + struct.pack("<HHIHH", 0x0112, 3, 1, orientation, 0)
+            + struct.pack("<I", 0)
+        )
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            body = kind + payload
+            return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
+
+        png = capture_page.PNG_SIGNATURE + chunk(b"IHDR", ihdr) + chunk(b"eXIf", exif) + chunk(b"IEND", b"")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            export_dir = root / "export"
+            captures_dir = root / "captures"
+            export_dir.mkdir()
+            captures_dir.mkdir()
+            (export_dir / "landscape.png").write_bytes(png)
+            attachment = {
+                "exportedFileName": "landscape.png",
+                "timestamp": 1793012400,
+                "suggestedHumanReadableName": "preview-landscape-inbox_1.png",
+                "deviceId": "SIM-1",
+                "deviceName": "Test Simulator",
+            }
+            warnings: list[str] = []
+
+            capture = capture_page.capture_available_image(
+                "inbox", "Inbox", "preview-landscape-inbox", "landscape", "light",
+                [attachment], export_dir, captures_dir, True,
+                {"testPassed": True}, warnings,
+            )
+
+            self.assertEqual(capture["verification"], "verified")
+            self.assertEqual(capture["orientation"], "landscape")
+            self.assertTrue(capture["orientationVerified"])
+            self.assertEqual((capture["width"], capture["height"]), (2622, 1206))
+            self.assertEqual((capture["pixelWidth"], capture["pixelHeight"]), (1206, 2622))
+            self.assertEqual(capture["embeddedOrientation"], 8)
+            self.assertEqual(warnings, [])
 
 
 class PreviewPageInputTests(unittest.TestCase):

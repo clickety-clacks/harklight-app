@@ -313,6 +313,64 @@ def png_dimensions(data: bytes) -> tuple[int, int] | None:
         return None
 
 
+def png_exif_orientation(data: bytes) -> int | None:
+    if len(data) < 8 or not data.startswith(PNG_SIGNATURE):
+        return None
+
+    offset = 8
+    while offset + 12 <= len(data):
+        chunk_length = struct.unpack(">I", data[offset:offset + 4])[0]
+        chunk_type = data[offset + 4:offset + 8]
+        payload_start = offset + 8
+        payload_end = payload_start + chunk_length
+        if payload_end + 4 > len(data):
+            return None
+        if chunk_type == b"eXIf":
+            payload = data[payload_start:payload_end]
+            if len(payload) < 8:
+                return None
+            if payload[:2] == b"II":
+                byte_order = "<"
+            elif payload[:2] == b"MM":
+                byte_order = ">"
+            else:
+                return None
+            try:
+                if struct.unpack(byte_order + "H", payload[2:4])[0] != 42:
+                    return None
+                directory = struct.unpack(byte_order + "I", payload[4:8])[0]
+                if directory + 2 > len(payload):
+                    return None
+                entry_count = struct.unpack(byte_order + "H", payload[directory:directory + 2])[0]
+                for index in range(entry_count):
+                    entry = directory + 2 + index * 12
+                    if entry + 12 > len(payload):
+                        return None
+                    tag, value_type, value_count = struct.unpack(
+                        byte_order + "HHI", payload[entry:entry + 8],
+                    )
+                    if tag == 0x0112 and value_type == 3 and value_count == 1:
+                        value = struct.unpack(byte_order + "H", payload[entry + 8:entry + 10])[0]
+                        return value if 1 <= value <= 8 else None
+            except struct.error:
+                return None
+            return None
+        if chunk_type == b"IEND":
+            return None
+        offset = payload_end + 4
+    return None
+
+
+def png_display_dimensions(data: bytes) -> tuple[int, int] | None:
+    dimensions = png_dimensions(data)
+    if dimensions is None:
+        return None
+    orientation = png_exif_orientation(data)
+    if orientation in (5, 6, 7, 8):
+        return dimensions[1], dimensions[0]
+    return dimensions
+
+
 def missing_capture(slug: str, title: str, orientation: str,
                     appearance: str, reason: str) -> dict:
     return {
@@ -376,7 +434,9 @@ def capture_available_image(slug: str, title: str, attachment_name: str,
         add_warning(warnings, f"{title}, {requested_orientation}, {appearance}: {reason}")
         return missing_capture(slug, title, requested_orientation, appearance, reason)
 
-    width, height = dimensions
+    pixel_width, pixel_height = dimensions
+    display_dimensions = png_display_dimensions(data) or dimensions
+    width, height = display_dimensions
     orientation = "portrait" if height > width else "landscape" if width > height else "square"
     orientation_verified = orientation == requested_orientation
     if not orientation_verified:
@@ -431,6 +491,9 @@ def capture_available_image(slug: str, title: str, attachment_name: str,
         "sha256": hashlib.sha256(data).hexdigest(),
         "width": width,
         "height": height,
+        "pixelWidth": pixel_width,
+        "pixelHeight": pixel_height,
+        "embeddedOrientation": png_exif_orientation(data),
         "reasons": reasons,
     }
 
@@ -591,7 +654,7 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
     .warnings ul {{ margin-bottom:0; padding-left:22px; }}
     .card {{ margin:0; overflow:hidden; border:1px solid var(--border); border-radius:12px; background:var(--surface); }}
     .appearance-content {{ padding:12px; }}
-    .capture {{ display:block; max-width:100%; max-height:72vh; margin:0 auto; object-fit:contain; border-radius:8px; }}
+    .capture {{ display:block; max-width:100%; max-height:72vh; margin:0 auto; object-fit:contain; image-orientation:from-image; border-radius:8px; }}
     .capture-status {{ padding:10px 2px 0; }}
     .unavailable {{ min-height:120px; display:flex; align-items:center; gap:8px; color:var(--muted); }}
     :root[data-appearance="light"] .appearance-content[data-appearance="dark"], :root[data-appearance="dark"] .appearance-content[data-appearance="light"] {{ display:none; }}
