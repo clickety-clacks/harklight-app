@@ -32,13 +32,21 @@ final class ConversationPresentationTests: XCTestCase {
 
     func testAcceptedDiscussionClearsOnlyTheSubmittedText() {
         XCTAssertEqual(ConversationSubmittedText.afterResult(
-            accepted: true, submitted: "Sent", current: "Sent"), "")
+            accepted: true, submitted: "Sent", submittedEdit: 3,
+            current: "Sent", currentEdit: 3), "")
         XCTAssertEqual(ConversationSubmittedText.afterResult(
-            accepted: true, submitted: "Sent", current: "A later edit"), "A later edit")
+            accepted: true, submitted: "Sent", submittedEdit: 3,
+            current: "A later edit", currentEdit: 4), "A later edit")
         XCTAssertEqual(ConversationSubmittedText.afterResult(
-            accepted: false, submitted: "Sent", current: "Sent"), "Sent")
+            accepted: true, submitted: "Sent", submittedEdit: 3,
+            current: "Sent", currentEdit: 5), "Sent",
+            "Edits made after submission survive even if the text returns to its old value.")
         XCTAssertEqual(ConversationSubmittedText.afterResult(
-            accepted: false, submitted: "Sent", current: "A later edit"), "A later edit")
+            accepted: false, submitted: "Sent", submittedEdit: 3,
+            current: "Sent", currentEdit: 3), "Sent")
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: false, submitted: "Sent", submittedEdit: 3,
+            current: "A later edit", currentEdit: 4), "A later edit")
     }
 
     func testConversationAvailabilityMustBeConfirmedBeforeShowingNoChatState() {

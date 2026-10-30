@@ -26,7 +26,10 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "Write a message…")
         XCTAssertFalse(send.isEnabled)
         composer.tap()
-        composer.typeText("A note submitted with Return.\n")
+        composer.typeText("A note submitted with Return.")
+        let keyboardSend = app.keyboards.buttons["Send"]
+        XCTAssertTrue(keyboardSend.waitForExistence(timeout: 5), app.debugDescription)
+        keyboardSend.tap()
         XCTAssertTrue(history.staticTexts["A note submitted with Return."].waitForExistence(timeout: 5),
                       app.debugDescription)
         XCTAssertEqual(composer.value as? String, "Write a message…")

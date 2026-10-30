@@ -246,8 +246,9 @@ enum ConversationDraftPresentationText {
 }
 
 enum ConversationSubmittedText {
-    static func afterResult(accepted: Bool, submitted: String, current: String) -> String {
-        accepted && current == submitted ? "" : current
+    static func afterResult(accepted: Bool, submitted: String, submittedEdit: UInt64,
+                            current: String, currentEdit: UInt64) -> String {
+        accepted && currentEdit == submittedEdit && current == submitted ? "" : current
     }
 }
 
@@ -260,6 +261,7 @@ private struct ConversationComposer: View {
     @State private var pickingFiles = false
     @State private var attachmentChoices = false
     @State private var stagedText = ""
+    @State private var textEditRevision: UInt64 = 0
     @State private var savedText = ""
     @State private var stagedBinding: ConversationBinding?
     @State private var textSaveTask: Task<Void, Never>?
@@ -320,18 +322,14 @@ private struct ConversationComposer: View {
                     .padding(.top, 8)
                 }
                 TextField("Write a message…", text: Binding(get: { stagedText }, set: { text in
+                    guard stagedText != text else { return }
+                    textEditRevision &+= 1
                     stagedText = text
                     scheduleTextSave()
                 }), axis: .vertical)
                     .lineLimit(1...5).disabled(frozen || !allowsDiscussion)
                     .padding(.vertical, 11)
                     .submitLabel(.send)
-                    .onChange(of: stagedText) { _, text in
-                        guard text.hasSuffix("\n") else { return }
-                        textSaveTask?.cancel()
-                        stagedText = String(text.dropLast())
-                        sendStagedText()
-                    }
                     .onSubmit { sendStagedText() }
                     .accessibilityIdentifier("sample-chat-composer")
             }
@@ -429,10 +427,12 @@ private struct ConversationComposer: View {
               frozen || !stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else { return }
         guard persistStagedText(), let binding = stagedBinding else { return }
         let submittedText = stagedText
+        let submittedEdit = textEditRevision
         store.sendDiscussion(for: binding.request, revision: binding.revision) { accepted in
             guard stagedBinding == binding else { return }
             let remaining = ConversationSubmittedText.afterResult(
-                accepted: accepted, submitted: submittedText, current: stagedText)
+                accepted: accepted, submitted: submittedText, submittedEdit: submittedEdit,
+                current: stagedText, currentEdit: textEditRevision)
             if remaining != stagedText {
                 stagedText = remaining
                 savedText = remaining
