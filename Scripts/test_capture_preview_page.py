@@ -6,8 +6,10 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import struct
 import sys
 import tempfile
+import zlib
 import unittest
 from unittest import mock
 
@@ -23,6 +25,7 @@ SPEC.loader.exec_module(capture_page)
 
 def run_main_with_unavailable_capture(
     page_dir: Path, arguments: tuple[str, ...], partial: bool = False,
+    landscape_not_declared: bool = False,
 ) -> tuple[int, str, str]:
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -47,20 +50,27 @@ def run_main_with_unavailable_capture(
         return {"returnCode": 0, "output": "", "error": None}
 
     def capture_available(*args: object) -> dict:
-        slug, screen_title, _attachment_name, appearance = args[:4]
-        if partial and slug == "inbox" and appearance == "light":
+        slug, screen_title, _attachment_name, orientation, appearance = args[:5]
+        has_partial_capture = partial and slug == "inbox" and orientation == "portrait" and appearance == "light"
+        has_landscape_capture = landscape_not_declared and slug == "inbox" and orientation == "landscape" and appearance == "light"
+        if has_partial_capture or has_landscape_capture:
             return {
+                "screen": slug,
+                "screenTitle": screen_title,
+                "requestedOrientation": orientation,
+                "appearance": appearance,
                 "status": "captured",
-                "file": "captures/inbox-portrait-light.png",
-                "verification": "unverified",
-                "orientation": "portrait",
-                "width": 390,
-                "height": 844,
-                "reasons": ["Synthetic focused check capture."],
+                "file": f"captures/{slug}-{orientation}-{appearance}.png",
+                "verification": "verified",
+                "orientation": orientation,
+                "orientationVerified": True,
+                "width": 844 if orientation == "landscape" else 390,
+                "height": 390 if orientation == "landscape" else 844,
+                "reasons": [],
                 "captureTimestampUTC": None,
             }
         return capture_page.missing_capture(
-            slug, screen_title, appearance, "No screenshot was captured.",
+            slug, screen_title, orientation, appearance, "No screenshot was captured.",
         )
 
     def run_capture_test(_device_id: str, appearance: str, _export_dir: Path,
@@ -80,7 +90,10 @@ def run_main_with_unavailable_capture(
         mock.patch.object(capture_page, "find_simulator", return_value="Test Simulator"),
         mock.patch.object(capture_page, "attempt", side_effect=attempt),
         mock.patch.object(capture_page, "run_capture_test", side_effect=run_capture_test),
-        mock.patch.object(capture_page, "read_portrait_support", return_value=("declared", ["portrait"])),
+        mock.patch.object(capture_page, "read_orientation_support", return_value=(
+            {"portrait": "declared", "landscape": "not declared" if landscape_not_declared else "declared"},
+            ["UIInterfaceOrientationPortrait", "UIInterfaceOrientationLandscapeLeft"],
+        )),
         mock.patch.object(capture_page, "capture_available_image", side_effect=capture_available),
         mock.patch("sys.stdout", stdout),
         mock.patch("sys.stderr", stderr),
@@ -88,6 +101,52 @@ def run_main_with_unavailable_capture(
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
         result = capture_page.main()
     return result, stdout.getvalue(), stderr.getvalue()
+
+
+class PreviewPageImageOrientationTests(unittest.TestCase):
+    def test_exif_rotated_simulator_png_is_verified_in_display_orientation(self) -> None:
+        width, height, orientation = 1206, 2622, 8
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        exif = (
+            b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 1)
+            + struct.pack("<HHIHH", 0x0112, 3, 1, orientation, 0)
+            + struct.pack("<I", 0)
+        )
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            body = kind + payload
+            return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
+
+        png = capture_page.PNG_SIGNATURE + chunk(b"IHDR", ihdr) + chunk(b"eXIf", exif) + chunk(b"IEND", b"")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            export_dir = root / "export"
+            captures_dir = root / "captures"
+            export_dir.mkdir()
+            captures_dir.mkdir()
+            (export_dir / "landscape.png").write_bytes(png)
+            attachment = {
+                "exportedFileName": "landscape.png",
+                "timestamp": 1793012400,
+                "suggestedHumanReadableName": "preview-landscape-inbox_1.png",
+                "deviceId": "SIM-1",
+                "deviceName": "Test Simulator",
+            }
+            warnings: list[str] = []
+
+            capture = capture_page.capture_available_image(
+                "inbox", "Inbox", "preview-landscape-inbox", "landscape", "light",
+                [attachment], export_dir, captures_dir, True,
+                {"testPassed": True}, warnings,
+            )
+
+            self.assertEqual(capture["verification"], "verified")
+            self.assertEqual(capture["orientation"], "landscape")
+            self.assertTrue(capture["orientationVerified"])
+            self.assertEqual((capture["width"], capture["height"]), (2622, 1206))
+            self.assertEqual((capture["pixelWidth"], capture["pixelHeight"]), (1206, 2622))
+            self.assertEqual(capture["embeddedOrientation"], 8)
+            self.assertEqual(warnings, [])
 
 
 class PreviewPageInputTests(unittest.TestCase):
@@ -148,11 +207,72 @@ class PreviewPageInputTests(unittest.TestCase):
                 (page_dir / "metadata.json").read_text(encoding="utf-8"),
             )
             self.assertIn('src="captures/inbox-portrait-light.png"', page)
-            self.assertIn("1 of 4 images available", page)
+            self.assertIn("1 of 8 images available", page)
+            self.assertIn("Requested orientation: portrait", page)
+            self.assertIn("Requested orientation: landscape", page)
+            self.assertEqual(page.count('id="appearance-switch"'), 1)
+            self.assertEqual(metadata["requestedOrientations"], ["portrait", "landscape"])
+            self.assertEqual(len(metadata["captureMatrix"]), 8)
             self.assertIn("Dark capture unavailable.", page)
             self.assertIn("Page ready (partial)", stdout)
             self.assertEqual(metadata["pageStatus"], "partial")
             self.assertEqual(metadata["imageCount"], 1)
+
+    def test_landscape_without_declared_support_still_builds_an_unverified_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            page_dir = Path(temporary_directory) / "page"
+            result, _stdout, stderr = run_main_with_unavailable_capture(
+                page_dir, ("--pushed-at", "2026-10-26T11:00:00Z"),
+                landscape_not_declared=True,
+            )
+
+            self.assertEqual(result, 0, stderr)
+            page = (page_dir / "index.html").read_text(encoding="utf-8")
+            metadata = json.loads((page_dir / "metadata.json").read_text(encoding="utf-8"))
+            landscape = next(
+                item for item in metadata["captureMatrix"]
+                if item["requestedOrientation"] == "landscape"
+                and item["appearance"] == "light"
+                and item["status"] == "captured"
+            )
+            self.assertIn('src="captures/inbox-landscape-light.png"', page)
+            self.assertIn("Built-app orientation support: portrait declared, landscape not declared", page)
+            self.assertEqual(landscape["verification"], "unverified")
+            self.assertEqual(metadata["pageStatus"], "partial")
+
+    def test_landscape_capture_is_saved_in_its_requested_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            export_dir = root / "export"
+            captures_dir = root / "captures"
+            export_dir.mkdir()
+            captures_dir.mkdir()
+            exported_name = "landscape.png"
+            png = capture_page.PNG_SIGNATURE + b"\x00" * 8 + struct.pack(">II", 844, 390)
+            (export_dir / exported_name).write_bytes(png)
+            warnings: list[str] = []
+            attachment = {
+                "exportedFileName": exported_name,
+                "timestamp": 1793012400,
+                "suggestedHumanReadableName": "preview-landscape-inbox_1.png",
+                "deviceId": "SIM-1",
+                "deviceName": "Test Simulator",
+            }
+            record = {"testPassed": True}
+
+            capture = capture_page.capture_available_image(
+                "inbox", "Inbox", "preview-landscape-inbox",
+                "landscape", "dark", [attachment], export_dir, captures_dir,
+                True, record, warnings,
+            )
+
+            self.assertEqual(capture["status"], "captured")
+            self.assertEqual(capture["requestedOrientation"], "landscape")
+            self.assertTrue(capture["orientationVerified"])
+            self.assertEqual(capture["file"], "captures/inbox-landscape-dark.png")
+            self.assertEqual((capture["width"], capture["height"]), (844, 390))
+            self.assertTrue((captures_dir / "inbox-landscape-dark.png").is_file())
+            self.assertEqual(capture["verification"], "verified")
 
     def test_default_output_is_timestamped_in_current_directory(self) -> None:
         output_path, defaulted = capture_page.requested_output_directory(None)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture a portrait Harklight preview page from available simulator UI screenshots."""
+"""Capture a nonfold Harklight preview page from available simulator UI screenshots."""
 
 from __future__ import annotations
 
@@ -20,9 +20,16 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ID = "HarklightUITests/SampleWorkspaceUITests/testPreviewPageCapturesInboxAndDetail"
 TEST_LABELS = {
-    "inbox": ("Inbox", "preview-portrait-inbox"),
-    "detail": ("Message detail", "preview-portrait-detail"),
+    "inbox": ("Inbox", {
+        "portrait": "preview-portrait-inbox",
+        "landscape": "preview-landscape-inbox",
+    }),
+    "detail": ("Message detail", {
+        "portrait": "preview-portrait-detail",
+        "landscape": "preview-landscape-detail",
+    }),
 }
+ORIENTATIONS = ("portrait", "landscape")
 APPEARANCES = ("light", "dark")
 DEFAULT_PAGE_TITLE = "Harklight preview"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -187,7 +194,7 @@ def run_capture_test(device_id: str, appearance: str, export_dir: Path,
     env = os.environ.copy()
     env["HARKLIGHT_SIMULATOR_ID"] = device_id
     env["HARKLIGHT_ONLY_TESTING"] = TEST_ID
-    print(f"Capturing the Inbox and selected detail in {appearance} appearance…", flush=True)
+    print(f"Capturing Inbox and selected detail in portrait and landscape, {appearance} appearance…", flush=True)
     wrapper = attempt([str(ROOT / "Scripts" / "verify.sh"), "test"], env=env)
     output = wrapper["output"]
     bundle = locate_result_bundle(before, output, warnings)
@@ -306,15 +313,76 @@ def png_dimensions(data: bytes) -> tuple[int, int] | None:
         return None
 
 
-def missing_capture(slug: str, title: str, appearance: str, reason: str) -> dict:
+def png_exif_orientation(data: bytes) -> int | None:
+    if len(data) < 8 or not data.startswith(PNG_SIGNATURE):
+        return None
+
+    offset = 8
+    while offset + 12 <= len(data):
+        chunk_length = struct.unpack(">I", data[offset:offset + 4])[0]
+        chunk_type = data[offset + 4:offset + 8]
+        payload_start = offset + 8
+        payload_end = payload_start + chunk_length
+        if payload_end + 4 > len(data):
+            return None
+        if chunk_type == b"eXIf":
+            payload = data[payload_start:payload_end]
+            if len(payload) < 8:
+                return None
+            if payload[:2] == b"II":
+                byte_order = "<"
+            elif payload[:2] == b"MM":
+                byte_order = ">"
+            else:
+                return None
+            try:
+                if struct.unpack(byte_order + "H", payload[2:4])[0] != 42:
+                    return None
+                directory = struct.unpack(byte_order + "I", payload[4:8])[0]
+                if directory + 2 > len(payload):
+                    return None
+                entry_count = struct.unpack(byte_order + "H", payload[directory:directory + 2])[0]
+                for index in range(entry_count):
+                    entry = directory + 2 + index * 12
+                    if entry + 12 > len(payload):
+                        return None
+                    tag, value_type, value_count = struct.unpack(
+                        byte_order + "HHI", payload[entry:entry + 8],
+                    )
+                    if tag == 0x0112 and value_type == 3 and value_count == 1:
+                        value = struct.unpack(byte_order + "H", payload[entry + 8:entry + 10])[0]
+                        return value if 1 <= value <= 8 else None
+            except struct.error:
+                return None
+            return None
+        if chunk_type == b"IEND":
+            return None
+        offset = payload_end + 4
+    return None
+
+
+def png_display_dimensions(data: bytes) -> tuple[int, int] | None:
+    dimensions = png_dimensions(data)
+    if dimensions is None:
+        return None
+    orientation = png_exif_orientation(data)
+    if orientation in (5, 6, 7, 8):
+        return dimensions[1], dimensions[0]
+    return dimensions
+
+
+def missing_capture(slug: str, title: str, orientation: str,
+                    appearance: str, reason: str) -> dict:
     return {
         "screen": slug,
         "screenTitle": title,
+        "requestedOrientation": orientation,
         "appearance": appearance,
         "status": "missing",
         "verification": "unverified",
         "file": None,
         "orientation": None,
+        "orientationVerified": False,
         "width": None,
         "height": None,
         "sha256": None,
@@ -323,13 +391,14 @@ def missing_capture(slug: str, title: str, appearance: str, reason: str) -> dict
 
 
 def capture_available_image(slug: str, title: str, attachment_name: str,
-                            appearance: str, matches: list[dict], export_dir: Path,
+                            requested_orientation: str, appearance: str,
+                            matches: list[dict], export_dir: Path,
                             captures_dir: Path, appearance_set: bool,
                             test_record: dict, warnings: list[str]) -> dict:
     if not matches:
         reason = "No matching screenshot attachment was exported."
-        add_warning(warnings, f"{title}, {appearance}: {reason}")
-        return missing_capture(slug, title, appearance, reason)
+        add_warning(warnings, f"{title}, {requested_orientation}, {appearance}: {reason}")
+        return missing_capture(slug, title, requested_orientation, appearance, reason)
 
     attachment = matches[-1]
     reasons = []
@@ -348,37 +417,41 @@ def capture_available_image(slug: str, title: str, attachment_name: str,
     exported_name = attachment.get("exportedFileName")
     if not isinstance(exported_name, str) or not exported_name:
         reason = "The attachment has no exported file name."
-        add_warning(warnings, f"{title}, {appearance}: {reason}")
-        return missing_capture(slug, title, appearance, reason)
+        add_warning(warnings, f"{title}, {requested_orientation}, {appearance}: {reason}")
+        return missing_capture(slug, title, requested_orientation, appearance, reason)
 
     source_file = export_dir / exported_name
     try:
         data = source_file.read_bytes()
     except OSError as error:
         reason = f"The exported screenshot is unavailable: {error}"
-        add_warning(warnings, f"{title}, {appearance}: {reason}")
-        return missing_capture(slug, title, appearance, reason)
+        add_warning(warnings, f"{title}, {requested_orientation}, {appearance}: {reason}")
+        return missing_capture(slug, title, requested_orientation, appearance, reason)
 
     dimensions = png_dimensions(data)
     if dimensions is None:
         reason = "The exported attachment is not a readable PNG."
-        add_warning(warnings, f"{title}, {appearance}: {reason}")
-        return missing_capture(slug, title, appearance, reason)
+        add_warning(warnings, f"{title}, {requested_orientation}, {appearance}: {reason}")
+        return missing_capture(slug, title, requested_orientation, appearance, reason)
 
-    width, height = dimensions
+    pixel_width, pixel_height = dimensions
+    display_dimensions = png_display_dimensions(data) or dimensions
+    width, height = display_dimensions
     orientation = "portrait" if height > width else "landscape" if width > height else "square"
-    if orientation != "portrait":
-        reasons.append(f"Image dimensions indicate {orientation}, not portrait.")
-    suffix = "portrait" if orientation == "portrait" else "orientation-unverified"
-    filename = f"{slug}-{suffix}-{appearance}.png"
+    orientation_verified = orientation == requested_orientation
+    if not orientation_verified:
+        reasons.append(
+            f"Image dimensions indicate {orientation}, not requested {requested_orientation}."
+        )
+    filename = f"{slug}-{requested_orientation}-{appearance}.png"
     relative_path = Path("captures") / filename
     destination = captures_dir / filename
     try:
         shutil.copyfile(source_file, destination)
     except OSError as error:
         reason = f"Could not copy the available screenshot into the page: {error}"
-        add_warning(warnings, f"{title}, {appearance}: {reason}")
-        return missing_capture(slug, title, appearance, reason)
+        add_warning(warnings, f"{title}, {requested_orientation}, {appearance}: {reason}")
+        return missing_capture(slug, title, requested_orientation, appearance, reason)
 
     capture_time = None
     timestamp = attachment.get("timestamp")
@@ -392,19 +465,20 @@ def capture_available_image(slug: str, title: str, attachment_name: str,
 
     if reasons:
         verification = "unverified"
-        add_warning(warnings, f"{title}, {appearance}: " + " ".join(reasons))
+        add_warning(warnings, f"{title}, {requested_orientation}, {appearance}: " + " ".join(reasons))
     else:
         verification = "verified"
 
     return {
         "screen": slug,
         "screenTitle": title,
+        "requestedOrientation": requested_orientation,
         "appearance": appearance,
         "status": "captured",
         "verification": verification,
         "file": relative_path.as_posix(),
         "orientation": orientation,
-        "orientationVerified": orientation == "portrait",
+        "orientationVerified": orientation_verified,
         "appearanceSet": appearance_set,
         "testPassed": test_record.get("testPassed"),
         "attachmentCount": len(matches),
@@ -417,36 +491,50 @@ def capture_available_image(slug: str, title: str, attachment_name: str,
         "sha256": hashlib.sha256(data).hexdigest(),
         "width": width,
         "height": height,
+        "pixelWidth": pixel_width,
+        "pixelHeight": pixel_height,
+        "embeddedOrientation": png_exif_orientation(data),
         "reasons": reasons,
     }
 
 
-def read_portrait_support(warnings: list[str]) -> tuple[str, list[str] | None]:
+def read_orientation_support(warnings: list[str]) -> tuple[dict[str, str], list[str] | None]:
+    unknown = {orientation: "unknown" for orientation in ORIENTATIONS}
     app_path = ROOT / "DerivedData" / "Build" / "Products" / "Debug-iphonesimulator" / "Harklight.app"
     try:
         with (app_path / "Info.plist").open("rb") as info_file:
             app_info = plistlib.load(info_file)
     except (OSError, plistlib.InvalidFileException, ValueError, TypeError) as error:
-        add_warning(warnings, f"Built-app portrait support could not be read: {error}")
-        return "unknown", None
+        add_warning(warnings, f"Built-app orientation support could not be read: {error}")
+        return unknown, None
 
     if not isinstance(app_info, dict):
-        add_warning(warnings, "Built-app Info.plist has an unsupported shape; portrait support is unknown.")
-        return "unknown", None
+        add_warning(warnings, "Built-app Info.plist has an unsupported shape; orientation support is unknown.")
+        return unknown, None
 
     raw_orientations = app_info.get("UISupportedInterfaceOrientations")
     if not isinstance(raw_orientations, list):
-        add_warning(warnings, "Built-app supported orientations are unavailable; portrait support is unknown.")
-        return "unknown", None
+        add_warning(warnings, "Built-app supported orientations are unavailable; orientation support is unknown.")
+        return unknown, None
 
-    orientations = [
-        item for item in raw_orientations
-        if isinstance(item, str)
-    ]
-    if "UIInterfaceOrientationPortrait" not in orientations:
-        add_warning(warnings, "The built app does not declare portrait support; captured orientation is unverified.")
-        return "not declared", orientations
-    return "declared", orientations
+    orientations = [item for item in raw_orientations if isinstance(item, str)]
+    declarations = {
+        "portrait": {"UIInterfaceOrientationPortrait"},
+        "landscape": {
+            "UIInterfaceOrientationLandscapeLeft",
+            "UIInterfaceOrientationLandscapeRight",
+        },
+    }
+    support = {}
+    for requested, identifiers in declarations.items():
+        status = "declared" if identifiers.intersection(orientations) else "not declared"
+        support[requested] = status
+        if status != "declared":
+            add_warning(
+                warnings,
+                f"The built app does not declare {requested} support; those captures are unverified.",
+            )
+    return support, orientations
 
 
 def format_duration(seconds: int) -> str:
@@ -475,44 +563,53 @@ def calculate_timing(pushed_at: dt.datetime | None, interpretation: str,
 
 def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
                ready_at: dt.datetime, simulator_label: str,
-               capture_matrix: dict[tuple[str, str], dict],
+               capture_matrix: dict[tuple[str, str, str], dict],
                warnings: list[str], timing_status: str,
-               elapsed_seconds: int | None, portrait_support: str) -> str:
+               elapsed_seconds: int | None,
+               orientation_support: dict[str, str]) -> str:
     sections = []
     for slug, (screen_title, _) in TEST_LABELS.items():
-        appearance_items = []
-        for appearance in APPEARANCES:
-            capture = capture_matrix[(slug, appearance)]
-            if capture["status"] == "captured":
-                file_path = html.escape(capture["file"], quote=True)
-                label = f"{appearance.capitalize()} capture · {capture['verification']}"
-                details = [
-                    f"{capture['orientation']} image, {capture['width']}×{capture['height']}",
-                ]
-                if capture.get("reasons"):
-                    details.extend(capture["reasons"])
-                if capture.get("captureTimestampUTC"):
-                    details.append(f"captured {capture['captureTimestampUTC']}")
-                appearance_items.append(
-                    f'''<div class="appearance-content" data-appearance="{appearance}">
-  <img class="capture" src="{file_path}" alt="{html.escape(screen_title)}, {appearance} appearance">
+        orientation_sections = []
+        for orientation in ORIENTATIONS:
+            appearance_items = []
+            for appearance in APPEARANCES:
+                capture = capture_matrix[(slug, orientation, appearance)]
+                if capture["status"] == "captured":
+                    file_path = html.escape(capture["file"], quote=True)
+                    label = f"{appearance.capitalize()} capture · {capture['verification']}"
+                    details = [
+                        f"{capture['orientation']} image, {capture['width']}×{capture['height']}",
+                    ]
+                    if capture.get("reasons"):
+                        details.extend(capture["reasons"])
+                    if capture.get("captureTimestampUTC"):
+                        details.append(f"captured {capture['captureTimestampUTC']}")
+                    appearance_items.append(
+                        f"""<div class="appearance-content" data-appearance="{appearance}">
+  <img class="capture" src="{file_path}" alt="{html.escape(screen_title)}, {orientation}, {appearance} appearance">
   <p class="capture-status"><strong>{html.escape(label)}.</strong> {html.escape("; ".join(details))}</p>
-</div>'''
-                )
-            else:
-                reason = "; ".join(capture.get("reasons", [])) or "Capture unavailable."
-                appearance_items.append(
-                    f'''<div class="appearance-content unavailable" data-appearance="{appearance}" role="status">
+</div>"""
+                    )
+                else:
+                    reason = "; ".join(capture.get("reasons", [])) or "Capture unavailable."
+                    appearance_items.append(
+                        f"""<div class="appearance-content unavailable" data-appearance="{appearance}" role="status">
   <strong>{appearance.capitalize()} capture unavailable.</strong> {html.escape(reason)}
-</div>'''
-                )
-        sections.append(
-            f'''<section aria-labelledby="screen-{slug}">
-  <h2 id="screen-{slug}">{html.escape(screen_title)}</h2>
+</div>"""
+                    )
+            orientation_sections.append(
+                f"""<section aria-labelledby="screen-{slug}-{orientation}">
+  <h3 id="screen-{slug}-{orientation}">{orientation.capitalize()}</h3>
   <figure class="card">{''.join(appearance_items)}
-    <figcaption>Requested orientation: portrait · fold state not recorded</figcaption>
+    <figcaption>Requested orientation: {orientation} · built-app support: {html.escape(orientation_support[orientation])} · fold state not recorded</figcaption>
   </figure>
-</section>'''
+</section>"""
+            )
+        sections.append(
+            f"""<section aria-labelledby="screen-{slug}">
+  <h2 id="screen-{slug}">{html.escape(screen_title)}</h2>
+  {''.join(orientation_sections)}
+</section>"""
         )
 
     if timing_status.startswith("unavailable-"):
@@ -535,7 +632,7 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
     image_count = sum(item["status"] == "captured" for item in capture_matrix.values())
     verified_count = sum(item["verification"] == "verified" for item in capture_matrix.values())
 
-    return f'''<!doctype html>
+    return f"""<!doctype html>
 <html lang="en" data-appearance="light">
 <head>
   <meta charset="utf-8">
@@ -549,6 +646,7 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
     header {{ position:sticky; top:0; z-index:1; display:flex; align-items:center; justify-content:space-between; gap:24px; padding:18px clamp(16px,4vw,48px); border-bottom:1px solid var(--border); background:var(--surface); }}
     h1 {{ margin:0 0 4px; font-size:clamp(20px,3vw,28px); }}
     h2 {{ margin:28px 0 12px; font-size:20px; }}
+    h3 {{ margin:18px 0 10px; font-size:16px; }}
     p {{ margin:3px 0; color:var(--muted); }}
     main {{ max-width:1100px; margin:0 auto; padding:0 clamp(16px,4vw,48px) 40px; }}
     .scope, .warnings {{ margin:18px 0 26px; padding:14px 16px; border:1px solid var(--border); border-radius:10px; background:var(--surface); }}
@@ -556,7 +654,7 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
     .warnings ul {{ margin-bottom:0; padding-left:22px; }}
     .card {{ margin:0; overflow:hidden; border:1px solid var(--border); border-radius:12px; background:var(--surface); }}
     .appearance-content {{ padding:12px; }}
-    .capture {{ display:block; max-width:100%; max-height:72vh; margin:0 auto; object-fit:contain; border-radius:8px; }}
+    .capture {{ display:block; max-width:100%; max-height:72vh; margin:0 auto; object-fit:contain; image-orientation:from-image; border-radius:8px; }}
     .capture-status {{ padding:10px 2px 0; }}
     .unavailable {{ min-height:120px; display:flex; align-items:center; gap:8px; color:var(--muted); }}
     :root[data-appearance="light"] .appearance-content[data-appearance="dark"], :root[data-appearance="dark"] .appearance-content[data-appearance="light"] {{ display:none; }}
@@ -579,7 +677,7 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
     <span>Dark appearance</span>
   </label></header>
   <main>
-    <p class="scope"><strong>Capture scope:</strong> Inbox and selected message detail, portrait requested, light and dark. Fold state was not observed or changed. Missing or unverified captures are labeled. Built-app portrait support: {html.escape(portrait_support)}. Landscape and fold coverage are excluded.</p>
+    <p class="scope"><strong>Capture scope:</strong> Inbox and selected message detail, portrait and landscape, light and dark. Fold state was not observed or changed. Missing or unverified captures are labeled. Built-app orientation support: portrait {html.escape(orientation_support["portrait"])}, landscape {html.escape(orientation_support["landscape"])}. Fold coverage is excluded.</p>
     {warning_html}
     {''.join(sections)}
   </main>
@@ -589,7 +687,7 @@ def build_html(title: str, revision: str | None, pushed_at: dt.datetime | None,
   </script>
 </body>
 </html>
-'''
+"""
 
 
 def main() -> int:
@@ -644,7 +742,7 @@ def main() -> int:
                 "The simulator's original appearance is unknown; its appearance will not be restored.",
             )
 
-        capture_matrix: dict[tuple[str, str], dict] = {}
+        capture_matrix: dict[tuple[str, str, str], dict] = {}
         test_records = []
         appearance_set_records = []
 
@@ -689,19 +787,21 @@ def main() -> int:
                     "setExitCode": set_result["returnCode"],
                 })
 
-                for slug, (screen_title, attachment_name) in TEST_LABELS.items():
-                    try:
-                        matches = matching_attachments(manifest, attachment_name)
-                        capture_matrix[(slug, appearance)] = capture_available_image(
-                            slug, screen_title, attachment_name, appearance, matches,
-                            export_dir, captures_dir, appearance_set, test_record, warnings,
-                        )
-                    except Exception as error:
-                        reason = f"Capture processing did not complete: {error}"
-                        add_warning(warnings, f"{screen_title}, {appearance}: {reason}")
-                        capture_matrix[(slug, appearance)] = missing_capture(
-                            slug, screen_title, appearance, reason,
-                        )
+                for slug, (screen_title, attachment_names) in TEST_LABELS.items():
+                    for orientation in ORIENTATIONS:
+                        attachment_name = attachment_names[orientation]
+                        try:
+                            matches = matching_attachments(manifest, attachment_name)
+                            capture_matrix[(slug, orientation, appearance)] = capture_available_image(
+                                slug, screen_title, attachment_name, orientation, appearance,
+                                matches, export_dir, captures_dir, appearance_set, test_record, warnings,
+                            )
+                        except Exception as error:
+                            reason = f"Capture processing did not complete: {error}"
+                            add_warning(warnings, f"{screen_title}, {orientation}, {appearance}: {reason}")
+                            capture_matrix[(slug, orientation, appearance)] = missing_capture(
+                                slug, screen_title, orientation, appearance, reason,
+                            )
         finally:
             if original_appearance is not None:
                 restore_result = attempt([
@@ -716,12 +816,14 @@ def main() -> int:
             else:
                 restore_status = "skipped_unknown"
 
-        portrait_support, supported_orientations = read_portrait_support(warnings)
+        orientation_support, supported_orientations = read_orientation_support(warnings)
         for capture in capture_matrix.values():
             if capture["status"] != "captured":
                 continue
-            if portrait_support != "declared":
-                reason = f"Built-app portrait support is {portrait_support}."
+            requested_orientation = capture["requestedOrientation"]
+            support_status = orientation_support[requested_orientation]
+            if support_status != "declared":
+                reason = f"Built-app {requested_orientation} support is {support_status}."
                 if reason not in capture["reasons"]:
                     capture["reasons"].append(reason)
                     capture["verification"] = "unverified"
@@ -733,7 +835,7 @@ def main() -> int:
 
         page_html = build_html(
             page_title, revision, pushed_at, ready_at, simulator_label,
-            capture_matrix, warnings, timing_status, elapsed_seconds, portrait_support,
+            capture_matrix, warnings, timing_status, elapsed_seconds, orientation_support,
         )
         (page_dir / "index.html").write_text(page_html, encoding="utf-8")
 
@@ -765,9 +867,10 @@ def main() -> int:
             "outputDirectoryDefaulted": output_path_defaulted,
             "changeToPageSeconds": elapsed_seconds,
             "timingStatus": timing_status,
+            "requestedOrientations": list(ORIENTATIONS),
             "capturedOrientations": actual_orientations,
             "supportedOrientations": supported_orientations,
-            "portraitSupportStatus": portrait_support,
+            "orientationSupportStatus": orientation_support,
             "foldState": "not observed or changed",
             "foldCoverage": "excluded",
             "pageStatus": page_status,
