@@ -2,7 +2,7 @@ import XCTest
 
 @MainActor
 final class ConversationSampleUITests: XCTestCase {
-    func testReturnSubmitsAndClearsTheAcceptedLocalDiscussion() {
+    func testSendButtonAndReturnClearAcceptedLocalDiscussion() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launch()
@@ -15,11 +15,20 @@ final class ConversationSampleUITests: XCTestCase {
         let composer = app.textFields["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         composer.tap()
+        composer.typeText("A note submitted with Send.")
+        let send = app.buttons["Send locally"]
+        XCTAssertTrue(send.isEnabled)
+        send.tap()
+        XCTAssertTrue(app.staticTexts["A note submitted with Send."].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertEqual(composer.value as? String, "Write a message…")
+        XCTAssertFalse(send.isEnabled)
+        composer.tap()
         composer.typeText("A note submitted with Return.\n")
         XCTAssertTrue(app.staticTexts["A note submitted with Return."].waitForExistence(timeout: 5),
                       app.debugDescription)
         XCTAssertEqual(composer.value as? String, "Write a message…")
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        XCTAssertFalse(send.isEnabled)
     }
 
     func testOrdinaryConversationSharesAdaptivePanelWithoutLiveServices() {

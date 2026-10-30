@@ -788,9 +788,6 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("component-chat-composer", app)
         app.buttons["Send locally"].tap()
         XCTAssertTrue(app.staticTexts["A local note with an example image."].waitForExistence(timeout: 5))
-        XCTAssertEqual(composer.value as? String, "Write a message…",
-                       "An accepted local send clears only the submitted composer text.")
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
         capture("component-chat-thread", app)
     }
 
