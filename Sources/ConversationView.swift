@@ -95,20 +95,10 @@ struct ConversationPanel: View {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
                 }
-                HStack {
-                    Spacer(minLength: 0)
-                    Text(store.isLocalExample ? "Local conversation · nothing sent" :
-                        revision == 1 ? "Discussion" : "Discussion · version \(revision)")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }.padding(.horizontal)
                 ConversationDraftStatus(disposition: draft.disposition)
                 ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                }
-                if ConversationAvailabilityLabel.shouldDisplay(unavailableMessage: store.conversationUnavailableMessage) {
-                    ConversationAvailabilityLabel(availability: thread.availability, local: store.isLocalExample)
-                        .padding(.horizontal)
                 }
                 if let message = store.conversationUnavailableMessage {
                     Text(message)
@@ -353,44 +343,6 @@ private struct ConversationComposer: View {
         var number = 1
         while draft.files.contains(where: { $0.name.rawValue == "\(kind) \(number)" }) { number += 1 }
         store.addLocalAttachment("\(kind) \(number)", for: key, revision: revision)
-    }
-}
-
-struct ConversationAvailabilityLabel: View {
-    let availability: ConversationAvailability
-    let local: Bool
-
-    static func shouldDisplay(unavailableMessage: String?) -> Bool {
-        unavailableMessage == nil
-    }
-
-    var body: some View {
-        Text(Self.text(for: availability, local: local))
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .accessibilityIdentifier("conversation-availability")
-    }
-
-    static func text(for availability: ConversationAvailability, local: Bool = false) -> String {
-        let prefix = local ? "Example · " : ""
-        switch availability {
-        case .listening:
-            return prefix + "Agent listening · delivery shown per message"
-        case let .notListening(time):
-            return prefix + notListeningText(since: time)
-        case .gone:
-            return prefix + "Originating session gone · request remains available"
-        case let .unsupported(reason):
-            return prefix + "Listening unsupported · " + reason.rawValue
-        }
-    }
-
-    /// The relay reports the detach time in epoch milliseconds; show it as a date.
-    static func notListeningText(since time: ExactText?) -> String {
-        guard let time else { return "Agent not listening" }
-        guard let milliseconds = UInt64(time.rawValue) else { return "Agent not listening since " + time.rawValue }
-        let date = Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
-        return "Agent not listening since " + date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 
