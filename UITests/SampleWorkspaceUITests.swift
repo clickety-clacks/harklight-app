@@ -915,21 +915,31 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     func testPreviewPageCapturesInboxAndDetail() {
-        let orientations: [(String, UIDeviceOrientation, Bool)] = [
-            ("portrait", .portrait, false),
-            ("landscape", .landscapeLeft, true),
+        let orientations: [(String, Bool)] = [
+            ("portrait", false),
+            ("landscape", true),
         ]
         defer { XCUIDevice.shared.orientation = .portrait }
 
-        for (name, orientation, expectsLandscape) in orientations {
-            XCUIDevice.shared.orientation = orientation
+        for (name, expectsLandscape) in orientations {
+            XCUIDevice.shared.orientation = .portrait
             let app = XCUIApplication()
             app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
             app.launch()
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
             enterSearch("Archive", in: app)
-            let row = app.descendants(matching: .any)["sample-approval-0"]
+            let row = app.descendants(matching: .any)["sample-approval-2"]
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+
+            if expectsLandscape {
+                XCUIDevice.shared.orientation = .landscapeLeft
+                let wideFrame = XCTNSPredicateExpectation(
+                    predicate: NSPredicate { _, _ in app.frame.width > app.frame.height },
+                    object: app
+                )
+                XCTAssertEqual(XCTWaiter().wait(for: [wideFrame], timeout: 5),
+                               .completed, app.debugDescription)
+            }
             XCTAssertEqual(app.frame.width > app.frame.height, expectsLandscape, app.debugDescription)
             capture("preview-\(name)-inbox", app)
             row.tap()
