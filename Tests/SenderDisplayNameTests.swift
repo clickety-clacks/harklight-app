@@ -56,7 +56,8 @@ final class SenderDisplayNameTests: XCTestCase {
 
         let port = AttentionDomainPort(store: store)
         let projected = try port.observe(context: port.context).requests
-        XCTAssertEqual(projected.map(\.acceptanceOrder), [1, 2, 3])
+        XCTAssertEqual(projected.map(\.acceptanceOrder), [UInt64(3), 2, 1],
+                       "The feed presents the newest accepted request first.")
         for testCase in cases {
             let request = try XCTUnwrap(projected.first {
                 $0.key.messageID == ExactText(testCase.messageID)
