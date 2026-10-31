@@ -3,6 +3,49 @@ import XCTest
 import AttentionDomain
 
 final class ReleaseNotesTests: XCTestCase {
+    @MainActor
+    func testPost79UpdateShowsOnceForExistingUsersWithoutClaimingAnArchiveBuild() throws {
+        let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first)
+        XCTAssertNil(note.buildIdentifier)
+        XCTAssertEqual(note.highlights.map(\.id),
+                       ["inbox-message-context", "simpler-chat-display", "chat-unsent-text"])
+        XCTAssertEqual(String(localized: note.highlights[0].title), "More context in the Inbox")
+        XCTAssertEqual(String(localized: note.highlights[1].title), "A simpler Chat view")
+        XCTAssertEqual(String(localized: note.highlights[2].title), "Chat keeps unsent text")
+
+        let suite = "ReleaseNotesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(90, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
+
+        let firstLaunch = ReleaseNotesPresentation(
+            currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
+        XCTAssertEqual(firstLaunch.notesToShow.map(\.id), [note.id])
+        XCTAssertEqual(HarklightReleaseNotes.settingsHistory(
+            currentBuildIdentifier: "91", entries: []).first?.id, note.id)
+
+        let nextLaunch = ReleaseNotesPresentation(
+            currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
+        XCTAssertTrue(nextLaunch.notesToShow.isEmpty)
+        let laterBuild = ReleaseNotesPresentation(
+            currentBuildIdentifier: "92", hasPriorAppState: true, entries: [], defaults: defaults)
+        XCTAssertTrue(laterBuild.notesToShow.isEmpty)
+    }
+
+    @MainActor
+    func testPost79UpdateDoesNotAppearAfterAFreshInstall() throws {
+        let suite = "ReleaseNotesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let firstLaunch = ReleaseNotesPresentation(
+            currentBuildIdentifier: "91", hasPriorAppState: false, entries: [], defaults: defaults)
+        XCTAssertTrue(firstLaunch.notesToShow.isEmpty)
+        let nextLaunch = ReleaseNotesPresentation(
+            currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
+        XCTAssertTrue(nextLaunch.notesToShow.isEmpty)
+    }
+
     func testBuildSeventyNineEdgePullRemovalNoteIsFixedAndHiddenUntilThatBuild() throws {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 79 })
         let highlight = try XCTUnwrap(entry.highlights.first)

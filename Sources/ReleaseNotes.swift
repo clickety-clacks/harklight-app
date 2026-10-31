@@ -19,8 +19,8 @@ struct HarklightReleaseNote: Identifiable, Sendable {
     let buildIdentifier: Int?
     let marketingVersion: String
     let historyDateDescription: LocalizedStringResource?
-    /// Earliest confirmed running build that contains a dated history entry.
-    /// This does not claim the unknown build number of the changes it describes.
+    /// Minimum installed build where an unnumbered note can appear.
+    /// Source inclusion, rather than this value, determines its first containing build.
     let visibleFromBuildIdentifier: Int?
     let highlights: [Highlight]
 
@@ -50,6 +50,47 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 }
 
 enum HarklightReleaseNotes {
+    /// Source inclusion makes these notes available without predicting the archive build number.
+    /// Keep each update's identifier stable so it appears once for people who already use the app.
+    static let updateEntries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            historyIdentifier: "changes-after-build-79",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource(
+                "Changes since Build 79",
+                comment: "Release-note heading for changes after the last numbered update."),
+            visibleFromBuildIdentifier: 79,
+            highlights: [
+                .init(
+                    id: "inbox-message-context",
+                    symbol: "tray.full",
+                    title: LocalizedStringResource(
+                        "More context in the Inbox",
+                        comment: "Release-note title for optional request details and related messages."),
+                    detail: LocalizedStringResource(
+                        "Related messages can appear together. Priority, deadlines, and what’s at stake appear when provided.",
+                        comment: "Release-note detail for conditional request context in the Inbox.")),
+                .init(
+                    id: "simpler-chat-display",
+                    symbol: "bubble.left.and.bubble.right",
+                    title: LocalizedStringResource(
+                        "A simpler Chat view",
+                        comment: "Release-note title for less repeated information in Chat."),
+                    detail: LocalizedStringResource(
+                        "Original messages no longer show an extra version label, and repeated status rows are gone.",
+                        comment: "Release-note detail for simplified Chat labels and status display.")),
+                .init(
+                    id: "chat-unsent-text",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Chat keeps unsent text",
+                        comment: "Release-note title for confirmed Chat sending and draft retention."),
+                    detail: LocalizedStringResource(
+                        "Send with the keyboard or button. Only confirmed sent text clears; unsent text and later edits stay.",
+                        comment: "Release-note detail for Chat Send and draft retention."))
+            ])
+    ]
+
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
         // Conservative estimate; adjust if the archive reports a different build.
@@ -391,10 +432,9 @@ enum HarklightReleaseNotes {
             ])
     ]
 
-    /// These changes shipped before Build 59, but their archived build numbers
-    /// are not available. Show their dated summary in Settings from the first
-    /// confirmed build containing them; never present it as a new-build popup.
-    static let historyEntries: [HarklightReleaseNote] = [
+    /// The older dated entry remains Settings-only. Its changes shipped before
+    /// Build 59, but their archived build numbers are unavailable.
+    static let historyEntries: [HarklightReleaseNote] = updateEntries + [
         HarklightReleaseNote(
             historyIdentifier: "earlier-on-2026-10-25",
             marketingVersion: "0.1.0",
@@ -467,13 +507,25 @@ enum HarklightReleaseNotes {
         return released.sorted { $0.build > $1.build }.map(\.note)
     }
 
+    static func visibleUpdateEntries(
+        currentBuildIdentifier: String?,
+        entries: [HarklightReleaseNote] = HarklightReleaseNotes.updateEntries
+    ) -> [HarklightReleaseNote] {
+        guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
+        return entries.filter { ($0.visibleFromBuildIdentifier ?? Int.max) <= currentBuild }
+    }
+
     static func settingsHistory(
         currentBuildIdentifier: String?,
         entries: [HarklightReleaseNote]? = nil,
-        historyEntries: [HarklightReleaseNote] = HarklightReleaseNotes.historyEntries
+        historyEntries: [HarklightReleaseNote] = HarklightReleaseNotes.historyEntries,
+        updateEntries: [HarklightReleaseNote] = HarklightReleaseNotes.updateEntries
     ) -> [HarklightReleaseNote] {
         guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
         let entries = entries ?? HarklightReleaseNotes.entries
+        let visibleUpdates = visibleUpdateEntries(currentBuildIdentifier: currentBuildIdentifier,
+                                                 entries: updateEntries)
+        let updateIDs = Set(visibleUpdates.map(\.id))
         let buildNotes = releasedEntries(currentBuildIdentifier: currentBuildIdentifier,
                                          entries: entries)
             .compactMap { note -> (note: HarklightReleaseNote, build: Int, priority: Int)? in
@@ -483,22 +535,25 @@ enum HarklightReleaseNotes {
         let datedNotes = historyEntries.compactMap {
             note -> (note: HarklightReleaseNote, build: Int, priority: Int)? in
             guard note.buildIdentifier == nil,
+                  !updateIDs.contains(note.id),
                   let visibleFrom = note.visibleFromBuildIdentifier,
                   visibleFrom <= currentBuild else { return nil }
             return (note, visibleFrom, 0)
         }
-        return (buildNotes + datedNotes)
+        let earlierNotes = (buildNotes + datedNotes)
             .sorted {
                 if $0.build != $1.build { return $0.build > $1.build }
                 return $0.priority > $1.priority
             }
             .map(\.note)
+        return visibleUpdates + earlierNotes
     }
 }
 
 enum ReleaseNotesLifecycle {
     static let seenBuildIdentifiersDefaultsKey = "release-notes.seen-build-identifiers"
     static let lastSeenBuildIdentifierDefaultsKey = "release-notes.last-seen-build-identifier"
+    static let seenUpdateIdentifiersDefaultsKey = "release-notes.seen-update-identifiers"
 
     static func lastSeenBuildIdentifier(defaults: UserDefaults) -> Int? {
         if let storedBuild = defaults.object(forKey: lastSeenBuildIdentifierDefaultsKey) as? Int {
@@ -512,16 +567,21 @@ enum ReleaseNotesLifecycle {
     static func notesToPresent(
         currentBuildIdentifier: String?,
         entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries,
+        updateEntries: [HarklightReleaseNote] = HarklightReleaseNotes.updateEntries,
+        seenUpdateIdentifiers: Set<String> = [],
         lastSeenBuildIdentifier: Int?,
         hasPriorAppState: Bool
     ) -> [HarklightReleaseNote] {
         let released = HarklightReleaseNotes.releasedEntries(
             currentBuildIdentifier: currentBuildIdentifier,
             entries: entries)
+        let unseenUpdates = HarklightReleaseNotes.visibleUpdateEntries(
+            currentBuildIdentifier: currentBuildIdentifier,
+            entries: updateEntries).filter { !seenUpdateIdentifiers.contains($0.id) }
         guard let lastSeenBuildIdentifier else {
-            return hasPriorAppState ? Array(released.prefix(1)) : []
+            return hasPriorAppState ? unseenUpdates + Array(released.prefix(1)) : []
         }
-        return released.filter { ($0.buildIdentifier ?? 0) > lastSeenBuildIdentifier }
+        return unseenUpdates + released.filter { ($0.buildIdentifier ?? 0) > lastSeenBuildIdentifier }
     }
 }
 
@@ -542,16 +602,23 @@ final class ReleaseNotesPresentation {
         self.defaults = defaults
         let entries = entries ?? HarklightReleaseNotes.entries
         let lastSeenBuildIdentifier = ReleaseNotesLifecycle.lastSeenBuildIdentifier(defaults: defaults)
+        let seenUpdateIdentifiers = Set(defaults.stringArray(
+            forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey) ?? [])
+        let visibleUpdates = HarklightReleaseNotes.visibleUpdateEntries(
+            currentBuildIdentifier: currentBuildIdentifier)
         let released = HarklightReleaseNotes.releasedEntries(
             currentBuildIdentifier: currentBuildIdentifier,
             entries: entries)
         notesToShow = ReleaseNotesLifecycle.notesToPresent(
             currentBuildIdentifier: currentBuildIdentifier,
             entries: entries,
+            seenUpdateIdentifiers: seenUpdateIdentifiers,
             lastSeenBuildIdentifier: lastSeenBuildIdentifier,
             hasPriorAppState: hasPriorAppState)
 
         if let currentBuild = currentBuildIdentifier.flatMap(Int.init) {
+            defaults.set(seenUpdateIdentifiers.union(visibleUpdates.map(\.id)).sorted(),
+                         forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey)
             let maxSeenBuild = max(currentBuild, lastSeenBuildIdentifier ?? 0)
             defaults.set(maxSeenBuild,
                          forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
