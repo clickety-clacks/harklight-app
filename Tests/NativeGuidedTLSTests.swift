@@ -938,6 +938,16 @@ final class NativeGuidedTLSTests: XCTestCase {
                        .confirmed, "An authorized origin answer remains sufficient confirmation.")
 
         let live = try LivePresentationStore(store: store, context: context)
+        let availableSeenRow = try XCTUnwrap(live.inboxRows.first { $0.key == seenKey })
+        XCTAssertEqual(availableSeenRow.resolvedMessageType, .info)
+        XCTAssertEqual(availableSeenRow.informationalSeenStatus, .available)
+        XCTAssertTrue(availableSeenRow.canMarkSeen,
+                      "A canonical descriptor offers Seen before any server Seen outcome.")
+        let nonSeenTerminalRow = try XCTUnwrap(live.inboxRows.first { $0.key == remotelySeenKey })
+        XCTAssertEqual(nonSeenTerminalRow.resolvedMessageType, .info,
+                       "A canonical descriptor remains informational when a remote terminal is not Seen.")
+        XCTAssertEqual(nonSeenTerminalRow.informationalSeenStatus, .resolvedWithoutSeen)
+
         let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
         XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
@@ -1022,9 +1032,30 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(live.request(for: seenKey)?.isResolved, true)
         XCTAssertEqual(live.openRequests.map(\.key), [legacyKey, structuredKey])
         XCTAssertEqual(live.resolvedRequests.map(\.key), [seenKey])
-        XCTAssertTrue(live.inboxRows.last?.status.contains("Seen confirmed") == true)
+        XCTAssertTrue(live.inboxRows.last?.status.contains("Seen") == true)
         XCTAssertTrue(live.inboxRows.last?.isResolved == true,
                       "Resolved content stays in the ordered inbox projection below open requests.")
+
+        let canonicalSeenRow = try XCTUnwrap(live.inboxRows.first { $0.key == seenKey })
+        XCTAssertEqual(canonicalSeenRow.resolvedMessageType, .info)
+        XCTAssertEqual(canonicalSeenRow.informationalSeenStatus, .confirmed)
+
+        let thirdHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(thirdHigh, 5)
+        XCTAssertEqual(session.acknowledgedSequences(), [3, 4, 5],
+                       "Each durable contiguous checkpoint is acknowledged, including remote legacy Seen.")
+        try live.refreshFromDurableStore()
+
+        let legacyAfterRemoteSeen = try XCTUnwrap(port.inspect(context: port.context, request: legacyKey).requests.first)
+        XCTAssertNil(legacyAfterRemoteSeen.informationalSeenStatus,
+                     "A remote Seen answer does not make a request without answer_ui informational.")
+        guard case let .compatibility(legacyActionsAfterSeen) = legacyAfterRemoteSeen.projection else {
+            return XCTFail("A missing answer_ui must retain the compatibility Reply control after remote Seen.")
+        }
+        XCTAssertEqual(legacyActionsAfterSeen.map(\.label), [ExactText("Reply")])
+
+        let legacyRowAfterRemoteSeen = try XCTUnwrap(live.inboxRows.first { $0.key == legacyKey })
+        XCTAssertEqual(legacyRowAfterRemoteSeen.resolvedMessageType, .request)
     }
 
     func testOnlyUnknownConversationOpenIsUnavailableAndOrdinaryExchangesContinue() async throws {
@@ -3651,11 +3682,17 @@ private final class OrdinaryOrderingRelaySession: AuthenticatedInboxPagingSessio
                 #"{"v":1,"type":"ok","ref":"native-sync"}"#,
                 #"{"v":1,"type":"resynced","seq":3}"#
             ]
+        case 2:
+            return [
+                #"{"v":1,"type":"ok","ref":"native-sync"}"#,
+                #"{"v":1,"type":"lifecycle","seq":4,"sender_id":"sender","message_id":"notice","origin":"other-installation","state":"answered","answer_outcome":{"kind":"seen"},"by":"agent_answer","request_revision":1,"event_id":"terminal-4","author":"agent"}"#,
+                #"{"v":1,"type":"resynced","seq":4}"#
+            ]
         default:
             return [
                 #"{"v":1,"type":"ok","ref":"native-sync"}"#,
-                #"{"v":1,"type":"lifecycle","seq":4,"sender_id":"sender","message_id":"notice","origin":"other-installation","state":"answered","by":"agent_answer","request_revision":1,"event_id":"terminal-4","author":"agent"}"#,
-                #"{"v":1,"type":"resynced","seq":4}"#
+                #"{"v":1,"type":"lifecycle","seq":5,"sender_id":"sender","message_id":"legacy","origin":"other-installation","state":"answered","answer_outcome":{"kind":"seen"},"by":"agent_answer","request_revision":1,"event_id":"terminal-5","author":"agent"}"#,
+                #"{"v":1,"type":"resynced","seq":5}"#
             ]
         }
     }
