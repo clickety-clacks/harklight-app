@@ -25,6 +25,7 @@
 		1CE1DD773EB94AA8F1EA176E /* ConversationRelayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04C670B08914C6F62366492 /* ConversationRelayTests.swift */; };
 		20703BDE3924BA4E3385A904 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DA73983703AF494F97B44D03 /* Assets.xcassets */; };
 		22DDB77EA028F97652A80979 /* NativeJoinInvitation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED26A646F6AA8DA27E84067 /* NativeJoinInvitation.swift */; };
+		23166F9652ECA7FE554A4525 /* ConversationReturnTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 339E15F97694A217F778CAC0 /* ConversationReturnTextView.swift */; };
 		253FF6D928101B02B4093646 /* PrototypeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEC8516B5AF186CD58914057 /* PrototypeStore.swift */; };
 		25687C2E7B8A6FCEA937DE63 /* ConversationJoinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DFF574DDDAA420FDCF79D76 /* ConversationJoinTests.swift */; };
 		27BF57CECC9F7EA25BA3A606 /* DetailChatButtonUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13CD46E1416E0F7FD24B20D0 /* DetailChatButtonUITests.swift */; };
@@ -81,6 +82,7 @@
 		99600D5791D337E606EFF33F /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 5954B3B8B73E147E3A8640AB /* README.md */; };
 		99FA8FC1192D50771C2D80A6 /* SampleCardScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */; };
 		9D262F1A9341068BB8EFA25E /* NativeAppLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */; };
+		9D89298BEE42012D75B28E08 /* ConversationReturnTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 339E15F97694A217F778CAC0 /* ConversationReturnTextView.swift */; };
 		9EBAF1B70940FCCDCC38F0C7 /* ReleaseNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 051A64DEB3D98D201BE5075B /* ReleaseNotes.swift */; };
 		A27D48651D89DAC048631C30 /* AttentionTierClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D08AC0D6D784E9C72FE43E /* AttentionTierClientTests.swift */; };
 		A3CF1B415AF68605EE55643F /* SampleFixtureDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */; };
@@ -177,6 +179,7 @@
 		2F28B1EA798F4B9BD079D83D /* LiveAnswerConfirmationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveAnswerConfirmationTests.swift; sourceTree = "<group>"; };
 		2F61C6602BDC255EEA48B801 /* NativeRelay */ = {isa = PBXFileReference; lastKnownFileType = folder; name = NativeRelay; path = NativeRelay; sourceTree = SOURCE_ROOT; };
 		321798AEF657AEBF709D6F76 /* SampleMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleMedia.swift; sourceTree = "<group>"; };
+		339E15F97694A217F778CAC0 /* ConversationReturnTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationReturnTextView.swift; sourceTree = "<group>"; };
 		396AEC07109CDA54130ED482 /* AnswerStatusPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnswerStatusPresentationTests.swift; sourceTree = "<group>"; };
 		396BC71281F0B01FF57E83FB /* NativePushRefreshTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushRefreshTests.swift; sourceTree = "<group>"; };
 		3DFF574DDDAA420FDCF79D76 /* ConversationJoinTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationJoinTests.swift; sourceTree = "<group>"; };
@@ -402,6 +405,7 @@
 			children = (
 				D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */,
 				0FD0F77C018CF082033BCA6E /* ConversationFileStorage.swift */,
+				339E15F97694A217F778CAC0 /* ConversationReturnTextView.swift */,
 				F68B30BAF95249EB48C166A9 /* ConversationView.swift */,
 				407E539F1063EFB0E135C9A1 /* DevelopmentPushRegistration.swift */,
 				9EA260044E9E03BE572ABF11 /* HarklightApp.swift */,
@@ -685,6 +689,7 @@
 			files = (
 				5FAA08D77C7D7A90F5B0D173 /* BoundedNativeJoinExchange.swift in Sources */,
 				F81B025E53C8D48163280624 /* ConversationFileStorage.swift in Sources */,
+				23166F9652ECA7FE554A4525 /* ConversationReturnTextView.swift in Sources */,
 				7BDFD2B2D70BD71596D8B6C5 /* ConversationView.swift in Sources */,
 				FD60725972D79FDF0DB82F5E /* DevelopmentPushRegistration.swift in Sources */,
 				3B5256DF599C29BBE67FDC2E /* HarklightConversationUITestHost.swift in Sources */,
@@ -730,6 +735,7 @@
 			files = (
 				C3F2ACDF6B6FDBEBF2C5E6FC /* BoundedNativeJoinExchange.swift in Sources */,
 				17DEB0A678698B7E8369CD27 /* ConversationFileStorage.swift in Sources */,
+				9D89298BEE42012D75B28E08 /* ConversationReturnTextView.swift in Sources */,
 				4132D611C16A7A8746EC9773 /* ConversationView.swift in Sources */,
 				695B08E084DD584FDFDBBFC4 /* DevelopmentPushRegistration.swift in Sources */,
 				F6D494F49D42E37FE1769737 /* HarklightApp.swift in Sources */,
