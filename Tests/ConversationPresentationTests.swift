@@ -1,11 +1,79 @@
 import AttentionDomain
 import CryptoKit
 import Foundation
+import SwiftUI
+import UIKit
 import XCTest
 @testable import Harklight
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testPastedNewlineRemainsInTheComposerWithoutSending() {
+        var text = "Before "
+        var sendCount = 0
+        let editor = ConversationReturnTextView(
+            text: Binding(get: { text }, set: { text = $0 }),
+            isEnabled: true, onReturn: { sendCount += 1 })
+        let coordinator = editor.makeCoordinator()
+        let view = UITextView()
+        view.text = text
+        view.delegate = coordinator
+        let end = view.endOfDocument
+        let insertion = view.textRange(from: end, to: end)!
+
+        _ = coordinator.textPasteConfigurationSupporting(
+            view, performPasteOf: NSAttributedString(string: "pasted text\n"), to: insertion)
+        XCTAssertEqual(text, "Before pasted text\n")
+        XCTAssertEqual(sendCount, 0)
+
+        XCTAssertFalse(coordinator.textView(view, shouldChangeTextIn: NSRange(location: view.text.utf16.count, length: 0),
+                                            replacementText: "\n"))
+        XCTAssertEqual(sendCount, 1)
+    }
+
+    func testFailedComposerSaveKeepsTheLatestTextAvailableForRetryInThisSession() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        let persistence = MemoryAttentionStatePersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        let model = try LivePresentationStore(localFixtureStore: domain, context: context)
+
+        persistence.failNextCommit()
+        XCTAssertFalse(model.updateConversation(for: key, revision: 1, text: "Latest unsent text"))
+        XCTAssertEqual(model.unsavedConversationText(for: binding), "Latest unsent text")
+        XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text, ExactText(""))
+
+        XCTAssertTrue(model.updateConversation(for: key, revision: 1, text: "Latest unsent text"))
+        XCTAssertNil(model.unsavedConversationText(for: binding))
+        XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text,
+                       ExactText("Latest unsent text"))
+    }
+
+    func testAcceptedDiscussionClearsOnlyTheSubmittedText() {
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: true, submitted: "Sent", submittedEdit: 3,
+            current: "Sent", currentEdit: 3), "")
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: true, submitted: "Sent", submittedEdit: 3,
+            current: "A later edit", currentEdit: 4), "A later edit")
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: true, submitted: "Sent", submittedEdit: 3,
+            current: "Sent", currentEdit: 5), "Sent",
+            "Edits made after submission survive even if the text returns to its old value.")
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: false, submitted: "Sent", submittedEdit: 3,
+            current: "Sent", currentEdit: 3), "Sent")
+        XCTAssertEqual(ConversationSubmittedText.afterResult(
+            accepted: false, submitted: "Sent", submittedEdit: 3,
+            current: "A later edit", currentEdit: 4), "A later edit")
+    }
+
     func testConversationAvailabilityMustBeConfirmedBeforeShowingNoChatState() {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),

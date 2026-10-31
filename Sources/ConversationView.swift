@@ -245,6 +245,13 @@ enum ConversationDraftPresentationText {
     }
 }
 
+enum ConversationSubmittedText {
+    static func afterResult(accepted: Bool, submitted: String, submittedEdit: UInt64,
+                            current: String, currentEdit: UInt64) -> String {
+        accepted && currentEdit == submittedEdit && current == submitted ? "" : current
+    }
+}
+
 @MainActor
 private struct ConversationComposer: View {
     let store: LivePresentationStore
@@ -253,6 +260,12 @@ private struct ConversationComposer: View {
     let inspect: (ConversationFile, UInt64) -> Void
     @State private var pickingFiles = false
     @State private var attachmentChoices = false
+    @State private var stagedText = ""
+    @State private var textEditRevision: UInt64 = 0
+    @State private var savedText = ""
+    @State private var stagedBinding: ConversationBinding?
+    @State private var textSaveTask: Task<Void, Never>?
+    @Environment(\.scenePhase) private var scenePhase
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var allowsDiscussion: Bool { thread?.allowsDiscussion == true }
@@ -264,6 +277,7 @@ private struct ConversationComposer: View {
         // Each regular glass button adds 7 points around its label, for a 44-point target.
         HStack(alignment: .bottom, spacing: 10) {
             Button {
+                guard persistStagedText() else { return }
                 if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
             } label: {
                 Image(systemName: "plus")
@@ -297,6 +311,7 @@ private struct ConversationComposer: View {
                                         Text("Not ready · reselect after cleanup").font(.caption2).foregroundStyle(.secondary)
                                     }
                                     Button("Remove", systemImage: "xmark.circle.fill") {
+                                        guard persistStagedText() else { return }
                                         store.updateConversation(for: key, revision: revision,
                                             files: draft.files.filter { $0.id != file.id })
                                     }.labelStyle(.iconOnly).disabled(frozen)
@@ -306,17 +321,27 @@ private struct ConversationComposer: View {
                     }
                     .padding(.top, 8)
                 }
-                TextField("Write a message…", text: Binding(get: { draft.text.rawValue }, set: {
-                    store.updateConversation(for: key, revision: revision, text: $0)
-                }), axis: .vertical)
-                    .lineLimit(1...5).disabled(frozen || !allowsDiscussion)
-                    .padding(.vertical, 11)
-                    .accessibilityIdentifier("sample-chat-composer")
+                ZStack(alignment: .topLeading) {
+                    ConversationReturnTextView(text: Binding(get: { stagedText }, set: { text in
+                        guard stagedText != text else { return }
+                        textEditRevision &+= 1
+                        stagedText = text
+                        scheduleTextSave()
+                    }), isEnabled: !frozen && allowsDiscussion, onReturn: sendStagedText)
+                        .padding(.vertical, 11)
+                    if stagedText.isEmpty {
+                        Text("Write a message…")
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 11)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
             }
             .padding(.horizontal, 12)
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
             .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
-            Button { store.sendDiscussion(for: key, revision: revision) } label: {
+            Button { sendStagedText() } label: {
                 Image(systemName: frozen ? "arrow.clockwise" : "arrow.up")
                     .font(.headline)
                     .frame(width: 30, height: 30)
@@ -325,7 +350,47 @@ private struct ConversationComposer: View {
             .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
             .accessibilityLabel(store.isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
             .accessibilityIdentifier("sample-chat-send")
-            .disabled(store.isSendingDiscussion || !allowsDiscussion || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || store.hasUnreadyUploadReference(for: key, revision: revision) || (draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
+            .disabled(store.isSendingDiscussion || !allowsDiscussion || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || store.hasUnreadyUploadReference(for: key, revision: revision) || (!frozen && stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
+        }
+        .onChange(of: ConversationBinding(request: key, revision: revision), initial: true) { _, binding in
+            if let stagedBinding, stagedBinding != binding { _ = persistStagedText() }
+            textSaveTask?.cancel()
+            stagedBinding = binding
+            let current = store.conversationDraft(for: binding.request, revision: binding.revision)
+            if let unsaved = store.unsavedConversationText(for: binding) {
+                stagedText = unsaved
+                savedText = current.text.rawValue
+                return
+            }
+            // A confirmed send can await replay while its exact operation stays durable.
+            if case .acceptedPendingReplay = current.disposition {
+                stagedText = ""
+                savedText = ""
+            } else {
+                stagedText = current.text.rawValue
+                savedText = stagedText
+            }
+        }
+        .onChange(of: draft.text) { old, new in
+            guard stagedText == savedText else { return }
+            if old != new {
+                stagedText = new.rawValue
+                savedText = stagedText
+            }
+        }
+        .onChange(of: draft.disposition) { _, disposition in
+            if case .saved = disposition, stagedText != savedText { scheduleTextSave() }
+            if case .rejected = disposition, stagedText != savedText { scheduleTextSave() }
+        }
+        .onDisappear {
+            textSaveTask?.cancel()
+            _ = persistStagedText()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                textSaveTask?.cancel()
+                _ = persistStagedText()
+            }
         }
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {
@@ -333,6 +398,49 @@ private struct ConversationComposer: View {
                 Task { await store.importConversationFiles(urls, for: key, revision: addressedRevision) }
             } else if case let .failure(error) = result {
                 store.reportConversationImportError(error, for: key, revision: revision)
+            }
+        }
+    }
+
+    private func scheduleTextSave() {
+        textSaveTask?.cancel()
+        let expected = stagedText
+        let binding = stagedBinding
+        textSaveTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled, stagedBinding == binding, stagedText == expected else { return }
+            _ = persistStagedText()
+        }
+    }
+
+    @discardableResult
+    private func persistStagedText() -> Bool {
+        guard let binding = stagedBinding else { return false }
+        guard stagedText != savedText else { return true }
+        guard store.updateConversation(for: binding.request, revision: binding.revision,
+                                       text: stagedText) else { return false }
+        savedText = stagedText
+        return true
+    }
+
+    private func sendStagedText() {
+        textSaveTask?.cancel()
+        guard !store.isSendingDiscussion, allowsDiscussion,
+              !store.hasPendingUploadCleanup(for: key, revision: revision),
+              !store.hasAbandonedDiscussion(for: key, revision: revision),
+              !store.hasUnreadyUploadReference(for: key, revision: revision),
+              frozen || !stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else { return }
+        guard persistStagedText(), let binding = stagedBinding else { return }
+        let submittedText = stagedText
+        let submittedEdit = textEditRevision
+        store.sendDiscussion(for: binding.request, revision: binding.revision) { accepted in
+            guard stagedBinding == binding else { return }
+            let remaining = ConversationSubmittedText.afterResult(
+                accepted: accepted, submitted: submittedText, submittedEdit: submittedEdit,
+                current: stagedText, currentEdit: textEditRevision)
+            if remaining != stagedText {
+                stagedText = remaining
+                savedText = remaining
             }
         }
     }

@@ -1083,6 +1083,7 @@ final class LivePresentationStore {
     }
 
     private(set) var conversationThreads: [RequestKey: ConversationThread]
+    @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
     @ObservationIgnored private let conversationAvailability: NativeConversationAvailability
     var conversationAvailabilityState: NativeConversationAvailability.State {
@@ -1322,9 +1323,14 @@ final class LivePresentationStore {
         conversationThreads[key]?.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
     }
 
+    func unsavedConversationText(for binding: ConversationBinding) -> String? {
+        pendingConversationTextByBinding[binding]
+    }
+
+    @discardableResult
     func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
-                            files: [ConversationFile]? = nil) {
-        guard !isReadOnly else { return }
+                            files: [ConversationFile]? = nil) -> Bool {
+        guard !isReadOnly else { return false }
         do {
             if let text, files == nil {
                 guard var thread = conversationThreads[key] else { throw ConversationError.missingRequest }
@@ -1333,8 +1339,9 @@ final class LivePresentationStore {
                     context: port.context)
                 thread.drafts[revision] = updated
                 conversationThreads[key] = thread
+                pendingConversationTextByBinding.removeValue(forKey: binding)
                 conversationError = nil
-                return
+                return true
             }
             var draft = conversationDraft(for: key, revision: revision)
             if let text { draft.text = ExactText(text) }
@@ -1343,10 +1350,13 @@ final class LivePresentationStore {
             try port.saveConversationDraft(draft, context: port.context)
             try refreshFromDurableStore()
             conversationError = nil
+            return true
         } catch {
-            conversationError = "Your discussion edit could not be saved. Its earlier saved draft is retained."
+            if let text { pendingConversationTextByBinding[ConversationBinding(request: key, revision: revision)] = text }
+            conversationError = "Your latest discussion edit could not be saved. It remains in this session; the earlier saved draft is unchanged."
             diagnose(.localStore, .draftSave, .failed, error: error,
                      request: key, revision: revision)
+            return false
         }
     }
 
@@ -1461,7 +1471,8 @@ final class LivePresentationStore {
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
     }
 
-    func sendDiscussion(for key: RequestKey, revision: UInt64) {
+    func sendDiscussion(for key: RequestKey, revision: UInt64,
+                        onResult: ((Bool) -> Void)? = nil) {
         guard !isReadOnly, conversationUnavailableMessage == nil else { return }
         do {
             let binding = ConversationBinding(request: key, revision: revision)
@@ -1481,11 +1492,21 @@ final class LivePresentationStore {
                         let result = try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: profileContext) { file in
                             try files.fileURL(for: file)
                         }
-                        try refreshFromDurableStore()
+                        do { try refreshFromDurableStore() }
+                        catch {
+                            diagnose(.localStore, .projectionRefresh, .failed, error: error,
+                                     request: key, revision: revision)
+                        }
                         switch result {
-                        case .accepted: conversationError = nil
-                        case let .rejected(reason): conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
-                        case .unresolved: conversationError = "Submission unconfirmed. Retry uses the same saved operation."
+                        case .accepted:
+                            conversationError = nil
+                            onResult?(true)
+                        case let .rejected(reason):
+                            conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
+                            onResult?(false)
+                        case .unresolved:
+                            conversationError = "Submission unconfirmed. Retry uses the same saved operation."
+                            onResult?(false)
                         }
                     } catch {
                         diagnose(.conversation, .discussionSubmission,
@@ -1509,6 +1530,7 @@ final class LivePresentationStore {
             try port.appendFixtureDiscussion(binding, context: port.context)
             try refreshFromDurableStore()
             conversationError = nil
+            onResult?(true)
         } catch {
             conversationError = "Not delivered: the discussion could not be submitted. Your draft is retained."
             diagnose(.conversation, .discussionSubmission, .failed, error: error,

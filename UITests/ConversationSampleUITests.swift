@@ -2,6 +2,40 @@ import XCTest
 
 @MainActor
 final class ConversationSampleUITests: XCTestCase {
+    func testSendButtonAndReturnClearAcceptedLocalDiscussion() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+        let composer = app.textViews["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        composer.tap()
+        composer.typeText("A note submitted with Send.")
+        let send = app.buttons["Send locally"]
+        XCTAssertTrue(send.isEnabled)
+        send.tap()
+        XCTAssertTrue(history.staticTexts["A note submitted with Send."].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertEqual(composer.value as? String, "Write a message…")
+        XCTAssertFalse(send.isEnabled)
+        composer.tap()
+        composer.typeText("A note submitted with Return.")
+        let keyboardSend = app.keyboards.buttons["Send"]
+        XCTAssertTrue(keyboardSend.waitForExistence(timeout: 5), app.debugDescription)
+        keyboardSend.tap()
+        XCTAssertTrue(history.staticTexts["A note submitted with Return."].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertEqual(composer.value as? String, "Write a message…")
+        XCTAssertFalse(send.isEnabled)
+    }
+
     func testOrdinaryConversationSharesAdaptivePanelWithoutLiveServices() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -12,7 +46,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
         app.buttons["Chat"].tap()
-        let composers = app.textFields.matching(identifier: "sample-chat-composer")
+        let composers = app.textViews.matching(identifier: "sample-chat-composer")
         XCTAssertTrue(composers.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(composers.count, 1)
         XCTAssertTrue(app.staticTexts["Could you explain the tradeoff?"].exists,
@@ -77,7 +111,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(noChatDescription.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(app.staticTexts["Chat unavailable"].exists,
                        "A confirmed local no-chat example must not be presented as a server failure.")
-        XCTAssertFalse(app.textFields["sample-chat-composer"].exists,
+        XCTAssertFalse(app.textViews["sample-chat-composer"].exists,
                        "A missing chat thread must not show a chat composer.")
         capture("conversation-no-chat-empty-state", app)
 
@@ -103,7 +137,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         chat.tap()
 
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         let inputSurface = app.otherElements["sample-chat-input-surface"]
         let add = app.buttons["sample-chat-add-attachment"]
         let send = app.buttons["sample-chat-send"]
@@ -161,7 +195,7 @@ final class ConversationSampleUITests: XCTestCase {
         row.tap()
         app.buttons["Chat"].tap()
 
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         let history = app.scrollViews["conversation-history-scroll"]
         XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
@@ -255,7 +289,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep the original mixed-result note.")
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label == %@",
@@ -277,7 +311,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
         dismissChatSheet(app)
@@ -309,7 +343,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep this file note.")
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
@@ -320,7 +354,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         // A wide landscape layout may reveal its passive inline panel and
         // dismiss the sheet during rotation. Reopen the button presentation.
-        if !app.textFields["sample-chat-composer"].exists { app.buttons["Chat"].tap() }
+        if !app.textViews["sample-chat-composer"].exists { app.buttons["Chat"].tap() }
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         dismissChatSheet(app)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
@@ -415,7 +449,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent."].exists)
         capture("sender-retracted-retained-request", app)
         app.buttons["Chat"].tap()
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Please keep this unsent note.")
         XCTAssertFalse(composer.isEnabled)
@@ -440,7 +474,7 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             row.tap()
             app.buttons["Chat"].tap()
-            XCTAssertTrue(app.textFields["sample-chat-composer"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5))
         }
         open("sample-approval-2", search: "Archive")
         XCTAssertTrue(app.staticTexts["Please review the sketches before archiving. The earlier answer draft is retained."].exists)
@@ -462,7 +496,7 @@ final class ConversationSampleUITests: XCTestCase {
         capture("conversation-file-metadata", app)
         open("sample-completed-2", search: "journal is ready")
         XCTAssertTrue(app.staticTexts["Request cleared"].exists)
-        XCTAssertFalse(app.textFields["sample-chat-composer"].isEnabled)
+        XCTAssertFalse(app.textViews["sample-chat-composer"].isEnabled)
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
         capture("conversation-explicit-closure", app)
     }
@@ -475,7 +509,7 @@ final class ConversationSampleUITests: XCTestCase {
     }
 
     private func dismissChatSheet(_ app: XCUIApplication) {
-        let composer = app.textFields["sample-chat-composer"]
+        let composer = app.textViews["sample-chat-composer"]
         let inputSurface = app.otherElements["sample-chat-input-surface"]
         // The saved accessibility hierarchy exposes the native presentation's
         // history and composer but has no Sheet node, so anchor the swipe to the history.
