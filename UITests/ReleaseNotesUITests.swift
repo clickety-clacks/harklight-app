@@ -2,6 +2,35 @@ import XCTest
 
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
+    func testPost79UpdateAppearsWithoutAnEstimatedBuildNumber() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture"]
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "91"
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
+                      app.debugDescription)
+        let updateHeader = app.staticTexts["Version 0.1.0 · Changes since Build 79"]
+        XCTAssertTrue(updateHeader.exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["More context in the Inbox"].exists,
+                      app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build 91"].exists,
+                       "The update must not claim an unverified archive build number.")
+
+        app.buttons["Done"].tap()
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
+        settings.tap()
+        let historyLink = app.buttons["Release notes"]
+        XCTAssertTrue(historyLink.waitForExistence(timeout: 5), app.debugDescription)
+        historyLink.tap()
+        XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertTrue(updateHeader.exists,
+                      "Settings keeps the update in history without a guessed build number.")
+    }
+
     func testUpdateSheetAndSettingsHistoryShowReleasedNotes() {
         let app = XCUIApplication()
         let simulatedCurrentBuild = "62" // Synthetic metadata; no archive mapping is claimed.
