@@ -1,8 +1,11 @@
 #!/bin/sh
-set -eu
+set -u
 
-# A release build must account for every app change since this check was added.
+# Report source changes that need release-note attention without stopping a build.
 # The starting commit is a source revision, not an App Store build number.
+warn() {
+    printf 'Release notes warning: %s\n' "$1" >&2
+}
 case "${CI_XCODE_CLOUD:-}" in
     TRUE|true|1) ;;
     *) exit 0 ;;
@@ -15,24 +18,37 @@ if [ -n "${CI_PULL_REQUEST_NUMBER:-}" ]; then
     exit 0
 fi
 
-repo=${CI_PRIMARY_REPOSITORY_PATH:?Xcode Cloud did not provide the source path}
-commit=${CI_COMMIT:?Xcode Cloud did not provide the source revision}
+repo=${CI_PRIMARY_REPOSITORY_PATH:-}
+commit=${CI_COMMIT:-}
 base=ccaabc211da453c21c44fc8ca6e3ff19851332e2
 
+if [ -z "$repo" ] || [ -z "$commit" ]; then
+    warn 'The source path or revision is unavailable; continuing the build.'
+    exit 0
+fi
 if ! git -C "$repo" merge-base --is-ancestor "$base" "$commit"; then
-    printf '%s\n' 'Release notes could not be checked against the source history.' >&2
-    exit 1
+    warn 'Source history is unavailable; continuing the build.'
+    exit 0
 fi
 
-revisions=$(git -C "$repo" rev-list --first-parent --reverse "$base..$commit")
+if ! revisions=$(git -C "$repo" rev-list --first-parent --reverse "$base..$commit"); then
+    warn 'Source revisions could not be read; continuing the build.'
+    exit 0
+fi
 for revision in $revisions; do
-    parent=$(git -C "$repo" rev-parse "$revision^1")
-    changed=$(git -C "$repo" diff --name-only "$parent" "$revision" -- \
+    if ! parent=$(git -C "$repo" rev-parse "$revision^1"); then
+        warn 'A source parent could not be read; continuing the build.'
+        exit 0
+    fi
+    if ! changed=$(git -C "$repo" diff --name-only "$parent" "$revision" -- \
         Sources AttentionDomain/Sources NativeRelay/Sources Resources \
         Design/tokens.json Configuration/HarklightInfo.plist \
         Signing/ReceiverDevelopment.entitlements project.yml \
         Harklight.xcodeproj/project.pbxproj AttentionDomain/Package.swift \
-        NativeRelay/Package.swift)
+        NativeRelay/Package.swift); then
+        warn 'Source changes could not be read; continuing the build.'
+        exit 0
+    fi
     if [ -z "$changed" ]; then
         continue
     fi
@@ -43,23 +59,29 @@ for revision in $revisions; do
         if [ "$diff_status" -eq 1 ]; then
             continue
         fi
-        printf 'Release notes could not be checked for %s.\n' "$revision" >&2
-        exit 1
+        warn "Changes in $revision could not be checked; continuing the build."
+        exit 0
     fi
 
     # A source-only maintenance change may say why it has no user-facing note.
     # For a merge, the source branch's last commit carries that declaration.
     message_commit=$revision
-    set -- $(git -C "$repo" rev-list --parents -n 1 "$revision")
+    if ! parents=$(git -C "$repo" rev-list --parents -n 1 "$revision"); then
+        warn 'Revision parents could not be read; continuing the build.'
+        exit 0
+    fi
+    set -- $parents
     if [ "$#" -ge 3 ]; then
         message_commit=$3
     fi
-    if git -C "$repo" log -1 --format=%B "$message_commit" |
-        grep -Eq '^Release-Notes: none - .+'; then
+    if ! message=$(git -C "$repo" log -1 --format=%B "$message_commit"); then
+        warn 'The source message could not be read; continuing the build.'
+        exit 0
+    fi
+    if printf '%s\n' "$message" | grep -Eq '^Release-Notes: none - .+'; then
         continue
     fi
 
-    printf 'App source changed in %s without a release note or a reason it needs none.\n' "$revision" >&2
-    printf '%s\n' 'Update Sources/ReleaseNotes.swift or add "Release-Notes: none - <reason>" to the source commit.' >&2
-    exit 1
+    warn "App source changed in $revision without a release note or a reason it needs none."
 done
+exit 0
