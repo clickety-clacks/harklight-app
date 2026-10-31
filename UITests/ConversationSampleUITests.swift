@@ -647,3 +647,16 @@ private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
     }
     return field
 }
+
+@MainActor
+private func workspaceBackButton(in app: XCUIApplication) -> XCUIElement {
+    let toolbarBack = app.toolbars.buttons["BackButton"]
+    if toolbarBack.exists { return toolbarBack }
+
+    let navigationBack = app.navigationBars.buttons.matching(
+        NSPredicate(format: "identifier == 'BackButton' OR label == 'Back'")
+    ).firstMatch
+    if navigationBack.exists { return navigationBack }
+
+    return app.buttons["BackButton"]
+}
