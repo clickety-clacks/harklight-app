@@ -528,7 +528,7 @@ private struct ConversationTurnView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text(authorLabel)
+                authorLabel
                 if turn.binding.revision != 1 {
                     Text("· version \(turn.binding.revision)")
                 }
@@ -563,12 +563,13 @@ private struct ConversationTurnView: View {
         .background(turn.author == .person ? Color.blue.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private var authorLabel: String {
+    @ViewBuilder
+    private var authorLabel: some View {
         switch turn.author {
-        case .person: return "You"
-        case .origin: return sender
-        case .agent: return "Agent"
-        case .server: return "Harklight"
+        case .person: Text("You")
+        case .origin: Text(verbatim: sender)
+        case .agent: Text("Agent")
+        case .server: Text("Harklight")
         }
     }
 }

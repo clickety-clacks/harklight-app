@@ -462,7 +462,7 @@ struct MessageHeading: View {
                         .background(titleColor.opacity(0.18), in: Circle())
                 }
                 if let sender {
-                    Text(sender).font(.subheadline)
+                    Text(verbatim: sender).font(.subheadline)
                 }
                 Spacer(minLength: 0)
                 if let createdAt {
@@ -1159,6 +1159,24 @@ struct LiveRequestDetail: View {
         return "Send answer"
     }
 
+    private var senderLabel: String {
+        if let localExample { return localExample.message.sender }
+        return InboxSenderDisplay.label(displayName: request.senderDisplayName?.rawValue,
+                                        senderID: request.key.senderID.rawValue)
+    }
+
+    private var detailSenderLabel: String {
+        if let localExample { return localExample.message.sender }
+        return InboxSenderDisplay.detailLabel(displayName: request.senderDisplayName?.rawValue,
+                                              senderID: request.key.senderID.rawValue)
+    }
+
+    private var senderInitials: String {
+        if let localExample { return localExample.message.initials }
+        return String(senderLabel.split(whereSeparator: { !$0.isLetter })
+            .prefix(2).compactMap(\.first)).uppercased()
+    }
+
     var body: some View {
         MessageCardSurface(context: context,
                            replyEditorIsOpen: activeReplyEditor != nil || focusedReplyActionID != nil,
@@ -1169,11 +1187,8 @@ struct LiveRequestDetail: View {
                 Button {
                     requestDetailsPresented = true
                 } label: {
-                    MessageHeading(sender: localExample?.message.sender
-                                   ?? InboxSenderDisplay.name(for: request.key.senderID.rawValue),
-                               initials: localExample?.message.initials
-                                   ?? String(InboxSenderDisplay.name(for: request.key.senderID.rawValue)
-                                       .split(whereSeparator: { !$0.isLetter }).prefix(2).compactMap(\.first)).uppercased(),
+                    MessageHeading(sender: senderLabel,
+                               initials: senderInitials,
                                title: request.title?.rawValue ?? "Message",
                                createdAt: request.createdAt,
                                symbol: localExample?.message.kind.symbol ?? (request.informationalSeenStatus == nil ? "text.bubble" : "info.circle"),
@@ -1598,7 +1613,7 @@ struct LiveRequestDetail: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Sender: \(request.key.senderID.rawValue)")
+                    Text("Sender: \(detailSenderLabel)")
                     Text("Message: \(request.key.messageID.rawValue)")
                     Text(request.originalContentJSON)
                         .font(.caption.monospaced())
@@ -1656,7 +1671,7 @@ struct LiveRequestDetail: View {
 
     private var conversationPanel: some View {
         ConversationPanel(store: store, key: request.key,
-            sender: request.key.senderID.rawValue, title: request.title?.rawValue ?? "")
+            sender: detailSenderLabel, title: request.title?.rawValue ?? "")
     }
 
     static func informationalSeenText(_ status: InformationalSeenStatus) -> String {

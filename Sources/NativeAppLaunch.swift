@@ -1622,6 +1622,7 @@ final class LivePresentationStore {
             title: request.title?.rawValue ?? "Message",
             sender: request.key.senderID.rawValue,
             status: statusParts.joined(separator: " · "),
+            senderDisplayName: request.senderDisplayName?.rawValue,
             bodyText: request.body?.rawValue,
             symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
             isResolved: request.answerNotDelivered || receiptStatus == .failed ? false :

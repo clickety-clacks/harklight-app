@@ -285,6 +285,8 @@ public enum InformationalSeenStatus: Equatable, Sendable {
 
 public struct PresentedRequest: Equatable, Sendable {
     public let key: RequestKey
+    /// Optional sender-authored display text. It never supplies request identity.
+    public let senderDisplayName: ExactText?
     /// The exact sender-authored version represented by this projection.
     public let requestRevision: UInt64
     /// Durable order assigned by C at first acceptance; consumers preserve this order.
@@ -340,6 +342,7 @@ public struct PresentedRequest: Equatable, Sendable {
     }
 
     public init(key: RequestKey,
+                senderDisplayName: ExactText? = nil,
                 requestRevision: UInt64 = 1,
                 acceptanceOrder: UInt64,
                 title: ExactText?,
@@ -370,6 +373,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 inboxStateIsCurrent: Bool = true,
                 supersedesMessageIDs: [ExactText] = []) {
         self.key = key
+        self.senderDisplayName = senderDisplayName
         self.requestRevision = requestRevision
         self.acceptanceOrder = acceptanceOrder
         self.title = title
@@ -1187,6 +1191,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         }
 
         return PresentedRequest(key: request.key,
+                                senderDisplayName: request.senderDisplayName,
                                 requestRevision: requestRevision,
                                 acceptanceOrder: acceptanceOrder,
                                 title: request.originalPayload.uniqueValue(named: "title")?.stringValue,
