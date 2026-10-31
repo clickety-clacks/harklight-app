@@ -46,6 +46,30 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(nextLaunch.notesToShow.isEmpty)
     }
 
+    func testLaterUnnumberedUpdateHasItsOwnSeenIdentityAndKeepsHistoryOrder() throws {
+        let earlier = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first)
+        let later = HarklightReleaseNote(
+            historyIdentifier: "later-update",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource("A later update"),
+            visibleFromBuildIdentifier: 79,
+            highlights: [])
+
+        let pending = ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "93",
+            entries: [],
+            updateEntries: [later, earlier],
+            seenUpdateIdentifiers: [earlier.id],
+            lastSeenBuildIdentifier: 92,
+            hasPriorAppState: true)
+        XCTAssertEqual(pending.map(\.id), [later.id])
+        XCTAssertEqual(HarklightReleaseNotes.settingsHistory(
+            currentBuildIdentifier: "93",
+            entries: [],
+            historyEntries: [],
+            updateEntries: [later, earlier]).map(\.id), [later.id, earlier.id])
+    }
+
     func testBuildSeventyNineEdgePullRemovalNoteIsFixedAndHiddenUntilThatBuild() throws {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 79 })
         let highlight = try XCTUnwrap(entry.highlights.first)
