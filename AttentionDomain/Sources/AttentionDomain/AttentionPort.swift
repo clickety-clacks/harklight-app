@@ -1261,9 +1261,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                          remote: RemoteRequestState?,
                                          submission: Submission?) -> InformationalSeenStatus? {
         guard request.hasExplicitInformationalSeenAction else { return nil }
-        if let remote, remote.state != nil {
-            guard remote.state == .answered,
-                  remote.accountAnswerOutcome == .seen else { return nil }
+        if remote?.state == .answered,
+           remote?.accountAnswerOutcome == .seen {
             return .confirmed
         }
         let seenValue = JSONValue.object([

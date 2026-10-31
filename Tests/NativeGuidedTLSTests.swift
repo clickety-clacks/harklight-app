@@ -938,6 +938,16 @@ final class NativeGuidedTLSTests: XCTestCase {
                        .confirmed, "An authorized origin answer remains sufficient confirmation.")
 
         let live = try LivePresentationStore(store: store, context: context)
+        let availableSeenRow = try XCTUnwrap(live.inboxRows.first { $0.key == seenKey })
+        XCTAssertEqual(availableSeenRow.resolvedMessageType, .info)
+        XCTAssertEqual(availableSeenRow.informationalSeenStatus, .available)
+        XCTAssertTrue(availableSeenRow.canMarkSeen,
+                      "A canonical descriptor offers Seen before any server Seen outcome.")
+        let nonSeenTerminalRow = try XCTUnwrap(live.inboxRows.first { $0.key == remotelySeenKey })
+        XCTAssertEqual(nonSeenTerminalRow.resolvedMessageType, .info,
+                       "A canonical descriptor remains informational when a remote terminal is not Seen.")
+        XCTAssertEqual(nonSeenTerminalRow.informationalSeenStatus, .resolvedWithoutSeen)
+
         let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
         XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
