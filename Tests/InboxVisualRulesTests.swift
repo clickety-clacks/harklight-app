@@ -4,6 +4,18 @@ import XCTest
 import AttentionDomain
 
 final class InboxVisualRulesTests: XCTestCase {
+    func testServerPriorityUsesPlainLanguageLabelsAndOmitsNormal() {
+        func renderedLabel(for priority: InboxMessagePriority) -> String? {
+            guard let display = InboxPriorityDisplay.label(for: priority) else { return nil }
+            return String(localized: display.title)
+        }
+
+        XCTAssertEqual(renderedLabel(for: .now), "Urgent")
+        XCTAssertEqual(renderedLabel(for: .high), "High priority")
+        XCTAssertEqual(renderedLabel(for: .low), "Low priority")
+        XCTAssertNil(renderedLabel(for: .normal))
+    }
+
     func testExplicitTiersCapBodyAtEightFourAndTwoLines() {
         XCTAssertEqual(InboxAttentionTier.top.bodyLineLimit, 8)
         XCTAssertEqual(InboxAttentionTier.middle.bodyLineLimit, 4)
