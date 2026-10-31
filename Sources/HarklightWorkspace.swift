@@ -277,6 +277,12 @@ enum InboxSenderDisplay {
         displayName ?? name(for: senderID)
     }
 
+    /// Detail and conversation surfaces retain the complete sender identity
+    /// when no sender-authored display name was supplied.
+    static func detailLabel(displayName: String?, senderID: String) -> String {
+        displayName ?? senderID
+    }
+
     static func name(for senderID: String) -> String {
         let withoutKind = senderID.split(separator: ":", omittingEmptySubsequences: false).last
             .map(String.init) ?? senderID

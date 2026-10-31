@@ -1165,6 +1165,12 @@ struct LiveRequestDetail: View {
                                         senderID: request.key.senderID.rawValue)
     }
 
+    private var detailSenderLabel: String {
+        if let localExample { return localExample.message.sender }
+        return InboxSenderDisplay.detailLabel(displayName: request.senderDisplayName?.rawValue,
+                                              senderID: request.key.senderID.rawValue)
+    }
+
     private var senderInitials: String {
         if let localExample { return localExample.message.initials }
         return String(senderLabel.split(whereSeparator: { !$0.isLetter })
@@ -1607,7 +1613,7 @@ struct LiveRequestDetail: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Sender: \(senderLabel)")
+                    Text("Sender: \(detailSenderLabel)")
                     Text("Message: \(request.key.messageID.rawValue)")
                     Text(request.originalContentJSON)
                         .font(.caption.monospaced())
@@ -1665,7 +1671,7 @@ struct LiveRequestDetail: View {
 
     private var conversationPanel: some View {
         ConversationPanel(store: store, key: request.key,
-            sender: senderLabel, title: request.title?.rawValue ?? "")
+            sender: detailSenderLabel, title: request.title?.rawValue ?? "")
     }
 
     static func informationalSeenText(_ status: InformationalSeenStatus) -> String {

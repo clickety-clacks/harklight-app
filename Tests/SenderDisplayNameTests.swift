@@ -88,4 +88,20 @@ final class SenderDisplayNameTests: XCTestCase {
                            "Display text must not change the RequestKey sender identity.")
         }
     }
+
+    func testDetailLabelPreservesDisplayNameAndFallsBackToFullSenderID() {
+        let senderID = "agent:workspace/actor-17"
+        let arbitrary = "  A/雪:\n% e\u{301}  "
+        let cases: [(displayName: String?, expected: String)] = [
+            (arbitrary, arbitrary),
+            ("", ""),
+            (nil, senderID)
+        ]
+
+        for testCase in cases {
+            let actual = InboxSenderDisplay.detailLabel(displayName: testCase.displayName,
+                                                        senderID: senderID)
+            XCTAssertTrue(actual.utf8.elementsEqual(testCase.expected.utf8))
+        }
+    }
 }
