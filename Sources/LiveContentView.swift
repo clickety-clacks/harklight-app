@@ -1199,9 +1199,15 @@ struct LiveRequestDetail: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("request-heading")
                 .accessibilityHint("Open request details")
-                if let priority = request.inboxPriority {
-                    Label("Priority \(priority.rawValue)", systemImage: "flag.fill")
+                if let priority = request.inboxPriority,
+                   let priorityLabel = InboxPriorityDisplay.label(for: priority) {
+                    Label {
+                        Text(priorityLabel.title)
+                    } icon: {
+                        Image(systemName: "flag.fill")
+                    }
                         .font(.caption.weight(.semibold))
+                        .accessibilityLabel(Text(priorityLabel.title))
                         .accessibilityIdentifier("request-priority")
                 }
                 if let deadline = byWhenDate {

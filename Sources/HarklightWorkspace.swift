@@ -2,6 +2,29 @@ import SwiftUI
 import UIKit
 import AttentionDomain
 
+enum InboxPriorityDisplay: Equatable {
+    case urgent
+    case high
+    case low
+
+    var title: LocalizedStringResource {
+        switch self {
+        case .urgent: "Urgent"
+        case .high: "High priority"
+        case .low: "Low priority"
+        }
+    }
+
+    static func label(for priority: InboxMessagePriority) -> Self? {
+        switch priority {
+        case .now: .urgent
+        case .high: .high
+        case .low: .low
+        case .normal: nil
+        }
+    }
+}
+
 /// Window bounds describe the available app window without shrinking when the
 /// keyboard appears. Read this view's window, never a global screen or window.
 struct WorkspaceWindowReader: UIViewRepresentable {
@@ -1192,14 +1215,15 @@ struct InboxRowContent: View {
                     .font(titleFont)
                     .foregroundStyle(titleColor)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if let priority = row.priority {
-                    Text("Priority \(priority.rawValue)")
+                if let priority = row.priority,
+                   let priorityLabel = InboxPriorityDisplay.label(for: priority) {
+                    Text(priorityLabel.title)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(priorityColor(for: priority))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(priorityColor(for: priority).opacity(0.14), in: Capsule())
-                        .accessibilityLabel("Priority \(priority.rawValue)")
+                        .accessibilityLabel(Text(priorityLabel.title))
                         .accessibilityIdentifier("inbox-priority-\(priority.rawValue)")
                 }
                 if let chatUnread = row.chatUnread {
