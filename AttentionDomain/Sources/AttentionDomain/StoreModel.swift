@@ -363,6 +363,11 @@ public struct StoredRequest: Equatable, Codable, Sendable {
         self.acceptanceOrder = nil
     }
 
+    /// Optional sender-chosen display text. It never supplies request identity.
+    public var senderDisplayName: ExactText? {
+        originalPayload.uniqueValue(named: "display_name")?.stringValue
+    }
+
     /// Sender-authored creation time, retained in the original message as Unix
     /// milliseconds. This is display metadata only; inbox order comes from the
     /// server-assigned acceptance order.

@@ -168,6 +168,7 @@ struct InboxRequestRow: Identifiable {
     let title: String
     let sender: String
     let status: String
+    var senderDisplayName: String? = nil
     var bodyText: String? = nil
     var symbol: String = "text.bubble"
     var isResolved = false
@@ -194,6 +195,10 @@ struct InboxRequestRow: Identifiable {
     var orderingReason: String? = nil
     var defaultAnswerStatus: String? = nil
     var id: RequestKey { key }
+
+    var senderLabel: String {
+        InboxSenderDisplay.label(displayName: senderDisplayName, senderID: sender)
+    }
 
     var resolvedMessageType: HarklightMessageType {
         if let messageType { return messageType }
@@ -268,6 +273,10 @@ enum InboxFriendlyDate {
 }
 
 enum InboxSenderDisplay {
+    static func label(displayName: String?, senderID: String) -> String {
+        displayName ?? name(for: senderID)
+    }
+
     static func name(for senderID: String) -> String {
         let withoutKind = senderID.split(separator: ":", omittingEmptySubsequences: false).last
             .map(String.init) ?? senderID
@@ -958,7 +967,7 @@ struct InboxList: View {
     private func threadGroupLabel(members: [InboxItem]) -> some View {
         let sender = members.first.map { item -> String in
             switch item {
-            case let .request(row): InboxSenderDisplay.name(for: row.sender)
+            case let .request(row): row.senderLabel
             case let .example(message, _): InboxSenderDisplay.name(for: message.sender)
             }
         } ?? String(localized: "Sender")
@@ -1150,7 +1159,7 @@ struct InboxRowContent: View {
                     .font(.caption2.bold())
                     .frame(width: 24, height: 24)
                     .background(palette.neutral.separatorColor, in: Circle())
-                Text(InboxSenderDisplay.name(for: row.sender)).lineLimit(1)
+                Text(verbatim: row.senderLabel).lineLimit(1)
                 Spacer(minLength: 4)
                 if let createdAt = row.createdAt {
                     Text(InboxFriendlyDate.label(for: createdAt))
@@ -1281,7 +1290,7 @@ struct InboxRowContent: View {
 
     private var displayInitials: String {
         if !row.initials.isEmpty { return row.initials }
-        let words = InboxSenderDisplay.name(for: row.sender)
+        let words = row.senderLabel
             .split(whereSeparator: { !$0.isLetter })
         return String(words.prefix(2).compactMap(\.first)).uppercased()
     }

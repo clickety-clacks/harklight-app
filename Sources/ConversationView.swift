@@ -528,7 +528,7 @@ private struct ConversationTurnView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text(authorLabel)
+                Text(verbatim: authorLabel)
                 if turn.binding.revision != 1 {
                     Text("· version \(turn.binding.revision)")
                 }
