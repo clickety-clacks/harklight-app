@@ -434,7 +434,7 @@ enum HarklightReleaseNotes {
 
     /// The older dated entry remains Settings-only. Its changes shipped before
     /// Build 59, but their archived build numbers are unavailable.
-    static let historyEntries: [HarklightReleaseNote] = updateEntries + [
+    static let historyEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
             historyIdentifier: "earlier-on-2026-10-25",
             marketingVersion: "0.1.0",
@@ -525,7 +525,6 @@ enum HarklightReleaseNotes {
         let entries = entries ?? HarklightReleaseNotes.entries
         let visibleUpdates = visibleUpdateEntries(currentBuildIdentifier: currentBuildIdentifier,
                                                  entries: updateEntries)
-        let updateIDs = Set(visibleUpdates.map(\.id))
         let buildNotes = releasedEntries(currentBuildIdentifier: currentBuildIdentifier,
                                          entries: entries)
             .compactMap { note -> (note: HarklightReleaseNote, build: Int, priority: Int)? in
@@ -535,7 +534,6 @@ enum HarklightReleaseNotes {
         let datedNotes = historyEntries.compactMap {
             note -> (note: HarklightReleaseNote, build: Int, priority: Int)? in
             guard note.buildIdentifier == nil,
-                  !updateIDs.contains(note.id),
                   let visibleFrom = note.visibleFromBuildIdentifier,
                   visibleFrom <= currentBuild else { return nil }
             return (note, visibleFrom, 0)
