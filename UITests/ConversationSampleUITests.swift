@@ -393,12 +393,15 @@ final class ConversationSampleUITests: XCTestCase {
         capture("upload-cleanup-portrait-retained-draft", app)
     }
 
-    func testEdgePullDoesNotChangeSelectedMessageAndBackRestoresIt() {
+    func testEdgePullDoesNotChangeSelectedMessageAndBackReturnsToEntryTab() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let entryTab = workspaceTab("Inbox", in: app)
+        XCTAssertTrue(entryTab.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(entryTab.isSelected, "The sample message should be opened from the Inbox entry tab.")
         let list = listContainer(app)
         // Open the information example after placing its row in view.
         let opened = app.descendants(matching: .any)["request-row-sample-information-1"]
@@ -426,13 +429,14 @@ final class ConversationSampleUITests: XCTestCase {
         recordDiagnostics("after-edge-pull", app)
         let probe = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
         XCTAssertTrue(probe.label.contains("lastViewed=request:sample-information-1 "), probe.label)
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
-        let shown = NSPredicate { _, _ in opened.exists && self.unobscured(opened, in: list, app: app) }
-        let result = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: shown, object: nil)], timeout: 5)
+        let returnedToInbox = entryTab.waitForExistence(timeout: 5) && entryTab.isSelected
+            && card.waitForNonExistence(timeout: 5)
         recordDiagnostics("after-back", app)
-        XCTAssertEqual(result, .completed, "Back after an edge pull must restore the same selected message: \(app.debugDescription)")
+        XCTAssertTrue(returnedToInbox,
+                      "Back without switching messages must return to the entry tab. \(app.debugDescription)")
     }
 
     func testRetractedItemKeepsItsSelectedChoiceHistoryAndUnsentDiscussion() {
@@ -642,4 +646,17 @@ private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
         }
     }
     return field
+}
+
+@MainActor
+private func workspaceBackButton(in app: XCUIApplication) -> XCUIElement {
+    let toolbarBack = app.toolbars.buttons["BackButton"]
+    if toolbarBack.exists { return toolbarBack }
+
+    let navigationBack = app.navigationBars.buttons.matching(
+        NSPredicate(format: "identifier == 'BackButton' OR label == 'Back'")
+    ).firstMatch
+    if navigationBack.exists { return navigationBack }
+
+    return app.buttons["BackButton"]
 }
