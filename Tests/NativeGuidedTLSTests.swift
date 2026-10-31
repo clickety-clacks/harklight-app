@@ -897,6 +897,40 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(snapshot.requests.map(\.isResolved), [false, true, true])
     }
 
+    func testRemoteSeenRequiresCanonicalInformationalDescriptor() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-remote-seen"), deviceID: ExactText("device-remote-seen"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let canonicalKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("canonical-seen"))
+        let legacyKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy-seen"))
+        let canonicalPayload = try JSONValue.parse(Data(#"{"title":"Release complete","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        let legacyPayload = try JSONValue.parse(Data(#"{"title":"Legacy request"}"#.utf8))
+
+        _ = store.applyRelayEvent(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: canonicalKey, originalPayload: canonicalPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: legacyKey, originalPayload: legacyPayload), .message)), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 3, body: .terminal(canonicalKey, .answered, nil), accountAnswerOutcome: .seen), context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 4, body: .terminal(legacyKey, .answered, nil), accountAnswerOutcome: .seen), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let canonical = try XCTUnwrap(port.inspect(context: port.context, request: canonicalKey).requests.first)
+        XCTAssertEqual(canonical.informationalSeenStatus, .confirmed)
+        let canonicalRow = InboxRequestRow(key: canonicalKey, title: "Release complete", sender: "sender", status: "Seen",
+                                           informationalSeenStatus: canonical.informationalSeenStatus)
+        XCTAssertEqual(canonicalRow.resolvedMessageType, .info)
+
+        let legacy = try XCTUnwrap(port.inspect(context: port.context, request: legacyKey).requests.first)
+        XCTAssertNil(legacy.informationalSeenStatus,
+                     "A remote Seen answer does not make a request with missing answer_ui informational.")
+        guard case let .compatibility(actions) = legacy.projection else {
+            return XCTFail("A missing answer_ui must retain the compatibility Reply control.")
+        }
+        XCTAssertEqual(actions.first?.label, ExactText("Reply"))
+        let legacyRow = InboxRequestRow(key: legacyKey, title: "Legacy request", sender: "sender", status: "Seen",
+                                        informationalSeenStatus: legacy.informationalSeenStatus)
+        XCTAssertEqual(legacyRow.resolvedMessageType, .request)
+    }
+
     func testExplicitSeenRequiresCanonicalDescriptorAndConfirmsOnlyAuthorizedEvidence() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-seen"), deviceID: ExactText("device-seen"))
