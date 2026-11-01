@@ -153,7 +153,7 @@ private struct AcceptanceReduceMotionOverride: ViewModifier {
 }
 
 extension EnvironmentValues {
-    @Entry var harklightReduceMotionOverride: Bool?
+    @Entry var harklightReduceMotionOverride: Bool? = nil
 }
 
 @MainActor
