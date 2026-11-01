@@ -54,6 +54,24 @@ enum HarklightReleaseNotes {
     /// Keep each update's identifier stable so it appears once for people who already use the app.
     static let updateEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
+            historyIdentifier: "reply-drafts-after-navigation",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource(
+                "Reply drafts stay while you browse",
+                comment: "Release-note heading for unfinished replies retained during navigation."),
+            visibleFromBuildIdentifier: 79,
+            highlights: [
+                .init(
+                    id: "reply-drafts-after-navigation",
+                    symbol: "square.and.pencil",
+                    title: LocalizedStringResource(
+                        "Keep an unfinished Reply",
+                        comment: "Release-note title for same-session Reply draft retention."),
+                    detail: LocalizedStringResource(
+                        "Leave a message and come back before closing the app; your unsent text and choices are still there.",
+                        comment: "Release-note detail for same-session Reply draft retention."))
+            ]),
+        HarklightReleaseNote(
             historyIdentifier: "example-messages-removed",
             marketingVersion: "0.1.0",
             historyDateDescription: LocalizedStringResource(
