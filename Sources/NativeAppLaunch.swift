@@ -1163,6 +1163,12 @@ final class LivePresentationStore {
     private static let clearedRetractionsDefaultsKey = "harklight.cleared-retracted-requests"
     @ObservationIgnored private var presentedStaleAnswerOperationIDs = Set<UUID>()
 
+    private struct NoReplyRoutingState {
+        let requestRevision: UInt64
+        let isNoReply: Bool
+        let route: NativeDiagnosticNoReplyRoute?
+    }
+
     convenience init(store: AttentionDomainStore, context: ProfileContext,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
@@ -1652,14 +1658,6 @@ final class LivePresentationStore {
             duePhrase: request.inboxDueAtMilliseconds.map { InboxDuePhrase.label(for: $0) },
             orderingReason: request.inboxReason?.rawValue,
             defaultAnswerStatus: request.defaultAnswerStatusText)
-        if request.intentReceipt?.answerKind == .noComment ||
-            request.lifecycleStatus == .noComment || request.noCommentUnavailable {
-            diagnostics?.recordNoReplyRoutingIfChanged(request: request.key,
-                revision: request.requestRevision,
-                operationID: request.intentReceipt?.answerKind == .noComment
-                    ? request.intentReceipt?.opID : nil,
-                route: row.belongsToReplied ? .replied : .inbox)
-        }
         return row
     }
 
@@ -2366,12 +2364,14 @@ final class LivePresentationStore {
     }
 
     private func adopt(_ snapshot: PresentationSnapshot) {
+        let previousRoutingStates = noReplyRoutingStates(for: presentation.requests)
         do { conversationThreads = try port.conversations(context: port.context).threads }
         catch {
             observationError = "The local conversation could not be refreshed."
             diagnose(.localStore, .projectionRefresh, .failed, error: error)
         }
         presentation = snapshot
+        recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)
         if let key = actionErrorRequest,
            let current = snapshot.requests.first(where: { $0.key == key }),
@@ -2385,6 +2385,41 @@ final class LivePresentationStore {
             self.selectedRequestKey = snapshot.requests.first?.key
         }
         notificationProjectionDidChange?()
+    }
+
+    private func noReplyRoutingStates(for requests: [PresentedRequest]) -> [RequestKey: NoReplyRoutingState] {
+        var states: [RequestKey: NoReplyRoutingState] = [:]
+        for request in requests {
+            let isNoReply = request.intentReceipt?.answerKind == .noComment ||
+                request.lifecycleStatus == .noComment || request.noCommentUnavailable
+            let route = isNoReply ? makeInboxRow(for: request).map {
+                $0.belongsToReplied ? NativeDiagnosticNoReplyRoute.replied : .inbox
+            } : nil
+            states[request.key] = NoReplyRoutingState(requestRevision: request.requestRevision,
+                isNoReply: isNoReply, route: route)
+        }
+        return states
+    }
+
+    private func recordNoReplyRoutingChanges(from previousStates: [RequestKey: NoReplyRoutingState],
+                                             in requests: [PresentedRequest]) {
+        guard let diagnostics else { return }
+        let currentStates = noReplyRoutingStates(for: requests)
+        for request in requests {
+            // A row newly appearing in a projection may be old paged history, not
+            // a routing transition observed by this client.
+            guard let previous = previousStates[request.key],
+                  let current = currentStates[request.key], current.isNoReply,
+                  let route = current.route else { continue }
+            let changed = previous.requestRevision != current.requestRevision ||
+                !previous.isNoReply || previous.route != route
+            guard changed else { continue }
+            diagnostics.recordNoReplyRoutingIfChanged(request: request.key,
+                revision: request.requestRevision,
+                operationID: request.intentReceipt?.answerKind == .noComment
+                    ? request.intentReceipt?.opID : nil,
+                route: route)
+        }
     }
 
     private func presentStaleAnswerIfAvailable(in snapshot: PresentationSnapshot) {

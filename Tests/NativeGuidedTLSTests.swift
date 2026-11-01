@@ -1254,17 +1254,22 @@ final class NativeGuidedTLSTests: XCTestCase {
         _ = try store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: request, originalPayload: payload), .message)),
             context: context)
-        let port = AttentionDomainPort(store: store)
-        let selector = try XCTUnwrap(port.inspect(context: port.context, request: request).requests.first?.selector)
-        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
         let journalURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightNoCommentCoreDiagnostics-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: journalURL) }
         let journal = NativeClientDiagnosticJournal(fileURL: journalURL)
         let presentation = try LivePresentationStore(store: store, context: context, diagnostics: journal)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: request).requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
         try presentation.refreshFromDurableStore()
         XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: request)).belongsToReplied,
                       "The existing pending No comment route remains Replied.")
+        XCTAssertEqual(journal.events.filter { $0.phase == .noReplyRouting }.map(\.noReplyRoute), [.replied])
+        _ = presentation.inboxRows
+        _ = presentation.inboxRows
+        XCTAssertEqual(journal.events.filter { $0.phase == .noReplyRouting }.map(\.noReplyRoute), [.replied],
+                       "Reading inbox rows does not create new routing events.")
 
         let session = U2ReplaySession(identity)
         session.result = .unsupported(operationID: receipt.opID)

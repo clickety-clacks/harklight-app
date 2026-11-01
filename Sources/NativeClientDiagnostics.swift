@@ -124,9 +124,9 @@ final class NativeClientDiagnosticJournal {
         let event = NativeClientDiagnosticEvent(area: .answer,
             phase: .noReplyRouting, transition: .observed,
             operationIDSource: operationIDSource,
+            noReplyRoute: route,
             operationID: correlatedOperationID,
-            request: request, requestRevision: revision,
-            noReplyRoute: route)
+            request: request, requestRevision: revision)
         if let previous = events.last(where: {
             $0.phase == .noReplyRouting && $0.requestTag == event.requestTag &&
                 $0.requestRevision == revision

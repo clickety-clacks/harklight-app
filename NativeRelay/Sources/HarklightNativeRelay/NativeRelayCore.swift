@@ -675,9 +675,9 @@ public actor NativeRelayCore {
             let noCommentSubmissions = submissions.filter(\.isNoComment)
             for submission in noCommentSubmissions {
                 diagnose(.answer, .noReplyResponseReceive, .began,
+                         operationIDSource: .localSubmission,
                          operationID: submission.operationID, request: submission.requestKey,
-                         revision: submission.requestRevision, receipt: .pendingUnconfirmed,
-                         operationIDSource: .localSubmission)
+                         revision: submission.requestRevision, receipt: .pendingUnconfirmed)
             }
             let reply: Data
             do {
@@ -699,9 +699,9 @@ public actor NativeRelayCore {
                 diagnose(.answer, .noReplyResponseReceive, .completed,
                          noReplyResponseClass: .frameReceived,
                          operationIDSource: .localSubmission,
+                         occurredAtMilliseconds: responseReceivedAt,
                          operationID: submission.operationID, request: submission.requestKey,
-                         revision: submission.requestRevision,
-                         occurredAtMilliseconds: responseReceivedAt)
+                         revision: submission.requestRevision)
             }
             try validate()
             let reconciliation: InboxReconciliationResponse
@@ -759,9 +759,9 @@ public actor NativeRelayCore {
                              revision: submission.requestRevision, receipt: .unknown)
                 }
                 diagnose(.answer, .noReplyOperationApply, .began,
+                         operationIDSource: .localSubmission,
                          operationID: submission.operationID, request: submission.requestKey,
-                         revision: submission.requestRevision, receipt: .pendingUnconfirmed,
-                         operationIDSource: .localSubmission)
+                         revision: submission.requestRevision, receipt: .pendingUnconfirmed)
             }
             do {
                 try store.saveInboxReceiptBatch(batch.batchID,
@@ -885,10 +885,10 @@ public actor NativeRelayCore {
                          noReplyResponseClass: .frameReceived,
                          operationIDSource: operationIDSource,
                          lifecycleSequence: lifecycle.event.sequence,
+                         occurredAtMilliseconds: responseReceivedAt,
                          operationID: lifecycle.submission?.operationID,
                          request: lifecycle.request,
-                         revision: lifecycle.submission?.requestRevision,
-                         occurredAtMilliseconds: responseReceivedAt)
+                         revision: lifecycle.submission?.requestRevision)
                 diagnose(.answer, .noReplyResponseDecode, .completed,
                          noReplyResponseClass: lifecycle.responseClass,
                          operationIDSource: operationIDSource,
@@ -1562,9 +1562,9 @@ public actor NativeRelayCore {
     private func diagnoseNoReplyApplyFailure(_ error: Error, for submission: Submission) {
         guard submission.isNoComment else { return }
         diagnose(.answer, .noReplyOperationApply, .failed, error: error,
+                 operationIDSource: .localSubmission,
                  operationID: submission.operationID, request: submission.requestKey,
-                 revision: submission.requestRevision, receipt: .unknown,
-                 operationIDSource: .localSubmission)
+                 revision: submission.requestRevision, receipt: .unknown)
     }
 
     private func retainReplayDiagnostics(for submissions: [Submission]) {
@@ -1617,9 +1617,9 @@ public actor NativeRelayCore {
             try validate()
             if submission.isNoComment {
                 diagnose(.answer, .noReplyOriginalOperation, .began,
+                         operationIDSource: .localSubmission,
                          operationID: submission.operationID, request: submission.requestKey,
-                         revision: submission.requestRevision, receipt: .pendingUnconfirmed,
-                         operationIDSource: .localSubmission)
+                         revision: submission.requestRevision, receipt: .pendingUnconfirmed)
             }
             diagnose(.answer, .originalOperationDelivery, .began,
                      operationID: submission.operationID, request: submission.requestKey,
@@ -1636,17 +1636,17 @@ public actor NativeRelayCore {
                 if submission.isNoComment {
                     diagnose(.answer, .noReplyOriginalOperation, .unresolved,
                              error: error,
+                             operationIDSource: .localSubmission,
                              operationID: submission.operationID, request: submission.requestKey,
-                             revision: submission.requestRevision, receipt: .unknown,
-                             operationIDSource: .localSubmission)
+                             revision: submission.requestRevision, receipt: .unknown)
                 }
                 throw error
             }
             if submission.isNoComment {
                 diagnose(.answer, .noReplyOperationApply, .began,
+                         operationIDSource: .localSubmission,
                          operationID: submission.operationID, request: submission.requestKey,
-                         revision: submission.requestRevision, receipt: .pendingUnconfirmed,
-                         operationIDSource: .localSubmission)
+                         revision: submission.requestRevision, receipt: .pendingUnconfirmed)
             }
             do {
                 try validate()
@@ -1815,10 +1815,10 @@ public actor NativeRelayCore {
                     terminalSequence = nil
                 }
                 diagnose(.answer, .noReplyOperationApply, applied,
-                         operationID: submission.operationID, request: submission.requestKey,
-                         revision: submission.requestRevision, receipt: receipt,
                          operationIDSource: .localSubmission,
-                         terminalSequence: terminalSequence)
+                         terminalSequence: terminalSequence,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: receipt)
             }
         }
         return attempted
