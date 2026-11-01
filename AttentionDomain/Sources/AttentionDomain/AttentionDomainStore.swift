@@ -1864,6 +1864,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                      nextCursor: String?,
                                      receiptCursor: String?,
                                      context suppliedContext: ProfileContext) throws {
+        var validationRejection: ConversationValidationRejection?
+        try saveInboxInitialPage(snapshotID: snapshotID, highWater: highWater, items: items,
+            nextCursor: nextCursor, receiptCursor: receiptCursor, context: suppliedContext,
+            validationRejection: &validationRejection)
+    }
+
+    public func saveInboxInitialPage(snapshotID: String,
+                                     highWater: UInt64,
+                                     items: [InboxSnapshotItem],
+                                     nextCursor: String?,
+                                     receiptCursor: String?,
+                                     context suppliedContext: ProfileContext,
+                                     validationRejection: inout ConversationValidationRejection?) throws {
+        validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -1897,7 +1911,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
             return
         }
         var next = state
-        for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        do {
+            for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        } catch let error as ConversationValidationRejectionError {
+            validationRejection = error.rejection
+            throw ConversationError.invalidBinding
+        }
         candidate.snapshotID = snapshotID
         candidate.highWater = highWater
         candidate.nextCursor = nextCursor
@@ -1946,6 +1965,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    items: [InboxSnapshotItem],
                                    nextCursor: String?,
                                    context suppliedContext: ProfileContext) throws {
+        var validationRejection: ConversationValidationRejection?
+        try saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater, cursor: cursor,
+            items: items, nextCursor: nextCursor, context: suppliedContext,
+            validationRejection: &validationRejection)
+    }
+
+    public func saveInboxOlderPage(snapshotID: String,
+                                   highWater: UInt64,
+                                   cursor: String,
+                                   items: [InboxSnapshotItem],
+                                   nextCursor: String?,
+                                   context suppliedContext: ProfileContext,
+                                   validationRejection: inout ConversationValidationRejection?) throws {
+        validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -1968,7 +2001,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
               keys.allSatisfy({ !checkpoint.loadedKeys.contains($0) }),
               nextCursor != cursor else { throw AttentionStoreError.inboxPageConflict }
         var next = state
-        for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        do {
+            for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        } catch let error as ConversationValidationRejectionError {
+            validationRejection = error.rejection
+            throw ConversationError.invalidBinding
+        }
         let previousSourceOrder: [RequestKey]
         if let sourceOrder = checkpoint.sourceOrder {
             previousSourceOrder = sourceOrder

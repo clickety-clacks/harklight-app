@@ -22,6 +22,7 @@ final class ConversationRelayTests: XCTestCase {
         let authenticatedIdentity: ProfileIdentity
         var ordinary: [Data] = []
         var conversation: [Data] = []
+        var inboxStartItemsJSON: String?
         var ordinaryACKs: [Data] = []
         var conversationACKs: [Data] = []
         var conversationReadPositionRequests: [Data] = []
@@ -55,6 +56,14 @@ final class ConversationRelayTests: XCTestCase {
         func acknowledge(_ request: Data) async throws {
             try onOrdinaryACK?()
             ordinaryACKs.append(request)
+        }
+        func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+            let value = try JSONValue.parse(request)
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start",
+               let items = inboxStartItemsJSON {
+                return data(#"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"held-fact-snapshot","high_water":1,"items":\#(items),"next_cursor":null,"receipt_cursor":null}"#)
+            }
+            return try await emptyInboxReply(request, ref: ref)
         }
         func nextPostCheckpointInboxEvent() async throws -> Data {
             try await withCheckedThrowingContinuation { continuation in
@@ -208,6 +217,44 @@ final class ConversationRelayTests: XCTestCase {
         })
         XCTAssertEqual(drainFailure.postAckFailureStep, .replayConversationsAndAcknowledge)
         XCTAssertEqual(drainFailure.postAckFailureErrorCode, "conversation_invalid_binding")
+        await core.deactivate()
+    }
+
+    func testInboxPageOpeningThreadPreservesHeldFactValidationErrorAndDetails() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("local-person"), deviceID: ExactText("reader"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        try store.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .delivered(turn: ExactText("missing-turn"))), context: context)
+
+        let session = Session(identity)
+        session.inboxStartItemsJSON = #"[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1}}]"#
+        let diagnostics = DiagnosticCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: { diagnostics.append($0) })
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("An inbox delivery must preserve the held-fact invalidBinding rejection.")
+        } catch let error as ConversationError {
+            XCTAssertEqual(error, .invalidBinding)
+        }
+
+        let event = try XCTUnwrap(diagnostics.events.first { $0.phase == .inboxPage })
+        XCTAssertEqual(event.transition, .failed)
+        XCTAssertEqual(event.causeCode, "conversation_invalid_binding")
+        XCTAssertEqual(event.conversationValidationRejection?.guardID, .referencedTurnExists)
+        XCTAssertEqual(event.conversationValidationRejection?.eventKind, .receipt)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 0)
+        let conversationSnapshot = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(conversationSnapshot.cursor, 1)
+        XCTAssertNil(conversationSnapshot.threads[key])
+        XCTAssertTrue(session.ordinaryACKs.isEmpty)
         await core.deactivate()
     }
 

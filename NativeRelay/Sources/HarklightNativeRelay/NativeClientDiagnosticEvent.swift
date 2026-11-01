@@ -27,6 +27,7 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case webSocketOpen
     case relayAdmission
     case ordinaryReplay
+    case inboxPage
     case conversationReplay
     case conversationReadPosition
     case acknowledgement

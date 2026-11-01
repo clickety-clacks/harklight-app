@@ -538,8 +538,18 @@ public actor NativeRelayCore {
             try validate()
             let page = try inboxWire.decodePage(reply, ref: ref,
                                                 snapshotID: snapshotID, highWater: highWater)
-            try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
-                cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context)
+            var validationRejection: ConversationValidationRejection?
+            do {
+                try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
+                    cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context,
+                    validationRejection: &validationRejection)
+            } catch {
+                if let validationRejection {
+                    diagnoseInboxPageValidationFailure(validationRejection)
+                    throw ConversationError.invalidBinding
+                }
+                throw error
+            }
             return true
         } catch {
             throw error
@@ -617,10 +627,19 @@ public actor NativeRelayCore {
                                      ref: startRef), ref: startRef)
             try validate()
             let firstPage = try inboxWire.decodeStart(startReply, ref: startRef)
-            try store.saveInboxInitialPage(snapshotID: firstPage.snapshotID,
-                highWater: firstPage.highWater, items: firstPage.items,
-                nextCursor: firstPage.nextCursor, receiptCursor: firstPage.receiptCursor,
-                context: context)
+            var validationRejection: ConversationValidationRejection?
+            do {
+                try store.saveInboxInitialPage(snapshotID: firstPage.snapshotID,
+                    highWater: firstPage.highWater, items: firstPage.items,
+                    nextCursor: firstPage.nextCursor, receiptCursor: firstPage.receiptCursor,
+                    context: context, validationRejection: &validationRejection)
+            } catch {
+                if let validationRejection {
+                    diagnoseInboxPageValidationFailure(validationRejection)
+                    throw ConversationError.invalidBinding
+                }
+                throw error
+            }
         }
 
         let eligible = try await prepareInboxCandidate(using: transport)
@@ -1886,6 +1905,11 @@ public actor NativeRelayCore {
             operationID: operationID, request: request,
             requestRevision: revision, receiptState: receipt,
             occurredAtMilliseconds: occurredAtMilliseconds ?? NativeClientDiagnosticEvent.nowMilliseconds()))
+    }
+
+    private func diagnoseInboxPageValidationFailure(_ rejection: ConversationValidationRejection) {
+        diagnose(.relay, .inboxPage, .failed, error: ConversationError.invalidBinding,
+            conversationValidationRejection: rejection)
     }
 
     private func validatedRelayCursor() throws -> UInt64 {
