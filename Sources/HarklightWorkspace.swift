@@ -193,7 +193,7 @@ struct InboxRequestRow: Identifiable {
     let status: String
     var senderDisplayName: String? = nil
     var bodyText: String? = nil
-    var symbol: String = "text.bubble"
+    var symbol: String = "envelope"
     var isResolved = false
     var createdAt: Date? = nil
     var isLocalExample = false
@@ -1007,7 +1007,7 @@ struct InboxList: View {
             }
         } ?? String(localized: "Sender")
         return HStack(spacing: 10) {
-            Image(systemName: "bubble.left.and.bubble.right")
+            Image(systemName: "square.stack")
                 .foregroundStyle(designPalette.neutral.secondaryTextColor)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
@@ -1356,7 +1356,7 @@ struct InboxTierReferenceScreen: View {
             InboxRequestRow(key: RequestKey(accountScope: ExactText("reference"),
                                             senderID: ExactText(sender), messageID: ExactText(id)),
                             title: title, sender: sender, status: "", bodyText: longBody,
-                            symbol: "text.bubble", createdAt: date(daysAgo),
+                            symbol: "envelope", createdAt: date(daysAgo),
                             initials: initials, tier: tier)
         }
         let deadline = Int(now.addingTimeInterval(60 * 60).timeIntervalSince1970 * 1_000)

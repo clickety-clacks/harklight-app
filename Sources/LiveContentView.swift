@@ -338,13 +338,8 @@ struct LiveContentView: View {
             ContentUnavailableView(loadError, systemImage: "exclamationmark.triangle")
         } else {
             HarklightInbox(
-                requests: store.inboxRows.map { row in
-                    var row = row
-                    if store.conversation(for: row.key) != nil {
-                        row.chatUnread = store.hasUnreadAgentReply(row.key)
-                    }
-                    return row
-                }, showsBasicOrderMarker: store.presentation.showsBasicOrderMarker,
+                requests: store.inboxRows,
+                showsBasicOrderMarker: store.presentation.showsBasicOrderMarker,
                 samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { key, revision in markSeen(key, requestRevision: revision) },
                 markNoCommentRequest: { key, revision in
