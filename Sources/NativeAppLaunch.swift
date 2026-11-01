@@ -1610,8 +1610,7 @@ final class LivePresentationStore {
     private func makeInboxRow(for request: PresentedRequest) -> InboxRequestRow? {
         let retracted = isRetracted(request)
         if retracted, clearedRetractions.contains(request.key) { return nil }
-        let hasKnownDeliveryFailure = failedResponseWarning(for: request.key,
-            revision: request.requestRevision) != nil
+        let hasKnownDeliveryFailure = failedResponseWarning(for: request) != nil
         let hasDeliveryWarning = hasKnownDeliveryFailure || request.staleAnswerRevision != nil
         let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
             request.receiptFacts?.ownOutcome == .unconfirmed &&
@@ -1764,10 +1763,14 @@ final class LivePresentationStore {
     func failedResponseWarning(for key: RequestKey,
                                revision: UInt64? = nil) -> FailedResponseWarning? {
         guard let request = request(for: key),
-              revision == nil || request.requestRevision == revision,
-              request.informationalSeenStatus == nil,
+              revision == nil || request.requestRevision == revision else { return nil }
+        return failedResponseWarning(for: request)
+    }
+
+    private func failedResponseWarning(for request: PresentedRequest) -> FailedResponseWarning? {
+        guard request.informationalSeenStatus == nil,
               request.staleAnswerRevision == nil else { return nil }
-        if let warning = failedResponseWarnings[key],
+        if let warning = failedResponseWarnings[request.key],
            warning.requestRevision == request.requestRevision {
             return warning
         }
