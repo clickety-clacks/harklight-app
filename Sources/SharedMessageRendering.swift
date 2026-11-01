@@ -363,7 +363,6 @@ struct SenderIllustrationCanvas: View {
         let label = Text("Picture could not\nbe shown")
             .font(.system(size: fontSize, weight: .medium))
             .foregroundColor(.primary)
-            .multilineTextAlignment(.center)
         fallbackContext.draw(label, at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
     }
 
