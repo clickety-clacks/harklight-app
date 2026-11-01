@@ -247,6 +247,19 @@ public enum InboxMessagePriority: String, Equatable, Codable, Sendable {
     case now
 }
 
+/// A sender-stated message purpose. This is projected only from the exact
+/// top-level `message_type` member; answer controls do not imply a type.
+public enum MessageTypeValue: String, Equatable, Sendable {
+    case fyi
+    case request
+}
+
+/// A sender-stated message kind, independent of its answer controls and priority.
+public enum MessageKindValue: String, Equatable, Sendable {
+    case blocker
+    case success
+}
+
 /// The subset of top-level choice styles that has a stock control treatment.
 /// Unknown styles intentionally map to the ordinary presentation.
 public enum MessageChoiceStyle: String, Equatable, Codable, Sendable {
@@ -366,6 +379,24 @@ public struct StoredRequest: Equatable, Codable, Sendable {
     /// Optional sender-chosen display text. It never supplies request identity.
     public var senderDisplayName: ExactText? {
         originalPayload.uniqueValue(named: "display_name")?.stringValue
+    }
+
+    /// Explicit top-level type metadata. Missing, duplicate, or unrecognized
+    /// values remain untyped; the answer descriptor is never inspected here.
+    public var messageType: MessageTypeValue? {
+        guard let rawValue = originalPayload.uniqueValue(named: "message_type")?.stringValue?.rawValue else {
+            return nil
+        }
+        return MessageTypeValue(rawValue: rawValue)
+    }
+
+    /// Explicit top-level kind metadata. Missing, duplicate, or unrecognized
+    /// values are presented with no kind.
+    public var messageKind: MessageKindValue? {
+        guard let rawValue = originalPayload.uniqueValue(named: "message_kind")?.stringValue?.rawValue else {
+            return nil
+        }
+        return MessageKindValue(rawValue: rawValue)
     }
 
     /// Sender-authored creation time, retained in the original message as Unix

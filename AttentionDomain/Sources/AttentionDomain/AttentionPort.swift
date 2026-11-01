@@ -308,6 +308,10 @@ public struct PresentedRequest: Equatable, Sendable {
     public let intentReceipt: IntentReceipt?
     public let projection: AdmittedRequestProjection
     public let informationalSeenStatus: InformationalSeenStatus?
+    /// Explicit sender-stated message type, if recognized from the current message.
+    public let messageType: MessageTypeValue?
+    /// Explicit sender-stated message kind, if recognized from the current message.
+    public let messageKind: MessageKindValue?
     /// The server's account-wide terminal outcome, when supported.
     public let accountAnswerOutcome: AccountAnswerOutcome?
     /// The first value action matching a default outcome in the current revision.
@@ -357,6 +361,8 @@ public struct PresentedRequest: Equatable, Sendable {
                 intentReceipt: IntentReceipt?,
                 projection: AdmittedRequestProjection,
                 informationalSeenStatus: InformationalSeenStatus? = nil,
+                messageType: MessageTypeValue? = nil,
+                messageKind: MessageKindValue? = nil,
                 accountAnswerOutcome: AccountAnswerOutcome? = nil,
                 defaultAnswerAction: ProjectedActionReference? = nil,
                 attentionTier: AttentionTier = .middle,
@@ -388,6 +394,8 @@ public struct PresentedRequest: Equatable, Sendable {
         self.intentReceipt = intentReceipt
         self.projection = projection
         self.informationalSeenStatus = informationalSeenStatus
+        self.messageType = messageType
+        self.messageKind = messageKind
         self.accountAnswerOutcome = accountAnswerOutcome
         self.defaultAnswerAction = defaultAnswerAction
         self.attentionTier = attentionTier
@@ -1208,6 +1216,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
                                     status: status, remote: remote, submission: submission),
+                                messageType: request.messageType,
+                                messageKind: request.messageKind,
                                 accountAnswerOutcome: remote?.accountAnswerOutcome,
                                 defaultAnswerAction: defaultAnswerAction,
                                 attentionTier: .middle,

@@ -1210,6 +1210,11 @@ struct LiveRequestDetail: View {
                         .accessibilityLabel(Text(priorityLabel.title))
                         .accessibilityIdentifier("request-priority")
                 }
+                if request.messageType != nil || request.messageKind != nil {
+                    MessageMetadataBadges(messageType: request.messageType,
+                                          messageKind: request.messageKind,
+                                          containsChildAccessibilityElements: true)
+                }
                 if let deadline = byWhenDate {
                     Label("Deadline · \(deadline.formatted(date: .omitted, time: .shortened))",
                           systemImage: "calendar")
@@ -2312,45 +2317,51 @@ private struct LiveCompatibilityActions: View {
                 }
             }
         } else if let seenStatus = request.informationalSeenStatus {
-            switch seenStatus {
-            case .available, .pending, .confirmed:
-                Button {
-                    guard seenStatus == .available, let action = actions.first else { return }
-                    if let onSeen {
-                        onSeen(action.id)
-                    } else {
-                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id,
-                                             requestRevision: request.requestRevision)
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: seenActionSymbol)
-                            .foregroundStyle(seenActionColor)
-                        if seenActionIsComplete {
-                            Text("Seen").foregroundStyle(seenActionColor)
-                        } else if seenActionIsPending {
-                            Text(seenActionPresentation.title).foregroundStyle(seenActionColor)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("FYI", systemImage: "info.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(detailColors.secondaryTextColor)
+                    .accessibilityIdentifier("request-seen-form-label")
+                switch seenStatus {
+                case .available, .pending, .confirmed:
+                    Button {
+                        guard seenStatus == .available, let action = actions.first else { return }
+                        if let onSeen {
+                            onSeen(action.id)
                         } else {
-                            Text(actions.first?.label.rawValue ?? "Seen")
-                                .foregroundStyle(seenActionColor)
+                            store.submitFromUser(request.key, explicitCompatibilityAction: action.id,
+                                                 requestRevision: request.requestRevision)
                         }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: seenActionSymbol)
+                                .foregroundStyle(seenActionColor)
+                            if seenActionIsComplete {
+                                Text("Seen").foregroundStyle(seenActionColor)
+                            } else if seenActionIsPending {
+                                Text(seenActionPresentation.title).foregroundStyle(seenActionColor)
+                            } else {
+                                Text(actions.first?.label.rawValue ?? "Seen")
+                                    .foregroundStyle(seenActionColor)
+                            }
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 50)
                     }
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .buttonStyle(.glass)
+                    .tint(seenActionColor)
+                    .disabled(sendDisabled || seenStatus != .available)
+                    .opacity(seenActionIsComplete ? 0.76 : (sendDisabled ? 0.48 : 1))
+                    .accessibilityLabel(Text(localExample?.localSeenSelected == true
+                                             ? "Seen with green checkmark"
+                                             : seenActionPresentation.accessibilityLabel))
+                    .accessibilityValue(Text(localExample?.localSeenSelected == true
+                                             ? "Completed"
+                                             : seenActionPresentation.accessibilityValue))
+                    .accessibilityIdentifier("request-seen-action")
+                case .resolvedWithoutSeen:
+                    Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
                 }
-                .buttonStyle(.glass)
-                .tint(seenActionColor)
-                .disabled(sendDisabled || seenStatus != .available)
-                .opacity(seenActionIsComplete ? 0.76 : (sendDisabled ? 0.48 : 1))
-                .accessibilityLabel(Text(localExample?.localSeenSelected == true
-                                         ? "Seen with green checkmark"
-                                         : seenActionPresentation.accessibilityLabel))
-                .accessibilityValue(Text(localExample?.localSeenSelected == true
-                                         ? "Completed"
-                                         : seenActionPresentation.accessibilityValue))
-                .accessibilityIdentifier("request-seen-action")
-            case .resolvedWithoutSeen:
-                Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
             }
         } else {
             VStack(alignment: .leading, spacing: 10) {

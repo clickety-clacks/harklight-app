@@ -1641,6 +1641,8 @@ final class LivePresentationStore {
                         : cachedOperationStatus(request.intentReceipt?.localState))
                 : nil,
             informationalSeenStatus: request.informationalSeenStatus,
+            declaredMessageType: request.messageType,
+            declaredMessageKind: request.messageKind,
             canMarkSeen: !isReadOnly &&
                 !retracted && request.lifecycleStatus == .open &&
                 request.intentReceipt == nil && request.informationalSeenStatus == .available,

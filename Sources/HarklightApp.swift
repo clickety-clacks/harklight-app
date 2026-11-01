@@ -49,6 +49,17 @@ struct HarklightApp: App {
         return 0
     }
 
+    /// UI acceptance screenshots can exercise both values consumed by SwiftUI
+    /// without changing the simulator's system accessibility setting.
+    private var acceptanceReduceMotionOverride: Bool? {
+        #if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--harklight-test-reduce-motion-on") { return true }
+        if arguments.contains("--harklight-test-reduce-motion-off") { return false }
+        #endif
+        return nil
+    }
+
     var body: some Scene {
         WindowGroup {
             @Bindable var releaseNotes = self.releaseNotes
@@ -88,6 +99,7 @@ struct HarklightApp: App {
                     }
                 }
             }
+            .modifier(AcceptanceReduceMotionOverride(isEnabled: acceptanceReduceMotionOverride))
             .task {
                 if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }
             }
@@ -123,6 +135,19 @@ struct HarklightApp: App {
                     ReleaseNotesSheet(notes: releaseNotes.notesToShow)
                 }
             }
+        }
+    }
+}
+
+private struct AcceptanceReduceMotionOverride: ViewModifier {
+    let isEnabled: Bool?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let isEnabled {
+            content.environment(\.harklightReduceMotionOverride, isEnabled)
+        } else {
+            content
         }
     }
 }

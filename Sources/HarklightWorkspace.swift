@@ -199,6 +199,8 @@ struct InboxRequestRow: Identifiable {
     var isLocalExample = false
     var localStatus: String? = nil
     var informationalSeenStatus: InformationalSeenStatus? = nil
+    var declaredMessageType: MessageTypeValue? = nil
+    var declaredMessageKind: MessageKindValue? = nil
     var canMarkSeen = false
     var canNoComment = false
     var noCommentUnavailable = false
@@ -746,7 +748,11 @@ struct InboxList: View {
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
     let triggerNotification: (() -> Void)?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
+    private var reduceMotion: Bool {
+        reduceMotionOverride ?? systemReduceMotion
+    }
     @Environment(\.colorScheme) private var colorScheme
     @State private var canRequestOlderPageOnDrag = false
     @State private var isUserScrolling = false
@@ -1240,6 +1246,10 @@ struct InboxRowContent: View {
                         .foregroundStyle(palette.neutral.secondaryTextColor)
                         .accessibilityLabel("Seen")
                 }
+            }
+            if row.declaredMessageType != nil || row.declaredMessageKind != nil {
+                MessageMetadataBadges(messageType: row.declaredMessageType,
+                                      messageKind: row.declaredMessageKind)
             }
             if let bodyText = row.bodyText, !bodyText.isEmpty {
                 Text(bodyText)

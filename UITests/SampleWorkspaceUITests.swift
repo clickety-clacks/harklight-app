@@ -10,6 +10,67 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testSuccessMessageKindAppearsInInboxAndDetail() {
+        for (motionLabel, motionArgument) in [
+            ("off", "--harklight-test-reduce-motion-off"),
+            ("on", "--harklight-test-reduce-motion-on")
+        ] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                                  "--harklight-message-kind-acceptance", motionArgument]
+            app.launch()
+            XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+
+            enterSearch("Release package", in: app)
+            let row = app.descendants(matching: .any)["sample-message-kind-success"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(row.label.contains("FYI"), row.label)
+            XCTAssertTrue(row.label.contains("Success"), row.label)
+            capture("Success kind inbox · Reduce Motion \(motionLabel)", app)
+
+            row.tap()
+            XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(app.descendants(matching: .any)["message-type-fyi"].exists,
+                          app.debugDescription)
+            XCTAssertTrue(app.descendants(matching: .any)["message-kind-success"].exists,
+                          app.debugDescription)
+            XCTAssertTrue(app.buttons["request-seen-action"].exists,
+                          "The FYI label leaves the existing Seen action available.")
+            XCTAssertTrue(app.descendants(matching: .any)["request-seen-form-label"].exists,
+                          "The legacy Seen-only form is separately labelled FYI.")
+            capture("Success kind detail · Reduce Motion \(motionLabel)", app)
+
+            showList(app)
+            enterSearch("A note for the studio journal", in: app)
+            let requestRow = app.descendants(matching: .any)["sample-note-0"]
+            XCTAssertTrue(requestRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(requestRow.label.contains("Request"), requestRow.label)
+            XCTAssertTrue(requestRow.label.contains("Blocker"), requestRow.label)
+            requestRow.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["message-type-request"].waitForExistence(timeout: 5),
+                          app.debugDescription)
+            XCTAssertTrue(app.descendants(matching: .any)["message-kind-blocker"].exists,
+                          app.debugDescription)
+            XCTAssertTrue(app.buttons["Reply"].exists,
+                          "The existing Reply action remains available for a typed request.")
+
+            showList(app)
+            enterSearch("review moved to Thursday", in: app)
+            let legacySeen = app.descendants(matching: .any)["sample-information-0"]
+            XCTAssertTrue(legacySeen.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertFalse(legacySeen.label.contains("FYI"),
+                           "The Seen descriptor does not create a stored type label.")
+            legacySeen.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["request-seen-form-label"].waitForExistence(timeout: 5),
+                          app.debugDescription)
+            XCTAssertFalse(app.descendants(matching: .any)["message-type-fyi"].exists,
+                           "An untyped legacy Seen message remains untyped.")
+            XCTAssertTrue(app.buttons["request-seen-action"].exists,
+                          "The original Seen button remains available.")
+            app.terminate()
+        }
+    }
+
     func testMessageDetailDetectedURLUsesSystemHandlerAndBodyCanBeCopied() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
