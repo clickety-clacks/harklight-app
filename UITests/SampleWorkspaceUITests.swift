@@ -22,7 +22,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
 
             enterSearch("Release package", in: app)
-            let row = app.descendants(matching: .any)["request-row-sample-message-kind-success"]
+            let row = app.descendants(matching: .any)["sample-message-kind-success"]
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(row.label.contains("FYI"), row.label)
             XCTAssertTrue(row.label.contains("Success"), row.label)
