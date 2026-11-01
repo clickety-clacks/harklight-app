@@ -96,6 +96,295 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
     }
 }
 
+private struct ServerNoCommentCapture: Decodable, Sendable {
+    struct Source: Decodable, Sendable {
+        let serverBaseCommit: String
+        let serverBaseTree: String
+        let fixtureCommit: String
+        let fixtureTree: String
+        let fixtureSHA256: String
+
+        enum CodingKeys: String, CodingKey {
+            case serverBaseCommit = "server_base_commit"
+            case serverBaseTree = "server_base_tree"
+            case fixtureCommit = "fixture_commit"
+            case fixtureTree = "fixture_tree"
+            case fixtureSHA256 = "fixture_sha256"
+        }
+    }
+
+    struct Exchange: Decodable, Sendable {
+        let stage: String
+        let request: String
+        let frames: [String]
+    }
+
+    let captureVersion: Int
+    let source: Source
+    let senderID: String
+    let messageID: String
+    let requestRevision: UInt64
+    let localOperationID: String
+    let directCaptureBoundary: String
+    let exchanges: [Exchange]
+
+    enum CodingKeys: String, CodingKey {
+        case captureVersion = "capture_version"
+        case source
+        case senderID = "sender_id"
+        case messageID = "message_id"
+        case requestRevision = "request_revision"
+        case localOperationID = "local_operation_id"
+        case directCaptureBoundary = "direct_capture_boundary"
+        case exchanges
+    }
+
+    static func loadForFocusedTest() throws -> ServerNoCommentCapture {
+        guard let path = ProcessInfo.processInfo.environment["HARKLIGHT_NO_COMMENT_CAPTURE_JSON"],
+              !path.isEmpty else {
+            throw XCTSkip("Requires the generated Server no-comment capture supplied through HARKLIGHT_NO_COMMENT_CAPTURE_JSON.")
+        }
+        guard path.hasPrefix("/") else {
+            throw XCTSkip("The Server no-comment capture path must be absolute.")
+        }
+        return try JSONDecoder().decode(Self.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+    }
+
+    func exchange(_ stage: String) throws -> Exchange {
+        try XCTUnwrap(exchanges.first { $0.stage == stage }, "Missing Server capture stage: \(stage)")
+    }
+
+    func assertBoundToReviewedServerFixture() throws {
+        XCTAssertEqual(captureVersion, 2)
+        XCTAssertEqual(source.serverBaseCommit, "69a47d9aa45b2a1bb6717a212069f173f37db58a")
+        XCTAssertEqual(source.serverBaseTree, "0e6733ae764b394312c900411125286434df7b34")
+        XCTAssertEqual(source.fixtureCommit, "532656878a92d5cbc5633dda2f11fb334d782e5c")
+        XCTAssertEqual(source.fixtureTree, "4ee757097ff767f0b73cfac69f6e1ef25febb6e5")
+        XCTAssertEqual(source.fixtureSHA256, "1b597105b4342e848da4969afe9db28fb5df7eea5d79636c512f082a02668f39")
+        XCTAssertEqual(requestRevision, 2)
+        XCTAssertEqual(directCaptureBoundary, "through_matching_lifecycle")
+        XCTAssertNotNil(UUID(uuidString: localOperationID))
+        XCTAssertEqual(exchanges.map(\.stage), [
+            "seed", "revision", "initial", "checkpoint", "attach", "ack",
+            "conversation", "conversation_ack", "direct", "recovered", "reconciliation"
+        ])
+
+        let initial = try exchange("initial")
+        let initialValues = try initial.frames.map { try JSONValue.parse(Data($0.utf8)) }
+        let initialSnapshot = try XCTUnwrap(initialValues.first {
+            $0.uniqueValue(named: "type")?.stringValue == ExactText("ok")
+        })
+        let initialItems = try XCTUnwrap(initialSnapshot.uniqueValue(named: "items")?.arrayValues)
+        let initialAcceptance = try XCTUnwrap(initialItems.first?.uniqueValue(named: "acceptance"))
+        XCTAssertEqual(initialAcceptance.uniqueValue(named: "sender_id")?.stringValue?.rawValue, senderID)
+        XCTAssertEqual(initialAcceptance.uniqueValue(named: "message_id")?.stringValue?.rawValue, messageID)
+        XCTAssertEqual(initialAcceptance.uniqueValue(named: "request_revision")?.integerValue, 1)
+
+        let conversation = try exchange("conversation")
+        let conversationRequest = try JSONValue.parse(Data(conversation.request.utf8))
+        XCTAssertEqual(conversationRequest.uniqueValue(named: "type")?.stringValue,
+                       ExactText("conversation_open"))
+        XCTAssertEqual(conversationRequest.uniqueValue(named: "since")?.integerValue, 0)
+        let conversationValues = try conversation.frames.map { try JSONValue.parse(Data($0.utf8)) }
+        let conversationRevision = try XCTUnwrap(conversationValues.first {
+            $0.uniqueValue(named: "type")?.stringValue == ExactText("conversation") &&
+                $0.uniqueValue(named: "kind")?.stringValue == ExactText("revision") &&
+                $0.uniqueValue(named: "message_id")?.stringValue?.rawValue == messageID
+        })
+        XCTAssertEqual(conversationRevision.uniqueValue(named: "request_revision")?.integerValue, 2)
+        let conversationReplyIndex = try XCTUnwrap(conversationValues.firstIndex {
+            $0.uniqueValue(named: "type")?.stringValue == ExactText("ok") &&
+                $0.uniqueValue(named: "ref")?.stringValue == ExactText("native-conversation-sync")
+        })
+        let conversationRevisionIndex = try XCTUnwrap(conversationValues.firstIndex(of: conversationRevision))
+        let conversationResyncedIndex = try XCTUnwrap(conversationValues.firstIndex {
+            $0.uniqueValue(named: "type")?.stringValue == ExactText("conversation_resynced")
+        })
+        XCTAssertLessThan(conversationReplyIndex, conversationRevisionIndex)
+        XCTAssertLessThan(conversationRevisionIndex, conversationResyncedIndex)
+
+        let direct = try exchange("direct")
+        let directRequest = try JSONValue.parse(Data(direct.request.utf8))
+        XCTAssertEqual(directRequest.uniqueValue(named: "type")?.stringValue, ExactText("answer_no_comment"))
+        XCTAssertEqual(directRequest.uniqueValue(named: "request_id")?.stringValue?.rawValue, messageID)
+        XCTAssertEqual(directRequest.uniqueValue(named: "request_revision")?.integerValue, 2)
+        XCTAssertNil(directRequest.uniqueValue(named: "op_id"), "The direct answer request has no wire operation ID.")
+
+        let directValues = try direct.frames.map { try JSONValue.parse(Data($0.utf8)) }
+        let accepted = try XCTUnwrap(directValues.first {
+            $0.uniqueValue(named: "type")?.stringValue == ExactText("ok")
+        })
+        let sequence = accepted.uniqueValue(named: "seq")?.integerValue
+        XCTAssertNotNil(sequence)
+        XCTAssertEqual(accepted.uniqueValue(named: "terminal_kind")?.stringValue, ExactText("no_comment"))
+        for key in ["op_id", "ref", "request_id", "request_revision", "sender_id", "message_id"] {
+            XCTAssertNil(accepted.uniqueValue(named: key), "Direct success must not echo \(key).")
+        }
+        let matchingLifecycle = try XCTUnwrap(directValues.first {
+            $0.uniqueValue(named: "type")?.stringValue == ExactText("lifecycle") &&
+                $0.uniqueValue(named: "seq")?.integerValue == sequence
+        })
+        XCTAssertEqual(matchingLifecycle.uniqueValue(named: "terminal_kind")?.stringValue,
+                       ExactText("no_comment"))
+        XCTAssertEqual(matchingLifecycle.uniqueValue(named: "message_id")?.stringValue?.rawValue, messageID)
+        XCTAssertEqual(matchingLifecycle.uniqueValue(named: "request_revision")?.integerValue, 2)
+        XCTAssertGreaterThan(try XCTUnwrap(directValues.firstIndex(of: matchingLifecycle)),
+                             try XCTUnwrap(directValues.firstIndex(of: accepted)))
+
+        let reconcile = try exchange("reconciliation")
+        let recovered = try exchange("recovered")
+        let recoveredReply = try JSONValue.parse(Data(try XCTUnwrap(recovered.frames.first).utf8))
+        let reconcileRequest = try JSONValue.parse(Data(reconcile.request.utf8))
+        XCTAssertEqual(reconcileRequest.uniqueValue(named: "snapshot_id"),
+                       recoveredReply.uniqueValue(named: "snapshot_id"))
+        let operations = try XCTUnwrap(reconcileRequest.uniqueValue(named: "operations")?.arrayValues)
+        XCTAssertEqual(operations.count, 1)
+        XCTAssertEqual(operations[0].uniqueValue(named: "op_id")?.stringValue?.rawValue, localOperationID)
+        let operationMembers = try XCTUnwrap(operations[0].objectMembers)
+        XCTAssertEqual(Set(operationMembers.map { $0.key.rawValue }),
+                       Set(["type", "request_id", "request_revision", "op_id"]))
+        let directRequest = try JSONValue.parse(Data(direct.request.utf8))
+        XCTAssertEqual(.object(operationMembers.filter { $0.key.rawValue != "op_id" }), directRequest)
+        let reconciliationResponse = try JSONValue.parse(Data(try XCTUnwrap(reconcile.frames.first).utf8))
+        let results = try XCTUnwrap(reconciliationResponse.uniqueValue(named: "results")?.arrayValues)
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results[0].uniqueValue(named: "op_id")?.stringValue?.rawValue, localOperationID)
+    }
+}
+
+private final class ServerNoCommentCaptureRouter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let capture: ServerNoCommentCapture
+    private var inboxStartCount = 0
+
+    init(capture: ServerNoCommentCapture) {
+        self.capture = capture
+    }
+
+    func reply(to rawRequest: String) -> [String] {
+        guard let request = try? JSONValue.parse(Data(rawRequest.utf8)),
+              let type = request.uniqueValue(named: "type")?.stringValue?.rawValue else { return [] }
+        switch type {
+        case "inbox_start":
+            lock.lock()
+            let stage = inboxStartCount == 0 ? "initial" : "recovered"
+            inboxStartCount += 1
+            lock.unlock()
+            return correlatedFrames(stage, request: request, key: "ref")
+        case "inbox_checkpoint_ack":
+            return correlatedFrames("checkpoint", request: request, key: "ref")
+        case "inbox_attach":
+            return correlatedFrames("attach", request: request, key: "ref")
+        case "ack":
+            return correlatedFrames("ack", request: request, key: "ref")
+        case "conversation_open":
+            return correlatedFrames("conversation", request: request, key: "ref")
+        case "conversation_ack":
+            return correlatedFrames("conversation_ack", request: request, key: "ref")
+        case "answer_no_comment":
+            return directSuccess(for: request)
+        case "inbox_reconcile":
+            return reconciliationReply(for: request)
+        default:
+            return []
+        }
+    }
+
+    private func correlatedFrames(_ stage: String, request: JSONValue, key: String) -> [String] {
+        guard let correlation = request.uniqueValue(named: key) else { return [] }
+        let exchange = try? capture.exchange(stage)
+        return exchange?.frames.compactMap { raw in
+            guard let value = try? JSONValue.parse(Data(raw.utf8)) else { return nil }
+            guard value.uniqueValue(named: key) != nil else { return raw }
+            guard let updated = Self.replacing([key: correlation], in: value) else { return nil }
+            return updated.jsonString + "\n"
+        } ?? []
+    }
+
+    private func directSuccess(for request: JSONValue) -> [String] {
+        guard let exchange = try? capture.exchange("direct"),
+              let capturedRequest = try? JSONValue.parse(Data(exchange.request.utf8)),
+              request.uniqueValue(named: "request_id") == capturedRequest.uniqueValue(named: "request_id"),
+              request.uniqueValue(named: "request_revision") == capturedRequest.uniqueValue(named: "request_revision"),
+              request.uniqueValue(named: "op_id") == nil,
+              exchange.frames.contains(where: {
+                  (try? JSONValue.parse(Data($0.utf8)))?.uniqueValue(named: "type")?.stringValue == ExactText("ok")
+              }) else { return [] }
+        return exchange.frames
+    }
+
+    private func reconciliationReply(for request: JSONValue) -> [String] {
+        guard let exchange = try? capture.exchange("reconciliation"),
+              let capturedRequest = try? JSONValue.parse(Data(exchange.request.utf8)),
+              let capturedOperations = capturedRequest.uniqueValue(named: "operations")?.arrayValues,
+              let operations = request.uniqueValue(named: "operations")?.arrayValues,
+              operations.count == capturedOperations.count,
+              operations.count == 1 else { return [] }
+        for (capturedOperation, operation) in zip(capturedOperations, operations) {
+            guard Self.withoutOperationID(capturedOperation) == Self.withoutOperationID(operation) else {
+                return []
+            }
+        }
+        guard request.uniqueValue(named: "snapshot_id") == capturedRequest.uniqueValue(named: "snapshot_id"),
+              let responseText = exchange.frames.first,
+              let response = try? JSONValue.parse(Data(responseText.utf8)),
+              let ref = request.uniqueValue(named: "ref"),
+              let batchID = request.uniqueValue(named: "batch_id"),
+              let results = response.uniqueValue(named: "results")?.arrayValues,
+              results.count == operations.count,
+              let resultIDs = try? zip(results, operations).map({ pair -> JSONValue in
+                  let (result, operation) = pair
+                  guard let operationID = operation.uniqueValue(named: "op_id"),
+                        result.uniqueValue(named: "op_id") == capturedOperations[0].uniqueValue(named: "op_id"),
+                        let rebound = Self.replacing(["op_id": operationID], in: result) else {
+                      throw InboxPagingWireError.invalidFrame
+                  }
+                  return rebound
+              }),
+              let rebound = Self.replacing([
+                  "ref": ref,
+                  "batch_id": batchID,
+                  "results": .array(resultIDs)
+              ], in: response) else { return [] }
+        return [rebound.jsonString + "\n"]
+    }
+
+    private static func withoutOperationID(_ value: JSONValue) -> JSONValue? {
+        guard value.hasUniqueObjectKeys, let members = value.objectMembers,
+              members.contains(where: { $0.key.rawValue == "op_id" }) else { return nil }
+        return .object(members.filter { $0.key.rawValue != "op_id" })
+    }
+
+    private static func replacing(_ fields: [String: JSONValue], in value: JSONValue) -> JSONValue? {
+        guard value.hasUniqueObjectKeys, var members = value.objectMembers else { return nil }
+        for (key, replacement) in fields {
+            if let index = members.firstIndex(where: { $0.key.rawValue == key }) {
+                members[index] = JSONMember(key, replacement)
+            } else {
+                members.append(JSONMember(key, replacement))
+            }
+        }
+        return .object(members)
+    }
+}
+
+private final class CapturedReplayFrames: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Data] = []
+
+    func append(_ frame: Data) {
+        lock.lock()
+        storage.append(frame)
+        lock.unlock()
+    }
+
+    var frames: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 @MainActor
 private final class MessageLinkRefreshPlan {
     var step = 0
@@ -1123,6 +1412,198 @@ final class NativeGuidedTLSTests: XCTestCase {
             }
             await session.close()
         }
+    }
+
+    func testServerNoCommentRevisionTwoCaptureClassifiesAndProjectsToReplied() async throws {
+        let capture = try ServerNoCommentCapture.loadForFocusedTest()
+        try capture.assertBoundToReviewedServerFixture()
+
+        let namespace = "Harklight.server-no-comment-revision-two." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let router = ServerNoCommentCaptureRouter(capture: capture)
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { router.reply(to: $0) }
+        defer { relay.close() }
+        let portNumber = try await relay.start()
+        let profileIdentity = ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText(UUID().uuidString.lowercased()),
+            deviceID: ExactText(identity.deviceID))
+        let context = ProfileContext(identity: profileIdentity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let pagingWire = try InboxPagingWire(profile: context)
+        let conversationWire = try ConversationWire(profile: context)
+        func makeSession() throws -> URLSessionInstallationSession {
+            try URLSessionInstallationSession(
+                profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(portNumber)/relay")),
+                clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        }
+        let firstSession = try makeSession()
+        defer { Task { await firstSession.close() } }
+
+        let initialStartupID = UUID().uuidString.lowercased()
+        let initialRef = "wi42-initial-" + UUID().uuidString.lowercased()
+        let initialCursor = try store.snapshot(context: context).cursor
+        _ = try store.beginInboxCandidate(startupID: initialStartupID, since: initialCursor,
+                                          batches: [], context: context)
+        let initialReply = try await firstSession.inboxRequest(
+            pagingWire.inboxStart(startupID: initialStartupID, since: initialCursor, ref: initialRef),
+            ref: initialRef)
+        let initialPage = try pagingWire.decodeStart(initialReply, ref: initialRef)
+        try store.saveInboxInitialPage(snapshotID: initialPage.snapshotID, highWater: initialPage.highWater,
+            items: initialPage.items, nextCursor: initialPage.nextCursor,
+            receiptCursor: initialPage.receiptCursor, context: context)
+
+        let requestKey = RequestKey(accountScope: profileIdentity.personID,
+            senderID: ExactText(capture.senderID), messageID: ExactText(capture.messageID))
+        XCTAssertEqual(initialPage.items.map(\.key), [requestKey])
+
+        let conversationFrames = CapturedReplayFrames()
+        try await firstSession.openConversation(conversationWire.open(since: 0)) {
+            conversationFrames.append($0)
+        }
+        var conversationHighWater: UInt64?
+        var appliedRevisionCount = 0
+        for frame in conversationFrames.frames {
+            let value = try JSONValue.parse(frame)
+            switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+            case "ok":
+                XCTAssertTrue(try conversationWire.isOpenAccepted(frame))
+            case "conversation":
+                let event = try conversationWire.decodeEvent(frame)
+                XCTAssertEqual(event.binding.request, requestKey)
+                XCTAssertEqual(event.binding.revision, 2)
+                guard case .revision = event.fact else {
+                    return XCTFail("The captured conversation update must be the request revision.")
+                }
+                try store.applyConversation(event, context: context)
+                appliedRevisionCount += 1
+            case "conversation_resynced":
+                conversationHighWater = try conversationWire.decodeResynced(frame)
+            default:
+                XCTFail("Unexpected frame in the captured conversation replay.")
+            }
+        }
+        XCTAssertEqual(appliedRevisionCount, 1)
+        let conversationCursor = try XCTUnwrap(conversationHighWater)
+        let capturedConversation = try capture.exchange("conversation")
+        let capturedHighWaterFrame = try XCTUnwrap(capturedConversation.frames.last)
+        XCTAssertEqual(conversationCursor, try conversationWire.decodeResynced(Data(capturedHighWaterFrame.utf8)))
+        try await firstSession.acknowledgeConversation(conversationWire.acknowledge(conversationCursor))
+
+        let presentationDefaultsName = namespace + ".presentation"
+        let presentationDefaults = try XCTUnwrap(UserDefaults(suiteName: presentationDefaultsName))
+        defer { presentationDefaults.removePersistentDomain(forName: presentationDefaultsName) }
+        let presentation = try LivePresentationStore(store: store, context: context,
+            clearedRetractionDefaults: presentationDefaults)
+        try presentation.refreshFromDurableStore()
+        let inboxBeforeAnswer = try XCTUnwrap(presentation.inboxRows.first { $0.key == requestKey })
+        XCTAssertFalse(inboxBeforeAnswer.belongsToReplied)
+        let port = AttentionDomainPort(store: store)
+        let request = try XCTUnwrap(port.inspect(context: port.context, request: requestKey).requests.first)
+        XCTAssertEqual(request.requestRevision, 2)
+        let selector = try XCTUnwrap(request.selector)
+        try store.discardInboxCandidate(context: context)
+        let intentID = UUID()
+        let intent = try port.submitNoComment(context: port.context, selector: selector, intentID: intentID)
+        XCTAssertEqual(intent.selector.requestRevision, 2)
+        let submission = try XCTUnwrap(store.retryOperation(intentID, context: context))
+        let directRequest = try JSONValue.parse(submission.wireFrame)
+        XCTAssertEqual(directRequest.uniqueValue(named: "type")?.stringValue, ExactText("answer_no_comment"))
+        XCTAssertEqual(directRequest.uniqueValue(named: "request_id")?.stringValue?.rawValue, capture.messageID)
+        XCTAssertEqual(directRequest.uniqueValue(named: "request_revision")?.integerValue, 2)
+        XCTAssertNil(directRequest.uniqueValue(named: "op_id"),
+                     "The direct answer is correlated locally; op_id belongs only to paging reconciliation.")
+
+        let capturedDirect = try capture.exchange("direct")
+        let capturedDirectRequest = try JSONValue.parse(Data(capturedDirect.request.utf8))
+        XCTAssertEqual(directRequest.uniqueValue(named: "type"), capturedDirectRequest.uniqueValue(named: "type"))
+        XCTAssertEqual(directRequest.uniqueValue(named: "request_id"), capturedDirectRequest.uniqueValue(named: "request_id"))
+        XCTAssertEqual(directRequest.uniqueValue(named: "request_revision"), capturedDirectRequest.uniqueValue(named: "request_revision"))
+        let capturedSuccess = try XCTUnwrap(capturedDirect.frames.first {
+            (try? JSONValue.parse(Data($0.utf8)).uniqueValue(named: "type")?.stringValue) == ExactText("ok")
+        })
+        let successValue = try JSONValue.parse(Data(capturedSuccess.utf8))
+        let terminalSequence = try XCTUnwrap(successValue.uniqueValue(named: "seq").flatMap {
+            guard case let .number(number) = $0 else { return nil }
+            return UInt64(number.lexeme)
+        })
+        let directResult = try await firstSession.sendOriginalOperation(submission.wireFrame,
+                                                                        operationID: submission.operationID)
+        XCTAssertEqual(directResult,
+            .accepted(operationID: submission.operationID, terminalSequence: terminalSequence))
+        try store.recordAcceptedOperation(intentID, operationID: submission.operationID,
+                                          terminalSequence: terminalSequence, context: context)
+        try presentation.refreshFromDurableStore()
+        XCTAssertFalse(try XCTUnwrap(presentation.inboxRows.first { $0.key == requestKey }).belongsToReplied,
+                       "A direct acceptance without its terminal remains in Inbox until reconciliation.")
+        await firstSession.close()
+
+        let inventory = try store.inboxOperationInventory(context: context)
+        XCTAssertEqual(inventory.map(\.operationID), [submission.operationID])
+        let recoveryCursor = try store.snapshot(context: context).cursor
+        XCTAssertEqual(recoveryCursor, 0)
+        let batchID = UUID().uuidString.lowercased()
+        let recoveryStartupID = UUID().uuidString.lowercased()
+        _ = try store.beginInboxCandidate(startupID: recoveryStartupID, since: recoveryCursor,
+            batches: [InboxReceiptBatch(batchID: batchID, operationIDs: [submission.operationID])],
+            context: context)
+        let recoverySession = try makeSession()
+        defer { Task { await recoverySession.close() } }
+        let recoveryRef = "wi42-recovery-" + UUID().uuidString.lowercased()
+        let recoveryReply = try await recoverySession.inboxRequest(
+            pagingWire.inboxStart(startupID: recoveryStartupID, since: recoveryCursor,
+                                  ref: recoveryRef), ref: recoveryRef)
+        let recoveryPage = try pagingWire.decodeStart(recoveryReply, ref: recoveryRef)
+        XCTAssertGreaterThanOrEqual(recoveryPage.highWater, recoveryCursor)
+        let capturedReconciliationRequest = try JSONValue.parse(
+            Data(try capture.exchange("reconciliation").request.utf8))
+        XCTAssertEqual(recoveryPage.snapshotID,
+                       capturedReconciliationRequest.uniqueValue(named: "snapshot_id")?.stringValue?.rawValue)
+        let recoveredItem = try XCTUnwrap(recoveryPage.items.first { $0.key == requestKey })
+        XCTAssertEqual(recoveredItem.terminal?.sequence, terminalSequence)
+        try store.saveInboxInitialPage(snapshotID: recoveryPage.snapshotID, highWater: recoveryPage.highWater,
+            items: recoveryPage.items, nextCursor: recoveryPage.nextCursor,
+            receiptCursor: recoveryPage.receiptCursor, context: context)
+
+        let reconciliationRef = "wi42-reconcile-" + UUID().uuidString.lowercased()
+        let reconciliationOperation = try pagingWire.reconciliationOperation(for: inventory[0])
+        XCTAssertEqual(reconciliationOperation.uniqueValue(named: "op_id")?.stringValue?.rawValue,
+                       submission.operationID.uuidString.lowercased())
+        let reconciliationRequest = pagingWire.inboxReconcile(snapshotID: recoveryPage.snapshotID,
+            batchID: batchID, operations: [reconciliationOperation], ref: reconciliationRef)
+        let reconciliationReply = try await recoverySession.inboxRequest(reconciliationRequest, ref: reconciliationRef)
+        let reconciliation = try pagingWire.decodeReconciliation(reconciliationReply,
+            ref: reconciliationRef, snapshotID: recoveryPage.snapshotID,
+            highWater: recoveryPage.highWater, batchID: batchID,
+            operationIDs: [submission.operationID], noCommentOperationIDs: [submission.operationID])
+        XCTAssertTrue(reconciliation.missingOperationIDs.isEmpty)
+        let operationReceipt = try XCTUnwrap(reconciliation.receipts.first)
+        XCTAssertEqual(operationReceipt.status, .committed)
+        XCTAssertEqual(operationReceipt.result?.uniqueValue(named: "duplicate"), .bool(true))
+        XCTAssertEqual(operationReceipt.terminal?.sequence, terminalSequence)
+        let terminal = try XCTUnwrap(operationReceipt.terminal)
+        guard case let .terminal(_, terminalState, _) = terminal.body else {
+            return XCTFail("The captured committed result must include its matching terminal.")
+        }
+        XCTAssertEqual(terminalState, .noComment)
+        try store.saveInboxReceiptBatch(batchID, results: reconciliation.receipts,
+            missingOperationIDs: reconciliation.missingOperationIDs, context: context)
+        XCTAssertTrue(try store.inboxOperationInventory(context: context).isEmpty,
+                      "A committed reconciliation settles the accepted local operation.")
+
+        try presentation.refreshFromDurableStore()
+        let replied = try XCTUnwrap(presentation.inboxRows.first { $0.key == requestKey })
+        XCTAssertTrue(replied.belongsToReplied)
+        XCTAssertEqual(presentation.openRequests.map(\.key), [])
+        XCTAssertEqual(presentation.resolvedRequests.map(\.key), [requestKey])
+        await recoverySession.close()
     }
 
     func testOlderRelayUnsupportedVersionResponseMarksNoCommentUnsupported() async throws {
