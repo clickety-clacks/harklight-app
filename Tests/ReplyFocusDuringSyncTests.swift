@@ -63,10 +63,17 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
               let reply = actions.first, reply.kind == .text else {
             return XCTFail("A plain sender message offers one deliberate text reply.")
         }
-        let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
+        let session = visible.replyEditorSession(for: request)
         session.selectAction(reply.id, inputID: nil)
         session.updateText("Typed locally", target: ReplyEditorTarget(inputID: nil,
                                                                        actionID: reply.id.rawValue))
+
+        let reopenedSession = visible.replyEditorSession(
+            for: try XCTUnwrap(visible.request(for: key)))
+        XCTAssertEqual(reopenedSession.draft.compatibility.selectedActionID, reply.id)
+        XCTAssertEqual(reopenedSession.draft.compatibility.textByActionID[reply.id],
+                       ExactText("Typed locally"),
+                       "Leaving and reopening a request in this app session keeps its unsent Reply.")
 
         let beforePause = try domain.snapshot(context: context)
         XCTAssertEqual(beforePause.drafts[key], draftBeforeEditing,
@@ -84,8 +91,8 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                        "A typing pause does not write Reply state.")
 
         XCTAssertTrue(visible.submitFromUser(key,
-                                            answerDraft: session.draft,
-                                            requestRevision: session.requestRevision))
+                                            answerDraft: reopenedSession.draft,
+                                            requestRevision: reopenedSession.requestRevision))
         let committed = try domain.snapshot(context: context)
         XCTAssertNil(committed.drafts[key], "Submitting does not create a resumable draft.")
         let submission = try XCTUnwrap(committed.outbox.first)
@@ -162,7 +169,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         let displayed = try XCTUnwrap(live.request(for: key))
         let draftBeforeEditing = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
         let writesBeforeEditing = persistence.writeCount
-        let session = ReplyEditorDraftSession(request: displayed, canSubmitFromSnapshot: true)
+        let session = live.replyEditorSession(for: displayed)
         session.selectAction(ExactText("reply"), inputID: nil)
         session.updateText("Answer for the first wording",
                            target: ReplyEditorTarget(inputID: nil, actionID: "reply"))
@@ -189,6 +196,11 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                        "Rejecting a stale checkmark leaves the request's unedited baseline intact.")
         XCTAssertEqual(live.request(for: key)?.requestRevision, 2,
                        "The latest wording is shown after the failed checkmark.")
+        let updatedSession = live.replyEditorSession(for: try XCTUnwrap(live.request(for: key)))
+        XCTAssertFalse(updatedSession === session,
+                       "A revised request starts a new in-memory Reply draft.")
+        XCTAssertNil(updatedSession.draft.compatibility.selectedActionID)
+        XCTAssertNil(updatedSession.draft.compatibility.textByActionID[ExactText("reply")])
         XCTAssertEqual(live.actionError,
                        "This message changed. Review the latest version before answering.")
     }

@@ -8,7 +8,13 @@ final class ReleaseNotesTests: XCTestCase {
         let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "changes-after-build-79"
         })
+        let draftNote = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
+            $0.id == "reply-drafts-after-navigation"
+        })
         XCTAssertNil(note.buildIdentifier)
+        XCTAssertNil(draftNote.buildIdentifier)
+        XCTAssertEqual(String(localized: draftNote.highlights[0].title),
+                       "Keep an unfinished Reply")
         XCTAssertEqual(note.highlights.map(\.id),
                        ["inbox-message-context", "simpler-chat-display", "chat-unsent-text",
                         "post-ack-connection-diagnostics", "no-reply-delivery-diagnostics"])
@@ -25,9 +31,11 @@ final class ReleaseNotesTests: XCTestCase {
 
         let firstLaunch = ReleaseNotesPresentation(
             currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
-        XCTAssertEqual(firstLaunch.notesToShow.map(\.id), [note.id])
-        XCTAssertTrue(HarklightReleaseNotes.settingsHistory(
-            currentBuildIdentifier: "91", entries: []).contains { $0.id == note.id })
+        XCTAssertEqual(firstLaunch.notesToShow.map(\.id), [draftNote.id, note.id])
+        let history = HarklightReleaseNotes.settingsHistory(
+            currentBuildIdentifier: "91", entries: [])
+        XCTAssertEqual(history.prefix(3).map(\.id),
+                       [draftNote.id, "example-messages-removed", note.id])
 
         let nextLaunch = ReleaseNotesPresentation(
             currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)

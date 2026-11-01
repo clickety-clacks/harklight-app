@@ -1160,6 +1160,9 @@ final class LivePresentationStore {
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
+    // Reply edits remain local until submission, but must outlive a detail view
+    // recreated by ordinary navigation in this app session.
+    @ObservationIgnored private var replyEditorSessions: [RequestKey: ReplyEditorDraftSession] = [:]
     // Clearing a retracted row is list state on this device only: no frame is
     // sent and the retracted record stays intact in the durable store.
     private(set) var clearedRetractions: Set<RequestKey> = []
@@ -1748,6 +1751,20 @@ final class LivePresentationStore {
               let presented = try? inspectedRequest(key, revision: revision) else { return nil }
         let bufferKey = DraftBufferKey(request: key, revision: presented.requestRevision)
         return pendingDrafts[bufferKey] ?? presented.draft
+    }
+
+    func replyEditorSession(for request: PresentedRequest) -> ReplyEditorDraftSession {
+        if let session = replyEditorSessions[request.key],
+           session.requestRevision == request.requestRevision {
+            return session
+        }
+        let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
+        replyEditorSessions[request.key] = session
+        return session
+    }
+
+    func discardReplyEditorSession(for key: RequestKey) {
+        replyEditorSessions.removeValue(forKey: key)
     }
 
     func selectRequest(_ key: RequestKey?) {
