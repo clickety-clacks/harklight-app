@@ -11,7 +11,8 @@ public enum RequestInterface: Equatable, Sendable {
     case compatibility(AnswerForm)
     case unsupported(UnsupportedInterfaceReason)
 
-    public static func recognize(_ description: JSONValue?) -> RequestInterface {
+    public static func recognize(_ description: JSONValue?,
+                                 deliveredFileNames: Set<ExactText> = []) -> RequestInterface {
         guard let description else {
             // A plain Harklight message has no sender-authored interface.
             // Give it one app-owned deliberate text reply whose answer is the
@@ -30,7 +31,8 @@ public enum RequestInterface: Equatable, Sendable {
 
         switch schema.rawValue {
         case "attention-client.ui/1":
-            guard let document = try? SenderDocument.parse(description) else {
+            guard let document = try? SenderDocument.parse(description,
+                                                            deliveredFileNames: deliveredFileNames) else {
                 return .unsupported(.unfamiliar)
             }
             return .sender(document)
@@ -82,6 +84,7 @@ public enum GraphicPrimitive: Equatable, Sendable {
     case circle(cx: Int, cy: Int, radius: Int, fill: ExactText)
     case line(x1: Int, y1: Int, x2: Int, y2: Int, stroke: ExactText, strokeWidth: Int)
     case text(x: Int, y: Int, text: ExactText, fill: ExactText, fontSize: Int, align: GraphicTextAlignment)
+    case image(x: Int, y: Int, width: Int, height: Int, file: ExactText)
 }
 
 public enum GraphicTextAlignment: String, Equatable, Sendable {
@@ -232,9 +235,10 @@ public struct SenderDocument: Equatable, Sendable {
     public let submissionLabel: ExactText
     public let result: ResultConstructor
 
-    public static func parse(_ root: JSONValue) throws -> SenderDocument {
+    public static func parse(_ root: JSONValue,
+                             deliveredFileNames: Set<ExactText> = []) throws -> SenderDocument {
         var parser = SenderDocumentParser()
-        return try parser.parse(root)
+        return try parser.parse(root, deliveredFileNames: deliveredFileNames)
     }
 
     public func input(withID id: ExactText) -> SenderInput? {
@@ -375,15 +379,18 @@ private struct SenderDocumentParser {
     private var sceneNodeCount = 0
     private var resultNodeCount = 0
     private var usesResultPoint = false
+    private var deliveredFileNames = Set<ExactText>()
 
-    mutating func parse(_ root: JSONValue) throws -> SenderDocument {
+    mutating func parse(_ root: JSONValue,
+                        deliveredFileNames: Set<ExactText>) throws -> SenderDocument {
+        self.deliveredFileNames = deliveredFileNames
         let document = try fields(root,
                                   required: ["schema", "requires", "illustrations", "inputs", "open", "resolved", "submission"],
                                   optional: ["resolvedByState", "answeredWithResult"])
         guard try string(document["schema"], nonempty: true).rawValue == "attention-client.ui/1",
               root.jsonString.utf8.count <= 65_536 else { throw SenderDocumentError.invalid }
 
-        let requiredCapabilities = try stringArray(document["requires"], nonempty: true, maximumCount: 7)
+        let requiredCapabilities = try stringArray(document["requires"], nonempty: true, maximumCount: 8)
         guard Set(requiredCapabilities).count == requiredCapabilities.count else { throw SenderDocumentError.invalid }
 
         try parseIllustrations(document["illustrations"])
@@ -489,6 +496,15 @@ private struct SenderDocumentParser {
                          fill: try color(item["fill"]),
                          fontSize: try integer(item["fontSize"], range: 1...256),
                          align: align)
+        case "image":
+            let item = try fields(raw, required: ["kind", "x", "y", "width", "height", "file"])
+            let file = try string(item["file"], nonempty: true)
+            guard deliveredFileNames.contains(file) else { throw SenderDocumentError.invalid }
+            return .image(x: try integer(item["x"], range: 0...4096),
+                          y: try integer(item["y"], range: 0...4096),
+                          width: try integer(item["width"], range: 1...4096),
+                          height: try integer(item["height"], range: 1...4096),
+                          file: file)
         default:
             throw SenderDocumentError.invalid
         }
@@ -755,6 +771,9 @@ private struct SenderDocumentParser {
         if inputs.contains(where: { if case .text = $0.kind { return true }; return false }) { result.insert(ExactText("text/1")) }
         if inputs.contains(where: { if case .point = $0.kind { return true }; return false }) { result.insert(ExactText("point/1")) }
         if usesResultPoint { result.insert(ExactText("result-point/1")) }
+        if illustrations.contains(where: { illustration in
+            illustration.primitives.contains(where: { if case .image = $0 { return true }; return false })
+        }) { result.insert(ExactText("image/1")) }
         return result
     }
 }

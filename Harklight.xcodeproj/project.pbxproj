@@ -51,6 +51,7 @@
 		49996B71D523EA72BB90C951 /* ConversationSubmissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C4376D606915388C880D04 /* ConversationSubmissionTests.swift */; };
 		4B06047B37C597023BA94175 /* NativeGuidedJoin.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */; };
 		4C2FECF89B2A209A3D6527B4 /* attention-client-m2-fixtures.json in Resources */ = {isa = PBXBuildFile; fileRef = EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */; };
+		4FDE0BB79BFA2964B9F4172B /* attention-client-ui1-conformance-v3.json in Resources */ = {isa = PBXBuildFile; fileRef = DEEE7C53134517618EB95752 /* attention-client-ui1-conformance-v3.json */; };
 		53754083DF8313BEFA327034 /* RetractionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82A636EA3A9AD62ED6E2B6D3 /* RetractionPresentationTests.swift */; };
 		54976060574B865FBF118C4A /* NativeEnrollment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BC5F8F8783FB9F06698C460 /* NativeEnrollment.swift */; };
 		549FA351946B6562D74E529B /* NativeGuidedJoinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F320A27E5B0E129F5A38828 /* NativeGuidedJoinTests.swift */; };
@@ -242,6 +243,7 @@
 		DA73983703AF494F97B44D03 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRelayLifecycle.swift; sourceTree = "<group>"; };
 		DD1D99883B2B159295D24D69 /* InboxStockTabsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxStockTabsUITests.swift; sourceTree = "<group>"; };
+		DEEE7C53134517618EB95752 /* attention-client-ui1-conformance-v3.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "attention-client-ui1-conformance-v3.json"; sourceTree = "<group>"; };
 		DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedJoin.swift; sourceTree = "<group>"; };
 		E324FFEA53B23DC189F2078B /* DevelopmentAPNsAddressStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentAPNsAddressStoreTests.swift; sourceTree = "<group>"; };
 		E5D08AC0D6D784E9C72FE43E /* AttentionTierClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionTierClientTests.swift; sourceTree = "<group>"; };
@@ -464,11 +466,20 @@
 				4354075FA994AADEF393D3D1 /* Packages */,
 				4F07B0696947245A002E287D /* Resources */,
 				A519C56B747BEF4CA5C1F171 /* Sources */,
+				C259D61950650AD31404EE35 /* TestResources */,
 				6BFD38E38AB4D05164ED1A05 /* Tests */,
 				8697B3B598B7EE2125CD5327 /* UITestHost */,
 				579221C23F35915E70DA3221 /* UITests */,
 				6E8E45F8386F230FA1D5124D /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		C259D61950650AD31404EE35 /* TestResources */ = {
+			isa = PBXGroup;
+			children = (
+				DEEE7C53134517618EB95752 /* attention-client-ui1-conformance-v3.json */,
+			);
+			path = TestResources;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -635,6 +646,7 @@
 				99600D5791D337E606EFF33F /* README.md in Resources */,
 				45E6B1F77CF2F6EB2E0DA45E /* attention-client-m2-fixtures.json in Resources */,
 				B5518512516A448A8F26776D /* attention-client-m2-r1-compat.json in Resources */,
+				4FDE0BB79BFA2964B9F4172B /* attention-client-ui1-conformance-v3.json in Resources */,
 				34740794B94BEEE0A6EBFDDC /* guided-local-tls.p12 in Resources */,
 				481991FBA4FBC43A8655795B /* guided-local-tls.pem in Resources */,
 				C847FB33CCA1E747A47034C5 /* tokens.json in Resources */,

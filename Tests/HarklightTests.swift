@@ -639,6 +639,265 @@ final class HarklightTests: XCTestCase {
                        .string(ExactText("  Another option?\n")))
     }
 
+    func testSenderUI1ConformanceCorpusMatchesReferenceParser() throws {
+        let url = try XCTUnwrap(Bundle(for: HarklightTests.self)
+            .url(forResource: "attention-client-ui1-conformance-v3", withExtension: "json"))
+        let corpus = try JSONValue.parse(Data(contentsOf: url))
+        let cases = try XCTUnwrap(corpus.uniqueValue(named: "cases")?.arrayValues)
+        XCTAssertFalse(cases.isEmpty)
+
+        var caseIDs = Set<String>()
+        var acceptedIDs = Set<String>()
+        var rejectedCount = 0
+        var sentMinusZeroCaseCount = 0
+        for vector in cases {
+            let caseID = try XCTUnwrap(vector.uniqueValue(named: "id")?.stringValue?.rawValue)
+            XCTAssertTrue(caseIDs.insert(caseID).inserted, "Duplicate conformance case id \(caseID).")
+            let document = try XCTUnwrap(vector.uniqueValue(named: "document"))
+            let deliveredFileNames = try XCTUnwrap(vector.uniqueValue(named: "delivered_file_names")?.arrayValues)
+                .map { try XCTUnwrap($0.stringValue) }
+            let names = Set(deliveredFileNames)
+            XCTAssertEqual(names.count, deliveredFileNames.count, "\(caseID) repeats a delivered file name.")
+
+            switch try XCTUnwrap(vector.uniqueValue(named: "verdict")?.stringValue?.rawValue) {
+            case "accept":
+                acceptedIDs.insert(caseID)
+                XCTAssertNoThrow(try SenderDocument.parse(document, deliveredFileNames: names),
+                                 "The reference parser rejected accepted case \(caseID).")
+                XCTAssertNil(vector.uniqueValue(named: "fault"), "Accepted case \(caseID) has a fault.")
+                if caseID == "accept-all-primitives-inputs-scenes-constructors-and-optionals" {
+                    let acceptedDocument = try SenderDocument.parse(document, deliveredFileNames: names)
+                    let primitives = acceptedDocument.illustrations.flatMap(\.primitives)
+                    XCTAssertTrue(primitives.contains { if case .rect = $0 { true } else { false } })
+                    XCTAssertTrue(primitives.contains { if case .circle = $0 { true } else { false } })
+                    XCTAssertTrue(primitives.contains { if case .line = $0 { true } else { false } })
+                    XCTAssertTrue(primitives.contains { if case .text = $0 { true } else { false } })
+                    XCTAssertTrue(primitives.contains { if case .image = $0 { true } else { false } })
+                    XCTAssertTrue(acceptedDocument.inputs.contains {
+                        if case .response = $0.kind { true } else { false }
+                    })
+                    XCTAssertTrue(acceptedDocument.inputs.contains {
+                        if case .text = $0.kind { true } else { false }
+                    })
+                    XCTAssertTrue(acceptedDocument.inputs.contains {
+                        if case .point = $0.kind { true } else { false }
+                    })
+
+                    func sceneKinds(_ node: SceneNode) -> Set<String> {
+                        switch node.kind {
+                        case let .stack(_, children):
+                            return children.reduce(into: Set(["stack"])) {
+                                $0.formUnion(sceneKinds($1))
+                            }
+                        case let .grid(_, children):
+                            return children.reduce(into: Set(["grid"])) {
+                                $0.formUnion(sceneKinds($1))
+                            }
+                        case .text:
+                            return ["text"]
+                        case .illustration:
+                            return ["illustration"]
+                        case .input:
+                            return ["input"]
+                        case .resultPoint:
+                            return ["resultPoint"]
+                        }
+                    }
+                    var acceptedSceneKinds = sceneKinds(acceptedDocument.open)
+                    if let answeredWithResult = acceptedDocument.answeredWithResult {
+                        acceptedSceneKinds.formUnion(sceneKinds(answeredWithResult))
+                    }
+                    XCTAssertEqual(acceptedSceneKinds,
+                                   Set(["stack", "grid", "text", "illustration", "input", "resultPoint"]))
+                    XCTAssertNotNil(acceptedDocument.resolvedByState[.answered])
+                    XCTAssertNotNil(acceptedDocument.answeredWithResult)
+
+                    func resultKinds(_ constructor: ResultConstructor) -> Set<String> {
+                        switch constructor {
+                        case .literal:
+                            return ["literal"]
+                        case .input:
+                            return ["input"]
+                        case let .array(values):
+                            return values.reduce(into: Set(["array"])) {
+                                $0.formUnion(resultKinds($1))
+                            }
+                        case let .object(members):
+                            return members.reduce(into: Set(["object"])) {
+                                $0.formUnion(resultKinds($1.value))
+                            }
+                        }
+                    }
+                    XCTAssertEqual(resultKinds(acceptedDocument.result),
+                                   Set(["literal", "input", "array", "object"]))
+
+                    guard case .sender = RequestInterface.recognize(document, deliveredFileNames: names) else {
+                        return XCTFail("A delivered picture document should be recognized as sender UI.")
+                    }
+                    guard case .unsupported(.unfamiliar) = RequestInterface.recognize(document) else {
+                        return XCTFail("A picture document without its delivered file names must remain unsupported.")
+                    }
+                    let payload = JSONValue.object([JSONMember("answer_ui", document)])
+                    let request = StoredRequest(key: RequestKey(accountScope: ExactText("person"),
+                                                                senderID: ExactText("agent"),
+                                                                messageID: ExactText("picture")),
+                                                originalPayload: payload)
+                    guard case .sender = request.interface(deliveredFileNames: names) else {
+                        return XCTFail("Stored request recognition must use its delivered file names.")
+                    }
+                    guard case .unsupported(.unfamiliar) = request.interface else {
+                        return XCTFail("Stored request recognition must not invent missing delivered files.")
+                    }
+                }
+            case "reject":
+                rejectedCount += 1
+                let fault = try XCTUnwrap(vector.uniqueValue(named: "fault"))
+                XCTAssertEqual(fault.objectMembers?.count, 2, "Rejected case \(caseID) must name exactly one fault.")
+                XCTAssertFalse(try XCTUnwrap(fault.uniqueValue(named: "location")?.stringValue?.rawValue).isEmpty,
+                               "Rejected case \(caseID) has no fault location.")
+                XCTAssertFalse(try XCTUnwrap(fault.uniqueValue(named: "condition")?.stringValue?.rawValue).isEmpty,
+                               "Rejected case \(caseID) has no fault condition.")
+                XCTAssertThrowsError(try SenderDocument.parse(document, deliveredFileNames: names),
+                                     "The reference parser accepted rejected case \(caseID).")
+            default:
+                XCTFail("Unknown verdict in case \(caseID).")
+            }
+
+            if let sentDocument = vector.uniqueValue(named: "sent_document") {
+                sentMinusZeroCaseCount += 1
+                XCTAssertEqual(document.jsonString.utf8.count, 65_536, "Delivered size differs in \(caseID).")
+                XCTAssertEqual(sentDocument.jsonString.utf8.count, 65_537, "Sent size differs in \(caseID).")
+                XCTAssertEqual(sentDocument.jsonString.components(separatedBy: "-0").count - 1, 1,
+                               "The sent form must differ by one negative-zero token in \(caseID).")
+                XCTAssertEqual(sentDocument.jsonString.replacingOccurrences(of: "-0", with: "0"),
+                               document.jsonString,
+                               "The sent and delivered forms differ beyond the Server's -0 re-encoding in \(caseID).")
+            }
+        }
+
+        XCTAssertGreaterThanOrEqual(rejectedCount, 1)
+        XCTAssertEqual(sentMinusZeroCaseCount, 1)
+        XCTAssertTrue(acceptedIDs.contains("accept-all-primitives-inputs-scenes-constructors-and-optionals"))
+        XCTAssertTrue(acceptedIDs.contains("accept-no-input-parser-document"))
+        XCTAssertTrue(acceptedIDs.contains("accept-image-integer-boundaries"))
+        XCTAssertTrue(acceptedIDs.contains("accept-delivered-size-65536"))
+        XCTAssertTrue(acceptedIDs.contains("accept-server-reencoded-minus-zero-edge"))
+        XCTAssertTrue(caseIDs.contains("reject-image-primitive-limit-513"))
+    }
+
+    func testPictureChoiceAndPointResultsKeepTheirExactExistingValues() throws {
+        let url = try XCTUnwrap(Bundle(for: HarklightTests.self)
+            .url(forResource: "attention-client-ui1-conformance-v3", withExtension: "json"))
+        let corpus = try JSONValue.parse(Data(contentsOf: url))
+        let cases = try XCTUnwrap(corpus.uniqueValue(named: "cases")?.arrayValues)
+        let pictureCase = try XCTUnwrap(cases.first {
+            $0.uniqueValue(named: "id")?.stringValue?.rawValue ==
+                "accept-all-primitives-inputs-scenes-constructors-and-optionals"
+        })
+        let deliveredNames = try XCTUnwrap(pictureCase.uniqueValue(named: "delivered_file_names")?.arrayValues)
+            .compactMap(\.stringValue)
+        let documentValue = try XCTUnwrap(pictureCase.uniqueValue(named: "document"))
+        let document = try SenderDocument.parse(documentValue, deliveredFileNames: Set(deliveredNames))
+
+        let exactNote = ExactText("  Exact note\n🗺  ")
+        var drafts: [ExactText: InputDraft] = [
+            ExactText("cover"): InputDraft(selectedActionID: ExactText("cover-b")),
+            ExactText("note"): InputDraft(text: exactNote),
+            ExactText("location"): InputDraft(point: PointValue(x: 500, y: 500),
+                                                horizontalText: ExactText("500"),
+                                                verticalText: ExactText("500"))
+        ]
+        let pictureAnswer = try XCTUnwrap(document.compose(drafts: drafts, maximumBytes: 65_536))
+        let expectedPictureAnswer = try JSONValue.parse(Data(
+            #"{"cover":{"cover":"B","issue":18446744073709551617},"note":"  Exact note\n🗺  ","location":{"x":500,"y":500},"details":[true,{"x":500,"y":500}]}"#.utf8))
+        XCTAssertEqual(pictureAnswer, expectedPictureAnswer)
+        XCTAssertTrue(pictureAnswer.jsonString.contains("18446744073709551617"))
+        XCTAssertEqual(document.answeredWithResult.flatMap {
+            document.resultPoint(in: $0, answer: pictureAnswer)
+        }, PointValue(x: 500, y: 500))
+
+        drafts[ExactText("cover")] = InputDraft(selectedActionID: ExactText("note-action"),
+                                                 textByActionID: [ExactText("note-action"): exactNote])
+        let noteAnswer = try XCTUnwrap(document.compose(drafts: drafts, maximumBytes: 65_536))
+        let expectedNoteAnswer = try JSONValue.parse(Data(
+            #"{"cover":"  Exact note\n🗺  ","note":"  Exact note\n🗺  ","location":{"x":500,"y":500},"details":[true,{"x":500,"y":500}]}"#.utf8))
+        XCTAssertEqual(noteAnswer, expectedNoteAnswer)
+    }
+
+    func testImageReferencesResolveOnlyAgainstTheOriginalRequestTurnFiles() throws {
+        let answerUI = try JSONValue.parse(Data(#"{"schema":"attention-client.ui/1","requires":["scene/1","result/1","illustration/1","image/1"],"illustrations":[{"id":"art","label":"Artwork","width":100,"height":100,"primitives":[{"kind":"image","x":0,"y":0,"width":100,"height":100,"file":"cover-a.jpg"}]}],"inputs":[],"open":{"kind":"illustration","id":"art"},"resolved":{"kind":"text","text":"Complete","style":"body"},"submission":{"label":"Done","result":{"kind":"literal","value":null}}}"#.utf8))
+        let requestPayload = JSONValue.object([
+            JSONMember("title", .string(ExactText("Choose a cover"))),
+            JSONMember("answer_ui", answerUI)
+        ])
+        let key = RequestKey(accountScope: ExactText("person"),
+                             senderID: ExactText("sender"),
+                             messageID: ExactText("picture-request"))
+        let context = ProfileContext(
+            identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                      personID: ExactText("person"),
+                                      deviceID: ExactText("reader")),
+            transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+                                            persistence: MemoryAttentionStatePersistence())
+        let requestFile = ConversationFile(id: ExactText("request-file"),
+                                           name: ExactText("cover-a.jpg"),
+                                           byteCount: 8,
+                                           sha256: ExactText(String(repeating: "a", count: 64)),
+                                           content: .uploaded(ExactText("upload-a")))
+        let laterTerminalFile = ConversationFile(id: ExactText("terminal-file"),
+                                                name: ExactText("terminal-only.jpg"),
+                                                byteCount: 8,
+                                                sha256: ExactText(String(repeating: "b", count: 64)),
+                                                content: .uploaded(ExactText("upload-b")))
+
+        _ = try store.apply(RelayEvent(
+            sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: requestPayload), .message),
+            conversation: RelayConversationMetadata(revision: 1,
+                sessionHandle: ExactText("origin-session"),
+                eventID: ExactText("request-turn"),
+                author: .origin,
+                files: [requestFile])),
+            context: context)
+
+        let port = AttentionDomainPort(store: store)
+        var presented = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        XCTAssertEqual(presented.deliveredFiles, [requestFile])
+        guard case .sender = presented.projection else {
+            return XCTFail("The request image should resolve against its delivered file.")
+        }
+
+        _ = try store.apply(RelayEvent(
+            sequence: 2,
+            body: .terminal(key, .answered, nil),
+            conversation: RelayConversationMetadata(revision: 1,
+                eventID: ExactText("terminal-turn"),
+                author: .origin,
+                files: [laterTerminalFile])),
+            context: context)
+
+        presented = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        XCTAssertEqual(presented.deliveredFiles, [requestFile],
+                       "Files attached to a later terminal turn are not request image resources.")
+        guard case .sender = presented.projection else {
+            return XCTFail("The original delivered picture remains recognized after the terminal event.")
+        }
+    }
+
+    @MainActor
+    func testSenderImageFitCentersWithoutCropping() {
+        let fitted = SenderIllustrationCanvas.imageDestinationRect(
+            imageSize: CGSize(width: 1_600, height: 1_000),
+            in: CGRect(x: 0, y: 0, width: 400, height: 400))
+        XCTAssertEqual(fitted, CGRect(x: 0, y: 75, width: 400, height: 250))
+
+        let smallImage = SenderIllustrationCanvas.imageDestinationRect(
+            imageSize: CGSize(width: 100, height: 200),
+            in: CGRect(x: 20, y: 10, width: 400, height: 250))
+        XCTAssertEqual(smallImage, CGRect(x: 157.5, y: 10, width: 125, height: 250))
+    }
+
     @MainActor
     func testInvalidTypedStatesCapacityAndUnsupportedDocumentsCreateNoReceipt() throws {
         let fixtures = try loadFixtures()

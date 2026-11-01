@@ -485,11 +485,16 @@ public struct StoredRequest: Equatable, Codable, Sendable {
     }
 
     public var interface: RequestInterface {
+        interface(deliveredFileNames: [])
+    }
+
+    public func interface(deliveredFileNames: Set<ExactText>) -> RequestInterface {
         guard let members = originalPayload.objectMembers?.filter({ $0.key == ExactText("answer_ui") }),
               members.count <= 1 else {
             return .unsupported(.unfamiliar)
         }
-        return RequestInterface.recognize(members.first?.value)
+        return RequestInterface.recognize(members.first?.value,
+                                          deliveredFileNames: deliveredFileNames)
     }
 }
 

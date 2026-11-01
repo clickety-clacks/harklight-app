@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import AttentionDomain
+import ImageIO
 
 enum MessageTextLinks {
     /// Makes ordinary web URLs tappable with the standard system link
@@ -162,9 +163,49 @@ struct PointGestureCapture {
     }
 }
 
+private struct DecodedSenderPicture: @unchecked Sendable {
+    let image: CGImage
+}
+
+private func decodeSenderPicture(at url: URL) -> DecodedSenderPicture? {
+    let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
+    let thumbnailOptions = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: 4096,
+        kCGImageSourceShouldCacheImmediately: true
+    ] as CFDictionary
+    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
+    return DecodedSenderPicture(image: image)
+}
+
+typealias SenderPictureLoader = @MainActor (ConversationFile) async throws -> URL
+
+@MainActor
 struct SenderIllustrationCanvas: View {
     let illustration: SenderIllustration
     let point: PointValue?
+    let deliveredFiles: [ConversationFile]
+    let pictureLoader: SenderPictureLoader?
+
+    @State private var pictureStates: [ExactText: PictureState] = [:]
+
+    private enum PictureState {
+        case loading
+        case unavailable
+        case ready(DecodedSenderPicture)
+    }
+
+    init(illustration: SenderIllustration,
+         point: PointValue?,
+         deliveredFiles: [ConversationFile] = [],
+         pictureLoader: SenderPictureLoader? = nil) {
+        self.illustration = illustration
+        self.point = point
+        self.deliveredFiles = deliveredFiles
+        self.pictureLoader = pictureLoader
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -174,7 +215,9 @@ struct SenderIllustrationCanvas: View {
             Canvas { context, _ in
                 context.clip(to: Path(rect))
                 for primitive in illustration.primitives {
-                    Self.draw(primitive, context: &context, rect: rect, sourceWidth: illustration.width, sourceHeight: illustration.height)
+                    Self.draw(primitive, context: &context, rect: rect,
+                              sourceWidth: illustration.width, sourceHeight: illustration.height,
+                              pictureStates: pictureStates)
                 }
                 if let point {
                     Self.draw(point, context: &context, rect: rect)
@@ -184,6 +227,49 @@ struct SenderIllustrationCanvas: View {
         .aspectRatio(CGFloat(illustration.width) / CGFloat(illustration.height), contentMode: .fit)
         .frame(maxWidth: .infinity)
         .accessibilityHidden(true)
+        .task(id: pictureTaskID) {
+            await loadPictures()
+        }
+    }
+
+    private var pictureTaskID: String {
+        let filesByName = Dictionary(deliveredFiles.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        return imageFileNames.map { name in
+            let file = filesByName[name]
+            return [name.rawValue, file?.sha256.rawValue ?? "", String(file?.byteCount ?? 0)].joined(separator: "\u{0}")
+        }.sorted().joined(separator: "\n")
+    }
+
+    private var imageFileNames: Set<ExactText> {
+        Set(illustration.primitives.compactMap { primitive in
+            if case let .image(_, _, _, _, file) = primitive { return file }
+            return nil
+        })
+    }
+
+    private func loadPictures() async {
+        pictureStates = [:]
+        guard !imageFileNames.isEmpty else { return }
+        let filesByName = Dictionary(deliveredFiles.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        for name in imageFileNames {
+            guard case nil = pictureStates[name] else { continue }
+            guard let file = filesByName[name], let pictureLoader else {
+                pictureStates[name] = .unavailable
+                continue
+            }
+            pictureStates[name] = .loading
+            do {
+                let url = try await pictureLoader(file)
+                let decoded = await Task.detached(priority: .userInitiated) {
+                    decodeSenderPicture(at: url)
+                }.value
+                guard !Task.isCancelled else { return }
+                pictureStates[name] = decoded.map(PictureState.ready) ?? .unavailable
+            } catch {
+                guard !Task.isCancelled else { return }
+                pictureStates[name] = .unavailable
+            }
+        }
     }
 
     static func fittedRect(size: CGSize, sourceWidth: Int, sourceHeight: Int) -> CGRect {
@@ -197,11 +283,24 @@ struct SenderIllustrationCanvas: View {
                       height: height)
     }
 
+    static func imageDestinationRect(imageSize: CGSize, in elementRect: CGRect) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0,
+              elementRect.width > 0, elementRect.height > 0 else { return .zero }
+        let scale = min(elementRect.width / imageSize.width,
+                        elementRect.height / imageSize.height)
+        let size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        return CGRect(x: elementRect.midX - size.width / 2,
+                      y: elementRect.midY - size.height / 2,
+                      width: size.width,
+                      height: size.height)
+    }
+
     private static func draw(_ primitive: GraphicPrimitive,
                              context: inout GraphicsContext,
                              rect: CGRect,
                              sourceWidth: Int,
-                             sourceHeight: Int) {
+                             sourceHeight: Int,
+                             pictureStates: [ExactText: PictureState]) {
         let scaleX = rect.width / CGFloat(sourceWidth)
         let scaleY = rect.height / CGFloat(sourceHeight)
         func x(_ value: Int) -> CGFloat { rect.minX + CGFloat(value) * scaleX }
@@ -232,7 +331,40 @@ struct SenderIllustrationCanvas: View {
                 .font(.system(size: CGFloat(fontSize) * min(scaleX, scaleY)))
                 .foregroundColor(Self.color(fill))
             context.draw(text, at: CGPoint(x: x(px), y: y(py)), anchor: anchor)
+        case let .image(px, py, width, height, file):
+            let elementRect = CGRect(x: x(px), y: y(py),
+                                     width: CGFloat(width) * scaleX,
+                                     height: CGFloat(height) * scaleY)
+            switch pictureStates[file] {
+            case let .ready(picture):
+                let imageRect = Self.imageDestinationRect(
+                    imageSize: CGSize(width: picture.image.width, height: picture.image.height),
+                    in: elementRect)
+                context.draw(Image(decorative: picture.image, scale: 1), in: imageRect)
+            case .unavailable:
+                Self.drawPictureFallback(in: elementRect, context: &context)
+            case .loading:
+                context.fill(Path(elementRect), with: .color(Color.gray.opacity(0.16)))
+            case nil:
+                if elementRect.isEmpty {
+                    break
+                }
+                context.fill(Path(elementRect), with: .color(Color.gray.opacity(0.16)))
+            }
         }
+    }
+
+    private static func drawPictureFallback(in rect: CGRect, context: inout GraphicsContext) {
+        var fallbackContext = context
+        fallbackContext.clip(to: Path(rect))
+        fallbackContext.fill(Path(roundedRect: rect, cornerSize: CGSize(width: 6, height: 6)),
+                             with: .color(Color.gray.opacity(0.32)))
+        let fontSize = min(12, max(7, rect.width / 14))
+        let label = Text("Picture could not\nbe shown")
+            .font(.system(size: fontSize, weight: .medium))
+            .foregroundColor(.primary)
+            .multilineTextAlignment(.center)
+        fallbackContext.draw(label, at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
     }
 
     private static func draw(_ point: PointValue, context: inout GraphicsContext, rect: CGRect) {

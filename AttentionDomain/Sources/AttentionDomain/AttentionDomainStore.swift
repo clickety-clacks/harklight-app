@@ -341,7 +341,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                                requestKey: requestKey,
                                                profileGeneration: context.generation,
                                                descriptorFingerprint: fingerprint(request.answerDescription?.canonicalJSON ?? ""),
-                                               submissionFingerprint: fingerprint(submissionSignature(for: request.interface)),
+                                               submissionFingerprint: fingerprint(submissionSignature(for: requestInterface(for: request))),
                                                opaqueSubmissionID: ExactText(submissionID.uuidString.lowercased()))
         return BoundDocumentSelector(request: requestKey,
                                      requestRevision: requestRevision,
@@ -358,7 +358,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
-        let interface = request.interface
+        let interface = requestInterface(for: request)
         guard validateDraft(draft, for: interface) else { throw AttentionStoreError.invalidDraft }
         guard state.remoteStates[request.key]?.isTerminal != true,
               state.intentByRequest[request.key] == nil else {
@@ -401,10 +401,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let request = try boundRequest(selector, context: suppliedContext)
         guard state.replayBarrier == nil else { throw AttentionStoreError.replayAlreadyActive }
         guard isUUIDv4(intentID) else { throw AttentionStoreError.invalidSubmission }
-        guard validateDraft(draft, for: request.interface) else { throw AttentionStoreError.invalidDraft }
+        let interface = requestInterface(for: request)
+        guard validateDraft(draft, for: interface) else { throw AttentionStoreError.invalidDraft }
         let answer = try compose(typedSubmission, draft: draft, for: request)
         let descriptorFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
-        let normalizedInputs = normalizedSubmission(typedSubmission, interface: request.interface)
+        let normalizedInputs = normalizedSubmission(typedSubmission, interface: interface)
         var fingerprintParts = [
             request.key.accountScope.rawValue,
             request.key.senderID.rawValue,
@@ -463,7 +464,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.intentByRequest[request.key] = intentID
         next.outboxOrder.append(intentID)
         if suppliedContext.transportMode == .fixture {
-            let sessionDraft = persistAnswerDraft ? draft : RequestDraft(interface: request.interface)
+            let sessionDraft = persistAnswerDraft ? draft : RequestDraft(interface: interface)
             next.fixtureSessions[request.key] = RequestSession(draft: sessionDraft,
                                                                lifecycle: .pending(submission))
         }
@@ -522,10 +523,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         ])
         let frame = Data((operation.jsonString + "\n").utf8)
         guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
-        let draft = discardDraft ? RequestDraft(interface: request.interface) :
+        let interface = requestInterface(for: request)
+        let draft = discardDraft ? RequestDraft(interface: interface) :
             (state.conversation?.threads[request.key]?.answerDrafts?[requestRevision] ??
                 (state.conversation?.threads[request.key]?.currentRevision == requestRevision
-                    ? state.drafts[request.key] : nil) ?? RequestDraft(interface: request.interface))
+                    ? state.drafts[request.key] : nil) ?? RequestDraft(interface: interface))
         let submission = Submission(requestKey: request.key,
                                     answer: .null,
                                     answerKind: .noComment,
@@ -952,7 +954,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
                 let thread = next.conversation?.threads[request.key]
                 let currentPayload = thread?.currentQuestionPayload ?? request.originalPayload
-                next.drafts[request.key] = RequestDraft(interface: StoredRequest(key: request.key, originalPayload: currentPayload).interface)
+                let deliveredNames = Self.deliveredFileNames(for: request.key, in: next.conversation)
+                    .union(event.conversation?.files?.map(\.name) ?? [])
+                let currentRequest = StoredRequest(key: request.key, originalPayload: currentPayload)
+                next.drafts[request.key] = RequestDraft(interface: currentRequest.interface(deliveredFileNames: deliveredNames))
             }
             let reference = next.inboxReferences?.removeValue(forKey: request.key)
             let previous = next.remoteStates[request.key] ?? reference
@@ -1229,7 +1234,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 next.requests[key] = request.assigningAcceptanceOrder(acceptance.sequence)
                 let thread = next.conversation?.threads[key]
                 let payload = thread?.currentQuestionPayload ?? request.originalPayload
-                next.drafts[key] = RequestDraft(interface: StoredRequest(key: key, originalPayload: payload).interface)
+                let deliveredNames = Self.deliveredFileNames(for: key, in: next.conversation)
+                    .union(acceptance.conversation?.files?.map(\.name) ?? [])
+                let acceptedRequest = StoredRequest(key: key, originalPayload: payload)
+                next.drafts[key] = RequestDraft(interface: acceptedRequest.interface(deliveredFileNames: deliveredNames))
             }
             if let reference = next.inboxReferences?.removeValue(forKey: key), next.remoteStates[key] == nil {
                 next.remoteStates[key] = reference
@@ -1747,7 +1755,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
         } else {
             next.requests[request.key] = request
-            next.drafts[request.key] = RequestDraft(interface: request.interface)
+            next.drafts[request.key] = RequestDraft(interface: requestInterface(for: request))
         }
         next.appliedEvents[sequence] = RelayEvent(sequence: sequence, body: .originReference(request.key))
         var remote = next.remoteStates[request.key] ?? RemoteRequestState()
@@ -2403,7 +2411,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
             if let draft = state.drafts[key] { archived[previous.currentRevision] = draft }
             conversation.threads[key]?.answerDrafts = archived
             if next.requests[key] != nil {
-                let fresh = RequestDraft(interface: StoredRequest(key: key, originalPayload: current.currentQuestionPayload).interface)
+                let freshRequest = StoredRequest(key: key, originalPayload: current.currentQuestionPayload)
+                let fresh = RequestDraft(interface: requestInterface(for: freshRequest, in: conversation))
                 next.drafts[key] = fresh
                 if var fixture = next.fixtureSessions[key], case .open = fixture.lifecycle {
                     fixture.draft = fresh
@@ -2986,7 +2995,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 .assigningAcceptanceOrder(acceptanceOrder)
             let descriptor = fingerprint(request.answerDescription?.canonicalJSON ?? "")
             guard descriptor == binding.descriptorFingerprint,
-                  fingerprint(submissionSignature(for: request.interface)) == binding.submissionFingerprint else {
+                  fingerprint(submissionSignature(for: requestInterface(for: request))) == binding.submissionFingerprint else {
                 throw AttentionStoreError.selectorExpired
             }
             return request
@@ -2995,10 +3004,28 @@ public final class AttentionDomainStore: @unchecked Sendable {
               let request = state.requests[selector.request] else { throw AttentionStoreError.requestMissing }
         let currentFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
         guard currentFingerprint == binding.descriptorFingerprint,
-              fingerprint(submissionSignature(for: request.interface)) == binding.submissionFingerprint else {
+              fingerprint(submissionSignature(for: requestInterface(for: request))) == binding.submissionFingerprint else {
             throw AttentionStoreError.selectorExpired
         }
         return request
+    }
+
+    private func requestInterface(for request: StoredRequest) -> RequestInterface {
+        requestInterface(for: request, in: state.conversation)
+    }
+
+    private func requestInterface(for request: StoredRequest,
+                                  in conversation: ConversationState?) -> RequestInterface {
+        request.interface(deliveredFileNames: Self.deliveredFileNames(for: request.key, in: conversation))
+    }
+
+    private static func deliveredFileNames(for request: RequestKey,
+                                           in conversation: ConversationState?) -> Set<ExactText> {
+        guard let thread = conversation?.threads[request] else { return [] }
+        return Set(thread.turns
+            .filter { $0.author == .origin && $0.kind == .revision && $0.binding.revision == 1 }
+            .flatMap(\.files)
+            .map(\.name))
     }
 
     private func effectiveRequest(for key: RequestKey) -> StoredRequest? {
@@ -3294,7 +3321,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private func compose(_ typedSubmission: TypedSubmission,
                         draft: RequestDraft,
                         for request: StoredRequest) throws -> JSONValue {
-        switch (request.interface, typedSubmission) {
+        switch (requestInterface(for: request), typedSubmission) {
         case let (.sender(document), .senderInputs(inputs)):
             guard inputs.count == document.inputs.count,
                   Set(inputs.map(\.inputID)).count == inputs.count,

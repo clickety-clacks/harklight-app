@@ -1762,6 +1762,15 @@ struct HistoricalAnswerDraftView: View {
 }
 
 @MainActor
+private func senderPictureLoader(for request: PresentedRequest,
+                                 store: LivePresentationStore) -> SenderPictureLoader {
+    { file in
+        try await store.prepareConversationPreview(file, for: request.key,
+                                                  revision: 1)
+    }
+}
+
+@MainActor
 private struct LiveProjectedSceneView: View {
     let request: PresentedRequest
     let sender: AdmittedSenderProjection
@@ -1799,7 +1808,9 @@ private struct LiveProjectedSceneView: View {
             SceneTextView(text: value.rawValue, style: style)
         case let .illustration(id):
             if let illustration = sender.illustrations.first(where: { $0.id == id }) {
-                SenderIllustrationCanvas(illustration: illustration, point: nil)
+                SenderIllustrationCanvas(illustration: illustration, point: nil,
+                                         deliveredFiles: request.deliveredFiles,
+                                         pictureLoader: senderPictureLoader(for: request, store: store))
                     .accessibilityHidden(false)
                     .accessibilityLabel(illustration.label.rawValue)
             }
@@ -1825,7 +1836,9 @@ private struct LiveProjectedSceneView: View {
         case let .resultPoint(illustrationID, label, point):
             if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
                 VStack(alignment: .leading, spacing: 8) {
-                    SenderIllustrationCanvas(illustration: illustration, point: point)
+                    SenderIllustrationCanvas(illustration: illustration, point: point,
+                                             deliveredFiles: request.deliveredFiles,
+                                             pictureLoader: senderPictureLoader(for: request, store: store))
                     Text(label.rawValue)
                         .font(.caption)
                 }
@@ -1887,7 +1900,9 @@ private struct LiveProjectedInputView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         if let artID = action.illustrationID,
                            let illustration = sender.illustrations.first(where: { $0.id == artID }) {
-                            SenderIllustrationCanvas(illustration: illustration, point: nil)
+                            SenderIllustrationCanvas(illustration: illustration, point: nil,
+                                                     deliveredFiles: request.deliveredFiles,
+                                                     pictureLoader: senderPictureLoader(for: request, store: store))
                         }
                         Text(action.label.rawValue)
                     }
@@ -1896,7 +1911,9 @@ private struct LiveProjectedInputView: View {
                 EmptyView()
             case let .point(illustrationID):
                 if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
-                    SenderIllustrationCanvas(illustration: illustration, point: draft?.effectivePoint)
+                    SenderIllustrationCanvas(illustration: illustration, point: draft?.effectivePoint,
+                                             deliveredFiles: request.deliveredFiles,
+                                             pictureLoader: senderPictureLoader(for: request, store: store))
                     if let point = draft?.effectivePoint {
                         Text("Horizontal \(point.x), vertical \(point.y)")
                     }
@@ -2080,7 +2097,9 @@ private struct LiveProjectedInputView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text(input.label.rawValue).font(.headline)
                             SenderIllustrationCanvas(illustration: illustration,
-                                                     point: draft?.effectivePoint)
+                                                     point: draft?.effectivePoint,
+                                                     deliveredFiles: request.deliveredFiles,
+                                                     pictureLoader: senderPictureLoader(for: request, store: store))
                                 .overlay {
                                     GeometryReader { geometry in
                                         let bounds = CGRect(origin: .zero, size: geometry.size)
@@ -2177,7 +2196,9 @@ private struct LiveProjectedInputView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     if let artID = action.illustrationID,
                        let illustration = sender.illustrations.first(where: { $0.id == artID }) {
-                        SenderIllustrationCanvas(illustration: illustration, point: nil)
+                        SenderIllustrationCanvas(illustration: illustration, point: nil,
+                                                 deliveredFiles: request.deliveredFiles,
+                                                 pictureLoader: senderPictureLoader(for: request, store: store))
                     }
                     let detail = localExample != nil && action.id.rawValue == "own"
                         ? "Write it here, or say why none of these fit."

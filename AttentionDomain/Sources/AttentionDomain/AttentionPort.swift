@@ -298,6 +298,9 @@ public struct PresentedRequest: Equatable, Sendable {
     public let createdAt: Date?
     /// A UTF-8 JSON string for inert inspection. H must not parse it to render answers.
     public let originalContentJSON: String
+    /// Files delivered with the original request revision, used only to resolve
+    /// sender-authored image primitives and the existing attachment list.
+    public let deliveredFiles: [ConversationFile]
     public let selector: BoundDocumentSelector?
     public let draft: RequestDraft
     /// The submitted answer projected from its durable intent, not from
@@ -353,6 +356,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 body: ExactText?,
                 createdAt: Date? = nil,
                 originalContentJSON: String,
+                deliveredFiles: [ConversationFile] = [],
                 selector: BoundDocumentSelector?,
                 draft: RequestDraft,
                 submittedAnswer: RequestDraft? = nil,
@@ -386,6 +390,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.body = body
         self.createdAt = createdAt
         self.originalContentJSON = originalContentJSON
+        self.deliveredFiles = deliveredFiles
         self.selector = selector
         self.draft = draft
         self.submittedAnswer = submittedAnswer
@@ -516,8 +521,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
         } else {
             viewSlot?.entry
         }
+        let deliveredFiles = thread.turns
+            .filter { $0.author == .origin && $0.kind == .revision && $0.binding.revision == 1 }
+            .flatMap(\.files)
         return try present(StoredRequest(key: key, originalPayload: payload), acceptanceOrder: stored.acceptanceOrder ?? 0,
-            draft: draft, session: nil, remote: nil, submission: nil, selector: nil,
+            draft: draft, deliveredFiles: deliveredFiles, session: nil, remote: nil, submission: nil, selector: nil,
             requestRevision: revision, supersedesMessageIDs: stored.supersedesMessageIDs,
             currentRevisionByWhenMilliseconds: currentRequest.byWhenMilliseconds,
             inboxViewEntry: inboxViewEntry)
@@ -607,6 +615,19 @@ public final class AttentionDomainPort: @unchecked Sendable {
         return accepted.acceptanceOrder.map { request.assigningAcceptanceOrder($0) } ?? request
     }
 
+    private func deliveredFiles(for request: StoredRequest,
+                                in snapshot: AttentionStoreSnapshot) -> [ConversationFile] {
+        snapshot.conversationThreads[request.key]?.turns
+            .filter { $0.author == .origin && $0.kind == .revision && $0.binding.revision == 1 }
+            .flatMap(\.files) ?? []
+    }
+
+    private func interface(for request: StoredRequest,
+                           in snapshot: AttentionStoreSnapshot) -> RequestInterface {
+        let files = deliveredFiles(for: request, in: snapshot)
+        return request.interface(deliveredFileNames: Set(files.map(\.name)))
+    }
+
     public func saveDraft(context suppliedContext: PortContext,
                           selector: BoundDocumentSelector,
                           completeDraft: RequestDraft) throws {
@@ -618,7 +639,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         try validate(suppliedContext)
         let snapshot = try store.snapshot(context: profileContext)
         guard let request = request(for: selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
-        try store.saveDraft(RequestDraft(interface: request.interface), selector: selector, context: profileContext)
+        try store.saveDraft(RequestDraft(interface: interface(for: request, in: snapshot)), selector: selector, context: profileContext)
     }
 
     public func preview(context suppliedContext: PortContext,
@@ -627,7 +648,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         try validate(suppliedContext)
         let snapshot = try store.snapshot(context: profileContext)
         guard let request = request(for: selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
-        let (typedSubmission, draft) = try makeSubmission(inputs, for: request.interface)
+        let (typedSubmission, draft) = try makeSubmission(inputs, for: interface(for: request, in: snapshot))
         return try store.previewSubmission(typedSubmission,
                                            draft: draft,
                                            selector: selector,
@@ -638,7 +659,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         try validate(intent.context)
         let snapshot = try store.snapshot(context: profileContext)
         guard let request = request(for: intent.selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
-        let (typedSubmission, draft) = try makeSubmission(intent.inputs, for: request.interface)
+        let (typedSubmission, draft) = try makeSubmission(intent.inputs, for: interface(for: request, in: snapshot))
         let stored = try store.submit(intentID: intent.intentID,
                                       typedSubmission: typedSubmission,
                                       typedInputs: intent.inputs,
@@ -841,6 +862,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
         let requests = try orderedRequests.map { item in
             let session = snapshot.fixtureSessions[item.request.key]
             let thread = snapshot.conversationThreads[item.request.key]
+            let deliveredFiles = thread?.turns
+                .filter { $0.author == .origin && $0.kind == .revision && $0.binding.revision == 1 }
+                .flatMap(\.files) ?? []
+            let deliveredFileNames = Set(deliveredFiles.map(\.name))
             let conversationRevision = thread?.currentRevision ?? 1
             let presentedRevision = selectors?[item.request.key]?.requestRevision ?? conversationRevision
             let matchesCurrentRevision: (Submission) -> Bool = { candidate in
@@ -874,10 +899,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
             let currentDraft: RequestDraft
             if presentedRevision == conversationRevision {
                 currentDraft = snapshot.drafts[item.request.key] ??
-                    thread?.answerDrafts?[presentedRevision] ?? RequestDraft(interface: projectedRequest.interface)
+                    thread?.answerDrafts?[presentedRevision] ??
+                    RequestDraft(interface: projectedRequest.interface(deliveredFileNames: deliveredFileNames))
             } else {
                 currentDraft = thread?.answerDrafts?[presentedRevision] ??
-                    RequestDraft(interface: projectedRequest.interface)
+                    RequestDraft(interface: projectedRequest.interface(deliveredFileNames: deliveredFileNames))
             }
             let hasUnsupportedNoComment = currentIntents.contains { candidate in
                 guard candidate.isNoComment else { return false }
@@ -917,6 +943,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             return try present(projectedRequest,
                         acceptanceOrder: item.order,
                         draft: currentDraft,
+                        deliveredFiles: deliveredFiles,
                         session: session,
                         remote: snapshot.remoteStates[item.request.key],
                         submission: submission,
@@ -932,7 +959,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         currentRevisionByWhenMilliseconds: currentRevisionRequest.byWhenMilliseconds,
                         defaultAnswerAction: presentedRevision == conversationRevision
                             ? Self.defaultAnswerAction(for: snapshot.remoteStates[item.request.key]?.accountAnswerOutcome,
-                                                        interface: currentRevisionRequest.interface)
+                                                        interface: currentRevisionRequest.interface(deliveredFileNames: deliveredFileNames))
                             : nil,
                         inboxViewEntry: inboxViewEntry)
         }
@@ -1054,6 +1081,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
     private func present(_ request: StoredRequest,
                          acceptanceOrder: UInt64,
                          draft: RequestDraft,
+                         deliveredFiles: [ConversationFile],
                          session: RequestSession?,
                          remote: RemoteRequestState?,
                          submission: Submission?,
@@ -1121,7 +1149,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
         let projection: AdmittedRequestProjection
         let hasAccountTerminal = remote?.state != nil
-        switch request.interface {
+        let interface = request.interface(deliveredFileNames: Set(deliveredFiles.map(\.name)))
+        switch interface {
         case let .sender(document):
             let scene: SceneNode
             let terminalState: TerminalState?
@@ -1206,10 +1235,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 body: request.originalPayload.uniqueValue(named: "body")?.stringValue,
                                 createdAt: request.createdAt,
                                 originalContentJSON: request.originalPayload.canonicalJSON,
+                                deliveredFiles: deliveredFiles,
                                 selector: selector,
                                 draft: draft,
                                 submittedAnswer: submittedAnswer(for: submission,
-                                                                 interface: request.interface),
+                                                                 interface: interface),
                                 lifecycleStatus: status,
                                 receiptFacts: hasAccountTerminal ? nil : receiptFacts,
                                 intentReceipt: hasAccountTerminal ? nil : submission.map { receipt($0, context: context) },
