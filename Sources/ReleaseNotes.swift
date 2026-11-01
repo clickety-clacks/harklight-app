@@ -68,8 +68,8 @@ enum HarklightReleaseNotes {
                         "See why a response was not accepted",
                         comment: "Release-note title for safe failure details and retrying a response."),
                     detail: LocalizedStringResource(
-                        "Known delivery failures show any safe recorded detail and let you retry the same response.",
-                        comment: "Release-note detail for inspecting and retrying a known delivery failure.")),
+                        "Known delivery failures show any safe recorded detail, let you retry the same response, and let you copy the visible summary and full detail.",
+                        comment: "Release-note detail for inspecting, retrying, and copying known delivery failures.")),
                 .init(
                     id: "inbox-message-context",
                     symbol: "tray.full",

@@ -393,6 +393,24 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("Unresolved send warning opened from Inbox", from: app)
     }
 
+    func testFailedResponseDialogShowsCopyForVisibleSummaryAndDetail() throws {
+        let app = launchFreshApp(additionalArguments: ["--harklight-test-copy-dialog"])
+        selectFacilitiesRequest(in: app)
+
+        let warningButton = app.buttons["request-delivery-warning"]
+        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+        warningButton.tap()
+
+        let summary = app.staticTexts["failed-response-summary"]
+        let detail = app.staticTexts["failed-response-detail"]
+        let copyButton = app.buttons["failed-response-copy"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(summary.label, "Your response was not delivered.")
+        XCTAssertEqual(detail.label, "A generated response was rejected for this test.")
+        XCTAssertTrue(copyButton.exists, "The warning dialog exposes Copy beside Retry.")
+    }
+
     func testNativeBackKeepsInboxListPositionForUntouchedRequest() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
