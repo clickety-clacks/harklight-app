@@ -1212,7 +1212,8 @@ struct LiveRequestDetail: View {
                 }
                 if request.messageType != nil || request.messageKind != nil {
                     MessageMetadataBadges(messageType: request.messageType,
-                                          messageKind: request.messageKind)
+                                          messageKind: request.messageKind,
+                                          containsChildAccessibilityElements: true)
                 }
                 if let deadline = byWhenDate {
                     Label("Deadline · \(deadline.formatted(date: .omitted, time: .shortened))",

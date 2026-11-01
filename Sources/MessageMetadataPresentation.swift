@@ -62,21 +62,39 @@ struct MessageKindPresentation {
 struct MessageMetadataBadges: View {
     let messageType: MessageTypeValue?
     let messageKind: MessageKindValue?
+    let containsChildAccessibilityElements: Bool
+
+    init(messageType: MessageTypeValue?,
+         messageKind: MessageKindValue?,
+         containsChildAccessibilityElements: Bool = false) {
+        self.messageType = messageType
+        self.messageKind = messageKind
+        self.containsChildAccessibilityElements = containsChildAccessibilityElements
+    }
 
     @ViewBuilder
     var body: some View {
         if messageType != nil || messageKind != nil {
-            HStack(alignment: .center, spacing: 6) {
-                if let messageType {
-                    MessageTypeBadge(type: messageType)
-                }
-                if let messageKind {
-                    MessageKindBadge(kind: messageKind)
-                }
-                Spacer(minLength: 0)
+            if containsChildAccessibilityElements {
+                badgeStack
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("message-metadata-badges")
+            } else {
+                badgeStack
+                    .accessibilityIdentifier("message-metadata-badges")
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("message-metadata-badges")
+        }
+    }
+
+    private var badgeStack: some View {
+        HStack(alignment: .center, spacing: 6) {
+            if let messageType {
+                MessageTypeBadge(type: messageType)
+            }
+            if let messageKind {
+                MessageKindBadge(kind: messageKind)
+            }
+            Spacer(minLength: 0)
         }
     }
 }
