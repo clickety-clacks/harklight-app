@@ -124,7 +124,7 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     func testOrdinaryInboxKeepsRequestsAlongsideTestFixtures() {
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
         let realRows = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
@@ -180,6 +180,13 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(original.label.contains("Pending"),
                       "The submitted answer remains pending until its outcome is confirmed.")
         capture("choice-response-in-replied", app)
+        // The removed Settings action used to add examples only after the ordinary
+        // request flow. Reopen the persisted fixture with test-only examples now.
+        app.terminate()
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 10),
+                      app.debugDescription)
         let row = app.descendants(matching: .any)["sample-approval-0"]
         // Test fixtures remain in Inbox, so leave the submitted request's Replied tab first.
         workspaceTab("Inbox", in: app).tap()
