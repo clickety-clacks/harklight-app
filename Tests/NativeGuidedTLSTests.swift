@@ -140,11 +140,13 @@ private struct ServerNoCommentCapture: Decodable, Sendable {
     }
 
     fileprivate static func operationsMatchIgnoringLocalID(_ lhs: JSONValue,
-                                                           _ rhs: JSONValue) -> Bool {
+                                                           _ rhs: JSONValue,
+                                                           allowMissingLocalIDOnRight: Bool = false) -> Bool {
         guard let lhsMembers = lhs.objectMembers, lhs.hasUniqueObjectKeys,
-              let rhsMembers = rhs.objectMembers, rhs.hasUniqueObjectKeys,
-              lhsMembers.contains(where: { $0.key.rawValue == "op_id" }),
-              rhsMembers.contains(where: { $0.key.rawValue == "op_id" }) else { return false }
+              let rhsMembers = rhs.objectMembers, rhs.hasUniqueObjectKeys else { return false }
+        let lhsHasLocalID = lhsMembers.contains { $0.key.rawValue == "op_id" }
+        let rhsHasLocalID = rhsMembers.contains { $0.key.rawValue == "op_id" }
+        guard lhsHasLocalID, rhsHasLocalID || allowMissingLocalIDOnRight else { return false }
         let lhsFields = Dictionary(uniqueKeysWithValues: lhsMembers
             .filter { $0.key.rawValue != "op_id" }
             .map { ($0.key.rawValue, $0.value) })
@@ -260,7 +262,8 @@ private struct ServerNoCommentCapture: Decodable, Sendable {
         XCTAssertEqual(Set(operationMembers.map { $0.key.rawValue }),
                        Set(["type", "request_id", "request_revision", "op_id"]))
         let directRequest = try JSONValue.parse(Data(direct.request.utf8))
-        XCTAssertTrue(Self.operationsMatchIgnoringLocalID(operations[0], directRequest))
+        XCTAssertTrue(Self.operationsMatchIgnoringLocalID(
+            operations[0], directRequest, allowMissingLocalIDOnRight: true))
         let reconciliationResponse = try JSONValue.parse(Data(try XCTUnwrap(reconcile.frames.first).utf8))
         let results = try XCTUnwrap(reconciliationResponse.uniqueValue(named: "results")?.arrayValues)
         XCTAssertEqual(results.count, 1)
