@@ -841,9 +841,12 @@ public actor NativeRelayCore {
         -> NativeDiagnosticNoReplyResponseClass {
         guard case let .terminal(_, state, _) = event.body else { return .terminalOther }
         switch state {
-        case .noComment: .terminalNoComment
-        case .answered: .terminalAnswered
-        default: .terminalOther
+        case .noComment:
+            return NativeDiagnosticNoReplyResponseClass.terminalNoComment
+        case .answered:
+            return NativeDiagnosticNoReplyResponseClass.terminalAnswered
+        default:
+            return NativeDiagnosticNoReplyResponseClass.terminalOther
         }
     }
 
