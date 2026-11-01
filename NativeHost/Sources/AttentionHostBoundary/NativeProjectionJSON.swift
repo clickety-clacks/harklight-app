@@ -118,6 +118,11 @@ enum NativeProjectionJSON {
                             JSONMember("text", .string(text)), JSONMember("fill", .string(fill)),
                             JSONMember("fontSize", number(fontSize)),
                             JSONMember("align", string(align.rawValue))])
+        case let .image(x, y, width, height, file):
+            return .object([JSONMember("kind", string("image")),
+                            JSONMember("x", number(x)), JSONMember("y", number(y)),
+                            JSONMember("width", number(width)), JSONMember("height", number(height)),
+                            JSONMember("file", .string(file))])
         }
     }
 
