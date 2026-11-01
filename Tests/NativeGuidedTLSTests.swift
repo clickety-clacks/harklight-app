@@ -1534,12 +1534,11 @@ final class NativeGuidedTLSTests: XCTestCase {
             guard case let .number(number) = $0 else { return nil }
             return UInt64(number.lexeme)
         })
-        let directResult = try await firstSession.sendOriginalOperation(submission.wireFrame,
-                                                                        operationID: submission.operationID)
-        XCTAssertEqual(directResult,
-            .accepted(operationID: submission.operationID, terminalSequence: terminalSequence))
-        try store.recordAcceptedOperation(intentID, operationID: submission.operationID,
-                                          terminalSequence: terminalSequence, context: context)
+        let core = try NativeRelayCore(store: store, context: context, session: firstSession)
+        let attemptedOperations = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(attemptedOperations, 1)
+        XCTAssertEqual(try store.inboxOperationInventory(context: context).map(\.operationID),
+                       [submission.operationID])
         try presentation.refreshFromDurableStore()
         XCTAssertFalse(try XCTUnwrap(presentation.inboxRows.first { $0.key == requestKey }).belongsToReplied,
                        "A direct acceptance without its terminal remains in Inbox until reconciliation.")
