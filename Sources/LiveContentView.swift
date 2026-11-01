@@ -798,6 +798,19 @@ struct LiveRequestDetail: View {
     }
 
     private var failedResponseWarning: LivePresentationStore.FailedResponseWarning? {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-copy-dialog"),
+           request.key.messageID.rawValue == "facilities-01" {
+            return LivePresentationStore.FailedResponseWarning(
+                requestRevision: request.requestRevision,
+                failedOperationID: nil,
+                answerKind: .answer,
+                submittedInputs: [],
+                answerDraft: nil,
+                detail: "A generated response was rejected for this test.",
+                retryOperationID: nil)
+        }
+#endif
         guard localExample == nil, fixtureStore == nil,
               request.informationalSeenStatus == nil else { return nil }
         return store.failedResponseWarning(for: request.key, revision: request.requestRevision)
@@ -1538,7 +1551,8 @@ struct LiveRequestDetail: View {
             if let warning = failedResponseWarning {
                 FailedResponseDialog(warning: warning,
                     canRetry: store.canRetryFailedResponse(for: request.key),
-                    onRetry: { _ = store.retryFailedResponse(for: request.key) })
+                    onRetry: { _ = store.retryFailedResponse(for: request.key) },
+                    onCopy: { UIPasteboard.general.string = $0 })
             }
         }
         .sheet(isPresented: $chatPresented) {
@@ -2511,10 +2525,31 @@ private struct NoCommentChoiceRow: View {
     }
 }
 
+struct FailedResponseDialogCopyContent: Equatable {
+    static let buttonAccessibilityIdentifier = "failed-response-copy"
+
+    let summary: String
+    let detail: String
+
+    var text: String { "\(summary)\n\n\(detail)" }
+
+    func copy(using action: (String) -> Void) {
+        action(text)
+    }
+}
+
 private struct FailedResponseDialog: View {
     let warning: LivePresentationStore.FailedResponseWarning
     let canRetry: Bool
     let onRetry: () -> Void
+    let onCopy: (String) -> Void
+    @Environment(\.locale) private var locale
+
+    private var copyContent: FailedResponseDialogCopyContent {
+        FailedResponseDialogCopyContent(
+            summary: String(localized: warning.summary, locale: locale),
+            detail: String(localized: warning.detail, locale: locale))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2523,6 +2558,9 @@ private struct FailedResponseDialog: View {
                     .font(.headline)
                     .accessibilityIdentifier("failed-response-title")
                 Spacer(minLength: 8)
+                Button("Copy") { copyContent.copy(using: onCopy) }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier(FailedResponseDialogCopyContent.buttonAccessibilityIdentifier)
                 Button("Retry", action: onRetry)
                     .buttonStyle(.borderedProminent)
                     .disabled(!canRetry)
@@ -2530,7 +2568,7 @@ private struct FailedResponseDialog: View {
             }
             .padding()
             Divider().accessibilityHidden(true)
-            Text(warning.summary)
+            Text(copyContent.summary)
                 .font(.body.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2538,7 +2576,7 @@ private struct FailedResponseDialog: View {
                 .padding(.top, 16)
                 .accessibilityIdentifier("failed-response-summary")
             ScrollView {
-                Text(warning.detail)
+                Text(copyContent.detail)
                     .font(.body)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
