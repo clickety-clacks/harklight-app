@@ -126,6 +126,13 @@ final class SampleFixtureDomain {
 
     private func record(_ message: SampleMessage) throws -> StoredRequest {
         func storedRequest(_ payload: [String: Any]) throws -> StoredRequest {
+            var payload = payload
+            if let messageType = message.declaredMessageType {
+                payload["message_type"] = messageType.rawValue
+            }
+            if let messageKind = message.declaredMessageKind {
+                payload["message_kind"] = messageKind.rawValue
+            }
             let json = try JSONValue.parse(JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
             let stored = StoredRequest(key: key(for: message), originalPayload: json)
             switch stored.interface {

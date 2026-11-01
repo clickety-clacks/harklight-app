@@ -65,6 +65,8 @@ struct SampleMessage: Identifiable, Equatable {
     // Stable per fixture identity so repeated registration keeps the original
     // payload instead of looking like an update to an existing request.
     let fixtureCreatedAtMilliseconds: Int
+    var declaredMessageType: MessageTypeValue? = nil
+    var declaredMessageKind: MessageKindValue? = nil
 }
 
 struct SampleMark: Identifiable, Equatable, Codable {
@@ -174,6 +176,8 @@ final class SampleResponse {
             initials: message.initials,
             emphasis: emphasis,
             messageType: message.kind.designMessageType,
+            declaredMessageType: request.messageType,
+            declaredMessageKind: request.messageKind,
             tier: message.tier)
     }
 
@@ -446,7 +450,9 @@ final class SampleLibrary {
                 title: request.title?.rawValue ?? "", body: request.body?.rawValue ?? "",
                 options: metadata.options, deadline: metadata.deadline, missed: metadata.missed,
                 revised: metadata.revised, chatUnread: metadata.chatUnread, hasChat: metadata.hasChat,
-                fixtureCreatedAtMilliseconds: metadata.fixtureCreatedAtMilliseconds)
+                fixtureCreatedAtMilliseconds: metadata.fixtureCreatedAtMilliseconds,
+                declaredMessageType: metadata.declaredMessageType,
+                declaredMessageKind: metadata.declaredMessageKind)
         }
         guard !reorderedIDs.isEmpty else { return projected }
         let byID = Dictionary(uniqueKeysWithValues: projected.map { ($0.id, $0) })
@@ -512,11 +518,20 @@ final class SampleLibrary {
 
 enum SampleCatalog {
     static var messages: [SampleMessage] {
-        let messages = standardMessages
+        var messages = standardMessages
         #if DEBUG
+        var acceptanceMessages: [SampleMessage] = []
         if ProcessInfo.processInfo.arguments.contains("--harklight-data-detector-acceptance") {
-            return messages + [dataDetectorAcceptanceMessage]
+            acceptanceMessages.append(dataDetectorAcceptanceMessage)
         }
+        if ProcessInfo.processInfo.arguments.contains("--harklight-message-kind-acceptance") {
+            if let requestIndex = messages.firstIndex(where: { $0.id == "sample-note-0" }) {
+                messages[requestIndex].declaredMessageType = .request
+                messages[requestIndex].declaredMessageKind = .blocker
+            }
+            acceptanceMessages.append(messageKindAcceptanceMessage)
+        }
+        return messages + acceptanceMessages
         #endif
         return messages
     }
@@ -553,6 +568,23 @@ enum SampleCatalog {
         chatUnread: false,
         hasChat: false,
         fixtureCreatedAtMilliseconds: 1_790_000_000_000)
+
+    private static let messageKindAcceptanceMessage = SampleMessage(
+        id: "sample-message-kind-success",
+        kind: .completed,
+        sender: "Release assistant",
+        initials: "RA",
+        title: "Release package is ready",
+        body: "The reviewed package is available and the handoff is complete.",
+        options: [],
+        deadline: nil,
+        missed: false,
+        revised: false,
+        chatUnread: false,
+        hasChat: false,
+        fixtureCreatedAtMilliseconds: 1_790_000_060_000,
+        declaredMessageType: .fyi,
+        declaredMessageKind: .success)
     #endif
 
     private struct Content {

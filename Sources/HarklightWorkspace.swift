@@ -199,6 +199,8 @@ struct InboxRequestRow: Identifiable {
     var isLocalExample = false
     var localStatus: String? = nil
     var informationalSeenStatus: InformationalSeenStatus? = nil
+    var declaredMessageType: MessageTypeValue? = nil
+    var declaredMessageKind: MessageKindValue? = nil
     var canMarkSeen = false
     var canNoComment = false
     var noCommentUnavailable = false
@@ -1240,6 +1242,10 @@ struct InboxRowContent: View {
                         .foregroundStyle(palette.neutral.secondaryTextColor)
                         .accessibilityLabel("Seen")
                 }
+            }
+            if row.declaredMessageType != nil || row.declaredMessageKind != nil {
+                MessageMetadataBadges(messageType: row.declaredMessageType,
+                                      messageKind: row.declaredMessageKind)
             }
             if let bodyText = row.bodyText, !bodyText.isEmpty {
                 Text(bodyText)
