@@ -152,10 +152,6 @@ private struct AcceptanceReduceMotionOverride: ViewModifier {
     }
 }
 
-extension EnvironmentValues {
-    @Entry var harklightReduceMotionOverride: Bool? = nil
-}
-
 @MainActor
 private struct DisconnectedAccountRecoveryView: View {
     let launch: NativeAppLaunch

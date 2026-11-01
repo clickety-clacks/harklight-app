@@ -1,6 +1,10 @@
 import AttentionDomain
 import SwiftUI
 
+extension EnvironmentValues {
+    @Entry var harklightReduceMotionOverride: Bool? = nil
+}
+
 enum MessageTypePresentation {
     static func title(for type: MessageTypeValue) -> LocalizedStringResource {
         switch type {
