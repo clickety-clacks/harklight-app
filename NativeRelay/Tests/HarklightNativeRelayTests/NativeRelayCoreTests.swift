@@ -516,6 +516,62 @@ final class NativeRelayCoreTests: XCTestCase {
                        "Failure diagnostics must leave the exact pending operation available for safe retry.")
     }
 
+    func testSafeCodePreservesEveryRelayAndStoreErrorMapping() {
+        let key = RequestKey(accountScope: ExactText("account"),
+                             senderID: ExactText("sender"), messageID: ExactText("message"))
+        let relayErrors: [NativeRelayCoreError] = [
+            .fixtureProfile,
+            .wrongInstallation,
+            .inactive,
+            .invalidReplay,
+            .missingOriginContent,
+            .eventRejected,
+            .mismatchedOperationResult,
+            .inboxPagingUnavailable,
+            .inboxPagingBusy
+        ]
+        let storeErrors: [AttentionStoreError] = [
+            .staleProfile,
+            .wrongAccount,
+            .requestMissing,
+            .requestConflict,
+            .selectorExpired,
+            .invalidDraft,
+            .invalidSubmission,
+            .unsupportedInterface,
+            .answerTooLarge,
+            .requestClosed,
+            .competingIntent(UUID()),
+            .intentConflict,
+            .intentMissing,
+            .eventGap(expected: 1, received: 2),
+            .eventConflict(1),
+            .missingOriginContent(key),
+            .replayAlreadyActive,
+            .replayNotActive,
+            .replayIncomplete(expected: 2, actual: 1),
+            .fixtureOnlyOperation,
+            .missingAcceptanceOrder,
+            .duplicateAcceptanceOrder,
+            .invalidProjection,
+            .inboxCheckpointPending,
+            .inboxCheckpointIncomplete,
+            .inboxPageConflict,
+            .inboxStateUnrefreshed,
+            .persistence("private persistence detail")
+        ]
+
+        func assertRoundTrip(_ error: any Error, file: StaticString = #filePath, line: UInt = #line) {
+            let code = NativeDiagnosticCauseCode.forError(error)
+            XCTAssertEqual(NativeDiagnosticCauseCode.safeCode(code), code,
+                           "safeCode must preserve the code produced for a known error.",
+                           file: file, line: line)
+        }
+
+        relayErrors.forEach { assertRoundTrip($0) }
+        storeErrors.forEach { assertRoundTrip($0) }
+    }
+
     func testInboxReconciliationAddsPersistedNoCommentIDWithoutChangingOrdinaryFrame() async throws {
         let (context, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
