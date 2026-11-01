@@ -370,20 +370,41 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         defer { socketExchangeGate.leave() }
         do { try await send(frame) }
         catch {
+            if isNoCommentOperation {
+                diagnoseNoReply(.noReplyResponseReceive, .unresolved, .noResponse,
+                                operationID: operationID)
+            }
             diagnose(.answer, .originalOperationDelivery,
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
             close()
             return .unresolved
         }
+        if isNoCommentOperation {
+            diagnoseNoReply(.noReplyResponseReceive, .began, nil, operationID: operationID)
+        }
         while true {
             let frame: Data
             let value: JSONValue
+            var frameReceivedAt: Int64?
             do {
                 frame = try await receive()
+                frameReceivedAt = NativeClientDiagnosticEvent.nowMilliseconds()
                 value = try JSONValue.parse(frame)
             }
             catch {
+                if isNoCommentOperation {
+                    if let frameReceivedAt {
+                        diagnoseNoReply(.noReplyResponseReceive, .completed, .frameReceived,
+                                        operationID: operationID,
+                                        occurredAtMilliseconds: frameReceivedAt)
+                        diagnoseNoReply(.noReplyResponseDecode, .failed, .unparseableFrame,
+                                        operationID: operationID, causeCode: "unexpected_relay_frame")
+                    } else {
+                        diagnoseNoReply(.noReplyResponseReceive, .unresolved, .noResponse,
+                                        operationID: operationID)
+                    }
+                }
                 // The response could still arrive later. Retire this socket
                 // so a stale uncorrelated `ok` cannot confirm a later send.
                 diagnose(.answer, .originalOperationDelivery,
@@ -392,7 +413,41 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 close()
                 return .unresolved
             }
-            switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+            let responseType = value.uniqueValue(named: "type")?.stringValue?.rawValue
+            if responseType == "delivery" || responseType == "lifecycle" || responseType == "conversation" {
+                continue
+            }
+            let responseClass: NativeDiagnosticNoReplyResponseClass
+            switch responseType {
+            case "ok":
+                responseClass = .acknowledgement
+            case "error":
+                let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
+                if isNoCommentOperation, let reason {
+                    let normalizedReason = reason.lowercased()
+                    responseClass = normalizedReason == "unknown_type" || normalizedReason.contains("unsupported")
+                        ? .unsupportedRefusal : .serverError
+                } else {
+                    responseClass = .serverError
+                }
+            default:
+                responseClass = .unknownFrame
+            }
+            if isNoCommentOperation {
+                diagnoseNoReply(.noReplyResponseReceive, .completed, .frameReceived,
+                                operationID: operationID,
+                                occurredAtMilliseconds: frameReceivedAt ?? NativeClientDiagnosticEvent.nowMilliseconds())
+                let sequence: UInt64?
+                if responseType == "ok",
+                   case let .number(number)? = value.uniqueValue(named: "seq") {
+                    sequence = UInt64(number.lexeme)
+                } else {
+                    sequence = nil
+                }
+                diagnoseNoReply(.noReplyResponseDecode, .completed, responseClass,
+                                operationID: operationID, terminalSequence: sequence)
+            }
+            switch responseType {
             case "ok":
                 guard case let .number(number)? = value.uniqueValue(named: "seq"),
                       let sequence = UInt64(number.lexeme), sequence > 0 else {
@@ -449,8 +504,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                          causeCode: NativeDiagnosticCauseCode.serverReason(reason),
                          operationID: operationID, receipt: .terminal)
                 return .failed(operationID: operationID)
-            case "delivery", "lifecycle", "conversation":
-                continue
             default:
                 if isNoCommentOperation {
                     diagnose(.answer, .originalOperationDelivery, .rejected,
@@ -465,6 +518,23 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 return .unresolved
             }
         }
+    }
+
+    private func diagnoseNoReply(_ phase: NativeDiagnosticPhase,
+                                 _ transition: NativeDiagnosticTransition,
+                                 _ responseClass: NativeDiagnosticNoReplyResponseClass?,
+                                 operationID: UUID,
+                                 causeCode: String? = nil,
+                                 terminalSequence: UInt64? = nil,
+                                 occurredAtMilliseconds: Int64? = nil) {
+        onDiagnostic(NativeClientDiagnosticEvent(area: .answer, phase: phase,
+            transition: transition, causeCode: causeCode,
+            noReplyResponseClass: responseClass,
+            operationIDSource: .localSubmission,
+            terminalSequence: terminalSequence,
+            attemptID: attemptID, transportAttemptID: attemptID,
+            operationID: operationID,
+            occurredAtMilliseconds: occurredAtMilliseconds ?? NativeClientDiagnosticEvent.nowMilliseconds()))
     }
 
     /// A send response is not a replay ACK and cannot advance either cursor.

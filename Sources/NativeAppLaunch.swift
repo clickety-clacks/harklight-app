@@ -1618,7 +1618,7 @@ final class LivePresentationStore {
             }
             statusParts.append("Cached history · status not refreshed")
         }
-        return InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
+        let row = InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
             title: request.title?.rawValue ?? "Message",
             sender: request.key.senderID.rawValue,
             status: statusParts.joined(separator: " · "),
@@ -1652,6 +1652,15 @@ final class LivePresentationStore {
             duePhrase: request.inboxDueAtMilliseconds.map { InboxDuePhrase.label(for: $0) },
             orderingReason: request.inboxReason?.rawValue,
             defaultAnswerStatus: request.defaultAnswerStatusText)
+        if request.intentReceipt?.answerKind == .noComment ||
+            request.lifecycleStatus == .noComment || request.noCommentUnavailable {
+            diagnostics?.recordNoReplyRoutingIfChanged(request: request.key,
+                revision: request.requestRevision,
+                operationID: request.intentReceipt?.answerKind == .noComment
+                    ? request.intentReceipt?.opID : nil,
+                route: row.belongsToReplied ? .replied : .inbox)
+        }
+        return row
     }
 
     private func isRetracted(_ request: PresentedRequest) -> Bool {

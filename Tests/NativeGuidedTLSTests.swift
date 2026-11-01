@@ -1166,8 +1166,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
             guard text.contains("\"type\":\"answer_no_comment\"") else { return [] }
-            if text.contains("\"request_id\":\"unsupported\"") {
+            if text.contains("\"request_id\":\"private-unsupported-request-marker\"") {
                 return ["{\"v\":1,\"type\":\"error\",\"reason\":\"unknown_type\"}\n"]
+            }
+            if text.contains("\"request_id\":\"private-unknown-frame-request-marker\"") {
+                return ["{\"v\":1,\"type\":\"private_response_marker\",\"body\":\"private_payload_marker\"}\n"]
             }
             return ["{\"v\":1,\"type\":\"error\",\"reason\":\"invalid_reply\"}\n"]
         }
@@ -1176,12 +1179,14 @@ final class NativeGuidedTLSTests: XCTestCase {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
             deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let diagnosticEvents = NativeDiagnosticEventCollector()
         let session = try URLSessionInstallationSession(
             profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
-            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER,
+            onDiagnostic: { diagnosticEvents.append($0) })
         let unsupportedOperationID = UUID()
         let unsupported = try await session.sendOriginalOperation(
-            Data(#"{"type":"answer_no_comment","request_id":"unsupported","request_revision":1}"#.utf8)
+            Data(#"{"type":"answer_no_comment","request_id":"private-unsupported-request-marker","request_revision":1}"#.utf8)
                 + Data([0x0A]),
             operationID: unsupportedOperationID)
         XCTAssertEqual(unsupported, .unsupported(operationID: unsupportedOperationID),
@@ -1189,12 +1194,112 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         let operationID = UUID()
         let result = try await session.sendOriginalOperation(
-            Data(#"{"type":"answer_no_comment","request_id":"request","request_revision":1}"#.utf8)
+            Data(#"{"type":"answer_no_comment","request_id":"private-server-error-request-marker","request_revision":1}"#.utf8)
                 + Data([0x0A]),
             operationID: operationID)
         XCTAssertEqual(result, .failed(operationID: operationID),
                        "A correlated error other than capability, closed, or stale revision is a definite refusal.")
+
+        let unknownFrameOperationID = UUID()
+        let unknownFrame = try await session.sendOriginalOperation(
+            Data(#"{"type":"answer_no_comment","request_id":"private-unknown-frame-request-marker","request_revision":1}"#.utf8)
+                + Data([0x0A]),
+            operationID: unknownFrameOperationID)
+        XCTAssertEqual(unknownFrame, .unsupported(operationID: unknownFrameOperationID),
+                       "An unknown response keeps the existing unsupported path while diagnostics classify it safely.")
+
+        let responseEvents = diagnosticEvents.events.filter { $0.phase == .noReplyResponseDecode }
+        XCTAssertEqual(responseEvents.compactMap(\.noReplyResponseClass),
+                       [.unsupportedRefusal, .serverError, .unknownFrame])
+        XCTAssertEqual(responseEvents.compactMap(\.operationID),
+                       [unsupportedOperationID, operationID, unknownFrameOperationID])
+        XCTAssertTrue(responseEvents.allSatisfy { $0.operationIDSource == .localSubmission })
+        let receivedEvents = diagnosticEvents.events.filter {
+            $0.phase == .noReplyResponseReceive && $0.transition == .completed
+        }
+        XCTAssertEqual(receivedEvents.compactMap(\.operationID),
+                       [unsupportedOperationID, operationID, unknownFrameOperationID])
+        for decoded in responseEvents {
+            let received = try XCTUnwrap(receivedEvents.first { $0.operationID == decoded.operationID })
+            XCTAssertLessThanOrEqual(received.occurredAtMilliseconds, decoded.occurredAtMilliseconds)
+        }
+        let journalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightNoReplyResponseDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: journalURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: journalURL)
+        journal.record(diagnosticEvents.events)
+        XCTAssertTrue(journal.shareText.contains("no_reply_response_class=unsupported_refusal"))
+        XCTAssertTrue(journal.shareText.contains("no_reply_response_class=server_error"))
+        XCTAssertTrue(journal.shareText.contains("no_reply_response_class=unknown_frame"))
+        XCTAssertFalse(journal.shareText.contains("private_response_marker"))
+        XCTAssertFalse(journal.shareText.contains("private_payload_marker"))
+        XCTAssertFalse(journal.shareText.contains("private-unsupported-request-marker"))
+        XCTAssertFalse(journal.shareText.contains("private-server-error-request-marker"))
+        XCTAssertFalse(journal.shareText.contains("private-unknown-frame-request-marker"))
+        XCTAssertFalse(journal.shareText.contains("unknown-frame"))
         await session.close()
+    }
+
+    func testNoCommentCoreDiagnosticsCorrelateLocalOperationToInboxRouting() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("private-person-marker"),
+                                       deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        let request = RequestKey(accountScope: identity.personID,
+                                 senderID: ExactText("private-sender-marker"),
+                                 messageID: ExactText("private-request-marker"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: request, originalPayload: payload), .message)),
+            context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: request).requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        let journalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightNoCommentCoreDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: journalURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: journalURL)
+        let presentation = try LivePresentationStore(store: store, context: context, diagnostics: journal)
+        try presentation.refreshFromDurableStore()
+        XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: request)).belongsToReplied,
+                      "The existing pending No comment route remains Replied.")
+
+        let session = U2ReplaySession(identity)
+        session.result = .unsupported(operationID: receipt.opID)
+        let collected = NativeDiagnosticEventCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: { collected.append($0) })
+        _ = try await core.sendPendingOriginalOperations()
+        journal.record(collected.events)
+        try presentation.refreshFromDurableStore()
+        let reopened = try XCTUnwrap(presentation.inboxRow(for: request))
+        XCTAssertFalse(reopened.belongsToReplied,
+                       "The existing unsupported-result behavior still returns the request to Inbox.")
+        XCTAssertTrue(reopened.noCommentUnavailable)
+
+        let operationEvents = journal.events.filter { $0.operationID == receipt.opID }
+        let original = try XCTUnwrap(operationEvents.first { $0.phase == .noReplyOriginalOperation })
+        XCTAssertEqual(original.operationIDSource, .localSubmission)
+        XCTAssertEqual(original.requestRevision, 1)
+        XCTAssertNotNil(original.requestTag)
+        let apply = try XCTUnwrap(operationEvents.last { $0.phase == .noReplyOperationApply })
+        XCTAssertEqual(apply.transition, .rejected)
+        let routes = journal.events.filter { $0.phase == .noReplyRouting }
+        XCTAssertEqual(routes.map(\.noReplyRoute), [.replied, .inbox])
+        XCTAssertEqual(routes.map(\.operationID), [receipt.opID, receipt.opID])
+        XCTAssertEqual(routes.last?.operationIDSource, .localRequestCorrelation)
+
+        let export = journal.shareText
+        XCTAssertFalse(export.contains("private-person-marker"))
+        XCTAssertFalse(export.contains("private-sender-marker"))
+        XCTAssertFalse(export.contains("private-request-marker"))
+        XCTAssertTrue(export.contains("request_revision=1"))
+        XCTAssertTrue(export.contains("no_reply_route=replied"))
+        XCTAssertTrue(export.contains("no_reply_route=inbox"))
+        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 0,
+                       "Diagnostics must not change the existing unsupported-result application.")
     }
 
     func testStaleNoCommentRevisionRefusalNamesTheCurrentRevision() async throws {
@@ -2366,6 +2471,126 @@ final class NativeGuidedTLSTests: XCTestCase {
         journal.record(unsafeEvent)
         XCTAssertFalse(journal.shareText.contains("secret-marker"))
         XCTAssertTrue(journal.shareText.contains("post_ack_failure_error_code=unknown_error"))
+    }
+
+    func testNoReplyJournalPersistsPayloadFreeOperationAndRoutingChain() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightNoReplyChain-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let journal = NativeClientDiagnosticJournal(fileURL: url)
+        let request = RequestKey(accountScope: ExactText("private-account-marker"),
+                                 senderID: ExactText("private-sender-marker"),
+                                 messageID: ExactText("private-request-marker"))
+        let operationID = UUID()
+        journal.record([
+            NativeClientDiagnosticEvent(area: .answer, phase: .noReplyOriginalOperation,
+                transition: .began, operationIDSource: .localSubmission,
+                operationID: operationID, request: request, requestRevision: 7,
+                receiptState: .pendingUnconfirmed, id: UUID(), occurredAtMilliseconds: 100),
+            NativeClientDiagnosticEvent(area: .answer, phase: .noReplyResponseReceive,
+                transition: .completed, noReplyResponseClass: .frameReceived,
+                operationIDSource: .localSubmission, operationID: operationID,
+                id: UUID(), occurredAtMilliseconds: 110),
+            NativeClientDiagnosticEvent(area: .answer, phase: .noReplyResponseDecode,
+                transition: .completed, noReplyResponseClass: .unknownFrame,
+                operationIDSource: .localSubmission, operationID: operationID,
+                id: UUID(), occurredAtMilliseconds: 111),
+            NativeClientDiagnosticEvent(area: .answer, phase: .noReplyResponseReceive,
+                transition: .completed, noReplyResponseClass: .frameReceived,
+                operationIDSource: .pagingWireOperationID,
+                terminalSequence: 12, lifecycleSequence: 12,
+                operationID: operationID, request: request, requestRevision: 7,
+                id: UUID(), occurredAtMilliseconds: 118),
+            NativeClientDiagnosticEvent(area: .answer, phase: .noReplyResponseDecode,
+                transition: .completed, noReplyResponseClass: .committedReceipt,
+                operationIDSource: .pagingWireOperationID,
+                terminalSequence: 12, lifecycleSequence: 12,
+                operationID: operationID, request: request, requestRevision: 7,
+                receiptState: .terminal, id: UUID(), occurredAtMilliseconds: 120),
+            NativeClientDiagnosticEvent(area: .answer, phase: .noReplyLifecycleApply,
+                transition: .began, noReplyResponseClass: .terminalNoComment,
+                operationIDSource: .pagingWireOperationID,
+                terminalSequence: 12, lifecycleSequence: 12,
+                operationID: operationID, request: request, requestRevision: 7,
+                receiptState: .terminal, id: UUID(), occurredAtMilliseconds: 120),
+            NativeClientDiagnosticEvent(area: .answer, phase: .noReplyLifecycleApply,
+                transition: .completed, noReplyResponseClass: .terminalNoComment,
+                operationIDSource: .pagingWireOperationID,
+                terminalSequence: 12, lifecycleSequence: 12,
+                operationID: operationID, request: request, requestRevision: 7,
+                receiptState: .terminal, id: UUID(), occurredAtMilliseconds: 121)
+        ])
+        journal.recordNoReplyRoutingIfChanged(request: request, revision: 7,
+                                              operationID: nil, route: .replied)
+        journal.recordNoReplyRoutingIfChanged(request: request, revision: 7,
+                                              operationID: nil, route: .replied)
+        journal.recordNoReplyRoutingIfChanged(request: request, revision: 7,
+                                              operationID: nil, route: .inbox)
+
+        let restored = NativeClientDiagnosticJournal(fileURL: url)
+        let routes = restored.events.filter { $0.phase == .noReplyRouting }
+        XCTAssertEqual(routes.count, 2, "Repeated projection of the same route is not a new routing transition.")
+        XCTAssertEqual(routes.map(\.noReplyRoute), [.replied, .inbox])
+        XCTAssertEqual(routes.map(\.operationID), [operationID, operationID])
+        XCTAssertEqual(routes.map(\.operationIDSource), [.localRequestCorrelation, .localRequestCorrelation])
+        XCTAssertEqual(restored.events.first(where: { $0.phase == .noReplyOriginalOperation })?.requestRevision, 7)
+        XCTAssertEqual(restored.events.first(where: { $0.phase == .noReplyResponseDecode })?.noReplyResponseClass,
+                       .unknownFrame)
+        XCTAssertEqual(restored.events.first(where: {
+            $0.phase == .noReplyResponseDecode && $0.noReplyResponseClass == .committedReceipt
+        })?.operationIDSource, .pagingWireOperationID)
+        XCTAssertEqual(restored.events.first(where: { $0.phase == .noReplyLifecycleApply })?.lifecycleSequence, 12)
+
+        let export = restored.shareText
+        XCTAssertTrue(export.contains("no_reply_response_class=unknown_frame"))
+        XCTAssertTrue(export.contains("operation_id_source=local_submission"))
+        XCTAssertTrue(export.contains("operation_id_source=paging_wire_op_id"))
+        XCTAssertTrue(export.contains("operation_id_source=local_request_correlation"))
+        XCTAssertTrue(export.contains("terminal_sequence=12"))
+        XCTAssertTrue(export.contains("lifecycle_sequence=12"))
+        XCTAssertTrue(export.contains("no_reply_route=replied"))
+        XCTAssertTrue(export.contains("no_reply_route=inbox"))
+        XCTAssertTrue(export.contains("app_source_commit="))
+        XCTAssertTrue(export.contains("app_source_tree="))
+        XCTAssertTrue(export.contains("request_tag_sha256="))
+        XCTAssertTrue(export.contains("operation_id=\(operationID.uuidString.lowercased())"))
+        XCTAssertFalse(export.contains("private-account-marker"))
+        XCTAssertFalse(export.contains("private-sender-marker"))
+        XCTAssertFalse(export.contains("private-request-marker"))
+    }
+
+    func testDiagnosticSourceProvenanceRequiresFullGitObjectIDs() {
+        let valid = NativeDiagnosticSourceProvenance.validated(
+            commit: String(repeating: "a", count: 40),
+            tree: String(repeating: "b", count: 40))
+        XCTAssertEqual(valid.commit, String(repeating: "a", count: 40))
+        XCTAssertEqual(valid.tree, String(repeating: "b", count: 40))
+        XCTAssertEqual(NativeDiagnosticSourceProvenance.validated(commit: "short", tree: String(repeating: "b", count: 40)),
+                       .unavailable)
+        XCTAssertEqual(NativeDiagnosticSourceProvenance.validated(commit: String(repeating: "a", count: 40), tree: "../tree"),
+                       .unavailable)
+    }
+
+    func testNoReplyRoutingDoesNotGuessBetweenLocalOperations() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightNoReplyAmbiguousRoute-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let journal = NativeClientDiagnosticJournal(fileURL: url)
+        let request = RequestKey(accountScope: ExactText("private-account-marker"),
+                                 senderID: ExactText("private-sender-marker"),
+                                 messageID: ExactText("private-request-marker"))
+        journal.record([UUID(), UUID()].map { operationID in
+            NativeClientDiagnosticEvent(area: .answer, phase: .noReplyOriginalOperation,
+                transition: .began, operationIDSource: .localSubmission,
+                operationID: operationID, request: request, requestRevision: 7)
+        })
+
+        journal.recordNoReplyRoutingIfChanged(request: request, revision: 7,
+                                              operationID: nil, route: .inbox)
+        let route = try XCTUnwrap(journal.events.first { $0.phase == .noReplyRouting })
+        XCTAssertNil(route.operationID)
+        XCTAssertNil(route.operationIDSource)
+        XCTAssertEqual(route.noReplyRoute, .inbox)
     }
 
     func testClientDiagnosticJournalKeepsCallbackHistoryInOccurrenceOrder() throws {

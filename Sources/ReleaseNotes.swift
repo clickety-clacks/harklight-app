@@ -96,7 +96,16 @@ enum HarklightReleaseNotes {
                         comment: "Release-note title for identifying failed post-sync steps."),
                     detail: LocalizedStringResource(
                         "Connection details name the post-sync step that stopped and include a safe error code to share.",
-                        comment: "Release-note detail for safe post-sync failure diagnostics."))
+                        comment: "Release-note detail for safe post-sync failure diagnostics.")),
+                .init(
+                    id: "no-reply-delivery-diagnostics",
+                    symbol: "tray.and.arrow.down",
+                    title: LocalizedStringResource(
+                        "More detail for no-reply answers",
+                        comment: "Release-note title for additional support details about a no-reply answer."),
+                    detail: LocalizedStringResource(
+                        "Support diagnostics can show whether a response arrived and whether the message is in Inbox or Replied.",
+                        comment: "Release-note detail for safe no-reply response and routing diagnostics."))
             ])
     ]
 

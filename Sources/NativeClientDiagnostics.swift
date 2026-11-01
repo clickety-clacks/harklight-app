@@ -4,6 +4,41 @@ import Foundation
 import HarklightNativeRelay
 import Observation
 
+struct NativeDiagnosticSourceProvenance: Equatable {
+    let commit: String
+    let tree: String
+
+    static let unavailable = Self(commit: "unavailable", tree: "unavailable")
+
+    static func validated(commit: String?, tree: String?) -> Self {
+        guard let commit, let tree, isGitObjectID(commit), isGitObjectID(tree) else {
+            return .unavailable
+        }
+        return Self(commit: commit, tree: tree)
+    }
+
+    static func from(infoDictionary: [String: Any]) -> Self {
+        validated(commit: infoDictionary["HarklightSourceCommit"] as? String,
+                  tree: infoDictionary["HarklightSourceTree"] as? String)
+    }
+
+    static func isGitObjectID(_ value: String) -> Bool {
+        value.utf8.count == 40 &&
+            value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    static var current: Self {
+        guard let url = Bundle.main.url(forResource: "HarklightBuildProvenance", withExtension: "plist"),
+              let data = try? Data(contentsOf: url),
+              let propertyList = try? PropertyListSerialization.propertyList(from: data,
+                  options: [], format: nil),
+              let dictionary = propertyList as? [String: Any] else {
+            return .unavailable
+        }
+        return from(infoDictionary: dictionary)
+    }
+}
+
 @MainActor
 @Observable
 final class NativeClientDiagnosticJournal {
@@ -69,6 +104,40 @@ final class NativeClientDiagnosticJournal {
         persist()
     }
 
+    func recordNoReplyRoutingIfChanged(request: RequestKey,
+                                       revision: UInt64?,
+                                       operationID: UUID?,
+                                       route: NativeDiagnosticNoReplyRoute) {
+        let requestTag = NativeClientDiagnosticEvent(area: .answer,
+            phase: .noReplyRouting, transition: .observed,
+            request: request, requestRevision: revision).requestTag
+        let localOperationIDs = Set(events.compactMap { event -> UUID? in
+            guard event.phase == .noReplyOriginalOperation,
+                  event.requestTag == requestTag,
+                  event.requestRevision == revision,
+                  event.operationIDSource == .localSubmission else { return nil }
+            return event.operationID
+        })
+        let correlatedOperationID = operationID ?? (localOperationIDs.count == 1 ? localOperationIDs.first : nil)
+        let operationIDSource: NativeDiagnosticOperationIDSource? = operationID != nil
+            ? .localSubmission : (correlatedOperationID == nil ? nil : .localRequestCorrelation)
+        let event = NativeClientDiagnosticEvent(area: .answer,
+            phase: .noReplyRouting, transition: .observed,
+            operationIDSource: operationIDSource,
+            operationID: correlatedOperationID,
+            request: request, requestRevision: revision,
+            noReplyRoute: route)
+        if let previous = events.last(where: {
+            $0.phase == .noReplyRouting && $0.requestTag == event.requestTag &&
+                $0.requestRevision == revision
+        }), previous.noReplyRoute == route,
+           previous.operationID == event.operationID,
+           previous.operationIDSource == event.operationIDSource {
+            return
+        }
+        record(event)
+    }
+
     private func isUnchangedOperationReplayState(_ event: NativeClientDiagnosticEvent) -> Bool {
         guard event.area == .answer,
               event.phase == .ordinaryReplay,
@@ -113,12 +182,15 @@ final class NativeClientDiagnosticJournal {
     }
 
     var shareText: String {
+        let source = NativeDiagnosticSourceProvenance.current
         var lines = [
             "Harklight client diagnostics",
             "format_version=1",
             "app_version=\(bundleValue("CFBundleShortVersionString"))",
             "app_build=\(bundleValue("CFBundleVersion"))",
             "app_executable_sha256=\(NativeForegroundConnectDiagnostic.executableSHA256(for: Bundle.main.executableURL))",
+            "app_source_commit=\(source.commit)",
+            "app_source_tree=\(source.tree)",
             "journal_status=\(persistenceStatus.rawValue)",
             "journal_cause=\(persistenceCauseCode ?? "none_observed")",
             "retained_event_count=\(events.count)",
@@ -139,6 +211,15 @@ final class NativeClientDiagnosticJournal {
             if let drain = event.postAckDrainTransition { fields.append("post_ack_drain=\(drain.rawValue)") }
             if let step = event.postAckFailureStep { fields.append("post_ack_failure_step=\(step.rawValue)") }
             if let code = event.postAckFailureErrorCode { fields.append("post_ack_failure_error_code=\(code)") }
+            if let responseClass = event.noReplyResponseClass {
+                fields.append("no_reply_response_class=\(responseClass.rawValue)")
+            }
+            if let operationSource = event.operationIDSource {
+                fields.append("operation_id_source=\(operationSource.rawValue)")
+            }
+            if let sequence = event.terminalSequence { fields.append("terminal_sequence=\(sequence)") }
+            if let sequence = event.lifecycleSequence { fields.append("lifecycle_sequence=\(sequence)") }
+            if let route = event.noReplyRoute { fields.append("no_reply_route=\(route.rawValue)") }
             if let id = event.attemptID { fields.append("attempt_id=\(id.uuidString.lowercased())") }
             if let id = event.transportAttemptID { fields.append("transport_attempt_id=\(id.uuidString.lowercased())") }
             if let id = event.operationID { fields.append("operation_id=\(id.uuidString.lowercased())") }

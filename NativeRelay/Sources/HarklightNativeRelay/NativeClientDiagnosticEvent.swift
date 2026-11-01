@@ -47,6 +47,12 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case foregroundProfileValidation
     case foregroundContextValidation
     case foregroundCompletion
+    case noReplyOriginalOperation
+    case noReplyResponseReceive
+    case noReplyResponseDecode
+    case noReplyOperationApply
+    case noReplyLifecycleApply
+    case noReplyRouting
 }
 
 public enum NativeDiagnosticTransition: String, Codable, Sendable {
@@ -122,6 +128,39 @@ public enum NativeDiagnosticReceiptState: String, Codable, Sendable {
     case unknown
 }
 
+/// A fixed class for a no-reply protocol response. Raw frames and server text
+/// are never retained; unknown or unparseable frames remain explicit states.
+public enum NativeDiagnosticNoReplyResponseClass: String, Codable, Sendable {
+    case frameReceived = "frame_received"
+    case acknowledgement
+    case serverError = "server_error"
+    case unsupportedRefusal = "unsupported_refusal"
+    case unknownFrame = "unknown_frame"
+    case unparseableFrame = "unparseable_frame"
+    case noResponse = "no_response"
+    case committedReceipt = "committed_receipt"
+    case operationConflictReceipt = "operation_conflict_receipt"
+    case notCommittedReceipt = "not_committed_receipt"
+    case refusedReceipt = "refused_receipt"
+    case missingReceipt = "missing_receipt"
+    case terminalNoComment = "terminal_no_comment"
+    case terminalAnswered = "terminal_answered"
+    case terminalOther = "terminal_other"
+}
+
+/// Identifies where an operation ID came from. A direct no-reply send has a
+/// local ID only; a later paging reconciliation carries that ID as wire op_id.
+public enum NativeDiagnosticOperationIDSource: String, Codable, Sendable {
+    case localSubmission = "local_submission"
+    case pagingWireOperationID = "paging_wire_op_id"
+    case localRequestCorrelation = "local_request_correlation"
+}
+
+public enum NativeDiagnosticNoReplyRoute: String, Codable, Sendable {
+    case inbox
+    case replied
+}
+
 /// A payload-free event emitted at native-client operation boundaries. Request
 /// keys are represented by a stable SHA-256 tag; user text, URLs and file names
 /// have no fields in this type.
@@ -137,6 +176,11 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public let postAckDrainTransition: NativeDiagnosticTransition?
     public let postAckFailureStep: NativeDiagnosticPostAckStep?
     public let postAckFailureErrorCode: String?
+    public let noReplyResponseClass: NativeDiagnosticNoReplyResponseClass?
+    public let operationIDSource: NativeDiagnosticOperationIDSource?
+    public let terminalSequence: UInt64?
+    public let lifecycleSequence: UInt64?
+    public let noReplyRoute: NativeDiagnosticNoReplyRoute?
     public let attemptID: UUID?
     public let transportAttemptID: UUID?
     public let operationID: UUID?
@@ -147,6 +191,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     private enum CodingKeys: String, CodingKey {
         case id, occurredAtMilliseconds, area, phase, transition, causeCode, terminalReason
         case postAckBoundary, postAckDrainTransition, postAckFailureStep, postAckFailureErrorCode
+        case noReplyResponseClass, operationIDSource, terminalSequence, lifecycleSequence, noReplyRoute
         case attemptID, transportAttemptID, operationID, requestTag, requestRevision, receiptState
     }
 
@@ -159,6 +204,11 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
                 postAckDrainTransition: NativeDiagnosticTransition? = nil,
                 postAckFailureStep: NativeDiagnosticPostAckStep? = nil,
                 postAckFailureErrorCode: String? = nil,
+                noReplyResponseClass: NativeDiagnosticNoReplyResponseClass? = nil,
+                operationIDSource: NativeDiagnosticOperationIDSource? = nil,
+                terminalSequence: UInt64? = nil,
+                lifecycleSequence: UInt64? = nil,
+                noReplyRoute: NativeDiagnosticNoReplyRoute? = nil,
                 attemptID: UUID? = nil,
                 transportAttemptID: UUID? = nil,
                 operationID: UUID? = nil,
@@ -178,6 +228,11 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         self.postAckDrainTransition = postAckDrainTransition
         self.postAckFailureStep = postAckFailureStep
         self.postAckFailureErrorCode = NativeDiagnosticCauseCode.safeCode(postAckFailureErrorCode)
+        self.noReplyResponseClass = noReplyResponseClass
+        self.operationIDSource = operationIDSource
+        self.terminalSequence = terminalSequence
+        self.lifecycleSequence = lifecycleSequence
+        self.noReplyRoute = noReplyRoute
         self.attemptID = attemptID
         self.transportAttemptID = transportAttemptID
         self.operationID = operationID
@@ -200,6 +255,11 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         postAckFailureStep = try values.decodeIfPresent(NativeDiagnosticPostAckStep.self, forKey: .postAckFailureStep)
         postAckFailureErrorCode = NativeDiagnosticCauseCode.safeCode(
             try values.decodeIfPresent(String.self, forKey: .postAckFailureErrorCode))
+        noReplyResponseClass = try values.decodeIfPresent(NativeDiagnosticNoReplyResponseClass.self, forKey: .noReplyResponseClass)
+        operationIDSource = try values.decodeIfPresent(NativeDiagnosticOperationIDSource.self, forKey: .operationIDSource)
+        terminalSequence = try values.decodeIfPresent(UInt64.self, forKey: .terminalSequence)
+        lifecycleSequence = try values.decodeIfPresent(UInt64.self, forKey: .lifecycleSequence)
+        noReplyRoute = try values.decodeIfPresent(NativeDiagnosticNoReplyRoute.self, forKey: .noReplyRoute)
         attemptID = try values.decodeIfPresent(UUID.self, forKey: .attemptID)
         transportAttemptID = try values.decodeIfPresent(UUID.self, forKey: .transportAttemptID)
         operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
@@ -224,6 +284,10 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
 
     private static func safeCauseCode(_ value: String?) -> String? {
         NativeDiagnosticCauseCode.safeCode(value)
+    }
+
+    public static func nowMilliseconds() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1_000)
     }
 }
 

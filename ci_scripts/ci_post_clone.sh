@@ -26,6 +26,44 @@ if [ -z "$repo" ] || [ -z "$commit" ]; then
     warn 'The source path or revision is unavailable; continuing the build.'
     exit 0
 fi
+
+# Embed source provenance only when the build's declared commit is exactly the
+# checked-out commit. Invalid or unavailable CI metadata remains explicitly
+# unavailable in the app's diagnostics export.
+provenance_file="$repo/Resources/HarklightBuildProvenance.plist"
+resolved_commit=$(git -C "$repo" rev-parse --verify "$commit^{commit}" 2>/dev/null || true)
+checkout_commit=$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null || true)
+if [ -n "$resolved_commit" ] && [ "$resolved_commit" = "$checkout_commit" ]; then
+    source_tree=$(git -C "$repo" rev-parse --verify "$resolved_commit^{tree}" 2>/dev/null || true)
+    case "$resolved_commit:$source_tree" in
+        *[!0123456789abcdef:]*|'') resolved_commit=; source_tree= ;;
+    esac
+    if [ "${#resolved_commit}" -ne 40 ] || [ "${#source_tree}" -ne 40 ]; then
+        resolved_commit=
+        source_tree=
+    fi
+else
+    resolved_commit=
+    source_tree=
+fi
+if [ -n "$resolved_commit" ] && [ -f "$provenance_file" ]; then
+    if ! cat > "$provenance_file" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>HarklightSourceCommit</key><string>$resolved_commit</string>
+    <key>HarklightSourceTree</key><string>$source_tree</string>
+</dict>
+</plist>
+PLIST
+    then
+        warn 'Source provenance could not be written; continuing the build with unavailable provenance.'
+    fi
+else
+    warn 'The checked-out source revision could not be verified; continuing the build with unavailable provenance.'
+fi
+
 if ! git -C "$repo" merge-base --is-ancestor "$base" "$commit"; then
     warn 'Source history is unavailable; continuing the build.'
     exit 0

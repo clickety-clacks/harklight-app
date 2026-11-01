@@ -672,19 +672,172 @@ public actor NativeRelayCore {
             let reconciliationOperations = try submissions.map {
                 try inboxWire.reconciliationOperation(for: $0)
             }
-            let reply = try await transport.inboxRequest(
-                inboxWire.inboxReconcile(snapshotID: snapshotID, batchID: batch.batchID,
-                    operations: reconciliationOperations, ref: ref), ref: ref)
+            let noCommentSubmissions = submissions.filter(\.isNoComment)
+            for submission in noCommentSubmissions {
+                diagnose(.answer, .noReplyResponseReceive, .began,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .pendingUnconfirmed,
+                         operationIDSource: .localSubmission)
+            }
+            let reply: Data
+            do {
+                reply = try await transport.inboxRequest(
+                    inboxWire.inboxReconcile(snapshotID: snapshotID, batchID: batch.batchID,
+                        operations: reconciliationOperations, ref: ref), ref: ref)
+            } catch {
+                for submission in noCommentSubmissions {
+                    diagnose(.answer, .noReplyResponseReceive, .unresolved,
+                             noReplyResponseClass: .noResponse,
+                             operationIDSource: .localSubmission,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                }
+                throw error
+            }
+            let responseReceivedAt = NativeClientDiagnosticEvent.nowMilliseconds()
+            for submission in noCommentSubmissions {
+                diagnose(.answer, .noReplyResponseReceive, .completed,
+                         noReplyResponseClass: .frameReceived,
+                         operationIDSource: .localSubmission,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision,
+                         occurredAtMilliseconds: responseReceivedAt)
+            }
             try validate()
-            let reconciliation = try inboxWire.decodeReconciliation(reply, ref: ref,
-                snapshotID: snapshotID, highWater: highWater,
-                batchID: batch.batchID,
-                operationIDs: batch.operationIDs,
-                noCommentOperationIDs: Set(submissions.filter(\.isNoComment).map(\.operationID)))
-            try store.saveInboxReceiptBatch(batch.batchID,
-                results: reconciliation.receipts,
-                missingOperationIDs: reconciliation.missingOperationIDs,
-                context: context)
+            let reconciliation: InboxReconciliationResponse
+            do {
+                reconciliation = try inboxWire.decodeReconciliation(reply, ref: ref,
+                    snapshotID: snapshotID, highWater: highWater,
+                    batchID: batch.batchID,
+                    operationIDs: batch.operationIDs,
+                    noCommentOperationIDs: Set(noCommentSubmissions.map(\.operationID)))
+            } catch {
+                for submission in noCommentSubmissions {
+                    diagnose(.answer, .noReplyResponseDecode, .failed,
+                             error: error,
+                             noReplyResponseClass: .unparseableFrame,
+                             operationIDSource: .localSubmission,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                }
+                throw error
+            }
+            let receiptsByID = Dictionary(uniqueKeysWithValues:
+                reconciliation.receipts.map { ($0.operationID, $0) })
+            let missing = Set(reconciliation.missingOperationIDs)
+            for submission in noCommentSubmissions {
+                if let receipt = receiptsByID[submission.operationID] {
+                    let responseClass = Self.noReplyResponseClass(for: receipt.status)
+                    let sequence = receipt.terminal?.sequence
+                    diagnose(.answer, .noReplyResponseDecode, .completed,
+                             noReplyResponseClass: responseClass,
+                             operationIDSource: .pagingWireOperationID,
+                             terminalSequence: sequence, lifecycleSequence: sequence,
+                             operationID: receipt.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision,
+                             receipt: Self.noReplyReceiptState(for: receipt.status))
+                    if let terminal = receipt.terminal {
+                        diagnose(.answer, .noReplyLifecycleApply, .began,
+                                 noReplyResponseClass: Self.noReplyTerminalClass(for: terminal),
+                                 operationIDSource: .pagingWireOperationID,
+                                 terminalSequence: terminal.sequence,
+                                 lifecycleSequence: terminal.sequence,
+                                 operationID: receipt.operationID, request: submission.requestKey,
+                                 revision: submission.requestRevision, receipt: .terminal)
+                    }
+                } else if missing.contains(submission.operationID) {
+                    diagnose(.answer, .noReplyResponseDecode, .completed,
+                             noReplyResponseClass: .missingReceipt,
+                             operationIDSource: .localSubmission,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                } else {
+                    diagnose(.answer, .noReplyResponseDecode, .unresolved,
+                             noReplyResponseClass: .missingReceipt,
+                             operationIDSource: .localSubmission,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                }
+                diagnose(.answer, .noReplyOperationApply, .began,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .pendingUnconfirmed,
+                         operationIDSource: .localSubmission)
+            }
+            do {
+                try store.saveInboxReceiptBatch(batch.batchID,
+                    results: reconciliation.receipts,
+                    missingOperationIDs: reconciliation.missingOperationIDs,
+                    context: context)
+            } catch {
+                for submission in noCommentSubmissions {
+                    diagnose(.answer, .noReplyOperationApply, .failed, error: error,
+                             operationIDSource: .localSubmission,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                }
+                throw error
+            }
+            for submission in noCommentSubmissions {
+                if let receipt = receiptsByID[submission.operationID] {
+                    let applied: NativeDiagnosticTransition = switch receipt.status {
+                    case .committed: .completed
+                    case .operationConflict, .refused: .rejected
+                    case .notCommittedAtSnapshot: .unresolved
+                    }
+                    diagnose(.answer, .noReplyOperationApply, applied,
+                             noReplyResponseClass: Self.noReplyResponseClass(for: receipt.status),
+                             operationIDSource: .pagingWireOperationID,
+                             terminalSequence: receipt.terminal?.sequence,
+                             lifecycleSequence: receipt.terminal?.sequence,
+                             operationID: receipt.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision,
+                             receipt: Self.noReplyReceiptState(for: receipt.status))
+                    if let terminal = receipt.terminal {
+                        diagnose(.answer, .noReplyLifecycleApply, .completed,
+                                 noReplyResponseClass: Self.noReplyTerminalClass(for: terminal),
+                                 operationIDSource: .pagingWireOperationID,
+                                 terminalSequence: terminal.sequence,
+                                 lifecycleSequence: terminal.sequence,
+                                 operationID: receipt.operationID, request: submission.requestKey,
+                                 revision: submission.requestRevision, receipt: .terminal)
+                    }
+                } else if missing.contains(submission.operationID) {
+                    diagnose(.answer, .noReplyOperationApply, .unresolved,
+                             noReplyResponseClass: .missingReceipt,
+                             operationIDSource: .localSubmission,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                }
+            }
+        }
+    }
+
+    private static func noReplyResponseClass(for status: InboxOperationReceiptStatus)
+        -> NativeDiagnosticNoReplyResponseClass {
+        switch status {
+        case .committed: .committedReceipt
+        case .operationConflict: .operationConflictReceipt
+        case .notCommittedAtSnapshot: .notCommittedReceipt
+        case .refused: .refusedReceipt
+        }
+    }
+
+    private static func noReplyReceiptState(for status: InboxOperationReceiptStatus)
+        -> NativeDiagnosticReceiptState {
+        switch status {
+        case .committed, .refused: .terminal
+        case .operationConflict: .unknown
+        case .notCommittedAtSnapshot: .pendingUnconfirmed
+        }
+    }
+
+    private static func noReplyTerminalClass(for event: RelayEvent)
+        -> NativeDiagnosticNoReplyResponseClass {
+        guard case let .terminal(_, state, _) = event.body else { return .terminalOther }
+        switch state {
+        case .noComment: .terminalNoComment
+        case .answered: .terminalAnswered
+        default: .terminalOther
         }
     }
 
@@ -697,14 +850,79 @@ public actor NativeRelayCore {
             let ref = Self.inboxRef("receipts")
             let reply = try await transport.inboxRequest(
                 inboxWire.inboxReceipts(snapshotID: snapshotID, cursor: cursor, ref: ref), ref: ref)
+            let responseReceivedAt = NativeClientDiagnosticEvent.nowMilliseconds()
             try validate()
             let page = try inboxWire.decodeReceipts(reply, ref: ref,
                 snapshotID: snapshotID, highWater: highWater)
             guard !page.events.isEmpty || page.nextCursor == nil else {
                 throw InboxPagingWireError.invalidFrame
             }
-            try store.saveInboxReceiptChunk(snapshotID: snapshotID, cursor: cursor,
-                events: page.events, nextCursor: page.nextCursor, context: context)
+            let noCommentSubmissions = Dictionary(grouping:
+                try store.snapshot(context: context).intents.values.filter(\.isNoComment),
+                by: \.requestKey)
+            let lifecycleEvents: [(event: RelayEvent,
+                                   request: RequestKey,
+                                   submission: Submission?,
+                                   responseClass: NativeDiagnosticNoReplyResponseClass)] = page.events.compactMap { event in
+                guard case let .terminal(key, _, _) = event.body else { return nil }
+                let matching = noCommentSubmissions[key] ?? []
+                guard !matching.isEmpty || Self.noReplyTerminalClass(for: event) == .terminalNoComment else {
+                    return nil
+                }
+                let submission = matching.count == 1 ? matching.first : nil
+                return (event, key, submission, Self.noReplyTerminalClass(for: event))
+            }
+            for lifecycle in lifecycleEvents {
+                let operationIDSource: NativeDiagnosticOperationIDSource? =
+                    lifecycle.submission == nil ? nil : .localRequestCorrelation
+                diagnose(.answer, .noReplyResponseReceive, .completed,
+                         noReplyResponseClass: .frameReceived,
+                         operationIDSource: operationIDSource,
+                         lifecycleSequence: lifecycle.event.sequence,
+                         operationID: lifecycle.submission?.operationID,
+                         request: lifecycle.request,
+                         revision: lifecycle.submission?.requestRevision,
+                         occurredAtMilliseconds: responseReceivedAt)
+                diagnose(.answer, .noReplyResponseDecode, .completed,
+                         noReplyResponseClass: lifecycle.responseClass,
+                         operationIDSource: operationIDSource,
+                         lifecycleSequence: lifecycle.event.sequence,
+                         operationID: lifecycle.submission?.operationID,
+                         request: lifecycle.request,
+                         revision: lifecycle.submission?.requestRevision)
+                diagnose(.answer, .noReplyLifecycleApply, .began,
+                         noReplyResponseClass: lifecycle.responseClass,
+                         operationIDSource: operationIDSource,
+                         lifecycleSequence: lifecycle.event.sequence,
+                         operationID: lifecycle.submission?.operationID,
+                         request: lifecycle.request,
+                         revision: lifecycle.submission?.requestRevision)
+            }
+            do {
+                try store.saveInboxReceiptChunk(snapshotID: snapshotID, cursor: cursor,
+                    events: page.events, nextCursor: page.nextCursor, context: context)
+            } catch {
+                for lifecycle in lifecycleEvents {
+                    diagnose(.answer, .noReplyLifecycleApply, .failed, error: error,
+                             noReplyResponseClass: lifecycle.responseClass,
+                             operationIDSource: lifecycle.submission == nil ? nil : .localRequestCorrelation,
+                             lifecycleSequence: lifecycle.event.sequence,
+                             operationID: lifecycle.submission?.operationID,
+                             request: lifecycle.request,
+                             revision: lifecycle.submission?.requestRevision)
+                }
+                throw error
+            }
+            for lifecycle in lifecycleEvents {
+                diagnose(.answer, .noReplyLifecycleApply, .completed,
+                         noReplyResponseClass: lifecycle.responseClass,
+                         operationIDSource: lifecycle.submission == nil ? nil : .localRequestCorrelation,
+                         lifecycleSequence: lifecycle.event.sequence,
+                         operationID: lifecycle.submission?.operationID,
+                         request: lifecycle.request,
+                         revision: lifecycle.submission?.requestRevision,
+                         receipt: .terminal)
+            }
         }
     }
 
@@ -1335,6 +1553,14 @@ public actor NativeRelayCore {
                  revision: submission.requestRevision, receipt: receipt)
     }
 
+    private func diagnoseNoReplyApplyFailure(_ error: Error, for submission: Submission) {
+        guard submission.isNoComment else { return }
+        diagnose(.answer, .noReplyOperationApply, .failed, error: error,
+                 operationID: submission.operationID, request: submission.requestKey,
+                 revision: submission.requestRevision, receipt: .unknown,
+                 operationIDSource: .localSubmission)
+    }
+
     private func retainReplayDiagnostics(for submissions: [Submission]) {
         let outstanding = Set(submissions.map(\.operationID))
         operationReplayDiagnosticStates = operationReplayDiagnosticStates.filter {
@@ -1383,6 +1609,12 @@ public actor NativeRelayCore {
         var attempted = 0
         for submission in pending {
             try validate()
+            if submission.isNoComment {
+                diagnose(.answer, .noReplyOriginalOperation, .began,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .pendingUnconfirmed,
+                         operationIDSource: .localSubmission)
+            }
             diagnose(.answer, .originalOperationDelivery, .began,
                      operationID: submission.operationID, request: submission.requestKey,
                      revision: submission.requestRevision, receipt: .pendingUnconfirmed)
@@ -1395,9 +1627,32 @@ public actor NativeRelayCore {
                          NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                          operationID: submission.operationID, request: submission.requestKey,
                          revision: submission.requestRevision, receipt: .unknown)
+                if submission.isNoComment {
+                    diagnose(.answer, .noReplyOriginalOperation, .unresolved,
+                             error: error,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown,
+                             operationIDSource: .localSubmission)
+                }
                 throw error
             }
-            try validate()
+            if submission.isNoComment {
+                diagnose(.answer, .noReplyOperationApply, .began,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .pendingUnconfirmed,
+                         operationIDSource: .localSubmission)
+            }
+            do {
+                try validate()
+            } catch {
+                if submission.isNoComment {
+                    diagnose(.answer, .noReplyOperationApply, .failed, error: error,
+                             operationIDSource: .localSubmission,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                }
+                throw error
+            }
             attempted += 1
             switch result {
             case let .accepted(operationID, terminalSequence):
@@ -1406,6 +1661,8 @@ public actor NativeRelayCore {
                              error: NativeRelayCoreError.mismatchedOperationResult,
                              operationID: submission.operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(NativeRelayCoreError.mismatchedOperationResult,
+                                                for: submission)
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
@@ -1417,6 +1674,7 @@ public actor NativeRelayCore {
                     diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
                              operationID: operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(error, for: submission)
                     throw error
                 }
                 diagnose(.answer, .originalOperationDelivery, .accepted,
@@ -1428,6 +1686,8 @@ public actor NativeRelayCore {
                              error: NativeRelayCoreError.mismatchedOperationResult,
                              operationID: submission.operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(NativeRelayCoreError.mismatchedOperationResult,
+                                                for: submission)
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
@@ -1439,6 +1699,7 @@ public actor NativeRelayCore {
                     diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
                              operationID: operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(error, for: submission)
                     throw error
                 }
                 diagnose(.answer, .originalOperationDelivery, .rejected,
@@ -1452,6 +1713,8 @@ public actor NativeRelayCore {
                              error: NativeRelayCoreError.mismatchedOperationResult,
                              operationID: submission.operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(NativeRelayCoreError.mismatchedOperationResult,
+                                                for: submission)
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
@@ -1461,6 +1724,7 @@ public actor NativeRelayCore {
                     diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
                              operationID: operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(error, for: submission)
                     throw error
                 }
                 diagnose(.answer, .originalOperationDelivery, .rejected,
@@ -1473,6 +1737,8 @@ public actor NativeRelayCore {
                              error: NativeRelayCoreError.mismatchedOperationResult,
                              operationID: submission.operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(NativeRelayCoreError.mismatchedOperationResult,
+                                                for: submission)
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
@@ -1483,6 +1749,7 @@ public actor NativeRelayCore {
                     diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
                              operationID: operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(error, for: submission)
                     throw error
                 }
                 diagnose(.answer, .originalOperationDelivery, .rejected,
@@ -1495,6 +1762,8 @@ public actor NativeRelayCore {
                              error: NativeRelayCoreError.mismatchedOperationResult,
                              operationID: submission.operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(NativeRelayCoreError.mismatchedOperationResult,
+                                                for: submission)
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
@@ -1505,6 +1774,7 @@ public actor NativeRelayCore {
                     diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
                              operationID: operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(error, for: submission)
                     throw error
                 }
                 diagnose(.answer, .originalOperationDelivery, .rejected,
@@ -1515,6 +1785,34 @@ public actor NativeRelayCore {
                 diagnose(.answer, .originalOperationDelivery, .unresolved,
                          operationID: submission.operationID, request: submission.requestKey,
                          revision: submission.requestRevision, receipt: .unknown)
+            }
+            if submission.isNoComment {
+                let applied: NativeDiagnosticTransition
+                let receipt: NativeDiagnosticReceiptState
+                let terminalSequence: UInt64?
+                switch result {
+                case let .accepted(_, sequence):
+                    applied = .completed
+                    receipt = .acceptedAwaitingReplay
+                    terminalSequence = sequence
+                case .refusedByRetraction, .staleRevision, .failed:
+                    applied = .rejected
+                    receipt = .terminal
+                    terminalSequence = nil
+                case .unsupported:
+                    applied = .rejected
+                    receipt = .pendingUnconfirmed
+                    terminalSequence = nil
+                case .unresolved:
+                    applied = .unresolved
+                    receipt = .unknown
+                    terminalSequence = nil
+                }
+                diagnose(.answer, .noReplyOperationApply, applied,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: receipt,
+                         operationIDSource: .localSubmission,
+                         terminalSequence: terminalSequence)
             }
         }
         return attempted
@@ -1527,6 +1825,12 @@ public actor NativeRelayCore {
                           causeCode: String? = nil,
                           postAckFailureStep: NativeDiagnosticPostAckStep? = nil,
                           postAckFailureErrorCode: String? = nil,
+                          noReplyResponseClass: NativeDiagnosticNoReplyResponseClass? = nil,
+                          operationIDSource: NativeDiagnosticOperationIDSource? = nil,
+                          terminalSequence: UInt64? = nil,
+                          lifecycleSequence: UInt64? = nil,
+                          noReplyRoute: NativeDiagnosticNoReplyRoute? = nil,
+                          occurredAtMilliseconds: Int64? = nil,
                           operationID: UUID? = nil,
                           request: RequestKey? = nil,
                           revision: UInt64? = nil,
@@ -1535,9 +1839,15 @@ public actor NativeRelayCore {
             causeCode: causeCode ?? error.map { NativeDiagnosticCauseCode.forError($0) },
             postAckFailureStep: postAckFailureStep,
             postAckFailureErrorCode: postAckFailureErrorCode,
+            noReplyResponseClass: noReplyResponseClass,
+            operationIDSource: operationIDSource,
+            terminalSequence: terminalSequence,
+            lifecycleSequence: lifecycleSequence,
+            noReplyRoute: noReplyRoute,
             attemptID: attemptID, transportAttemptID: attemptID,
             operationID: operationID, request: request,
-            requestRevision: revision, receiptState: receipt))
+            requestRevision: revision, receiptState: receipt,
+            occurredAtMilliseconds: occurredAtMilliseconds ?? NativeClientDiagnosticEvent.nowMilliseconds()))
     }
 
     private func validatedRelayCursor() throws -> UInt64 {
