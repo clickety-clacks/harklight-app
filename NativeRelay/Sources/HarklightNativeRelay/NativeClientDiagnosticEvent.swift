@@ -84,6 +84,35 @@ public enum NativeDiagnosticPostAckBoundary: String, Codable, Sendable {
     case foregroundConfirmed = "foreground_confirmed"
 }
 
+/// A bounded operation name for a failed post-ACK drain. These values identify
+/// code paths only; they never contain relay data or user content.
+public enum NativeDiagnosticPostAckStep: String, Codable, Sendable {
+    case readAcceptedOperationsBeforeDrain = "read_accepted_operations_before_drain"
+    case readOutboxBeforeDrain = "read_outbox_before_drain"
+    case drainPendingOperations = "drain_pending_operations"
+    case readOutboxAfterDrain = "read_outbox_after_drain"
+    case readAcceptedOperationsAfterDrain = "read_accepted_operations_after_drain"
+    case waitForAcceptedOperationAcknowledgement = "wait_for_accepted_operation_acknowledgement"
+    case replayInboxAfterDrain = "replay_inbox_after_drain"
+    case readInboxCursorAfterAcknowledgement = "read_inbox_cursor_after_acknowledgement"
+    case readConversationState = "read_conversation_state"
+    case replayConversationsAndAcknowledge = "replay_conversations_and_acknowledge"
+    case readFinalRelayCursor = "read_final_relay_cursor"
+    case validateRelayState = "validate_relay_state"
+}
+
+/// Safe detail retained when a post-ACK operation fails. The error is reduced
+/// to a named client code or bounded numeric code before it crosses layers.
+public struct NativePostAckFailureDetails: Equatable, Sendable {
+    public let step: NativeDiagnosticPostAckStep
+    public let errorCode: String
+
+    public init(step: NativeDiagnosticPostAckStep, errorCode: String?) {
+        self.step = step
+        self.errorCode = NativeDiagnosticCauseCode.safeCode(errorCode) ?? "unknown_error"
+    }
+}
+
 public enum NativeDiagnosticReceiptState: String, Codable, Sendable {
     case pendingUnconfirmed
     case acceptedAwaitingReplay
@@ -106,6 +135,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public let terminalReason: NativeDiagnosticTerminalReason?
     public let postAckBoundary: NativeDiagnosticPostAckBoundary?
     public let postAckDrainTransition: NativeDiagnosticTransition?
+    public let postAckFailureStep: NativeDiagnosticPostAckStep?
+    public let postAckFailureErrorCode: String?
     public let attemptID: UUID?
     public let transportAttemptID: UUID?
     public let operationID: UUID?
@@ -115,7 +146,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
 
     private enum CodingKeys: String, CodingKey {
         case id, occurredAtMilliseconds, area, phase, transition, causeCode, terminalReason
-        case postAckBoundary, postAckDrainTransition
+        case postAckBoundary, postAckDrainTransition, postAckFailureStep, postAckFailureErrorCode
         case attemptID, transportAttemptID, operationID, requestTag, requestRevision, receiptState
     }
 
@@ -126,6 +157,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
                 terminalReason: NativeDiagnosticTerminalReason? = nil,
                 postAckBoundary: NativeDiagnosticPostAckBoundary? = nil,
                 postAckDrainTransition: NativeDiagnosticTransition? = nil,
+                postAckFailureStep: NativeDiagnosticPostAckStep? = nil,
+                postAckFailureErrorCode: String? = nil,
                 attemptID: UUID? = nil,
                 transportAttemptID: UUID? = nil,
                 operationID: UUID? = nil,
@@ -143,6 +176,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         self.terminalReason = terminalReason
         self.postAckBoundary = postAckBoundary
         self.postAckDrainTransition = postAckDrainTransition
+        self.postAckFailureStep = postAckFailureStep
+        self.postAckFailureErrorCode = NativeDiagnosticCauseCode.safeCode(postAckFailureErrorCode)
         self.attemptID = attemptID
         self.transportAttemptID = transportAttemptID
         self.operationID = operationID
@@ -162,6 +197,9 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         terminalReason = try values.decodeIfPresent(NativeDiagnosticTerminalReason.self, forKey: .terminalReason)
         postAckBoundary = try values.decodeIfPresent(NativeDiagnosticPostAckBoundary.self, forKey: .postAckBoundary)
         postAckDrainTransition = try values.decodeIfPresent(NativeDiagnosticTransition.self, forKey: .postAckDrainTransition)
+        postAckFailureStep = try values.decodeIfPresent(NativeDiagnosticPostAckStep.self, forKey: .postAckFailureStep)
+        postAckFailureErrorCode = NativeDiagnosticCauseCode.safeCode(
+            try values.decodeIfPresent(String.self, forKey: .postAckFailureErrorCode))
         attemptID = try values.decodeIfPresent(UUID.self, forKey: .attemptID)
         transportAttemptID = try values.decodeIfPresent(UUID.self, forKey: .transportAttemptID)
         operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
@@ -246,7 +284,7 @@ public enum NativeDiagnosticCauseCode {
         guard let value else { return nil }
         if knownCodes.contains(value) { return value }
         for prefix in ["url_session_error_code_", "cocoa_error_code_", "posix_error_code_",
-                       "security_status_code_", "file_http_status_"] where value.hasPrefix(prefix) {
+                       "security_status_code_", "file_http_status_", "unclassified_error_code_"] where value.hasPrefix(prefix) {
             let suffix = value.dropFirst(prefix.count)
             let digits = suffix.first == "-" ? suffix.dropFirst() : suffix[...]
             if suffix.count <= 20, !digits.isEmpty,
@@ -359,6 +397,16 @@ public enum NativeDiagnosticCauseCode {
         case "NSOSStatusErrorDomain": return "security_status_code_\(value.code)"
         default: return "unknown_error"
         }
+    }
+
+    /// Preserves an otherwise unclassified NSError's numeric code without
+    /// exporting its arbitrary domain or localized description.
+    public static func forPostAckError(_ error: Error) -> String {
+        let code = forError(error)
+        guard code == "unknown_error" else { return code }
+        let underlying = error as NSError
+        guard underlying.code != 0 else { return code }
+        return "unclassified_error_code_\(underlying.code)"
     }
 
     /// Only known protocol tokens are copied into a diagnostic. Arbitrary

@@ -116,6 +116,7 @@ public actor NativeRelayCore {
     private let attemptID: UUID?
     private var active = true
     private var busy = false
+    private var postAckFailureDetails: NativePostAckFailureDetails?
     private var activeInboxReplay: ReplayProgress?
     private var inboxBootstrapped = false
     private var activeInboxStartupID: String?
@@ -369,11 +370,19 @@ public actor NativeRelayCore {
         resumePostCheckpointWaiters(throwing: NativeRelayCoreError.inactive)
     }
 
+    /// Returns details for the most recent failed post-ACK drain without
+    /// changing the error thrown by `resyncAndDrainOutbox()`.
+    public func takePostAckFailureDetails() -> NativePostAckFailureDetails? {
+        defer { postAckFailureDetails = nil }
+        return postAckFailureDetails
+    }
+
     /// Foreground and push-triggered reconnects both start from C's durable
     /// cursor. A server reply is never itself a durable cursor or ACK.
     @discardableResult
     public func resyncAndDrainOutbox() async throws -> UInt64 {
         guard !busy else { throw NativeRelayCoreError.inactive }
+        postAckFailureDetails = nil
         busy = true
         defer { releaseBusy() }
         try validate()
@@ -402,13 +411,16 @@ public actor NativeRelayCore {
             inboxBootstrapped = true
         }
         onProgress(.postAckDrainBegan)
+        var failedStep = NativeDiagnosticPostAckStep.readAcceptedOperationsBeforeDrain
         do {
             inspectedConversationMetadata = true
             let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
                 .map(\.operationID))
+            failedStep = .readOutboxBeforeDrain
             let pendingBeforeDrain = try store.snapshot(context: context).outbox
             let attempted: Int
             do {
+                failedStep = .drainPendingOperations
                 attempted = try await drainPending()
             } catch {
                 // A later operation may fail after an earlier operation was
@@ -424,6 +436,7 @@ public actor NativeRelayCore {
                 throw error
             }
             if attempted > 0 {
+                failedStep = .readOutboxAfterDrain
                 let afterDrain = try store.snapshot(context: context)
                 let newlyAccepted = pendingBeforeDrain.compactMap { pending -> Submission? in
                     guard let recorded = afterDrain.intents[pending.intentID],
@@ -437,6 +450,7 @@ public actor NativeRelayCore {
                                                 receipt: .acceptedAwaitingReplay)
                     }
                 }
+                failedStep = .readAcceptedOperationsAfterDrain
                 let acceptedAfterDrain = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
                 let trackingSubmissions = Array(acceptedReplaySubmissions.values)
                 if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
@@ -444,33 +458,46 @@ public actor NativeRelayCore {
                     let terminalSequence = (acceptedAfterDrain + newlyAccepted)
                         .compactMap(Self.acceptedTerminalSequence).max()
                     if let terminalSequence {
+                        failedStep = .waitForAcceptedOperationAcknowledgement
                         try await waitForPostCheckpointAcknowledgement(through: terminalSequence)
                     }
                     completeAcceptedOperationReplayDiagnostics(trackingSubmissions)
+                    failedStep = .readInboxCursorAfterAcknowledgement
                     high = try store.snapshot(context: context).cursor
                 } else {
+                    failedStep = .replayInboxAfterDrain
                     high = try await replayInboxAndAcknowledge(
                         since: high,
                         trackingAcceptedOperations: acceptedAfterDrain + newlyAccepted,
                         using: pagingSession)
                 }
             }
-            if try !store.conversationSnapshot(context: context).threads.isEmpty,
+            failedStep = .readConversationState
+            let conversationThreads = try store.conversationSnapshot(context: context).threads
+            if !conversationThreads.isEmpty,
                let conversationSession = session as? any AuthenticatedConversationSession {
+                failedStep = .replayConversationsAndAcknowledge
                 try await replayConversationAndAcknowledge(using: conversationSession)
             }
             if !inboxViewRequestedOnConnection {
                 inboxViewRequestedOnConnection = true
                 await refreshInboxView(using: pagingSession)
             }
+            failedStep = .readFinalRelayCursor
             let durableCursor = try store.snapshot(context: context).cursor
+            failedStep = .validateRelayState
             try validate()
             onProgress(.postAckDrainFinished(.completed))
             return max(high, durableCursor)
         } catch {
+            let errorCode = NativeDiagnosticCauseCode.forPostAckError(error)
+            let details = NativePostAckFailureDetails(step: failedStep, errorCode: errorCode)
+            postAckFailureDetails = details
             let transition = NativeDiagnosticCauseCode.failureTransition(for: error)
             onProgress(.postAckDrainFinished(transition))
-            diagnose(.relay, .postAckDrain, transition, error: error)
+            diagnose(.relay, .postAckDrain, transition, error: error,
+                     postAckFailureStep: details.step,
+                     postAckFailureErrorCode: details.errorCode)
             throw error
         }
     }
@@ -1498,12 +1525,16 @@ public actor NativeRelayCore {
                           _ transition: NativeDiagnosticTransition,
                           error: Error? = nil,
                           causeCode: String? = nil,
+                          postAckFailureStep: NativeDiagnosticPostAckStep? = nil,
+                          postAckFailureErrorCode: String? = nil,
                           operationID: UUID? = nil,
                           request: RequestKey? = nil,
                           revision: UInt64? = nil,
                           receipt: NativeDiagnosticReceiptState? = nil) {
         onDiagnostic(NativeClientDiagnosticEvent(area: area, phase: phase, transition: transition,
             causeCode: causeCode ?? error.map { NativeDiagnosticCauseCode.forError($0) },
+            postAckFailureStep: postAckFailureStep,
+            postAckFailureErrorCode: postAckFailureErrorCode,
             attemptID: attemptID, transportAttemptID: attemptID,
             operationID: operationID, request: request,
             requestRevision: revision, receiptState: receipt))

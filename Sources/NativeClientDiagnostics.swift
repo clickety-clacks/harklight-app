@@ -137,6 +137,8 @@ final class NativeClientDiagnosticJournal {
             if let reason = event.terminalReason { fields.append("terminal_reason=\(reason.rawValue)") }
             if let boundary = event.postAckBoundary { fields.append("post_ack_boundary=\(boundary.rawValue)") }
             if let drain = event.postAckDrainTransition { fields.append("post_ack_drain=\(drain.rawValue)") }
+            if let step = event.postAckFailureStep { fields.append("post_ack_failure_step=\(step.rawValue)") }
+            if let code = event.postAckFailureErrorCode { fields.append("post_ack_failure_error_code=\(code)") }
             if let id = event.attemptID { fields.append("attempt_id=\(id.uuidString.lowercased())") }
             if let id = event.transportAttemptID { fields.append("transport_attempt_id=\(id.uuidString.lowercased())") }
             if let id = event.operationID { fields.append("operation_id=\(id.uuidString.lowercased())") }

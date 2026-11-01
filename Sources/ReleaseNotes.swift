@@ -87,7 +87,16 @@ enum HarklightReleaseNotes {
                         comment: "Release-note title for confirmed Chat sending and draft retention."),
                     detail: LocalizedStringResource(
                         "Send with the keyboard or button. Only confirmed sent text clears; unsent text and later edits stay.",
-                        comment: "Release-note detail for Chat Send and draft retention."))
+                        comment: "Release-note detail for Chat Send and draft retention.")),
+                .init(
+                    id: "post-ack-connection-diagnostics",
+                    symbol: "network",
+                    title: LocalizedStringResource(
+                        "Clearer connection diagnostics",
+                        comment: "Release-note title for identifying failed post-sync steps."),
+                    detail: LocalizedStringResource(
+                        "Connection details name the post-sync step that stopped and include a safe error code to share.",
+                        comment: "Release-note detail for safe post-sync failure diagnostics."))
             ])
     ]
 

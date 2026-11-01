@@ -2228,6 +2228,44 @@ final class NativeGuidedTLSTests: XCTestCase {
         print("Connection diagnostics from the installed app bundle:\n\(bundleMetadata.joined(separator: "\n"))")
     }
 
+    func testPostAckFailureExplanationAndConnectionDetailsNameSafeStepAndError() {
+        let underlyingError = NSError(domain: "private-error-domain", code: 731,
+            userInfo: [NSLocalizedDescriptionKey: "private-answer-marker token=secret-marker"])
+        let safeErrorCode = NativeDiagnosticCauseCode.forPostAckError(underlyingError)
+        XCTAssertEqual(safeErrorCode, "unclassified_error_code_731")
+        XCTAssertEqual(NativeDiagnosticCauseCode.safeCode(safeErrorCode), safeErrorCode)
+
+        var progress = NativeForegroundConnectProgress(
+            lastConfirmedStage: .nativeSyncResynced,
+            webSocketOpenObserved: true,
+            issue: nil,
+            outcome: .incomplete,
+            attemptID: UUID(),
+            failureClass: .unknown)
+        progress.postAckFailureStep = .drainPendingOperations
+        progress.postAckFailureErrorCode = safeErrorCode
+        progress.observedErrorMessage = underlyingError.localizedDescription
+
+        let diagnostic = NativeForegroundConnectDiagnostic(
+            progress: progress,
+            operationSnapshot: .unavailable,
+            appVersion: "4.8.2",
+            buildNumber: "1087",
+            executableSHA256: String(repeating: "a", count: 64))
+
+        XCTAssertTrue(progress.message.contains("sending pending actions"))
+        XCTAssertTrue(progress.message.contains("not confirmed"))
+        XCTAssertTrue(progress.message.contains("Retry with the same approved identity"))
+        XCTAssertTrue(progress.message.contains("Share connection details"))
+        XCTAssertTrue(diagnostic.shareText.contains("post_ack_failure_step=drain_pending_operations"))
+        XCTAssertTrue(diagnostic.shareText.contains("post_ack_failure_error_code=\(safeErrorCode)"))
+        XCTAssertFalse(progress.message.contains("private-answer-marker"))
+        XCTAssertFalse(progress.message.contains("secret-marker"))
+        XCTAssertFalse(diagnostic.shareText.contains("private-error-domain"))
+        XCTAssertFalse(diagnostic.shareText.contains("private-answer-marker"))
+        XCTAssertFalse(diagnostic.shareText.contains("secret-marker"))
+    }
+
     func testClientDiagnosticJournalPersistsRetrievableOperationAndSafeCauseOnly() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightClientDiagnostics-\(UUID().uuidString).json")
@@ -2292,6 +2330,42 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(restored.shareText.contains("relay.private.example"))
         XCTAssertFalse(restored.shareText.contains("private-sender-marker"))
         XCTAssertFalse(restored.shareText.contains("secret-marker"))
+    }
+
+    func testPostAckFailureJournalRetainsBoundedStepAndErrorCode() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightPostAckFailure-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let journal = NativeClientDiagnosticJournal(fileURL: url)
+        let code = "url_session_error_code_-1005"
+        let event = NativeClientDiagnosticEvent(
+            area: .relay,
+            phase: .postAckDrain,
+            transition: .failed,
+            causeCode: code,
+            postAckFailureStep: .drainPendingOperations,
+            postAckFailureErrorCode: code,
+            id: UUID(),
+            occurredAtMilliseconds: 1)
+
+        journal.record(event)
+        let restored = NativeClientDiagnosticJournal(fileURL: url)
+        XCTAssertEqual(restored.events.first?.postAckFailureStep, .drainPendingOperations)
+        XCTAssertEqual(restored.events.first?.postAckFailureErrorCode, code)
+        XCTAssertTrue(restored.shareText.contains("post_ack_failure_step=drain_pending_operations"))
+        XCTAssertTrue(restored.shareText.contains("post_ack_failure_error_code=\(code)"))
+
+        let unsafeEvent = NativeClientDiagnosticEvent(
+            area: .relay,
+            phase: .postAckDrain,
+            transition: .failed,
+            postAckFailureStep: .drainPendingOperations,
+            postAckFailureErrorCode: "token=secret-marker",
+            id: UUID(),
+            occurredAtMilliseconds: 2)
+        journal.record(unsafeEvent)
+        XCTAssertFalse(journal.shareText.contains("secret-marker"))
+        XCTAssertTrue(journal.shareText.contains("post_ack_failure_error_code=unknown_error"))
     }
 
     func testClientDiagnosticJournalKeepsCallbackHistoryInOccurrenceOrder() throws {

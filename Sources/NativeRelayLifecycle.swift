@@ -186,6 +186,8 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         let lastCompletedPostAckBoundary: PostAckBoundary
         let postAckRelayRefresh: Validation
         let postAckDrainTransition: NativeDiagnosticTransition?
+        let postAckFailureStep: NativeDiagnosticPostAckStep?
+        let postAckFailureErrorCode: String?
         let generationValidation: Validation
         let profileContextValidation: Validation
         let relayContextValidation: Validation
@@ -238,6 +240,8 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var lastCompletedPostAckBoundary: PostAckBoundary = .none
     var postAckRelayRefresh: Validation = .notChecked
     var postAckDrainTransition: NativeDiagnosticTransition? = nil
+    var postAckFailureStep: NativeDiagnosticPostAckStep? = nil
+    var postAckFailureErrorCode: String? = nil
     var generationValidation: Validation = .notChecked
     var profileContextValidation: Validation = .notChecked
     var relayContextValidation: Validation = .notChecked
@@ -271,6 +275,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     }
 
     var message: String {
+        if let postAckFailureText { return postAckFailureText }
         let last = lastConfirmedStage?.label ?? "No connection milestone was confirmed."
         if lastConfirmedStage == .nativeSyncAcknowledged, outcome != .confirmed {
             let status = "At the last confirmed checkpoint, ordinary messages through that replay's cursor were durably applied and the relay acknowledged that cursor. The progress signal does not establish whether a later replay advanced the saved cursor or whether that later cursor was acknowledged. Full foreground completion remains unconfirmed. This does not establish pending-answer delivery, later conversation replay, upload cleanup, or notification registration. The current progress signal cannot identify the exact post-ACK step; Settings diagnostics retains operation-receipt states."
@@ -312,6 +317,40 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             return "The connection timed out. \(issueText)\(setupLimit)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity. Saved profile, local content and pending operation state were preserved; any replay already saved remains saved."
         case .confirmed:
             return lastConfirmedStage?.label ?? "Foreground connection is confirmed."
+        }
+    }
+
+    private var postAckFailureText: String? {
+        guard let step = postAckFailureStep, outcome != .confirmed else { return nil }
+        let detail = "Harklight stopped while \(step.userFacingDescription) after syncing earlier messages. Pending-action delivery is not confirmed. Retry with the same approved identity. Share connection details to include the exact failure code."
+        switch outcome {
+        case .connecting:
+            return "The connection attempt is still in progress. \(detail)"
+        case .incomplete:
+            return "The connection is not confirmed. \(detail)"
+        case .timedOut:
+            return "The connection attempt timed out. \(detail)"
+        case .confirmed:
+            return nil
+        }
+    }
+}
+
+private extension NativeDiagnosticPostAckStep {
+    var userFacingDescription: String {
+        switch self {
+        case .readAcceptedOperationsBeforeDrain: "checking accepted pending actions"
+        case .readOutboxBeforeDrain: "checking pending actions"
+        case .drainPendingOperations: "sending pending actions"
+        case .readOutboxAfterDrain: "checking the pending-action results"
+        case .readAcceptedOperationsAfterDrain: "checking which actions the relay accepted"
+        case .waitForAcceptedOperationAcknowledgement: "waiting for the relay to confirm accepted actions"
+        case .replayInboxAfterDrain: "replaying newly received messages"
+        case .readInboxCursorAfterAcknowledgement: "checking the saved message checkpoint"
+        case .readConversationState: "checking conversation state"
+        case .replayConversationsAndAcknowledge: "updating conversations"
+        case .readFinalRelayCursor: "checking the final saved message checkpoint"
+        case .validateRelayState: "validating the relay connection"
         }
     }
 }
@@ -419,6 +458,8 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             "last_completed_post_ack_boundary=\(progress.lastCompletedPostAckBoundary.rawValue)",
             "post_ack_relay_refresh=\(progress.postAckRelayRefresh.rawValue)",
             "post_ack_drain=\(progress.postAckDrainTransition?.rawValue ?? "not_started")",
+            "post_ack_failure_step=\(progress.postAckFailureStep?.rawValue ?? "none_observed")",
+            "post_ack_failure_error_code=\(progress.postAckFailureErrorCode ?? "none_observed")",
             "generation_validated=\(progress.generationValidation.rawValue)",
             "profile_context_validated=\(progress.profileContextValidation.rawValue)",
             "relay_context_validated=\(progress.relayContextValidation.rawValue)",
@@ -439,6 +480,8 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             lines.append("previous_last_completed_post_ack_boundary=\(previous.lastCompletedPostAckBoundary.rawValue)")
             lines.append("previous_post_ack_relay_refresh=\(previous.postAckRelayRefresh.rawValue)")
             lines.append("previous_post_ack_drain=\(previous.postAckDrainTransition?.rawValue ?? "not_started")")
+            lines.append("previous_post_ack_failure_step=\(previous.postAckFailureStep?.rawValue ?? "none_observed")")
+            lines.append("previous_post_ack_failure_error_code=\(previous.postAckFailureErrorCode ?? "none_observed")")
             lines.append("previous_generation_validated=\(previous.generationValidation.rawValue)")
             lines.append("previous_profile_context_validated=\(previous.profileContextValidation.rawValue)")
             lines.append("previous_relay_context_validated=\(previous.relayContextValidation.rawValue)")
@@ -547,6 +590,8 @@ final class ForegroundConnectDeadline {
                 lastCompletedPostAckBoundary: progress.lastCompletedPostAckBoundary,
                 postAckRelayRefresh: progress.postAckRelayRefresh,
                 postAckDrainTransition: progress.postAckDrainTransition,
+                postAckFailureStep: progress.postAckFailureStep,
+                postAckFailureErrorCode: progress.postAckFailureErrorCode,
                 generationValidation: progress.generationValidation,
                 profileContextValidation: progress.profileContextValidation,
                 relayContextValidation: progress.relayContextValidation,
@@ -564,6 +609,8 @@ final class ForegroundConnectDeadline {
         progress.lastCompletedPostAckBoundary = .none
         progress.postAckRelayRefresh = .notChecked
         progress.postAckDrainTransition = nil
+        progress.postAckFailureStep = nil
+        progress.postAckFailureErrorCode = nil
         progress.generationValidation = .notChecked
         progress.profileContextValidation = .notChecked
         progress.relayContextValidation = .notChecked
@@ -719,10 +766,18 @@ final class ForegroundConnectDeadline {
         progress.terminalReason = .deadlineExceeded
     }
 
+    func recordPostAckFailure(_ details: NativePostAckFailureDetails) {
+        guard acceptsEvents, attempt != nil else { return }
+        progress.postAckFailureStep = details.step
+        progress.postAckFailureErrorCode = details.errorCode
+        publishProgress()
+    }
+
     func recordFailure(_ error: Error) {
         guard acceptsEvents, attempt != nil else { return }
         progress.failureClass = NativeForegroundConnectProgress.FailureClass.classify(error)
-        progress.observedErrorMessage = error.localizedDescription
+        progress.observedErrorMessage = progress.postAckFailureStep == nil
+            ? error.localizedDescription : nil
         if progress.failureClass == .cancelled { progress.terminalReason = .cancelled }
         publishProgress()
     }
@@ -1347,7 +1402,14 @@ final class NativeRelayLifecycle {
                              checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
-        _ = try await core.resyncAndDrainOutbox()
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+        } catch {
+            if let details = await core.takePostAckFailureDetails() {
+                foregroundDeadline.recordPostAckFailure(details)
+            }
+            throw error
+        }
         let conversationsUnavailable = await core.conversationsUnavailable
         guard refreshGeneration == generation, self.context == context, self.core === core else {
             throw NativeRelayCoreError.inactive

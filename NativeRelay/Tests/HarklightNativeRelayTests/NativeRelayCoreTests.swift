@@ -103,6 +103,7 @@ final class NativeRelayCoreTests: XCTestCase {
         var acknowledgements: [Data] = []
         var sent: [(Data, UUID)] = []
         var result: OriginalOperationResult = .unresolved
+        var sendFailure: (any Error)?
         var replayFrames: [[Data]] = []
         var snapshotHighWater: UInt64?
         var initialItems: [JSONValue] = []
@@ -367,6 +368,7 @@ final class NativeRelayCoreTests: XCTestCase {
         }
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
             sent.append((frame, operationID))
+            if let sendFailure { throw sendFailure }
             if case .accepted = result, let postCheckpointEventAfterAccept {
                 publishPostCheckpointInboxEvent(postCheckpointEventAfterAccept)
             }
@@ -472,6 +474,46 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try port.lookupIntent(context: port.context, intentID: receipt.intentID)?.localState,
                        .unsupported)
+    }
+
+    func testPostAckDrainFailureNamesOperationAndSafeUnderlyingErrorWithoutWrappingIt() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("post-ack-failure"))
+        let payload = try JSONValue.parse(data(#"{"title":"Pending request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        _ = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        let persistedOperationID = try XCTUnwrap(store.snapshot(context: context).outbox.first?.operationID)
+
+        let failure = URLError(.networkConnectionLost)
+        session.sendFailure = failure
+        let collected = DiagnosticEventCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       onDiagnostic: { collected.append($0) })
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("The configured pending-operation failure must stop this drain.")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .networkConnectionLost,
+                           "Diagnostics must not replace the original thrown error.")
+        }
+
+        let details = await core.takePostAckFailureDetails()
+        XCTAssertEqual(details, NativePostAckFailureDetails(
+            step: .drainPendingOperations,
+            errorCode: "url_session_error_code_\(URLError.networkConnectionLost.rawValue)"))
+        let event = try XCTUnwrap(collected.events.first {
+            $0.phase == .postAckDrain && $0.transition == .failed
+        })
+        XCTAssertEqual(event.postAckFailureStep, .drainPendingOperations)
+        XCTAssertEqual(event.postAckFailureErrorCode,
+                       "url_session_error_code_\(URLError.networkConnectionLost.rawValue)")
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [persistedOperationID],
+                       "Failure diagnostics must leave the exact pending operation available for safe retry.")
     }
 
     func testInboxReconciliationAddsPersistedNoCommentIDWithoutChangingOrdinaryFrame() async throws {
