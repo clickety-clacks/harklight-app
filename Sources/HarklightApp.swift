@@ -16,9 +16,13 @@ struct HarklightApp: App {
         let launch = NativeAppLaunch(arguments: arguments)
         _launch = State(initialValue: launch)
         let isReleaseNotesUITest = ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] == "1"
+        #if DEBUG
         let isReferenceOrFixtureRun = !isReleaseNotesUITest && (arguments.contains("--reset-attention-fixture") ||
             arguments.contains("--attention-fixture") ||
             arguments.contains("--harklight-tier-reference"))
+        #else
+        let isReferenceOrFixtureRun = false
+        #endif
         let defaults: UserDefaults
         if isReleaseNotesUITest,
            let uiTestDefaults = UserDefaults(suiteName: "HarklightReleaseNotesUITests") {
@@ -40,11 +44,11 @@ struct HarklightApp: App {
     private var inboxBadgeCount: Int {
         if let store = launch.inboxPresentation {
             return InboxBadge.count(requests: store.inboxRows, samples: samples,
-                                    showsLocalExamples: !store.isReadOnly)
+                                    showsLocalExamples: loadsSampleMessages && !store.isReadOnly)
         }
         if case let .fixture(fixture) = launch.state, let store = fixture.presentationStore {
             return InboxBadge.count(requests: store.inboxRows, samples: samples,
-                                    showsLocalExamples: !store.isReadOnly)
+                                    showsLocalExamples: loadsSampleMessages && !store.isReadOnly)
         }
         return 0
     }
@@ -60,11 +64,27 @@ struct HarklightApp: App {
         return nil
     }
 
+    private var showsTierReference: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains("--harklight-tier-reference")
+        #else
+        return false
+        #endif
+    }
+
+    private var loadsSampleMessages: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains("--harklight-samples")
+        #else
+        return false
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
             @Bindable var releaseNotes = self.releaseNotes
             Group {
-                if ProcessInfo.processInfo.arguments.contains("--harklight-tier-reference") {
+                if showsTierReference {
                     InboxTierReferenceScreen()
                 } else if let archive = launch.selectedArchivedPresentation,
                    let departure = launch.selectedArchivedAccount {
@@ -101,7 +121,7 @@ struct HarklightApp: App {
             }
             .modifier(AcceptanceReduceMotionOverride(isEnabled: acceptanceReduceMotionOverride))
             .task {
-                if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }
+                if loadsSampleMessages { samples.populate() }
             }
             .task {
                 await launch.restoreInstallation()

@@ -5,10 +5,13 @@ import AttentionDomain
 final class ReleaseNotesTests: XCTestCase {
     @MainActor
     func testPost79UpdateShowsOnceForExistingUsersWithoutClaimingAnArchiveBuild() throws {
-        let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first)
+        let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
+            $0.id == "changes-after-build-79"
+        })
         XCTAssertNil(note.buildIdentifier)
         XCTAssertEqual(note.highlights.map(\.id),
-                       ["inbox-message-context", "simpler-chat-display", "chat-unsent-text"])
+                       ["inbox-message-context", "simpler-chat-display", "chat-unsent-text",
+                        "post-ack-connection-diagnostics", "no-reply-delivery-diagnostics"])
         XCTAssertEqual(String(localized: note.highlights[0].title), "More context in the Inbox")
         XCTAssertEqual(String(localized: note.highlights[1].title), "A simpler Chat view")
         XCTAssertEqual(String(localized: note.highlights[2].title), "Chat keeps unsent text")
@@ -17,12 +20,14 @@ final class ReleaseNotesTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set(90, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
+        defaults.set(["example-messages-removed"],
+                     forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey)
 
         let firstLaunch = ReleaseNotesPresentation(
             currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
         XCTAssertEqual(firstLaunch.notesToShow.map(\.id), [note.id])
-        XCTAssertEqual(HarklightReleaseNotes.settingsHistory(
-            currentBuildIdentifier: "91", entries: []).first?.id, note.id)
+        XCTAssertTrue(HarklightReleaseNotes.settingsHistory(
+            currentBuildIdentifier: "91", entries: []).contains { $0.id == note.id })
 
         let nextLaunch = ReleaseNotesPresentation(
             currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
@@ -30,6 +35,19 @@ final class ReleaseNotesTests: XCTestCase {
         let laterBuild = ReleaseNotesPresentation(
             currentBuildIdentifier: "92", hasPriorAppState: true, entries: [], defaults: defaults)
         XCTAssertTrue(laterBuild.notesToShow.isEmpty)
+    }
+
+    func testExampleRemovalNoteDescribesTheShippedChangeWithoutGuessingAnArchiveBuild() throws {
+        let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
+            $0.id == "example-messages-removed"
+        })
+        XCTAssertNil(note.buildIdentifier)
+        XCTAssertEqual(note.highlights.map(\.id), ["example-messages-removed"])
+        let highlight = try XCTUnwrap(note.highlights.first)
+        XCTAssertEqual(highlight.symbol, "tray")
+        XCTAssertEqual(String(localized: highlight.title), "Example messages are gone from the app")
+        XCTAssertEqual(String(localized: highlight.detail),
+                       "The app no longer adds example messages, and Settings no longer offers that option.")
     }
 
     @MainActor

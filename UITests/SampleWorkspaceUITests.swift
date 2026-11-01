@@ -110,9 +110,21 @@ final class SampleWorkspaceUITests: XCTestCase {
         copy.tap()
     }
 
-    func testOrdinaryInboxKeepsRequestsWhenExamplesAreAdded() {
+    func testOrdinaryInboxHasNoExampleMessagesOrAddControl() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["request-row-review-01"].waitForExistence(timeout: 10),
+                      app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["sample-approval-0"].exists)
+        app.buttons["inbox-settings"].tap()
+        XCTAssertFalse(app.buttons["Add example messages"].exists)
+        XCTAssertFalse(app.staticTexts["Local examples"].exists)
+    }
+
+    func testOrdinaryInboxKeepsRequestsAlongsideTestFixtures() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
         let realRows = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
@@ -168,10 +180,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(original.label.contains("Pending"),
                       "The submitted answer remains pending until its outcome is confirmed.")
         capture("choice-response-in-replied", app)
-        app.buttons["inbox-settings"].tap()
-        app.buttons["Add example messages"].tap()
         let row = app.descendants(matching: .any)["sample-approval-0"]
-        // Examples remain in Inbox, so leave the submitted request's Replied tab first.
+        // Test fixtures remain in Inbox, so leave the submitted request's Replied tab first.
         workspaceTab("Inbox", in: app).tap()
         enterSearch("Archive", in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 5))

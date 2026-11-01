@@ -54,6 +54,24 @@ enum HarklightReleaseNotes {
     /// Keep each update's identifier stable so it appears once for people who already use the app.
     static let updateEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
+            historyIdentifier: "example-messages-removed",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource(
+                "Example messages removed",
+                comment: "Release-note heading for removal of local example messages."),
+            visibleFromBuildIdentifier: 79,
+            highlights: [
+                .init(
+                    id: "example-messages-removed",
+                    symbol: "tray",
+                    title: LocalizedStringResource(
+                        "Example messages are gone from the app",
+                        comment: "Release-note title for removing example messages."),
+                    detail: LocalizedStringResource(
+                        "The app no longer adds example messages, and Settings no longer offers that option.",
+                        comment: "Release-note detail for example message removal."))
+            ]),
+        HarklightReleaseNote(
             historyIdentifier: "changes-after-build-79",
             marketingVersion: "0.1.0",
             historyDateDescription: LocalizedStringResource(
