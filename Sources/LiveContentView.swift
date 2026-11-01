@@ -2507,9 +2507,13 @@ private struct FailedResponseDialog: View {
     @Environment(\.locale) private var locale
 
     private var copyContent: FailedResponseDialogCopyContent {
-        FailedResponseDialogCopyContent(
-            summary: String(localized: warning.summary, locale: locale),
-            detail: String(localized: warning.detail, locale: locale))
+        var summary = warning.summary
+        summary.locale = locale
+        var detail = warning.detail
+        detail.locale = locale
+        return FailedResponseDialogCopyContent(
+            summary: String(localized: summary),
+            detail: String(localized: detail))
     }
 
     var body: some View {
