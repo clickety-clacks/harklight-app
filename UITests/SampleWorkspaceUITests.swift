@@ -210,6 +210,53 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("ordinary-request-after-example", app)
     }
 
+    func testSubmittedRequestHistoryRemainsWhileLocalExamplesAreUsed() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let original = app.descendants(matching: .any)["request-row-review-01"]
+        XCTAssertTrue(original.waitForExistence(timeout: 10), app.debugDescription)
+        original.tap()
+        let choice = app.buttons["Cover A"]
+        XCTAssertTrue(choice.waitForExistence(timeout: 5), app.debugDescription)
+        choice.tap()
+        XCTAssertTrue(choice.isSelected)
+        let finish = app.buttons["request-finish"]
+        XCTAssertTrue(finish.isEnabled, app.debugDescription)
+        finish.tap()
+
+        showList(app)
+        selectMessageTab("Replied", in: app)
+        XCTAssertTrue(original.waitForExistence(timeout: 5),
+                      "The submitted ordinary request appears in Replied.")
+        XCTAssertTrue(original.label.contains("Pending"),
+                      "Its answer remains pending until an outcome arrives.")
+
+        selectMessageTab("Inbox", in: app)
+        enterSearch("Archive", in: app)
+        let example = app.descendants(matching: .any)["sample-approval-0"]
+        XCTAssertTrue(example.waitForExistence(timeout: 5), app.debugDescription)
+        example.tap()
+        let keep = app.buttons.containing(.staticText, identifier: "Keep here").firstMatch
+        XCTAssertTrue(keep.waitForExistence(timeout: 5), app.debugDescription)
+        keep.tap()
+        app.descendants(matching: .any)["sample-finish"].tap()
+        XCTAssertTrue(app.staticTexts["Answered locally · nothing sent"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+
+        showList(app)
+        clearSearch(in: app)
+        selectMessageTab("Replied", in: app)
+        XCTAssertTrue(original.waitForExistence(timeout: 5),
+                      "Using a local example does not remove the ordinary answer history.")
+        original.tap()
+        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertTrue(app.buttons["Cover A"].isSelected,
+                      "The submitted ordinary answer remains visible after the local example.")
+    }
+
     func testNoCommentIsAnUnsentLastChoiceOnMultipleChoiceRequest() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
