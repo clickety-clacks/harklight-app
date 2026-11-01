@@ -75,6 +75,7 @@ struct MessageMetadataBadges: View {
                 }
                 Spacer(minLength: 0)
             }
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("message-metadata-badges")
         }
     }

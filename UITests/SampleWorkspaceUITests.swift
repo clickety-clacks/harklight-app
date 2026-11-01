@@ -41,8 +41,8 @@ final class SampleWorkspaceUITests: XCTestCase {
             capture("Success kind detail · Reduce Motion \(motionLabel)", app)
 
             showList(app)
-            enterSearch("A note", in: app)
-            let requestRow = app.descendants(matching: .any)["request-row-sample-note-0"]
+            enterSearch("A note for the studio journal", in: app)
+            let requestRow = app.descendants(matching: .any)["sample-note-0"]
             XCTAssertTrue(requestRow.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(requestRow.label.contains("Request"), requestRow.label)
             XCTAssertTrue(requestRow.label.contains("Blocker"), requestRow.label)
@@ -56,7 +56,7 @@ final class SampleWorkspaceUITests: XCTestCase {
 
             showList(app)
             enterSearch("review moved to Thursday", in: app)
-            let legacySeen = app.descendants(matching: .any)["request-row-sample-information-0"]
+            let legacySeen = app.descendants(matching: .any)["sample-information-0"]
             XCTAssertTrue(legacySeen.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertFalse(legacySeen.label.contains("FYI"),
                            "The Seen descriptor does not create a stored type label.")
