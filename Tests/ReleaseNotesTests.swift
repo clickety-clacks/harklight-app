@@ -20,7 +20,7 @@ final class ReleaseNotesTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set(90, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
-        defaults.set(["example-messages-removed"],
+        defaults.set(["chat-row-activity", "example-messages-removed"],
                      forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey)
 
         let firstLaunch = ReleaseNotesPresentation(
