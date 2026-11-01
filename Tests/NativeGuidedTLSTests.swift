@@ -2576,6 +2576,88 @@ final class NativeGuidedTLSTests: XCTestCase {
                        .unavailable)
     }
 
+    func testConversationValidationReportNamesRejectingGuardWithoutChangingRejection() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("private-person-marker"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        let request = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("private-sender-marker"), messageID: ExactText("private-message-marker"))
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        for revision in 1...2 {
+            try store.applyConversation(ConversationEvent(sequence: UInt64(revision),
+                binding: ConversationBinding(request: request, revision: UInt64(revision)),
+                fact: .request(sessionHandle: ExactText("private-session-marker"), payload: .null)),
+                context: context)
+        }
+
+        let rejectedBinding = ConversationBinding(request: request, revision: 3)
+        let rejectedEvent = ConversationEvent(sequence: 3, binding: rejectedBinding,
+            fact: .redactedRevision(ConversationTurn(id: ExactText("private-turn-marker"),
+                binding: rejectedBinding, author: .person, sessionHandle: ExactText("wrong-session-marker"),
+                text: ExactText("private-content-marker"), contentRedacted: false)))
+        var rejection: ConversationValidationRejection?
+        XCTAssertThrowsError(try store.applyConversation(rejectedEvent, context: context,
+            validationRejection: &rejection)) { error in
+            XCTAssertEqual(error as? ConversationError, .invalidBinding)
+        }
+        let detail = try XCTUnwrap(rejection)
+        XCTAssertEqual(detail.guardID, .redactedRevisionBinding)
+        XCTAssertEqual(detail.eventKind, .revision)
+        XCTAssertEqual(detail.facts.sessionHandlePresent, true)
+        XCTAssertEqual(detail.facts.sessionHandleMatchesThread, false)
+        XCTAssertEqual(detail.facts.contentRedactedPresent, true)
+        XCTAssertEqual(detail.facts.contentRedactedIsTrue, false)
+        XCTAssertEqual(detail.facts.authorIsOrigin, false)
+        XCTAssertEqual(detail.facts.revisionIsNext, true)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2,
+            "A rejected fact must not advance the durable conversation cursor.")
+
+        let event = NativeClientDiagnosticEvent(area: .conversation, phase: .conversationReplay,
+            transition: .failed, causeCode: NativeDiagnosticCauseCode.forError(ConversationError.invalidBinding),
+            conversationValidationRejection: detail)
+        let restoredEvent = try JSONDecoder().decode(NativeClientDiagnosticEvent.self,
+            from: JSONEncoder().encode(event))
+        XCTAssertEqual(restoredEvent.conversationValidationRejection, detail)
+
+        let journal = NativeClientDiagnosticJournal(fileURL: nil)
+        journal.record(restoredEvent)
+        let report = journal.shareText
+        XCTAssertTrue(report.contains("app_source_commit="))
+        XCTAssertTrue(report.contains("app_source_tree="))
+        XCTAssertTrue(report.contains("app_executable_sha256="))
+        XCTAssertTrue(report.contains("conversation_validation_guard=redacted_revision_binding"))
+        XCTAssertTrue(report.contains("conversation_event_kind=revision"))
+        XCTAssertTrue(report.contains("conversation_session_handle_matches_thread=no"))
+        XCTAssertTrue(report.contains("conversation_content_redacted_is_true=no"))
+        for privateValue in ["private-person-marker", "private-sender-marker", "private-message-marker",
+                             "private-session-marker", "wrong-session-marker", "private-turn-marker",
+                             "private-content-marker"] {
+            XCTAssertFalse(report.contains(privateValue))
+        }
+    }
+
+    func testConversationSnapshotValidationReportDistinguishesDuplicateRequestKey() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        let request = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("message"))
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let position = AccountConversationReadPosition(request: request,
+            readThroughConversationSequence: 1)
+        var rejection: ConversationValidationRejection?
+
+        XCTAssertThrowsError(try store.finishConversationReplay(at: 0,
+            chatReadPositions: [position, position], context: context,
+            validationRejection: &rejection)) { error in
+            XCTAssertEqual(error as? ConversationError, .invalidBinding)
+        }
+        XCTAssertEqual(rejection?.guardID, .readPositionSnapshotEntry)
+        XCTAssertEqual(rejection?.eventKind, .readPositionSnapshot)
+        XCTAssertEqual(rejection?.facts.readPositionPositive, true)
+        XCTAssertEqual(rejection?.facts.requestKeyIsUnique, false)
+    }
+
     func testNoReplyRoutingDoesNotGuessBetweenLocalOperations() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightNoReplyAmbiguousRoute-\(UUID().uuidString).json")

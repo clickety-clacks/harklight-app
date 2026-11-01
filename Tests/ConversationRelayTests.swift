@@ -165,6 +165,52 @@ final class ConversationRelayTests: XCTestCase {
         await replacement.deactivate()
     }
 
+    func testConversationReplayFailureReportsExactValidationGuardWithoutAdvancingCursor() async throws {
+        let (context, _, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        try store.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("handle"), payload: .object([
+                JSONMember("title", .string(ExactText("Question")))
+            ]))), context: context)
+
+        session.conversation = [
+            data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"private-event-marker"}"#)
+        ]
+        let diagnostics = DiagnosticCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: { diagnostics.append($0) })
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("The unchanged redacted-revision validation must still reject this event.")
+        } catch let error as ConversationError {
+            XCTAssertEqual(error, .invalidBinding)
+        }
+
+        let replayFailure = try XCTUnwrap(diagnostics.events.first {
+            $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .failed
+        })
+        XCTAssertEqual(replayFailure.causeCode, "conversation_invalid_binding")
+        XCTAssertEqual(replayFailure.conversationValidationRejection?.guardID, .redactedRevisionBinding)
+        XCTAssertEqual(replayFailure.conversationValidationRejection?.eventKind, .revision)
+        XCTAssertEqual(replayFailure.conversationValidationRejection?.facts.authorIsOrigin, false)
+        let encodedFailure = String(decoding: try JSONEncoder().encode(replayFailure), as: UTF8.self)
+        XCTAssertFalse(encodedFailure.contains("private-event-marker"))
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1,
+            "A rejected conversation event must not advance the durable cursor.")
+        XCTAssertTrue(session.conversationACKs.isEmpty,
+            "The rejected conversation event must not be acknowledged.")
+        let drainFailure = try XCTUnwrap(diagnostics.events.first {
+            $0.area == .relay && $0.phase == .postAckDrain && $0.transition == .failed
+        })
+        XCTAssertEqual(drainFailure.postAckFailureStep, .replayConversationsAndAcknowledge)
+        XCTAssertEqual(drainFailure.postAckFailureErrorCode, "conversation_invalid_binding")
+        await core.deactivate()
+    }
+
     func testReadPositionUpdateClearsOnlyItsRequestBeforeConversationACK() async throws {
         let (context, _, store, session) = try setup()
         let first = RequestKey(accountScope: context.identity.personID,

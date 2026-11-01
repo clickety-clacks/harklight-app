@@ -104,6 +104,124 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
     }
 }
 
+/// Closed, payload-free labels for conversation validation details that may be
+/// included in a support report. These identify client checks, not server data.
+public enum ConversationValidationEventKind: String, Codable, Sendable {
+    case request
+    case discussion
+    case reply
+    case revision
+    case result
+    case receipt
+    case acted
+    case availability
+    case fileTransfer = "file_transfer"
+    case fileUse = "file_use"
+    case turn
+    case terminal
+    case attentionTier = "attention_tier"
+    case readPosition = "read_position"
+    case retraction
+    case readPositionSnapshot = "read_position_snapshot"
+}
+
+/// Stable names for the exact validation guard that rejected a conversation
+/// event. Raw source text and values never enter the diagnostic.
+public enum ConversationValidationGuardID: String, Codable, Sendable {
+    case eventRevisionBinding = "event_revision_binding"
+    case readPositionEventShape = "read_position_event_shape"
+    case initialRevisionBinding = "initial_revision_binding"
+    case requestSessionHandlePresent = "request_session_handle_present"
+    case initialRequestRevision = "initial_request_revision"
+    case revisionSessionHandlePresent = "revision_session_handle_present"
+    case redactedRevisionBinding = "redacted_revision_binding"
+    case loadedThreadFactNotAllowed = "loaded_thread_fact_not_allowed"
+    case turnBinding = "turn_binding"
+    case mergedTurnRequestBinding = "merged_turn_request_binding"
+    case availabilitySessionHandle = "availability_session_handle"
+    case availabilityRecordSessionHandle = "availability_record_session_handle"
+    case actorPresent = "actor_present"
+    case referencedTurnExists = "referenced_turn_exists"
+    case referencedFileExists = "referenced_file_exists"
+    case readPositionSnapshotEntry = "read_position_snapshot_entry"
+}
+
+/// Only booleans derived from presence, equality, or shape checks are retained.
+/// Nil means a fact does not apply to the rejecting guard.
+public struct ConversationValidationFacts: Equatable, Codable, Sendable {
+    public let revisionIsZero: Bool?
+    public let revisionIsOne: Bool?
+    public let eventIdentifierPresent: Bool?
+    public let readPositionPositive: Bool?
+    public let sessionHandlePresent: Bool?
+    public let sessionHandleMatchesThread: Bool?
+    public let turnBindingMatchesEvent: Bool?
+    public let turnRequestMatchesThread: Bool?
+    public let turnIdentifierPresent: Bool?
+    public let contentRedactedPresent: Bool?
+    public let contentRedactedIsTrue: Bool?
+    public let authorIsOrigin: Bool?
+    public let revisionIsNext: Bool?
+    public let actorPresent: Bool?
+    public let referencedTurnPresent: Bool?
+    public let referencedFilePresent: Bool?
+    public let requestKeyIsUnique: Bool?
+
+    init(revisionIsZero: Bool? = nil,
+         revisionIsOne: Bool? = nil,
+         eventIdentifierPresent: Bool? = nil,
+         readPositionPositive: Bool? = nil,
+         sessionHandlePresent: Bool? = nil,
+         sessionHandleMatchesThread: Bool? = nil,
+         turnBindingMatchesEvent: Bool? = nil,
+         turnRequestMatchesThread: Bool? = nil,
+         turnIdentifierPresent: Bool? = nil,
+         contentRedactedPresent: Bool? = nil,
+         contentRedactedIsTrue: Bool? = nil,
+         authorIsOrigin: Bool? = nil,
+         revisionIsNext: Bool? = nil,
+         actorPresent: Bool? = nil,
+         referencedTurnPresent: Bool? = nil,
+         referencedFilePresent: Bool? = nil,
+         requestKeyIsUnique: Bool? = nil) {
+        self.revisionIsZero = revisionIsZero
+        self.revisionIsOne = revisionIsOne
+        self.eventIdentifierPresent = eventIdentifierPresent
+        self.readPositionPositive = readPositionPositive
+        self.sessionHandlePresent = sessionHandlePresent
+        self.sessionHandleMatchesThread = sessionHandleMatchesThread
+        self.turnBindingMatchesEvent = turnBindingMatchesEvent
+        self.turnRequestMatchesThread = turnRequestMatchesThread
+        self.turnIdentifierPresent = turnIdentifierPresent
+        self.contentRedactedPresent = contentRedactedPresent
+        self.contentRedactedIsTrue = contentRedactedIsTrue
+        self.authorIsOrigin = authorIsOrigin
+        self.revisionIsNext = revisionIsNext
+        self.actorPresent = actorPresent
+        self.referencedTurnPresent = referencedTurnPresent
+        self.referencedFilePresent = referencedFilePresent
+        self.requestKeyIsUnique = requestKeyIsUnique
+    }
+}
+
+public struct ConversationValidationRejection: Equatable, Codable, Sendable {
+    public let guardID: ConversationValidationGuardID
+    public let eventKind: ConversationValidationEventKind
+    public let facts: ConversationValidationFacts
+
+    init(guardID: ConversationValidationGuardID,
+         eventKind: ConversationValidationEventKind,
+         facts: ConversationValidationFacts) {
+        self.guardID = guardID
+        self.eventKind = eventKind
+        self.facts = facts
+    }
+}
+
+struct ConversationValidationRejectionError: Error, Sendable {
+    let rejection: ConversationValidationRejection
+}
+
 public struct ConversationTurnFacts: Equatable, Codable, Sendable {
     public var delivered = false
     public var actedBy: ExactText?
@@ -222,6 +340,44 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
     }
 }
 
+extension ConversationEvent.Fact {
+    var diagnosticKind: ConversationValidationEventKind {
+        switch self {
+        case .request: .request
+        case .revision: .revision
+        case .redactedRevision: .revision
+        case let .turn(turn):
+            switch turn.kind {
+            case .some(.discussion): .discussion
+            case .some(.reply): .reply
+            case .some(.revision): .revision
+            case .some(.result): .result
+            case .some(.terminal): .terminal
+            case nil: .turn
+            }
+        case .delivered: .receipt
+        case .acted: .acted
+        case .availability: .availability
+        case .availabilityRecord: .availability
+        case .fileTransfer: .fileTransfer
+        case .fileUse: .fileUse
+        case .terminal: .terminal
+        case .attentionTier: .attentionTier
+        case .readPosition: .readPosition
+        case .retraction: .retraction
+        }
+    }
+}
+
+private func conversationValidationRejection(
+    _ guardID: ConversationValidationGuardID,
+    eventKind: ConversationValidationEventKind,
+    facts: ConversationValidationFacts = ConversationValidationFacts()
+) -> ConversationValidationRejectionError {
+    ConversationValidationRejectionError(rejection: ConversationValidationRejection(
+        guardID: guardID, eventKind: eventKind, facts: facts))
+}
+
 public struct ConversationThread: Equatable, Codable, Sendable {
     public let request: RequestKey
     public let sessionHandle: ExactText
@@ -320,9 +476,17 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         }
     }
 
-    mutating func merge(_ turn: ConversationTurn) throws {
+    mutating func merge(_ turn: ConversationTurn, event: ConversationEvent) throws {
         guard turn.binding.request == request, turn.sessionHandle == sessionHandle,
-              !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+              !turn.id.rawValue.isEmpty else {
+            throw conversationValidationRejection(.mergedTurnRequestBinding,
+                eventKind: event.fact.diagnosticKind,
+                facts: ConversationValidationFacts(
+                    sessionHandlePresent: !turn.sessionHandle.rawValue.isEmpty,
+                    sessionHandleMatchesThread: turn.sessionHandle == sessionHandle,
+                    turnRequestMatchesThread: turn.binding.request == request,
+                    turnIdentifierPresent: !turn.id.rawValue.isEmpty))
+        }
         if let index = turns.firstIndex(where: { $0.id == turn.id }) {
             guard turns[index] == turn else { throw ConversationError.conflict }
             return
@@ -518,7 +682,9 @@ struct ConversationState: Codable, Equatable {
         if case .readPosition = event.fact { isReadPosition = true }
         else { isReadPosition = false }
         guard isReadPosition ? event.binding.revision == 0 : event.binding.revision > 0 else {
-            throw ConversationError.invalidBinding
+            throw conversationValidationRejection(.eventRevisionBinding,
+                eventKind: event.fact.diagnosticKind,
+                facts: ConversationValidationFacts(revisionIsZero: event.binding.revision == 0))
         }
         if event.sequence <= cursor {
             guard let previous = events[event.sequence], event.canEnrich(previous) else {
@@ -541,7 +707,11 @@ struct ConversationState: Codable, Equatable {
         }
         if case let .readPosition(eventID, position) = event.fact {
             guard event.binding.revision == 0, !eventID.rawValue.isEmpty, position > 0 else {
-                throw ConversationError.invalidBinding
+                throw conversationValidationRejection(.readPositionEventShape,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(revisionIsZero: event.binding.revision == 0,
+                        eventIdentifierPresent: !eventID.rawValue.isEmpty,
+                        readPositionPositive: position > 0))
             }
             mergeReadPosition(event.binding.request, position: position)
             events[event.sequence] = event
@@ -559,12 +729,15 @@ struct ConversationState: Codable, Equatable {
 
         switch event.fact {
         case let .request(handle, payload):
-            try applyRequest(handle: handle, payload: payload, binding: binding)
+            try applyRequest(handle: handle, payload: payload, binding: binding, event: event)
         case .attentionTier:
             break
         case let .revision(turn, payload) where threads[binding.request] == nil:
             guard binding.revision == 1, !turn.sessionHandle.rawValue.isEmpty else {
-                throw ConversationError.invalidBinding
+                throw conversationValidationRejection(.initialRevisionBinding,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(revisionIsOne: binding.revision == 1,
+                        sessionHandlePresent: !turn.sessionHandle.rawValue.isEmpty))
             }
             try validateUnloadedSessionHandle(turn.sessionHandle, for: binding.request)
             var thread = ConversationThread(request: binding.request, sessionHandle: turn.sessionHandle,
@@ -584,8 +757,12 @@ struct ConversationState: Codable, Equatable {
     }
 
     private mutating func applyRequest(handle: ExactText, payload: JSONValue,
-                                       binding: ConversationBinding) throws {
-        guard !handle.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+                                       binding: ConversationBinding, event: ConversationEvent) throws {
+        guard !handle.rawValue.isEmpty else {
+            throw conversationValidationRejection(.requestSessionHandlePresent,
+                eventKind: event.fact.diagnosticKind,
+                facts: ConversationValidationFacts(sessionHandlePresent: !handle.rawValue.isEmpty))
+        }
         if var thread = threads[binding.request] {
             guard thread.sessionHandle == handle else { throw ConversationError.conflict }
             if let old = thread.revisions[binding.revision] {
@@ -599,7 +776,11 @@ struct ConversationState: Codable, Equatable {
             }
             threads[binding.request] = thread
         } else {
-            guard binding.revision == 1 else { throw ConversationError.invalidBinding }
+            guard binding.revision == 1 else {
+                throw conversationValidationRejection(.initialRequestRevision,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(revisionIsOne: binding.revision == 1))
+            }
             try validateUnloadedSessionHandle(handle, for: binding.request)
             var thread = ConversationThread(request: binding.request, sessionHandle: handle,
                 revision: binding.revision, payload: payload)
@@ -621,7 +802,13 @@ struct ConversationState: Codable, Equatable {
         var incoming: [RequestKey: UInt64] = [:]
         for position in positions {
             guard position.readThroughConversationSequence > 0,
-                  incoming[position.request] == nil else { throw ConversationError.invalidBinding }
+                  incoming[position.request] == nil else {
+                throw conversationValidationRejection(.readPositionSnapshotEntry,
+                    eventKind: .readPositionSnapshot,
+                    facts: ConversationValidationFacts(
+                        readPositionPositive: position.readThroughConversationSequence > 0,
+                        requestKeyIsUnique: incoming[position.request] == nil))
+            }
             incoming[position.request] = position.readThroughConversationSequence
         }
         var merged = chatReadPositions ?? [:]
@@ -778,7 +965,11 @@ struct ConversationState: Codable, Equatable {
         let binding = event.binding
         switch event.fact {
         case let .revision(turn, payload):
-            guard !turn.sessionHandle.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+            guard !turn.sessionHandle.rawValue.isEmpty else {
+                throw conversationValidationRejection(.revisionSessionHandlePresent,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(sessionHandlePresent: !turn.sessionHandle.rawValue.isEmpty))
+            }
             guard turn.sessionHandle == thread.sessionHandle else { throw ConversationError.conflict }
             if let old = thread.revisions[binding.revision] {
                 guard old == payload else { throw ConversationError.conflict }
@@ -792,7 +983,16 @@ struct ConversationState: Codable, Equatable {
         case let .redactedRevision(turn):
             guard turn.contentRedacted == true, turn.sessionHandle == thread.sessionHandle,
                   turn.author == .origin, binding.revision == thread.currentRevision + 1 else {
-                throw ConversationError.invalidBinding
+                throw conversationValidationRejection(.redactedRevisionBinding,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(
+                        sessionHandlePresent: !turn.sessionHandle.rawValue.isEmpty,
+                        sessionHandleMatchesThread: turn.sessionHandle == thread.sessionHandle,
+                        contentRedactedPresent: turn.contentRedacted != nil,
+                        contentRedactedIsTrue: turn.contentRedacted == true,
+                        authorIsOrigin: turn.author == .origin,
+                        revisionIsNext: thread.currentRevision < UInt64.max &&
+                            binding.revision == thread.currentRevision + 1))
             }
             thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
             thread.currentRevision = binding.revision
@@ -803,14 +1003,23 @@ struct ConversationState: Codable, Equatable {
 
         switch event.fact {
         case .request, .attentionTier, .readPosition:
-            throw ConversationError.invalidBinding
+            throw conversationValidationRejection(.loadedThreadFactNotAllowed,
+                eventKind: event.fact.diagnosticKind)
         case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
             guard turn.binding == binding, turn.sessionHandle == thread.sessionHandle,
-                  !turn.id.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+                  !turn.id.rawValue.isEmpty else {
+                throw conversationValidationRejection(.turnBinding,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(
+                        sessionHandlePresent: !turn.sessionHandle.rawValue.isEmpty,
+                        sessionHandleMatchesThread: turn.sessionHandle == thread.sessionHandle,
+                        turnBindingMatchesEvent: turn.binding == binding,
+                        turnIdentifierPresent: !turn.id.rawValue.isEmpty))
+            }
             // Ordinary replay can close the request before its result turn
             // arrives. The exact matching identity enriches one retained row;
             // authoritative historical entries remain applicable.
-            try thread.merge(turn)
+            try thread.merge(turn, event: event)
             // Only an exact accepted operation clears its frozen draft.
             if let draft = thread.drafts[binding.revision], let operationID = turn.operationID,
                turn.kind != .result {
@@ -827,10 +1036,22 @@ struct ConversationState: Codable, Equatable {
                 }
             }
         case let .availability(handle, availability):
-            guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
+            guard handle == thread.sessionHandle else {
+                throw conversationValidationRejection(.availabilitySessionHandle,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(
+                        sessionHandlePresent: !handle.rawValue.isEmpty,
+                        sessionHandleMatchesThread: handle == thread.sessionHandle))
+            }
             thread.availability = availability
         case let .availabilityRecord(handle, availability, support):
-            guard handle == thread.sessionHandle else { throw ConversationError.invalidBinding }
+            guard handle == thread.sessionHandle else {
+                throw conversationValidationRejection(.availabilityRecordSessionHandle,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(
+                        sessionHandlePresent: !handle.rawValue.isEmpty,
+                        sessionHandleMatchesThread: handle == thread.sessionHandle))
+            }
             thread.availability = availability
             thread.listeningSupport = support
         case let .terminal(turn, author, state):
@@ -854,20 +1075,24 @@ struct ConversationState: Codable, Equatable {
             try thread.recordRetraction(turn: turn, sequence: sequence, revision: binding.revision,
                 retractedAtMilliseconds: event.retractedAtMilliseconds)
         case let .delivered(turn):
-            try requireTurn(turn, binding: binding, in: thread)
+            try requireTurn(turn, binding: binding, event: event, in: thread)
             thread.facts[turn, default: ConversationTurnFacts()].delivered = true
         case let .acted(turn, by):
-            try requireTurn(turn, binding: binding, in: thread)
-            guard !by.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+            try requireTurn(turn, binding: binding, event: event, in: thread)
+            guard !by.rawValue.isEmpty else {
+                throw conversationValidationRejection(.actorPresent,
+                    eventKind: event.fact.diagnosticKind,
+                    facts: ConversationValidationFacts(actorPresent: !by.rawValue.isEmpty))
+            }
             if let old = thread.facts[turn]?.actedBy, old != by { throw ConversationError.conflict }
             thread.facts[turn, default: ConversationTurnFacts()].actedBy = by
         case let .fileTransfer(turn, file, outcome):
-            try requireFile(file, turn: turn, binding: binding, in: thread)
+            try requireFile(file, turn: turn, binding: binding, event: event, in: thread)
             let old = thread.facts[turn]?.fileTransfers[file] ?? .unknown
             guard old == .unknown || old == outcome else { throw ConversationError.conflict }
             thread.facts[turn, default: ConversationTurnFacts()].fileTransfers[file] = outcome
         case let .fileUse(turn, file, outcome):
-            try requireFile(file, turn: turn, binding: binding, in: thread)
+            try requireFile(file, turn: turn, binding: binding, event: event, in: thread)
             let old = thread.facts[turn]?.fileUses[file] ?? .unknown
             guard old == .unknown || old == outcome else { throw ConversationError.conflict }
             thread.facts[turn, default: ConversationTurnFacts()].fileUses[file] = outcome
@@ -892,17 +1117,22 @@ struct ConversationState: Codable, Equatable {
         }
     }
 
-    private func requireTurn(_ id: ExactText, binding: ConversationBinding, in thread: ConversationThread) throws {
+    private func requireTurn(_ id: ExactText, binding: ConversationBinding,
+                             event: ConversationEvent, in thread: ConversationThread) throws {
         guard thread.terminalTurn == id || thread.turns.contains(where: { $0.id == id && $0.binding.request == binding.request }) else {
-            throw ConversationError.invalidBinding
+            throw conversationValidationRejection(.referencedTurnExists,
+                eventKind: event.fact.diagnosticKind,
+                facts: ConversationValidationFacts(referencedTurnPresent: false))
         }
     }
 
     private func requireFile(_ file: ExactText, turn: ExactText, binding: ConversationBinding,
-                             in thread: ConversationThread) throws {
-        try requireTurn(turn, binding: binding, in: thread)
+                             event: ConversationEvent, in thread: ConversationThread) throws {
+        try requireTurn(turn, binding: binding, event: event, in: thread)
         guard thread.turns.first(where: { $0.id == turn })?.files.contains(where: { $0.id == file }) == true else {
-            throw ConversationError.invalidBinding
+            throw conversationValidationRejection(.referencedFileExists,
+                eventKind: event.fact.diagnosticKind,
+                facts: ConversationValidationFacts(referencedFilePresent: false))
         }
     }
 }

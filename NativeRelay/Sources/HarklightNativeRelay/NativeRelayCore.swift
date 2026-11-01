@@ -329,6 +329,10 @@ public actor NativeRelayCore {
         var high: UInt64?
     }
 
+    private struct ConversationReplayValidationFailure: Error, Sendable {
+        let rejection: ConversationValidationRejection
+    }
+
     private struct ReplayProgress {
         var expected: UInt64
         let durableCursor: UInt64
@@ -1388,6 +1392,11 @@ public actor NativeRelayCore {
             // Ordinary replay and answer delivery already succeeded. The missing
             // optional projection must not undo their connection confirmation.
             return
+        } catch let failure as ConversationReplayValidationFailure {
+            diagnose(.conversation, .conversationReplay, .failed,
+                     error: ConversationError.invalidBinding,
+                     conversationValidationRejection: failure.rejection)
+            throw ConversationError.invalidBinding
         } catch {
             diagnose(.conversation, .conversationReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
@@ -1514,8 +1523,17 @@ public actor NativeRelayCore {
         } else if let snapshot = try? wire.decodeResyncedSnapshot(frame) {
             let high = snapshot.highWater
             guard high >= replay.durableCursor, high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
-            try store.finishConversationReplay(at: high,
-                chatReadPositions: snapshot.chatReadPositions, context: context)
+            var validationRejection: ConversationValidationRejection?
+            do {
+                try store.finishConversationReplay(at: high,
+                    chatReadPositions: snapshot.chatReadPositions, context: context,
+                    validationRejection: &validationRejection)
+            } catch {
+                if let validationRejection {
+                    throw ConversationReplayValidationFailure(rejection: validationRejection)
+                }
+                throw error
+            }
             conversationReadPositionSupportForSession = snapshot.chatReadPositions != nil
             if snapshot.hasInvalidChatReadPositions {
                 diagnose(.conversation, .conversationReadPosition, .observed,
@@ -1528,7 +1546,16 @@ public actor NativeRelayCore {
                 guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
                     throw NativeRelayCoreError.invalidReplay
                 }
-                _ = try store.applyConversation(event, context: context)
+                var validationRejection: ConversationValidationRejection?
+                do {
+                    _ = try store.applyConversation(event, context: context,
+                        validationRejection: &validationRejection)
+                } catch {
+                    if let validationRejection {
+                        throw ConversationReplayValidationFailure(rejection: validationRejection)
+                    }
+                    throw error
+                }
                 replay.expected = event.sequence
             case let .ignored(sequence):
                 guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
@@ -1839,6 +1866,7 @@ public actor NativeRelayCore {
                           terminalSequence: UInt64? = nil,
                           lifecycleSequence: UInt64? = nil,
                           noReplyRoute: NativeDiagnosticNoReplyRoute? = nil,
+                          conversationValidationRejection: ConversationValidationRejection? = nil,
                           occurredAtMilliseconds: Int64? = nil,
                           operationID: UUID? = nil,
                           request: RequestKey? = nil,
@@ -1853,6 +1881,7 @@ public actor NativeRelayCore {
             terminalSequence: terminalSequence,
             lifecycleSequence: lifecycleSequence,
             noReplyRoute: noReplyRoute,
+            conversationValidationRejection: conversationValidationRejection,
             attemptID: attemptID, transportAttemptID: attemptID,
             operationID: operationID, request: request,
             requestRevision: revision, receiptState: receipt,

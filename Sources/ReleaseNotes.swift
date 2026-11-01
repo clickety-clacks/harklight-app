@@ -113,7 +113,7 @@ enum HarklightReleaseNotes {
                         "Clearer connection diagnostics",
                         comment: "Release-note title for identifying failed post-sync steps."),
                     detail: LocalizedStringResource(
-                        "Connection details name the post-sync step that stopped and include a safe error code to share.",
+                        "Connection reports can identify the conversation check that stopped syncing without including message content.",
                         comment: "Release-note detail for safe post-sync failure diagnostics.")),
                 .init(
                     id: "no-reply-delivery-diagnostics",
