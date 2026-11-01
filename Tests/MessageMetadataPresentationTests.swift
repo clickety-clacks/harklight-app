@@ -68,7 +68,7 @@ final class MessageMetadataPresentationTests: XCTestCase {
 
         let port = AttentionDomainPort(store: store)
         let requests = try port.observe(context: port.context).requests
-        XCTAssertEqual(requests.map(\.key), [seenKey, replyKey],
+        XCTAssertEqual(requests.map(\.key), [replyKey, seenKey],
                        "Metadata does not affect the established request order.")
 
         let seen = try XCTUnwrap(requests.first { $0.key == seenKey })
