@@ -103,8 +103,13 @@ private struct MessageTypeBadge: View {
 private struct MessageKindBadge: View {
     let kind: MessageKindValue
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
     @State private var isFlairActive = false
+
+    private var reduceMotion: Bool {
+        reduceMotionOverride ?? systemReduceMotion
+    }
 
     private var presentation: MessageKindPresentation {
         MessageKindPresentation(kind: kind)

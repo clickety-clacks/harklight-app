@@ -166,6 +166,8 @@ final class SampleResponse {
             createdAt: request.createdAt,
             isLocalExample: true, localStatus: localStatus,
             informationalSeenStatus: request.informationalSeenStatus,
+            declaredMessageType: request.messageType,
+            declaredMessageKind: request.messageKind,
             canNoComment: canDeclineLocally && request.informationalSeenStatus == nil,
             localSeenSelected: localSeenSelected,
             hasUserAction: finished || receiptStatus == .pendingOrAccepted ||
@@ -176,8 +178,6 @@ final class SampleResponse {
             initials: message.initials,
             emphasis: emphasis,
             messageType: message.kind.designMessageType,
-            declaredMessageType: request.messageType,
-            declaredMessageKind: request.messageKind,
             tier: message.tier)
     }
 

@@ -145,11 +145,15 @@ private struct AcceptanceReduceMotionOverride: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if let isEnabled {
-            content.environment(\.accessibilityReduceMotion, isEnabled)
+            content.environment(\.harklightReduceMotionOverride, isEnabled)
         } else {
             content
         }
     }
+}
+
+extension EnvironmentValues {
+    @Entry var harklightReduceMotionOverride: Bool?
 }
 
 @MainActor

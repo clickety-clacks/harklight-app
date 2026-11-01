@@ -748,7 +748,11 @@ struct InboxList: View {
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
     let triggerNotification: (() -> Void)?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
+    private var reduceMotion: Bool {
+        reduceMotionOverride ?? systemReduceMotion
+    }
     @Environment(\.colorScheme) private var colorScheme
     @State private var canRequestOlderPageOnDrag = false
     @State private var isUserScrolling = false
