@@ -720,6 +720,7 @@ struct LiveRequestDetail: View {
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
+    @State private var failedResponsePresented = false
     @State private var activeReplyEditor: ReplyEditorTarget?
     @State private var replyDraftSession: ReplyEditorDraftSession?
     @State private var localReplyEditingActive = false
@@ -766,6 +767,12 @@ struct LiveRequestDetail: View {
 
     private var replyEditorSurface: Color {
         HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
+    }
+
+    private var failedResponseWarning: LivePresentationStore.FailedResponseWarning? {
+        guard localExample == nil, fixtureStore == nil,
+              request.informationalSeenStatus == nil else { return nil }
+        return store.failedResponseWarning(for: request.key, revision: request.requestRevision)
     }
 
     private static func canEditSnapshot(request: PresentedRequest,
@@ -1088,6 +1095,19 @@ struct LiveRequestDetail: View {
         .accessibilityIdentifier("request-no-comment-status")
     }
 
+    private var failedResponseWarningButton: some View {
+        Button {
+            failedResponsePresented = true
+        } label: {
+            Image(systemName: "exclamationmark.triangle.fill")
+        }
+        .labelStyle(.iconOnly)
+        .tint(.red)
+        .accessibilityLabel("Response not delivered")
+        .accessibilityHint("View the delivery details and retry the same response")
+        .accessibilityIdentifier("request-delivery-warning")
+    }
+
     private var noCommentSelected: Bool {
         if let localReplySession { return localReplySession.noCommentSelected }
         return localExample?.noCommentSelected
@@ -1119,6 +1139,7 @@ struct LiveRequestDetail: View {
     private var noCommentChoice: some View {
         NoCommentChoiceRow(selected: noCommentSelected,
                            unavailable: showsNoCommentUnavailable,
+                           canOpenFailureDetails: failedResponseWarning != nil,
                            onSelect: selectNoCommentAction)
     }
 
@@ -1321,6 +1342,7 @@ struct LiveRequestDetail: View {
                                              canOfferNoComment: canOfferNoComment,
                                              noCommentSelected: noCommentSelected,
                                              noCommentUnavailable: showsNoCommentUnavailable,
+                                             canOpenFailureDetails: failedResponseWarning != nil,
                                              onSelectNoComment: selectNoCommentAction,
                                              focusedReplyActionID: $focusedReplyActionID,
                                              replyTextBinding: { replyTextBinding(for: $0) },
@@ -1335,16 +1357,6 @@ struct LiveRequestDetail: View {
                             .foregroundStyle(detailColors.secondaryTextColor)
                         if canOfferNoComment { noCommentChoice }
                     }
-                }
-                if request.answerNotDelivered {
-                    Label("Answer not delivered", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.red)
-                        .accessibilityIdentifier("request-answer-not-delivered")
-                }
-                if showsNoCommentUnavailable && !isSupersedesReadOnly {
-                    Text("No comment was not delivered: this server does not support it. Tap the checkmark to retry.")
-                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
-                        .accessibilityIdentifier("request-no-comment-unavailable")
                 }
                 if request.inboxStateIsCurrent {
                     if storePresentationSnapshot.isRetracted {
@@ -1383,7 +1395,8 @@ struct LiveRequestDetail: View {
                     Label("Cached history · status not refreshed", systemImage: "clock.arrow.circlepath")
                         .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                         .accessibilityIdentifier("inbox-status-unrefreshed")
-                    if let localStatus = Self.cachedOperationStatus(request.intentReceipt?.localState) {
+                    if failedResponseWarning == nil,
+                       let localStatus = Self.cachedOperationStatus(request.intentReceipt?.localState) {
                         Text(localStatus).font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                     }
                 }
@@ -1404,7 +1417,7 @@ struct LiveRequestDetail: View {
                     }
                 }
                 if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
-                   request.lifecycleStatus == .pending {
+                   request.lifecycleStatus == .pending, failedResponseWarning == nil {
                     Button("Retry delivery") { store.retryPendingDelivery() }
                         .buttonStyle(.bordered)
                         .disabled(store.isReadOnly)
@@ -1466,6 +1479,8 @@ struct LiveRequestDetail: View {
                             .labelStyle(.iconOnly)
                             .disabled(!localExample.canFinishLocally || localExample.finished)
                             .accessibilityIdentifier("sample-finish")
+                        } else if failedResponseWarning != nil {
+                            failedResponseWarningButton
                         } else if isEditingLocalReply {
                             submitReplyButton
                         } else if request.lifecycleStatus == .noComment {
@@ -1485,6 +1500,13 @@ struct LiveRequestDetail: View {
         .sheet(isPresented: $requestDetailsPresented) {
             requestDetailsSheet
         }
+        .sheet(isPresented: $failedResponsePresented) {
+            if let warning = failedResponseWarning {
+                FailedResponseDialog(warning: warning,
+                    canRetry: store.canRetryFailedResponse(for: request.key),
+                    onRetry: { _ = store.retryFailedResponse(for: request.key) })
+            }
+        }
         .sheet(isPresented: $chatPresented) {
             conversationPanel
         }
@@ -1494,6 +1516,11 @@ struct LiveRequestDetail: View {
         .onChange(of: request) { _, _ in
             refreshStorePresentationSnapshot()
             refreshUneditedReplySession()
+        }
+        .onChange(of: failedResponseWarning) { previous, current in
+            if previous != nil, current == nil {
+                failedResponsePresented = false
+            }
         }
         .onChange(of: store.conversationThreads) { _, _ in
             refreshStorePresentationSnapshot()
@@ -1711,7 +1738,7 @@ struct LiveRequestDetail: View {
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer sent · result not confirmed"
         case .notDelivered: "Answer not delivered"
-        case .unsupported: "No comment is unsupported by this server"
+        case .unsupported: "No comment was not accepted"
         case .repairRequired: "Answer needs recovery"
         }
     }
@@ -2231,6 +2258,7 @@ private struct LiveCompatibilityActions: View {
     var canOfferNoComment = false
     var noCommentSelected = false
     var noCommentUnavailable = false
+    var canOpenFailureDetails = false
     var onSelectNoComment: () -> Void = {}
     @FocusState.Binding var focusedReplyActionID: String?
     var replyTextBinding: (ReplyEditorTarget) -> Binding<String>
@@ -2412,6 +2440,7 @@ private struct LiveCompatibilityActions: View {
                 if canOfferNoComment {
                     NoCommentChoiceRow(selected: noCommentSelected,
                                        unavailable: noCommentUnavailable,
+                                       canOpenFailureDetails: canOpenFailureDetails,
                                        onSelect: onSelectNoComment)
                 }
             }
@@ -2422,6 +2451,7 @@ private struct LiveCompatibilityActions: View {
 private struct NoCommentChoiceRow: View {
     let selected: Bool
     let unavailable: Bool
+    let canOpenFailureDetails: Bool
     let onSelect: () -> Void
 
     var body: some View {
@@ -2434,9 +2464,54 @@ private struct NoCommentChoiceRow: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityValue(selected ? "Selected" : "Not selected")
         .accessibilityHint(unavailable
-            ? "This server did not accept No comment. Use the checkmark to retry, or choose another answer."
+            ? (canOpenFailureDetails
+                ? "No comment was not accepted. Open the warning icon to view delivery details."
+                : "No comment was not accepted. Choose another answer.")
             : "Select No comment as your answer, then send it with the checkmark.")
         .accessibilityIdentifier("request-no-comment")
+    }
+}
+
+private struct FailedResponseDialog: View {
+    let warning: LivePresentationStore.FailedResponseWarning
+    let canRetry: Bool
+    let onRetry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 16) {
+                Text("Response delivery")
+                    .font(.headline)
+                    .accessibilityIdentifier("failed-response-title")
+                Spacer(minLength: 8)
+                Button("Retry", action: onRetry)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canRetry)
+                    .accessibilityIdentifier("failed-response-retry")
+            }
+            .padding()
+            Divider().accessibilityHidden(true)
+            Text(warning.summary)
+                .font(.body.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+                .padding(.top, 16)
+                .accessibilityIdentifier("failed-response-summary")
+            ScrollView {
+                Text(warning.detail)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .accessibilityIdentifier("failed-response-detail")
+            }
+            .accessibilityIdentifier("failed-response-detail-scroll")
+        }
+        .frame(minWidth: 280, minHeight: 260)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 

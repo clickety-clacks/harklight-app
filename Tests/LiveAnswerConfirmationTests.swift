@@ -189,7 +189,15 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let unavailableRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertFalse(unavailableRow.belongsToReplied,
                        "Unsupported No comment was not accepted, so the request stays in Inbox.")
-        XCTAssertTrue(unavailableRow.status.contains("No comment not delivered"))
+        XCTAssertTrue(unavailableRow.hasDeliveryWarning)
+        XCTAssertFalse(unavailableRow.visibleStatus.contains("Open"))
+        XCTAssertFalse(unavailableRow.visibleStatus.contains("not delivered"))
+        XCTAssertNil(unavailableRow.localStatus)
+        let warning = try XCTUnwrap(live.failedResponseWarning(for: key))
+        XCTAssertEqual(String(localized: warning.summary),
+                       "Your No comment response was not delivered.")
+        XCTAssertFalse(String(localized: warning.detail).contains("unsupported by this server"),
+                       "The dialog must not repeat an unverified cause.")
         XCTAssertTrue(LiveRequestDetail(request: reopened, store: live).canAnswer,
                       "The app leaves ordinary answer choices to an explicit user action.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
@@ -254,8 +262,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertFalse(row.belongsToReplied)
         XCTAssertTrue(row.hasFailedResponse)
-        XCTAssertEqual(row.localStatus, "Answer not delivered")
-        XCTAssertTrue(row.status.contains("Answer not delivered"))
+        XCTAssertTrue(row.hasDeliveryWarning)
+        XCTAssertNil(row.localStatus)
+        XCTAssertFalse(row.visibleStatus.contains("Open"))
+        XCTAssertFalse(row.visibleStatus.contains("not delivered"))
         XCTAssertEqual(session.sentOperationIDs, [failed.opID])
 
         live.selectAction(ExactText("reply"), input: nil, for: key)
@@ -266,6 +276,76 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "Only the new answer is retryable after the relay explicitly rejected the old one.")
         XCTAssertFalse(try XCTUnwrap(live.request(for: key)).answerNotDelivered,
                        "A new pending attempt replaces the previous failure treatment.")
+    }
+
+    func testFailedResponseRetryUsesTheRetainedAnswerAndClearsWarningOnlyAfterAcceptance() throws {
+        let (context, store, live, key) = try setup()
+        live.selectAction(ExactText("got-it"), input: nil, for: key)
+        let original = try live.submit(key)
+        try store.recordAnswerNotDelivered(original.intentID, operationID: original.opID,
+                                           context: context)
+        try live.refreshFromDurableStore()
+
+        let warning = try XCTUnwrap(live.failedResponseWarning(for: key))
+        XCTAssertEqual(String(localized: warning.summary), "Your response was not delivered.")
+        XCTAssertEqual(String(localized: warning.detail), "No additional safe failure detail was retained.")
+        XCTAssertEqual(warning.submittedInputs, original.inputs)
+        XCTAssertTrue(live.canRetryFailedResponse(for: key))
+
+        let failedRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertTrue(failedRow.hasDeliveryWarning)
+        XCTAssertNil(failedRow.localStatus)
+        XCTAssertFalse(failedRow.visibleStatus.contains("Open"))
+        XCTAssertFalse(failedRow.visibleStatus.contains("not delivered"))
+
+        XCTAssertTrue(live.retryFailedResponse(for: key))
+        let retried = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        XCTAssertNotEqual(retried.opID, original.opID,
+                          "An explicitly rejected operation is retried as a new operation.")
+        XCTAssertEqual(retried.inputs, original.inputs,
+                       "Retry uses the exact submitted response, not the editable draft.")
+        XCTAssertEqual(live.failedResponseWarning(for: key)?.retryOperationID, retried.opID)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning,
+                      "Queueing the retry does not clear the known-failure warning.")
+
+        try store.recordAcceptedOperation(retried.intentID, operationID: retried.opID,
+                                          terminalSequence: 2, context: context)
+        _ = try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil)),
+                            context: context)
+        try live.refreshFromDurableStore()
+
+        XCTAssertNil(live.failedResponseWarning(for: key),
+                     "The warning clears only after the server accepts the retry.")
+        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning)
+    }
+
+    func testFailedNoCommentWarningRetriesTheSameNoCommentResponse() throws {
+        let (context, store, live, key) = try setupReplyOnly()
+        XCTAssertTrue(live.submitNoCommentFromUser(key))
+        let original = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        try store.recordNoCommentUnsupported(original.intentID, operationID: original.opID,
+                                             context: context)
+        try live.refreshFromDurableStore()
+
+        let warning = try XCTUnwrap(live.failedResponseWarning(for: key))
+        XCTAssertEqual(warning.answerKind, .noComment)
+        XCTAssertTrue(warning.canRetry)
+        XCTAssertTrue(live.retryFailedResponse(for: key))
+
+        let retried = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        XCTAssertEqual(retried.answerKind, .noComment)
+        XCTAssertEqual(retried.inputs, [])
+        XCTAssertNotEqual(retried.opID, original.opID)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning)
+
+        try store.recordAcceptedOperation(retried.intentID, operationID: retried.opID,
+                                          terminalSequence: 2, context: context)
+        _ = try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .noComment, nil)),
+                            context: context)
+        try live.refreshFromDurableStore()
+
+        XCTAssertNil(live.failedResponseWarning(for: key))
+        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning)
     }
 
     func testMissingNoCommentReplyKeepsPendingExplanationAndReusesOperationID() async throws {
@@ -765,7 +845,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let unsupportedLiveRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertFalse(unsupportedLiveRow.belongsToReplied,
                        "An unsupported No comment leaves the request in Inbox.")
-        XCTAssertTrue(unsupportedLiveRow.status.contains("No comment not delivered"))
+        XCTAssertTrue(unsupportedLiveRow.hasDeliveryWarning)
+        XCTAssertNil(unsupportedLiveRow.localStatus)
         try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .noComment, nil)), context: context)
         try live.refreshFromDurableStore()
 
@@ -774,7 +855,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "A terminal account state supersedes the device-local failed attempt.")
         let liveRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertTrue(liveRow.belongsToReplied)
-        XCTAssertFalse(liveRow.status.contains("No comment not delivered"))
+        XCTAssertFalse(liveRow.hasDeliveryWarning)
+        XCTAssertFalse(liveRow.visibleStatus.contains("Open"))
         XCTAssertFalse(liveRow.localStatus?.contains("No comment not delivered") == true)
 
         let sampleResponse = sampleResponse(for: live, key: key)

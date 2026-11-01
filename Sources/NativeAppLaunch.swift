@@ -1071,6 +1071,26 @@ struct StaleAnswerDialog: Identifiable, Equatable {
 @MainActor
 @Observable
 final class LivePresentationStore {
+    struct FailedResponseWarning: Equatable {
+        let requestRevision: UInt64
+        let failedOperationID: UUID?
+        let answerKind: SubmissionAnswerKind
+        let submittedInputs: [TypedInputRecord]
+        let answerDraft: RequestDraft?
+        let detail: LocalizedStringResource
+        var retryOperationID: UUID?
+
+        var summary: LocalizedStringResource {
+            answerKind == .noComment
+                ? "Your No comment response was not delivered."
+                : "Your response was not delivered."
+        }
+
+        var canRetry: Bool {
+            failedOperationID != nil && answerDraft != nil
+        }
+    }
+
     enum InboxPageAvailability: Equatable {
         case more
         case exhausted
@@ -1109,6 +1129,7 @@ final class LivePresentationStore {
     var notificationWarning: String?
     private(set) var pushRegistrationWarning: String?
     var connectionWarning: String?
+    private(set) var failedResponseWarnings: [RequestKey: FailedResponseWarning] = [:]
 
     /// Present while any send from this device remains unresolved; nil once
     /// every such send resolves, which also clears the inbox warning indicator.
@@ -1215,6 +1236,7 @@ final class LivePresentationStore {
            let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
             clearedRetractions = cleared
         }
+        refreshFailedResponseWarnings(for: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)
     }
 
@@ -1588,6 +1610,9 @@ final class LivePresentationStore {
     private func makeInboxRow(for request: PresentedRequest) -> InboxRequestRow? {
         let retracted = isRetracted(request)
         if retracted, clearedRetractions.contains(request.key) { return nil }
+        let hasKnownDeliveryFailure = failedResponseWarning(for: request.key,
+            revision: request.requestRevision) != nil
+        let hasDeliveryWarning = hasKnownDeliveryFailure || request.staleAnswerRevision != nil
         let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
             request.receiptFacts?.ownOutcome == .unconfirmed &&
             request.lifecycleStatus != .pending
@@ -1606,23 +1631,31 @@ final class LivePresentationStore {
             let lifecycle = retracted ? retractionLabel(for: request) :
                 request.defaultAnswerStatusText ??
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
-            statusParts.append(lifecycle)
-            if request.answerNotDelivered { statusParts.append("Answer not delivered") }
-            if request.noCommentUnavailable, receiptStatus != .failed,
-               !serverReportedFinalResponse {
-                statusParts.append("No comment not delivered · unsupported by this server")
+            if request.lifecycleStatus != .open || retracted || request.defaultAnswerStatusText != nil {
+                statusParts.append(lifecycle)
             }
             if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
                 statusParts.append(informationalSeenRowStatus(seenStatus))
             }
         } else {
-            if let localStatus = cachedOperationStatus(request.intentReceipt?.localState) {
+            if !hasKnownDeliveryFailure, !request.answerNotDelivered,
+               let localStatus = cachedOperationStatus(request.intentReceipt?.localState) {
                 statusParts.append(localStatus)
             }
             if let defaultStatus = request.defaultAnswerStatusText {
                 statusParts.append(defaultStatus)
             }
             statusParts.append("Cached history · status not refreshed")
+        }
+        let localStatus: String?
+        if request.answerNotDelivered || hasKnownDeliveryFailure {
+            localStatus = nil
+        } else if receiptStatus == .failed {
+            localStatus = request.receiptFacts?.ownOutcome == .unconfirmed
+                ? "Answer sent · result not confirmed"
+                : cachedOperationStatus(request.intentReceipt?.localState)
+        } else {
+            localStatus = nil
         }
         let row = InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
             title: request.title?.rawValue ?? "Message",
@@ -1631,15 +1664,10 @@ final class LivePresentationStore {
             senderDisplayName: request.senderDisplayName?.rawValue,
             bodyText: request.body?.rawValue,
             symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
-            isResolved: request.answerNotDelivered || receiptStatus == .failed ? false :
-                request.isResolved, createdAt: request.createdAt,
-            localStatus: request.answerNotDelivered ? "Answer not delivered" : receiptStatus == .failed
-                ? (request.noCommentUnavailable
-                    ? "No comment not delivered · unsupported by this server"
-                    : request.receiptFacts?.ownOutcome == .unconfirmed
-                        ? "Answer sent · result not confirmed"
-                        : cachedOperationStatus(request.intentReceipt?.localState))
-                : nil,
+            isResolved: request.answerNotDelivered || receiptStatus == .failed || hasDeliveryWarning
+                ? false : request.isResolved,
+            createdAt: request.createdAt,
+            localStatus: localStatus,
             informationalSeenStatus: request.informationalSeenStatus,
             declaredMessageType: request.messageType,
             declaredMessageKind: request.messageKind,
@@ -1651,7 +1679,8 @@ final class LivePresentationStore {
             hasUserAction: receiptStatus == .pendingOrAccepted ||
                 request.lifecycleStatus == .answered ||
                 request.lifecycleStatus == .noComment,
-            hasFailedResponse: receiptStatus == .failed,
+            hasFailedResponse: receiptStatus == .failed || hasDeliveryWarning,
+            hasDeliveryWarning: hasDeliveryWarning,
             isRetracted: retracted,
             tier: .middle,
             priority: request.inboxPriority,
@@ -1699,7 +1728,7 @@ final class LivePresentationStore {
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer sent · result not confirmed"
         case .notDelivered: "Answer not delivered"
-        case .unsupported: "No comment is unsupported by this server"
+        case .unsupported: "No comment was not accepted"
         case .repairRequired: "Answer needs recovery"
         }
     }
@@ -1730,6 +1759,70 @@ final class LivePresentationStore {
 
     func request(for key: RequestKey) -> PresentedRequest? {
         presentation.requests.first { $0.key == key }
+    }
+
+    func failedResponseWarning(for key: RequestKey,
+                               revision: UInt64? = nil) -> FailedResponseWarning? {
+        guard let request = request(for: key),
+              revision == nil || request.requestRevision == revision,
+              request.informationalSeenStatus == nil,
+              request.staleAnswerRevision == nil else { return nil }
+        if let warning = failedResponseWarnings[key],
+           warning.requestRevision == request.requestRevision {
+            return warning
+        }
+        guard request.answerNotDelivered || request.noCommentUnavailable else { return nil }
+        return makeFailedResponseWarning(for: request, submission: nil, retryOperationID: nil)
+    }
+
+    func canRetryFailedResponse(for key: RequestKey) -> Bool {
+        guard permitsDelivery, !isReadOnly,
+              let request = request(for: key),
+              let warning = failedResponseWarning(for: key, revision: request.requestRevision),
+              warning.canRetry,
+              request.lifecycleStatus == .open,
+              request.informationalSeenStatus == nil,
+              request.staleAnswerRevision == nil,
+              !isRetracted(key) else { return false }
+        if let receipt = request.intentReceipt {
+            return warning.retryOperationID == receipt.opID &&
+                Self.matches(receipt: receipt, warning: warning)
+        }
+        return warning.retryOperationID == nil
+    }
+
+    /// Reuses the exact typed response retained by the failed durable submission.
+    /// If that retry is already pending, only the same operation is replayed.
+    @discardableResult
+    func retryFailedResponse(for key: RequestKey) -> Bool {
+        guard canRetryFailedResponse(for: key),
+              let request = request(for: key),
+              let warning = failedResponseWarning(for: key, revision: request.requestRevision) else {
+            return false
+        }
+        if request.intentReceipt != nil {
+            retryPendingDelivery()
+            return true
+        }
+        guard let answerDraft = warning.answerDraft else { return false }
+        do {
+            let receipt = try submit(key, answerDraft: answerDraft,
+                                    requestRevision: warning.requestRevision)
+            if var current = failedResponseWarnings[key],
+               current.failedOperationID == warning.failedOperationID {
+                current.retryOperationID = receipt.opID
+                failedResponseWarnings[key] = current
+            }
+            retryPendingDelivery()
+            return true
+        } catch {
+            diagnose(.localStore, .draftSave, .failed, error: error,
+                     request: key, requestRevision: warning.requestRevision,
+                     receiptState: .unknown)
+            actionErrorRequest = key
+            actionError = "The saved response could not be retried. Review the latest message and try again."
+            return false
+        }
     }
 
     func draft(for key: RequestKey, revision: UInt64? = nil) -> RequestDraft? {
@@ -2373,6 +2466,7 @@ final class LivePresentationStore {
             diagnose(.localStore, .projectionRefresh, .failed, error: error)
         }
         presentation = snapshot
+        refreshFailedResponseWarnings(for: snapshot.requests)
         recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)
         if let key = actionErrorRequest,
@@ -2387,6 +2481,235 @@ final class LivePresentationStore {
             self.selectedRequestKey = snapshot.requests.first?.key
         }
         notificationProjectionDidChange?()
+    }
+
+    private func refreshFailedResponseWarnings(for requests: [PresentedRequest]) {
+        guard let snapshot = try? attentionStore.snapshot(context: profileContext) else { return }
+        let submissions = Array(snapshot.intents.values)
+        var refreshed = failedResponseWarnings
+
+        for (key, warning) in failedResponseWarnings {
+            guard let retryOperationID = warning.retryOperationID,
+                  let retry = submissions.first(where: { $0.operationID == retryOperationID }) else { continue }
+            switch retry.disposition {
+            case .accepted, .terminal:
+                refreshed.removeValue(forKey: key)
+            case .failed, .unsupported:
+                refreshed.removeValue(forKey: key)
+            default:
+                if let request = requests.first(where: { $0.key == key }),
+                   request.intentReceipt?.opID == retryOperationID,
+                   request.receiptFacts?.ownOutcome == .accepted {
+                    refreshed.removeValue(forKey: key)
+                }
+            }
+        }
+
+        for request in requests {
+            guard request.informationalSeenStatus == nil,
+                  request.staleAnswerRevision == nil else {
+                refreshed.removeValue(forKey: request.key)
+                continue
+            }
+            let serverReportedAcceptedResponse = request.inboxStateIsCurrent &&
+                (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
+            if request.receiptFacts?.ownOutcome == .accepted || serverReportedAcceptedResponse {
+                refreshed.removeValue(forKey: request.key)
+                continue
+            }
+            if refreshed[request.key]?.requestRevision != request.requestRevision {
+                refreshed.removeValue(forKey: request.key)
+            }
+            let candidates = submissions.filter {
+                $0.requestKey == request.key && ($0.requestRevision ?? 1) == request.requestRevision &&
+                    Self.isDefinitiveFailure($0.disposition)
+            }
+
+            if request.answerNotDelivered || request.noCommentUnavailable {
+                if let failed = failureSubmission(for: request, among: candidates) {
+                    let retryOperationID = refreshed[request.key].flatMap {
+                        $0.failedOperationID == failed.operationID ? $0.retryOperationID : nil
+                    }
+                    refreshed[request.key] = makeFailedResponseWarning(
+                        for: request, submission: failed, retryOperationID: retryOperationID)
+                } else if refreshed[request.key]?.requestRevision != request.requestRevision {
+                    refreshed[request.key] = makeFailedResponseWarning(
+                        for: request, submission: nil, retryOperationID: nil)
+                }
+                continue
+            }
+
+            if let receipt = request.intentReceipt,
+               request.receiptFacts?.ownOutcome != .accepted,
+               let failed = failureSubmission(for: request,
+                    among: candidates.filter { Self.matches(receipt: receipt, submission: $0) }) {
+                refreshed[request.key] = makeFailedResponseWarning(
+                    for: request, submission: failed, retryOperationID: receipt.opID)
+                continue
+            }
+            let serverReportedTerminal = request.inboxStateIsCurrent &&
+                request.lifecycleStatus != .open && request.lifecycleStatus != .pending
+            if !serverReportedTerminal && request.inboxStateIsCurrent {
+                refreshed.removeValue(forKey: request.key)
+            }
+        }
+
+        failedResponseWarnings = refreshed
+    }
+
+    private func failureSubmission(for request: PresentedRequest,
+                                   among candidates: [Submission]) -> Submission? {
+        guard !candidates.isEmpty else { return nil }
+        let candidateIDs = Set(candidates.map(\.operationID))
+        for event in (diagnostics?.events ?? []).reversed()
+        where event.area == .answer && event.phase == .originalOperationDelivery &&
+            event.transition == .rejected {
+            if let operationID = event.operationID, candidateIDs.contains(operationID),
+               event.requestRevision == nil || event.requestRevision == request.requestRevision {
+                return candidates.first { $0.operationID == operationID }
+            }
+        }
+        if candidates.count == 1 { return candidates.first }
+        guard let first = candidates.first,
+              candidates.dropFirst().allSatisfy({ Self.matches($0, response: first) }) else { return nil }
+        return first
+    }
+
+    private func makeFailedResponseWarning(for request: PresentedRequest,
+                                           submission: Submission?,
+                                           retryOperationID: UUID?) -> FailedResponseWarning {
+        let answerKind: SubmissionAnswerKind = submission?.isNoComment == true ||
+            (submission == nil && request.noCommentUnavailable) ? .noComment : .answer
+        return FailedResponseWarning(
+            requestRevision: request.requestRevision,
+            failedOperationID: submission?.operationID,
+            answerKind: answerKind,
+            submittedInputs: submission?.typedInputs ?? [],
+            answerDraft: submission.flatMap { retryDraft(for: $0, request: request) },
+            detail: submission.map(failureDetail(for:)) ?? "No additional safe failure detail was retained.",
+            retryOperationID: retryOperationID)
+    }
+
+    private func retryDraft(for submission: Submission, request: PresentedRequest) -> RequestDraft? {
+        let blankInputs: [ExactText: InputDraft]
+        if case let .sender(sender) = request.projection {
+            blankInputs = Dictionary(uniqueKeysWithValues: sender.inputs.map { ($0.id, InputDraft()) })
+        } else {
+            blankInputs = [:]
+        }
+        var draft = RequestDraft(inputs: blankInputs)
+        if submission.isNoComment {
+            draft.noCommentSelected = true
+            return draft
+        }
+
+        for input in submission.typedInputs {
+            switch input {
+            case let .responseValue(inputID, action):
+                guard var field = draft.inputs[inputID] else { return nil }
+                field.selectedActionID = action
+                draft.inputs[inputID] = field
+            case let .responseText(inputID, action, text):
+                guard var field = draft.inputs[inputID] else { return nil }
+                field.selectedActionID = action
+                field.textByActionID[action] = text
+                draft.inputs[inputID] = field
+            case let .text(inputID, text):
+                guard var field = draft.inputs[inputID] else { return nil }
+                field.text = text
+                draft.inputs[inputID] = field
+            case let .point(inputID, point):
+                guard var field = draft.inputs[inputID] else { return nil }
+                field.point = point
+                field.horizontalText = ExactText(String(point.x))
+                field.verticalText = ExactText(String(point.y))
+                draft.inputs[inputID] = field
+            case let .compatibilityValue(action):
+                draft.compatibility.selectedActionID = action
+            case let .compatibilityText(action, text):
+                draft.compatibility.selectedActionID = action
+                draft.compatibility.textByActionID[action] = text
+            }
+        }
+        guard let rebuilt = try? typedInputs(for: request, draft: draft),
+              rebuilt == submission.typedInputs else { return nil }
+        return draft
+    }
+
+    private func failureDetail(for submission: Submission) -> LocalizedStringResource {
+        let events = (diagnostics?.events ?? []).filter { $0.operationID == submission.operationID }
+        if submission.isNoComment,
+           let responseClass = events.last(where: {
+               $0.phase == .noReplyResponseDecode && $0.transition == .completed
+           })?.noReplyResponseClass {
+            switch responseClass {
+            case .unsupportedRefusal:
+                return "The app classified the server reply as an unsupported refusal."
+            case .serverError:
+                if let code = meaningfulFailureCode(in: events) { return Self.failureDescription(for: code) }
+                return "The app classified the reply as a server error."
+            case .unknownFrame:
+                return "The reply did not match a response the app recognizes."
+            case .unparseableFrame:
+                return "A reply arrived, but the app could not read it."
+            case .noResponse:
+                return "No reply was recorded."
+            default:
+                break
+            }
+        }
+        if let code = meaningfulFailureCode(in: events) {
+            return Self.failureDescription(for: code)
+        }
+        return "No additional safe failure detail was retained."
+    }
+
+    private func meaningfulFailureCode(in events: [NativeClientDiagnosticEvent]) -> String? {
+        events.reversed().compactMap(\.causeCode).first {
+            !["answer_not_delivered", "no_comment_unsupported", "unknown_error"].contains($0)
+        }
+    }
+
+    private static func failureDescription(for code: String) -> LocalizedStringResource {
+        switch code {
+        case "server_invalid_request": "The server reported that the request was invalid."
+        case "server_revision_mismatch": "The server reported that the message revision did not match."
+        case "server_unauthorized": "The server did not authorize the request."
+        case "server_forbidden": "The server did not allow the request."
+        case "server_not_found": "The server could not find the requested item."
+        case "server_request_closed": "The server reported that the request was closed."
+        case "server_conflict": "The server reported a conflict."
+        case "server_expired": "The server reported that the request had expired."
+        case "server_too_large": "The server reported that the response was too large."
+        case "server_upload_discarded": "The server reported that an uploaded file was discarded."
+        case "unknown_server_reason": "The server returned a reason the app does not recognize."
+        case "unexpected_relay_frame", "unknown_no_comment_response_frame":
+            "The reply did not match a response the app recognizes."
+        case "relay_server_rejected": "The server rejected the response."
+        default: "The app recorded error code \(code)."
+        }
+    }
+
+    private static func isDefinitiveFailure(_ disposition: IntentDisposition) -> Bool {
+        switch disposition {
+        case .failed, .unsupported: true
+        default: false
+        }
+    }
+
+    private static func matches(receipt: IntentReceipt, warning: FailedResponseWarning) -> Bool {
+        receipt.inputs == warning.submittedInputs &&
+            (receipt.answerKind ?? .answer) == warning.answerKind
+    }
+
+    private static func matches(receipt: IntentReceipt, submission: Submission) -> Bool {
+        receipt.inputs == submission.typedInputs &&
+            (receipt.answerKind ?? .answer) == (submission.answerKind ?? .answer)
+    }
+
+    private static func matches(_ candidate: Submission, response: Submission) -> Bool {
+        candidate.typedInputs == response.typedInputs &&
+            (candidate.answerKind ?? .answer) == (response.answerKind ?? .answer)
     }
 
     private func noReplyRoutingStates(for requests: [PresentedRequest]) -> [RequestKey: NoReplyRoutingState] {

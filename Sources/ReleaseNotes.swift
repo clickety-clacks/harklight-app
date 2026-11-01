@@ -62,6 +62,15 @@ enum HarklightReleaseNotes {
             visibleFromBuildIdentifier: 79,
             highlights: [
                 .init(
+                    id: "failed-response-retry",
+                    symbol: "exclamationmark.triangle",
+                    title: LocalizedStringResource(
+                        "See why a response was not accepted",
+                        comment: "Release-note title for safe failure details and retrying a response."),
+                    detail: LocalizedStringResource(
+                        "Known delivery failures show any safe recorded detail and let you retry the same response.",
+                        comment: "Release-note detail for inspecting and retrying a known delivery failure.")),
+                .init(
                     id: "inbox-message-context",
                     symbol: "tray.full",
                     title: LocalizedStringResource(
@@ -105,7 +114,7 @@ enum HarklightReleaseNotes {
                         comment: "Release-note title for additional support details about a no-reply answer."),
                     detail: LocalizedStringResource(
                         "Support diagnostics can show whether a response arrived and whether the message is in Inbox or Replied.",
-                        comment: "Release-note detail for safe no-reply response and routing diagnostics."))
+                        comment: "Release-note detail for safe no-reply response and routing diagnostics.")),
             ])
     ]
 
