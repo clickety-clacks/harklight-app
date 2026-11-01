@@ -72,6 +72,17 @@
                ReferencedContainer = "container:Harklight.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "HarklightNativeRelayTests"
+               BuildableName = "HarklightNativeRelayTests"
+               BlueprintName = "HarklightNativeRelayTests"
+               ReferencedContainer = "container:NativeRelay">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>
