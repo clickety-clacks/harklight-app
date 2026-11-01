@@ -103,7 +103,11 @@ final class NativeAppLaunch {
                 checkBlockedPush: checkBlockedPush)
          },
          fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil) {
+        #if DEBUG
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
+        #else
+        let fixture = false
+        #endif
         let enrollment = enrollmentStore ?? NativeEnrollmentStore()
         let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
         self.enrollment = enrollment

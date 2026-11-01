@@ -334,7 +334,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var isRefreshing = false
     var conversationStore: LivePresentationStore? = nil
     var fetchOlderInboxPage: (() async -> Bool)? = nil
-    var showsLocalExamples = true
+    var showsLocalExamples = false
     var notificationNavigation: NativeInboxNavigation? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
@@ -1402,7 +1402,6 @@ struct InboxTierReferenceScreen: View {
 }
 
 struct InboxSettings: View {
-    let samples: SampleLibrary
     var launch: NativeAppLaunch? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
@@ -1412,7 +1411,6 @@ struct InboxSettings: View {
                    launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
                     InboxDiagnosticsSettingsSection(launch: launch, closeSettings: { dismiss() })
                 }
-                LocalExamplesSettingsSection(samples: samples, close: { dismiss() })
                 ReleaseNotesSettingsSection(notes: HarklightReleaseNotes.settingsHistory(
                     currentBuildIdentifier: HarklightReleaseNotes.currentBuildIdentifier()))
             }
@@ -1460,22 +1458,6 @@ struct InboxDiagnosticsSettingsSection: View {
                 }
                 .disabled(launch.guidedJoin.busy || launch.guidedJoin.isApprovedConnectBusy)
                 .accessibilityIdentifier("foreground-connect-settings-retry")
-            }
-        }
-    }
-}
-
-@MainActor
-private struct LocalExamplesSettingsSection: View {
-    let samples: SampleLibrary
-    let close: () -> Void
-
-    var body: some View {
-        Section("Local examples") {
-            Text("Example messages, their answers, chat and attachments stay on this device and disappear when the app closes.")
-            Button("Add example messages") {
-                samples.populate()
-                close()
             }
         }
     }

@@ -311,6 +311,14 @@ struct LiveContentView: View {
     private var recoveryStatusFixture: String? { nil }
 #endif
 
+    private var showsSampleMessages: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains("--harklight-samples")
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
         let progress = launch?.foregroundConnectProgress
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
@@ -351,7 +359,7 @@ struct LiveContentView: View {
                         ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
                     }
                 },
-                settingsContent: { LiveInboxSettings(store: store, samples: samples, launch: launch,
+                settingsContent: { LiveInboxSettings(store: store, launch: launch,
                                                       archiveDeparture: archiveDeparture,
                                                       connectionStatus: connectionStatus) },
                 warnings: [launch?.notificationNavigationMessage, connectionWarning,
@@ -365,7 +373,7 @@ struct LiveContentView: View {
                 isRefreshing: store.isRefreshing,
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
-                showsLocalExamples: !store.isReadOnly,
+                showsLocalExamples: showsSampleMessages && !store.isReadOnly,
                 notificationNavigation: launch?.notificationNavigation)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
@@ -497,7 +505,6 @@ struct MessageHeading: View {
 @MainActor
 struct LiveInboxSettings: View {
     let store: LivePresentationStore
-    let samples: SampleLibrary
     let launch: NativeAppLaunch?
     let archiveDeparture: NativeAccountDeparture?
     let connectionStatus: String?
@@ -678,12 +685,6 @@ struct LiveInboxSettings: View {
                    launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
                     InboxDiagnosticsSettingsSection(launch: launch, isReadOnly: store.isReadOnly,
                                                     closeSettings: { dismiss() })
-                }
-                if !store.isReadOnly {
-                    Section("Local examples") {
-                    Text("Example messages, their answers, chat and attachments stay on this device and disappear when the app closes.")
-                    Button("Add example messages") { samples.populate(); dismiss() }
-                    }
                 }
                 ReleaseNotesSettingsSection(notes: HarklightReleaseNotes.settingsHistory(
                     currentBuildIdentifier: HarklightReleaseNotes.currentBuildIdentifier()))

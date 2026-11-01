@@ -15,6 +15,8 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(updateHeader.exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["More context in the Inbox"].exists,
                       app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
+                      app.debugDescription)
         XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build 91"].exists,
                        "The update must not claim an unverified archive build number.")
 
