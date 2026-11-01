@@ -47,6 +47,12 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case foregroundProfileValidation
     case foregroundContextValidation
     case foregroundCompletion
+    case noReplyOriginalOperation
+    case noReplyResponseReceive
+    case noReplyResponseDecode
+    case noReplyOperationApply
+    case noReplyLifecycleApply
+    case noReplyRouting
 }
 
 public enum NativeDiagnosticTransition: String, Codable, Sendable {
@@ -84,6 +90,35 @@ public enum NativeDiagnosticPostAckBoundary: String, Codable, Sendable {
     case foregroundConfirmed = "foreground_confirmed"
 }
 
+/// A bounded operation name for a failed post-ACK drain. These values identify
+/// code paths only; they never contain relay data or user content.
+public enum NativeDiagnosticPostAckStep: String, Codable, Sendable {
+    case readAcceptedOperationsBeforeDrain = "read_accepted_operations_before_drain"
+    case readOutboxBeforeDrain = "read_outbox_before_drain"
+    case drainPendingOperations = "drain_pending_operations"
+    case readOutboxAfterDrain = "read_outbox_after_drain"
+    case readAcceptedOperationsAfterDrain = "read_accepted_operations_after_drain"
+    case waitForAcceptedOperationAcknowledgement = "wait_for_accepted_operation_acknowledgement"
+    case replayInboxAfterDrain = "replay_inbox_after_drain"
+    case readInboxCursorAfterAcknowledgement = "read_inbox_cursor_after_acknowledgement"
+    case readConversationState = "read_conversation_state"
+    case replayConversationsAndAcknowledge = "replay_conversations_and_acknowledge"
+    case readFinalRelayCursor = "read_final_relay_cursor"
+    case validateRelayState = "validate_relay_state"
+}
+
+/// Safe detail retained when a post-ACK operation fails. The error is reduced
+/// to a named client code or bounded numeric code before it crosses layers.
+public struct NativePostAckFailureDetails: Equatable, Sendable {
+    public let step: NativeDiagnosticPostAckStep
+    public let errorCode: String
+
+    public init(step: NativeDiagnosticPostAckStep, errorCode: String?) {
+        self.step = step
+        self.errorCode = NativeDiagnosticCauseCode.safeCode(errorCode) ?? "unknown_error"
+    }
+}
+
 public enum NativeDiagnosticReceiptState: String, Codable, Sendable {
     case pendingUnconfirmed
     case acceptedAwaitingReplay
@@ -91,6 +126,39 @@ public enum NativeDiagnosticReceiptState: String, Codable, Sendable {
     case terminal
     case repairRequired
     case unknown
+}
+
+/// A fixed class for a no-reply protocol response. Raw frames and server text
+/// are never retained; unknown or unparseable frames remain explicit states.
+public enum NativeDiagnosticNoReplyResponseClass: String, Codable, Sendable {
+    case frameReceived = "frame_received"
+    case acknowledgement
+    case serverError = "server_error"
+    case unsupportedRefusal = "unsupported_refusal"
+    case unknownFrame = "unknown_frame"
+    case unparseableFrame = "unparseable_frame"
+    case noResponse = "no_response"
+    case committedReceipt = "committed_receipt"
+    case operationConflictReceipt = "operation_conflict_receipt"
+    case notCommittedReceipt = "not_committed_receipt"
+    case refusedReceipt = "refused_receipt"
+    case missingReceipt = "missing_receipt"
+    case terminalNoComment = "terminal_no_comment"
+    case terminalAnswered = "terminal_answered"
+    case terminalOther = "terminal_other"
+}
+
+/// Identifies where an operation ID came from. A direct no-reply send has a
+/// local ID only; a later paging reconciliation carries that ID as wire op_id.
+public enum NativeDiagnosticOperationIDSource: String, Codable, Sendable {
+    case localSubmission = "local_submission"
+    case pagingWireOperationID = "paging_wire_op_id"
+    case localRequestCorrelation = "local_request_correlation"
+}
+
+public enum NativeDiagnosticNoReplyRoute: String, Codable, Sendable {
+    case inbox
+    case replied
 }
 
 /// A payload-free event emitted at native-client operation boundaries. Request
@@ -106,6 +174,13 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public let terminalReason: NativeDiagnosticTerminalReason?
     public let postAckBoundary: NativeDiagnosticPostAckBoundary?
     public let postAckDrainTransition: NativeDiagnosticTransition?
+    public let postAckFailureStep: NativeDiagnosticPostAckStep?
+    public let postAckFailureErrorCode: String?
+    public let noReplyResponseClass: NativeDiagnosticNoReplyResponseClass?
+    public let operationIDSource: NativeDiagnosticOperationIDSource?
+    public let terminalSequence: UInt64?
+    public let lifecycleSequence: UInt64?
+    public let noReplyRoute: NativeDiagnosticNoReplyRoute?
     public let attemptID: UUID?
     public let transportAttemptID: UUID?
     public let operationID: UUID?
@@ -115,7 +190,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
 
     private enum CodingKeys: String, CodingKey {
         case id, occurredAtMilliseconds, area, phase, transition, causeCode, terminalReason
-        case postAckBoundary, postAckDrainTransition
+        case postAckBoundary, postAckDrainTransition, postAckFailureStep, postAckFailureErrorCode
+        case noReplyResponseClass, operationIDSource, terminalSequence, lifecycleSequence, noReplyRoute
         case attemptID, transportAttemptID, operationID, requestTag, requestRevision, receiptState
     }
 
@@ -126,6 +202,13 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
                 terminalReason: NativeDiagnosticTerminalReason? = nil,
                 postAckBoundary: NativeDiagnosticPostAckBoundary? = nil,
                 postAckDrainTransition: NativeDiagnosticTransition? = nil,
+                postAckFailureStep: NativeDiagnosticPostAckStep? = nil,
+                postAckFailureErrorCode: String? = nil,
+                noReplyResponseClass: NativeDiagnosticNoReplyResponseClass? = nil,
+                operationIDSource: NativeDiagnosticOperationIDSource? = nil,
+                terminalSequence: UInt64? = nil,
+                lifecycleSequence: UInt64? = nil,
+                noReplyRoute: NativeDiagnosticNoReplyRoute? = nil,
                 attemptID: UUID? = nil,
                 transportAttemptID: UUID? = nil,
                 operationID: UUID? = nil,
@@ -143,6 +226,13 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         self.terminalReason = terminalReason
         self.postAckBoundary = postAckBoundary
         self.postAckDrainTransition = postAckDrainTransition
+        self.postAckFailureStep = postAckFailureStep
+        self.postAckFailureErrorCode = NativeDiagnosticCauseCode.safeCode(postAckFailureErrorCode)
+        self.noReplyResponseClass = noReplyResponseClass
+        self.operationIDSource = operationIDSource
+        self.terminalSequence = terminalSequence
+        self.lifecycleSequence = lifecycleSequence
+        self.noReplyRoute = noReplyRoute
         self.attemptID = attemptID
         self.transportAttemptID = transportAttemptID
         self.operationID = operationID
@@ -162,6 +252,14 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         terminalReason = try values.decodeIfPresent(NativeDiagnosticTerminalReason.self, forKey: .terminalReason)
         postAckBoundary = try values.decodeIfPresent(NativeDiagnosticPostAckBoundary.self, forKey: .postAckBoundary)
         postAckDrainTransition = try values.decodeIfPresent(NativeDiagnosticTransition.self, forKey: .postAckDrainTransition)
+        postAckFailureStep = try values.decodeIfPresent(NativeDiagnosticPostAckStep.self, forKey: .postAckFailureStep)
+        postAckFailureErrorCode = NativeDiagnosticCauseCode.safeCode(
+            try values.decodeIfPresent(String.self, forKey: .postAckFailureErrorCode))
+        noReplyResponseClass = try values.decodeIfPresent(NativeDiagnosticNoReplyResponseClass.self, forKey: .noReplyResponseClass)
+        operationIDSource = try values.decodeIfPresent(NativeDiagnosticOperationIDSource.self, forKey: .operationIDSource)
+        terminalSequence = try values.decodeIfPresent(UInt64.self, forKey: .terminalSequence)
+        lifecycleSequence = try values.decodeIfPresent(UInt64.self, forKey: .lifecycleSequence)
+        noReplyRoute = try values.decodeIfPresent(NativeDiagnosticNoReplyRoute.self, forKey: .noReplyRoute)
         attemptID = try values.decodeIfPresent(UUID.self, forKey: .attemptID)
         transportAttemptID = try values.decodeIfPresent(UUID.self, forKey: .transportAttemptID)
         operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
@@ -187,6 +285,10 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     private static func safeCauseCode(_ value: String?) -> String? {
         NativeDiagnosticCauseCode.safeCode(value)
     }
+
+    public static func nowMilliseconds() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1_000)
+    }
 }
 
 /// A nonblocking callback keeps transport and domain code independent of the
@@ -202,6 +304,7 @@ public enum NativeDiagnosticCauseCode {
         "native_sync_error", "relay_redirect_refused", "notification_permission_not_granted", "application_support_unavailable",
         "unsupported_journal_version", "invalid_acceptance_sequence", "unexpected_relay_frame",
         "saved_operation_frame_mismatch", "relay_server_rejected", "conversations_unavailable", "relay_acknowledgement_behind",
+        "relay_inbox_paging_unavailable", "relay_inbox_paging_busy",
         "unknown_update_kind",
         "invalid_chat_read_positions",
         "invalid_relay_endpoint", "invalid_trust_anchor", "wrong_device_identity",
@@ -218,6 +321,8 @@ public enum NativeDiagnosticCauseCode {
         "store_event_conflict", "store_origin_content_missing", "store_replay_already_active",
         "store_replay_not_active", "store_replay_incomplete", "store_fixture_operation",
         "store_acceptance_order_missing", "store_acceptance_order_duplicate", "store_invalid_projection",
+        "store_inbox_checkpoint_pending", "store_inbox_checkpoint_incomplete",
+        "store_inbox_page_conflict", "store_inbox_state_unrefreshed",
         "store_persistence_failure", "enrollment_invalid_settings", "enrollment_invalid_identity",
         "enrollment_identity_storage", "enrollment_invalid_response", "enrollment_server_rejected",
         "enrollment_approval_pending", "enrollment_approval_expired", "enrollment_no_pending_request",
@@ -246,7 +351,7 @@ public enum NativeDiagnosticCauseCode {
         guard let value else { return nil }
         if knownCodes.contains(value) { return value }
         for prefix in ["url_session_error_code_", "cocoa_error_code_", "posix_error_code_",
-                       "security_status_code_", "file_http_status_"] where value.hasPrefix(prefix) {
+                       "security_status_code_", "file_http_status_", "unclassified_error_code_"] where value.hasPrefix(prefix) {
             let suffix = value.dropFirst(prefix.count)
             let digits = suffix.first == "-" ? suffix.dropFirst() : suffix[...]
             if suffix.count <= 20, !digits.isEmpty,
@@ -359,6 +464,16 @@ public enum NativeDiagnosticCauseCode {
         case "NSOSStatusErrorDomain": return "security_status_code_\(value.code)"
         default: return "unknown_error"
         }
+    }
+
+    /// Preserves an otherwise unclassified NSError's numeric code without
+    /// exporting its arbitrary domain or localized description.
+    public static func forPostAckError(_ error: Error) -> String {
+        let code = forError(error)
+        guard code == "unknown_error" else { return code }
+        let underlying = error as NSError
+        guard underlying.code != 0 else { return code }
+        return "unclassified_error_code_\(underlying.code)"
     }
 
     /// Only known protocol tokens are copied into a diagnostic. Arbitrary
