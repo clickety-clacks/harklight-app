@@ -807,6 +807,12 @@ public actor NativeRelayCore {
                              operationIDSource: .localSubmission,
                              operationID: submission.operationID, request: submission.requestKey,
                              revision: submission.requestRevision, receipt: .unknown)
+                } else {
+                    diagnose(.answer, .noReplyOperationApply, .unresolved,
+                             noReplyResponseClass: .missingReceipt,
+                             operationIDSource: .localSubmission,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
                 }
             }
         }
