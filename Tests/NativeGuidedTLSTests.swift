@@ -139,6 +139,22 @@ private struct ServerNoCommentCapture: Decodable, Sendable {
         case exchanges
     }
 
+    fileprivate static func operationsMatchIgnoringLocalID(_ lhs: JSONValue,
+                                                           _ rhs: JSONValue) -> Bool {
+        guard let lhsMembers = lhs.objectMembers, lhs.hasUniqueObjectKeys,
+              let rhsMembers = rhs.objectMembers, rhs.hasUniqueObjectKeys,
+              lhsMembers.contains(where: { $0.key.rawValue == "op_id" }),
+              rhsMembers.contains(where: { $0.key.rawValue == "op_id" }) else { return false }
+        let lhsFields = Dictionary(uniqueKeysWithValues: lhsMembers
+            .filter { $0.key.rawValue != "op_id" }
+            .map { ($0.key.rawValue, $0.value) })
+        let rhsFields = Dictionary(uniqueKeysWithValues: rhsMembers
+            .filter { $0.key.rawValue != "op_id" }
+            .map { ($0.key.rawValue, $0.value) })
+        guard Set(lhsFields.keys) == Set(rhsFields.keys) else { return false }
+        return lhsFields.allSatisfy { rhsFields[$0.key] == $0.value }
+    }
+
     static func loadForFocusedTest() throws -> ServerNoCommentCapture {
         guard let path = ProcessInfo.processInfo.environment["HARKLIGHT_NO_COMMENT_CAPTURE_JSON"],
               !path.isEmpty else {
@@ -166,7 +182,7 @@ private struct ServerNoCommentCapture: Decodable, Sendable {
         XCTAssertNotNil(UUID(uuidString: localOperationID))
         XCTAssertEqual(exchanges.map(\.stage), [
             "seed", "revision", "initial", "checkpoint", "attach", "ack",
-            "conversation", "conversation_ack", "direct", "recovered", "reconciliation"
+            "conversation_open", "conversation_ack", "direct", "recovery", "reconcile"
         ])
 
         let initial = try exchange("initial")
@@ -180,7 +196,7 @@ private struct ServerNoCommentCapture: Decodable, Sendable {
         XCTAssertEqual(initialAcceptance.uniqueValue(named: "message_id")?.stringValue?.rawValue, messageID)
         XCTAssertEqual(initialAcceptance.uniqueValue(named: "request_revision")?.integerValue, 1)
 
-        let conversation = try exchange("conversation")
+        let conversation = try exchange("conversation_open")
         let conversationRequest = try JSONValue.parse(Data(conversation.request.utf8))
         XCTAssertEqual(conversationRequest.uniqueValue(named: "type")?.stringValue,
                        ExactText("conversation_open"))
@@ -231,8 +247,8 @@ private struct ServerNoCommentCapture: Decodable, Sendable {
         XCTAssertGreaterThan(try XCTUnwrap(directValues.firstIndex(of: matchingLifecycle)),
                              try XCTUnwrap(directValues.firstIndex(of: accepted)))
 
-        let reconcile = try exchange("reconciliation")
-        let recovered = try exchange("recovered")
+        let reconcile = try exchange("reconcile")
+        let recovered = try exchange("recovery")
         let recoveredReply = try JSONValue.parse(Data(try XCTUnwrap(recovered.frames.first).utf8))
         let reconcileRequest = try JSONValue.parse(Data(reconcile.request.utf8))
         XCTAssertEqual(reconcileRequest.uniqueValue(named: "snapshot_id"),
@@ -244,7 +260,7 @@ private struct ServerNoCommentCapture: Decodable, Sendable {
         XCTAssertEqual(Set(operationMembers.map { $0.key.rawValue }),
                        Set(["type", "request_id", "request_revision", "op_id"]))
         let directRequest = try JSONValue.parse(Data(direct.request.utf8))
-        XCTAssertEqual(.object(operationMembers.filter { $0.key.rawValue != "op_id" }), directRequest)
+        XCTAssertTrue(Self.operationsMatchIgnoringLocalID(operations[0], directRequest))
         let reconciliationResponse = try JSONValue.parse(Data(try XCTUnwrap(reconcile.frames.first).utf8))
         let results = try XCTUnwrap(reconciliationResponse.uniqueValue(named: "results")?.arrayValues)
         XCTAssertEqual(results.count, 1)
@@ -267,7 +283,7 @@ private final class ServerNoCommentCaptureRouter: @unchecked Sendable {
         switch type {
         case "inbox_start":
             lock.lock()
-            let stage = inboxStartCount == 0 ? "initial" : "recovered"
+            let stage = inboxStartCount == 0 ? "initial" : "recovery"
             inboxStartCount += 1
             lock.unlock()
             return correlatedFrames(stage, request: request, key: "ref")
@@ -278,7 +294,7 @@ private final class ServerNoCommentCaptureRouter: @unchecked Sendable {
         case "ack":
             return correlatedFrames("ack", request: request, key: "ref")
         case "conversation_open":
-            return correlatedFrames("conversation", request: request, key: "ref")
+            return correlatedFrames("conversation_open", request: request, key: "ref")
         case "conversation_ack":
             return correlatedFrames("conversation_ack", request: request, key: "ref")
         case "answer_no_comment":
@@ -314,14 +330,14 @@ private final class ServerNoCommentCaptureRouter: @unchecked Sendable {
     }
 
     private func reconciliationReply(for request: JSONValue) -> [String] {
-        guard let exchange = try? capture.exchange("reconciliation"),
+        guard let exchange = try? capture.exchange("reconcile"),
               let capturedRequest = try? JSONValue.parse(Data(exchange.request.utf8)),
               let capturedOperations = capturedRequest.uniqueValue(named: "operations")?.arrayValues,
               let operations = request.uniqueValue(named: "operations")?.arrayValues,
               operations.count == capturedOperations.count,
               operations.count == 1 else { return [] }
         for (capturedOperation, operation) in zip(capturedOperations, operations) {
-            guard Self.withoutOperationID(capturedOperation) == Self.withoutOperationID(operation) else {
+            guard ServerNoCommentCapture.operationsMatchIgnoringLocalID(capturedOperation, operation) else {
                 return []
             }
         }
@@ -347,12 +363,6 @@ private final class ServerNoCommentCaptureRouter: @unchecked Sendable {
                   "results": .array(resultIDs)
               ], in: response) else { return [] }
         return [rebound.jsonString + "\n"]
-    }
-
-    private static func withoutOperationID(_ value: JSONValue) -> JSONValue? {
-        guard value.hasUniqueObjectKeys, let members = value.objectMembers,
-              members.contains(where: { $0.key.rawValue == "op_id" }) else { return nil }
-        return .object(members.filter { $0.key.rawValue != "op_id" })
     }
 
     private static func replacing(_ fields: [String: JSONValue], in value: JSONValue) -> JSONValue? {
@@ -1448,7 +1458,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         defer { Task { await firstSession.close() } }
 
         let initialStartupID = UUID().uuidString.lowercased()
-        let initialRef = "wi42-initial-" + UUID().uuidString.lowercased()
+        let initialRef = "capture-initial-" + UUID().uuidString.lowercased()
         let initialCursor = try store.snapshot(context: context).cursor
         _ = try store.beginInboxCandidate(startupID: initialStartupID, since: initialCursor,
                                           batches: [], context: context)
@@ -1492,7 +1502,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         XCTAssertEqual(appliedRevisionCount, 1)
         let conversationCursor = try XCTUnwrap(conversationHighWater)
-        let capturedConversation = try capture.exchange("conversation")
+        let capturedConversation = try capture.exchange("conversation_open")
         let capturedHighWaterFrame = try XCTUnwrap(capturedConversation.frames.last)
         XCTAssertEqual(conversationCursor, try conversationWire.decodeResynced(Data(capturedHighWaterFrame.utf8)))
         try await firstSession.acknowledgeConversation(conversationWire.acknowledge(conversationCursor))
@@ -1555,14 +1565,14 @@ final class NativeGuidedTLSTests: XCTestCase {
             context: context)
         let recoverySession = try makeSession()
         defer { Task { await recoverySession.close() } }
-        let recoveryRef = "wi42-recovery-" + UUID().uuidString.lowercased()
+        let recoveryRef = "capture-recovery-" + UUID().uuidString.lowercased()
         let recoveryReply = try await recoverySession.inboxRequest(
             pagingWire.inboxStart(startupID: recoveryStartupID, since: recoveryCursor,
                                   ref: recoveryRef), ref: recoveryRef)
         let recoveryPage = try pagingWire.decodeStart(recoveryReply, ref: recoveryRef)
         XCTAssertGreaterThanOrEqual(recoveryPage.highWater, recoveryCursor)
         let capturedReconciliationRequest = try JSONValue.parse(
-            Data(try capture.exchange("reconciliation").request.utf8))
+            Data(try capture.exchange("reconcile").request.utf8))
         XCTAssertEqual(recoveryPage.snapshotID,
                        capturedReconciliationRequest.uniqueValue(named: "snapshot_id")?.stringValue?.rawValue)
         let recoveredItem = try XCTUnwrap(recoveryPage.items.first { $0.key == requestKey })
@@ -1571,7 +1581,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             items: recoveryPage.items, nextCursor: recoveryPage.nextCursor,
             receiptCursor: recoveryPage.receiptCursor, context: context)
 
-        let reconciliationRef = "wi42-reconcile-" + UUID().uuidString.lowercased()
+        let reconciliationRef = "capture-reconcile-" + UUID().uuidString.lowercased()
         let reconciliationOperation = try pagingWire.reconciliationOperation(for: inventory[0])
         XCTAssertEqual(reconciliationOperation.uniqueValue(named: "op_id")?.stringValue?.rawValue,
                        submission.operationID.uuidString.lowercased())
