@@ -22,6 +22,8 @@ final class ConversationRelayTests: XCTestCase {
         let authenticatedIdentity: ProfileIdentity
         var ordinary: [Data] = []
         var conversation: [Data] = []
+        var consumedConversationFrames: [Data] = []
+        var inboxStartItemsJSON: String?
         var ordinaryACKs: [Data] = []
         var conversationACKs: [Data] = []
         var conversationReadPositionRequests: [Data] = []
@@ -55,6 +57,15 @@ final class ConversationRelayTests: XCTestCase {
         func acknowledge(_ request: Data) async throws {
             try onOrdinaryACK?()
             ordinaryACKs.append(request)
+        }
+        func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+            let value = try JSONValue.parse(request)
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start",
+               let items = inboxStartItemsJSON {
+                let response = #"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"held-fact-snapshot","high_water":1,"items":\#(items),"next_cursor":null,"receipt_cursor":null}"#
+                return Data(response.utf8)
+            }
+            return try await emptyInboxReply(request, ref: ref)
         }
         func nextPostCheckpointInboxEvent() async throws -> Data {
             try await withCheckedThrowingContinuation { continuation in
@@ -94,7 +105,10 @@ final class ConversationRelayTests: XCTestCase {
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             onConversationOpen?()
             if let conversationOpenError { throw conversationOpenError }
-            for frame in conversation { try await consume(frame) }
+            for frame in conversation {
+                consumedConversationFrames.append(frame)
+                try await consume(frame)
+            }
         }
         func acknowledgeConversation(_ request: Data) async throws {
             try onConversationACK?()
@@ -163,6 +177,156 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertFalse(stillUnavailable)
         XCTAssertEqual(supported.conversationACKs.count, 1)
         await replacement.deactivate()
+    }
+
+    func testRejectedConversationCursorWriteFailureDoesNotAdvanceOrAcknowledge() async throws {
+        let (context, persistence, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        try store.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("handle"), payload: .object([
+                JSONMember("title", .string(ExactText("Question")))
+            ]))), context: context)
+
+        session.conversation = [
+            data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"private-event-marker"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"valid-event","message":{"title":"Later wording"}}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
+        ]
+        session.onConversationOpen = { persistence.failNextCommit() }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("A rejected sequence must remain fatal when its cursor commit fails.")
+        } catch let error as AttentionStoreError {
+            guard case .persistence = error else { return XCTFail("Unexpected store error: \(error)") }
+        }
+
+        let snapshot = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 1,
+            "A failed cursor commit must leave the prior durable cursor unchanged.")
+        XCTAssertEqual(session.consumedConversationFrames.count, 2,
+            "Replay stops at the failed rejected-sequence cursor commit.")
+        XCTAssertTrue(session.conversationACKs.isEmpty,
+            "A rejected sequence is not acknowledged unless its cursor is durable.")
+        await core.deactivate()
+    }
+
+    func testOtherConversationValidationGuardRemainsFatalAndUnacknowledged() async throws {
+        let (context, _, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        try store.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("handle"), payload: .object([
+                JSONMember("title", .string(ExactText("Question")))
+            ]))), context: context)
+
+        session.conversation = [
+            data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"","request_revision":2,"kind":"revision","author":"origin","event_id":"invalid-revision","message":{"title":"Later wording"}}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
+        ]
+        let diagnostics = DiagnosticCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: diagnostics.append)
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("Only redacted_revision_binding may advance the cursor after a structured rejection.")
+        } catch let error as ConversationError {
+            XCTAssertEqual(error, .invalidBinding)
+        }
+
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+        XCTAssertTrue(session.conversationACKs.isEmpty)
+        let rejection = try XCTUnwrap(diagnostics.events.first {
+            $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .failed
+        }?.conversationValidationRejection)
+        XCTAssertEqual(rejection.guardID, .revisionSessionHandlePresent)
+        await core.deactivate()
+    }
+
+    func testStaleContextBeforeConversationReplayRemainsFatal() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("discussion", sequence: 1, fields: #""author":"person","event_id":"turn","text":"Question""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        session.onConversationOpen = { store.invalidate() }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("A stale store context must not be converted into a skipped event.")
+        } catch let error as AttentionStoreError {
+            XCTAssertEqual(error, .staleProfile)
+        }
+
+        XCTAssertTrue(session.conversationACKs.isEmpty)
+        await core.deactivate()
+    }
+
+    func testSnapshotValidationFailureRemainsFatalAfterDurableEvents() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("discussion", sequence: 1, fields: #""author":"person","event_id":"turn","text":"Question""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1},{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("A rejected snapshot must not be treated as an accounted event.")
+        } catch let error as ConversationError {
+            XCTAssertEqual(error, .invalidBinding)
+        }
+
+        let snapshot = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 1,
+            "The already committed event remains the last durable cursor.")
+        XCTAssertTrue(session.conversationACKs.isEmpty,
+            "A rejected resync snapshot cannot cross the barrier ACK.")
+        await core.deactivate()
+    }
+
+    func testInboxPageOpeningThreadPreservesHeldFactValidationErrorAndDetails() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("local-person"), deviceID: ExactText("reader"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        try store.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .delivered(turn: ExactText("missing-turn"))), context: context)
+
+        let session = Session(identity)
+        session.inboxStartItemsJSON = #"[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1}}]"#
+        let diagnostics = DiagnosticCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: { diagnostics.append($0) })
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("An inbox delivery must preserve the held-fact invalidBinding rejection.")
+        } catch let error as ConversationError {
+            XCTAssertEqual(error, .invalidBinding)
+        }
+
+        let event = try XCTUnwrap(diagnostics.events.first { $0.phase == .inboxPage })
+        XCTAssertEqual(event.transition, .failed)
+        XCTAssertEqual(event.causeCode, "conversation_invalid_binding")
+        XCTAssertEqual(event.conversationValidationRejection?.guardID, .referencedTurnExists)
+        XCTAssertEqual(event.conversationValidationRejection?.eventKind, .receipt)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 0)
+        let conversationSnapshot = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(conversationSnapshot.cursor, 1)
+        XCTAssertNil(conversationSnapshot.threads[key])
+        XCTAssertTrue(session.ordinaryACKs.isEmpty)
+        await core.deactivate()
     }
 
     func testReadPositionUpdateClearsOnlyItsRequestBeforeConversationACK() async throws {
@@ -329,10 +493,11 @@ final class ConversationRelayTests: XCTestCase {
             author: .origin, sessionHandle: handle, text: ExactText("Reply"), kind: .reply)
         var thread = ConversationThread(request: request, sessionHandle: handle,
             revision: 1, payload: .null)
-        try thread.merge(oldTurn)
+        let oldTurnEvent = ConversationEvent(sequence: 1, binding: binding, fact: .turn(oldTurn))
+        try thread.merge(oldTurn, event: oldTurnEvent)
         var state = ConversationState()
         state.cursor = 1
-        state.events[1] = ConversationEvent(sequence: 1, binding: binding, fact: .turn(oldTurn))
+        state.events[1] = oldTurnEvent
         state.threads[request] = thread
 
         state.orderTurnsFromProjectionEvents()
@@ -825,16 +990,37 @@ final class ConversationRelayTests: XCTestCase {
         session.finishPostCheckpointInboxEvents()
     }
     func testConversationGapAndWrongHighWaterCannotBeAcknowledged() async throws {
-        for gap in [true, false] {
+        for failure in ["gap", "wrong-high-water", "wrong-high-water-after-rejection"] {
             let (context, _, store, session) = try setup()
-            session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-                event("discussion", sequence: gap ? 2 : 1, fields: #""author":"person","event_id":"2","text":"Explain""#),
-                data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
+            let events: [Data]
+            let barrierHighWater: Int
+            if failure == "wrong-high-water-after-rejection" {
+                events = [
+                    data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"private-event-marker"}"#),
+                    data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"valid-event","message":{"title":"Later wording"}}"#)
+                ]
+                barrierHighWater = 1
+            } else {
+                events = [event("discussion", sequence: failure == "gap" ? 2 : 1,
+                    fields: #""author":"person","event_id":"2","text":"Explain""#)]
+                barrierHighWater = 2
+            }
+            session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#)] + events +
+                [data(#"{"v":1,"type":"conversation_resynced","conversation_seq":\#(barrierHighWater)}"#)]
             let core = try NativeRelayCore(store: store, context: context, session: session)
             do { _ = try await core.resyncAndDrainOutbox(); XCTFail("Noncontiguous replay must fail") }
             catch { XCTAssertEqual(error as? NativeRelayCoreError, .invalidReplay) }
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, gap ? 0 : 1)
+            let snapshot = try store.conversationSnapshot(context: context)
+            if failure == "gap" {
+                XCTAssertEqual(snapshot.cursor, 0)
+            } else if failure == "wrong-high-water-after-rejection" {
+                XCTAssertEqual(snapshot.cursor, 2,
+                    "The rejected sequence advances the cursor by one and the later valid event commits before the bad barrier.")
+            } else {
+                XCTAssertEqual(snapshot.cursor, 1)
+            }
             XCTAssertTrue(session.conversationACKs.isEmpty)
+            await core.deactivate()
         }
     }
     func testFailedConversationPersistenceLeavesItsCursorUnacknowledged() async throws {

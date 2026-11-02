@@ -1864,6 +1864,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                      nextCursor: String?,
                                      receiptCursor: String?,
                                      context suppliedContext: ProfileContext) throws {
+        var validationRejection: ConversationValidationRejection?
+        try saveInboxInitialPage(snapshotID: snapshotID, highWater: highWater, items: items,
+            nextCursor: nextCursor, receiptCursor: receiptCursor, context: suppliedContext,
+            validationRejection: &validationRejection)
+    }
+
+    public func saveInboxInitialPage(snapshotID: String,
+                                     highWater: UInt64,
+                                     items: [InboxSnapshotItem],
+                                     nextCursor: String?,
+                                     receiptCursor: String?,
+                                     context suppliedContext: ProfileContext,
+                                     validationRejection: inout ConversationValidationRejection?) throws {
+        validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -1897,7 +1911,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
             return
         }
         var next = state
-        for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        do {
+            for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        } catch let error as ConversationValidationRejectionError {
+            validationRejection = error.rejection
+            throw ConversationError.invalidBinding
+        }
         candidate.snapshotID = snapshotID
         candidate.highWater = highWater
         candidate.nextCursor = nextCursor
@@ -1946,6 +1965,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    items: [InboxSnapshotItem],
                                    nextCursor: String?,
                                    context suppliedContext: ProfileContext) throws {
+        var validationRejection: ConversationValidationRejection?
+        try saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater, cursor: cursor,
+            items: items, nextCursor: nextCursor, context: suppliedContext,
+            validationRejection: &validationRejection)
+    }
+
+    public func saveInboxOlderPage(snapshotID: String,
+                                   highWater: UInt64,
+                                   cursor: String,
+                                   items: [InboxSnapshotItem],
+                                   nextCursor: String?,
+                                   context suppliedContext: ProfileContext,
+                                   validationRejection: inout ConversationValidationRejection?) throws {
+        validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -1968,7 +2001,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
               keys.allSatisfy({ !checkpoint.loadedKeys.contains($0) }),
               nextCursor != cursor else { throw AttentionStoreError.inboxPageConflict }
         var next = state
-        for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        do {
+            for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+        } catch let error as ConversationValidationRejectionError {
+            validationRejection = error.rejection
+            throw ConversationError.invalidBinding
+        }
         let previousSourceOrder: [RequestKey]
         if let sourceOrder = checkpoint.sourceOrder {
             previousSourceOrder = sourceOrder
@@ -2359,10 +2397,42 @@ public final class AttentionDomainStore: @unchecked Sendable {
             pendingChatReadPositions: pending)
     }
 
+    /// Re-validates an already-accounted redacted revision without applying or
+    /// persisting it. Replay may ignore it only when the normal profile/request
+    /// checks pass and the exact redacted-revision guard still rejects it.
+    public func redactedRevisionRejectionForAccountedRedelivery(
+        _ event: ConversationEvent,
+        context suppliedContext: ProfileContext
+    ) throws -> ConversationValidationRejection? {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        try validate(event.binding.request, in: context.identity)
+        guard case let .redactedRevision(turn) = event.fact else { return nil }
+        try validateConversationFiles(turn.files)
+        let conversation = state.conversation ?? ConversationState()
+        return try conversation.redactedRevisionRejectionForAccountedRedelivery(event)
+    }
+
     /// The conversation cursor commits in the same account transaction as its fact.
     /// Neither it nor its ACK can advance ordinary delivery/lifecycle replay.
     @discardableResult
     public func applyConversation(_ event: ConversationEvent, context suppliedContext: ProfileContext) throws -> UInt64 {
+        var validationRejection: ConversationValidationRejection?
+        return try applyConversation(event, context: suppliedContext,
+            validationRejection: &validationRejection)
+    }
+
+    /// The optional output reports which unchanged validation guard rejected
+    /// an event; callers still receive the same ConversationError.
+    @discardableResult
+    public func applyConversation(_ event: ConversationEvent,
+                                  context suppliedContext: ProfileContext,
+                                  validationRejection: inout ConversationValidationRejection?) throws -> UInt64 {
+        validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -2378,7 +2448,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         var next = state
         var conversation = next.conversation ?? ConversationState()
-        try conversation.apply(event)
+        do {
+            try conversation.apply(event)
+        } catch let error as ConversationValidationRejectionError {
+            validationRejection = error.rejection
+            throw ConversationError.invalidBinding
+        }
         if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
         let key = event.binding.request
         if case let .attentionTier(_, origin, tier, sessionHandle) = event.fact {
@@ -2499,6 +2574,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func finishConversationReplay(at highWater: UInt64,
                                          chatReadPositions: [AccountConversationReadPosition]?,
                                          context suppliedContext: ProfileContext) throws {
+        var validationRejection: ConversationValidationRejection?
+        try finishConversationReplay(at: highWater, chatReadPositions: chatReadPositions,
+            context: suppliedContext, validationRejection: &validationRejection)
+    }
+
+    public func finishConversationReplay(at highWater: UInt64,
+                                         chatReadPositions: [AccountConversationReadPosition]?,
+                                         context suppliedContext: ProfileContext,
+                                         validationRejection: inout ConversationValidationRejection?) throws {
+        validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -2515,7 +2600,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
         }
         var conversation = state.conversation ?? ConversationState()
-        try conversation.mergeChatReadPositions(chatReadPositions)
+        do {
+            try conversation.mergeChatReadPositions(chatReadPositions)
+        } catch let error as ConversationValidationRejectionError {
+            validationRejection = error.rejection
+            throw ConversationError.invalidBinding
+        }
         guard conversation != (state.conversation ?? ConversationState()) else { return }
         var next = state
         next.conversation = conversation

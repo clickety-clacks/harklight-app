@@ -548,6 +548,64 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertFalse(resumed.hasUnreadAgentReply(request))
     }
 
+    func testInboxChatMarkerNeedsAChatTurnAndKeepsClosedUnreadRepliesVisible() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let handle = ExactText("session")
+        let payload = try JSONValue.parse(Data(#"{"title":"A message"}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: handle,
+                eventID: ExactText("delivery-revision"),
+                availability: .listening)), context: context)
+        let emptyKey = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("empty-chat"))
+        try domain.apply(RelayEvent(sequence: 2, body: .delivery(
+            StoredRequest(key: emptyKey, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1,
+                sessionHandle: ExactText("empty-session"))), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(model.conversation(for: key)?.turns.first?.kind, .revision)
+        XCTAssertNil(model.inboxRow(for: emptyKey)?.chatUnread,
+                     "An opened session without turns does not display a Chat marker.")
+        XCTAssertNil(model.inboxRow(for: key)?.chatUnread,
+                     "A session with only request history does not display a Chat marker.")
+        XCTAssertEqual(model.inboxRow(for: key)?.symbol, "envelope")
+
+        let person = ConversationTurn(id: ExactText("person-turn"), binding: binding,
+            author: .person, sessionHandle: handle, text: ExactText("Hello"), kind: .discussion)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .turn(person)), context: context)
+        try model.refreshFromDurableStore()
+        XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, false)
+
+        let agent = ConversationTurn(id: ExactText("agent-turn"), binding: binding,
+            author: .agent, sessionHandle: handle, text: ExactText("Hi"),
+            inReplyTo: person.id, kind: .reply)
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(agent)), context: context)
+        try model.refreshFromDurableStore()
+        XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, true)
+        model.markConversationRead(key)
+        XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, false)
+
+        let later = ConversationTurn(id: ExactText("later-agent-turn"), binding: binding,
+            author: .agent, sessionHandle: handle, text: ExactText("One more thing"),
+            inReplyTo: person.id, kind: .reply)
+        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .turn(later)), context: context)
+        try domain.apply(RelayEvent(sequence: 3, body: .terminal(key, .answered, nil)), context: context)
+        try model.refreshFromDurableStore()
+        XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, true,
+                       "A closed request must still show an unseen agent reply.")
+    }
+
 }
 
 private final class FailOnceAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {

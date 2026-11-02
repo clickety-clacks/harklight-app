@@ -26,7 +26,7 @@ final class ReleaseNotesTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set(90, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
-        defaults.set(["example-messages-removed"],
+        defaults.set(["chat-row-activity", "example-messages-removed"],
                      forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey)
 
         let firstLaunch = ReleaseNotesPresentation(
@@ -34,8 +34,8 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertEqual(firstLaunch.notesToShow.map(\.id), [draftNote.id, note.id])
         let history = HarklightReleaseNotes.settingsHistory(
             currentBuildIdentifier: "91", entries: [])
-        XCTAssertEqual(history.prefix(3).map(\.id),
-                       [draftNote.id, "example-messages-removed", note.id])
+        XCTAssertEqual(history.prefix(4).map(\.id),
+                       [draftNote.id, "chat-row-activity", "example-messages-removed", note.id])
 
         let nextLaunch = ReleaseNotesPresentation(
             currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
