@@ -4,6 +4,21 @@ import Foundation
 @testable import HarklightNativeRelay
 import XCTest
 
+private final class InboxFreshnessDiagnosticCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [NativeClientDiagnosticEvent] = []
+
+    func append(_ event: NativeClientDiagnosticEvent) {
+        lock.lock(); defer { lock.unlock() }
+        storage.append(event)
+    }
+
+    var events: [NativeClientDiagnosticEvent] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+}
+
 private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
                                                 AuthenticatedConversationSession,
                                                 @unchecked Sendable {
@@ -68,18 +83,37 @@ final class InboxFreshnessReplayTests: XCTestCase {
         ]
         session.conversationFrames = [
             data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            // Deliberately malformed for a redacted revision: the Server .22
+            // source emits author=origin for its revision entries. This frame
+            // reaches the client's exact redactedRevisionBinding guard.
             data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"redacted-revision"}"#),
             data(#"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"valid-revision","message":{"title":"Second wording"}}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
         ]
 
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let diagnostics = InboxFreshnessDiagnosticCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: { diagnostics.append($0) })
         do {
             _ = try await core.resyncAndDrainOutbox()
             XCTFail("The invalid redacted revision should stop the current replay.")
         } catch let error as ConversationError {
             XCTAssertEqual(error, .invalidBinding)
         }
+
+        let replayFailure = try XCTUnwrap(diagnostics.events.first {
+            $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .failed
+        })
+        XCTAssertEqual(replayFailure.causeCode, "conversation_invalid_binding")
+        let rejection = try XCTUnwrap(replayFailure.conversationValidationRejection)
+        XCTAssertEqual(rejection.guardID, .redactedRevisionBinding)
+        XCTAssertEqual(rejection.eventKind, .revision)
+        XCTAssertEqual(rejection.facts.sessionHandlePresent, true)
+        XCTAssertEqual(rejection.facts.sessionHandleMatchesThread, true)
+        XCTAssertEqual(rejection.facts.contentRedactedPresent, true)
+        XCTAssertEqual(rejection.facts.contentRedactedIsTrue, true)
+        XCTAssertEqual(rejection.facts.authorIsOrigin, false)
+        XCTAssertEqual(rejection.facts.revisionIsNext, true)
 
         XCTAssertEqual(session.conversationFrames.count, 4,
                        "A valid revision follows the rejected event in the synthetic stream.")
