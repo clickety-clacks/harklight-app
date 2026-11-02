@@ -77,6 +77,7 @@ final class NativeAppLaunch {
     @ObservationIgnored private var notificationSynchronized = false
     @ObservationIgnored private var notificationRefreshFinished = false
     @ObservationIgnored private var handledNotificationSerial: UInt64?
+    @ObservationIgnored private var resolvingNotificationSerial: UInt64?
     @ObservationIgnored private var pendingMessageDeepLink: NativeMessageDeepLink?
     @ObservationIgnored private var didFinishRestoring = false
     @ObservationIgnored private var foregroundActivationPushCheckPending = false
@@ -812,7 +813,9 @@ final class NativeAppLaunch {
             throw error
         }
         guard activationGeneration == generation else { return }
-        presentation.notificationProjectionDidChange = { [weak self] in self?.resolveNotificationNavigation() }
+        presentation.notificationProjectionDidChange = { [weak self] in
+            Task { await self?.resolveNotificationNavigation() }
+        }
         presentation.confirmedRelayRefresh = { [weak self, weak presentation] in
             guard let self, let presentation,
                   case let .live(current) = self.state, current === presentation,
@@ -927,7 +930,7 @@ final class NativeAppLaunch {
         presentation.applyRefreshResult(result)
         notificationRefreshFinished = true
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
-        resolveNotificationNavigation()
+        await resolveNotificationNavigation()
         await resolveMessageDeepLink(synchronized: notificationSynchronized)
     }
 
@@ -1007,7 +1010,9 @@ final class NativeAppLaunch {
                 _ = notificationRouter.resolve(records: [record], context: presentation.notificationContext,
                     requests: [], synchronized: false)
             }
-            presentation.notificationProjectionDidChange = { [weak self] in self?.resolveNotificationNavigation() }
+            presentation.notificationProjectionDidChange = { [weak self] in
+                Task { await self?.resolveNotificationNavigation() }
+            }
             await refreshLive()
         } else {
             notificationRouter.fallback()
@@ -1015,33 +1020,95 @@ final class NativeAppLaunch {
         }
     }
 
-    func resolveNotificationNavigation() {
+    func resolveNotificationNavigation() async {
         guard notificationRefreshFinished, let intent = notificationRouter.intent,
               handledNotificationSerial == intent.serial,
-              case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample else { return }
+              case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample,
+              resolvingNotificationSerial != intent.serial else { return }
+        resolvingNotificationSerial = intent.serial
+        defer {
+            if resolvingNotificationSerial == intent.serial {
+                resolvingNotificationSerial = nil
+            }
+        }
         let record: NativeEnrollmentRecord?
         do { record = try enrollment.load() }
         catch {
             notificationNavigationMessage = "Could not check this notification's account."
             return
         }
-        if let key = notificationRouter.resolve(records: record.map { [$0] } ?? [],
+        let records = record.map { [$0] } ?? []
+        if let key = notificationRouter.resolve(records: records,
             context: presentation.notificationContext, requests: presentation.presentation.requests,
             synchronized: notificationSynchronized) {
             presentation.selectRequest(key)
             notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key)
             notificationNavigationMessage = nil
             notificationRouter.consumed()
-        } else if notificationRouter.intent?.locator != nil {
-            presentation.selectRequest(nil)
-            notificationNavigationMessage = notificationSynchronized
-                ? "This notification's message has not loaded yet."
-                : "Could not verify notification. Checking again while open."
-        } else {
+            return
+        }
+        guard let locator = notificationRouter.intent?.locator else {
             presentation.selectRequest(nil)
             notificationNavigationMessage = nil
             notificationRouter.consumed()
+            return
         }
+
+        presentation.selectRequest(nil)
+        guard notificationSynchronized else {
+            notificationNavigationMessage = "Could not verify notification. Checking again while open."
+            return
+        }
+
+        var pageAvailability = presentation.inboxPageAvailability()
+        while pageAvailability == .more {
+            guard notificationRouter.intent?.serial == intent.serial,
+                  notificationRouter.intent?.locator != nil,
+                  notificationSynchronized, notificationRefreshFinished,
+                  case let .live(current) = state, current === presentation else { return }
+            // A present identity with a different acceptance sequence is stale;
+            // older pages cannot make it current.
+            if presentation.presentation.requests.contains(where: { $0.key == locator.request }) {
+                break
+            }
+
+            let revisionBeforePage = presentation.presentation.revision
+            let fetched: Bool
+            if let fetchInboxPageOperation {
+                fetched = await fetchInboxPageOperation(presentation)
+            } else {
+                fetched = await presentation.fetchNextInboxPage()
+            }
+            guard notificationRouter.intent?.serial == intent.serial,
+                  notificationRouter.intent?.locator != nil,
+                  notificationSynchronized, notificationRefreshFinished,
+                  case let .live(current) = state, current === presentation else { return }
+
+            if let key = notificationRouter.resolve(records: records,
+                context: presentation.notificationContext,
+                requests: presentation.presentation.requests, synchronized: true) {
+                presentation.selectRequest(key)
+                notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key)
+                notificationNavigationMessage = nil
+                notificationRouter.consumed()
+                return
+            }
+            guard notificationRouter.intent?.locator != nil else {
+                presentation.selectRequest(nil)
+                notificationNavigationMessage = nil
+                notificationRouter.consumed()
+                return
+            }
+            if presentation.presentation.requests.contains(where: { $0.key == locator.request }) {
+                break
+            }
+
+            pageAvailability = presentation.inboxPageAvailability()
+            guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
+        }
+        guard notificationRouter.intent?.serial == intent.serial,
+              notificationRouter.intent?.locator != nil else { return }
+        notificationNavigationMessage = "This notification's message has not loaded yet."
     }
 
     func retryForegroundConnection() async {
