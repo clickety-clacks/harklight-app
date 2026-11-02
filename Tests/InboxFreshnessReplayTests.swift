@@ -356,6 +356,92 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
+    func testInboxPageRestoresOrSkipsHeldReceiptAtomicallyBeforeCurrentInbox() async throws {
+        for mode in ["matching", "missing", "conflicting", "refused", "write-failure"] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("page-held-person"), deviceID: ExactText("reader"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let persistence = MemoryAttentionStatePersistence()
+            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let answered = RequestKey(accountScope: identity.personID,
+                senderID: ExactText("author"), messageID: ExactText("answered"))
+            let open = RequestKey(accountScope: identity.personID,
+                senderID: ExactText("author"), messageID: ExactText("open"))
+            // Explicit missing-local-history precondition. The retained receipt
+            // is already durable, but waits for its request's first loaded page.
+            _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+            try store.applyConversation(ConversationEvent(sequence: 2,
+                binding: ConversationBinding(request: answered, revision: 1),
+                fact: .delivered(turn: ExactText("2"))), context: context)
+            let session = InboxFreshnessRelaySession(identity: identity)
+            session.inboxStartHighWater = 3
+            session.inboxStartItemsJSON = #"""
+                [{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"answered","origin":"origin","as":"message","message":{"title":"Answered"},"session_handle":"closed","request_revision":1,"event_id":"1"},
+                  "terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"answered","origin":"origin","state":"answered","author":"person","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"},"event_id":"3","request_revision":1}},
+                 {"acceptance":{"v":1,"type":"delivery","seq":3,"sender_id":"author","message_id":"open","origin":"origin","as":"message","message":{"title":"Open"},"session_handle":"open","request_revision":1,"event_id":"4"}}]
+                """#
+            session.ordinaryFrames = [data(#"{"v":1,"type":"resynced","seq":3}"#)]
+            let accepted = data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#)
+            let target = mode == "missing" ? "other" : "2"
+            let handle = mode == "conflicting" ? "wrong" : "closed"
+            let discussion = data("""
+                {"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"\(handle)","request_revision":1,"kind":"discussion","author":"person","event_id":"\(target)","text":"Before answer"}
+                """)
+            let receipt = data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed","request_revision":1,"kind":"receipt","author":"origin","event_id":"2","delivered":true}"#)
+            let current = data(#"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":2,"kind":"revision","author":"origin","event_id":"5","message":{"title":"Current"}}"#)
+            let end = data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
+            let historyFrames = [accepted, discussion, receipt, current, end]
+            session.conversationFrameBatches = mode == "write-failure"
+                ? [historyFrames, historyFrames, [accepted, current, end], [accepted, end]]
+                : [historyFrames, [accepted, current, end], [accepted, end]]
+            if mode == "refused" { session.conversationOpenErrors[1] = .serverRejected }
+            if mode == "write-failure" {
+                session.beforeConversationFrame = { frame in
+                    if (try? JSONValue.parse(frame).uniqueValue(named: "type")?.stringValue) == ExactText("conversation_resynced") {
+                        persistence.failNextCommit()
+                    }
+                }
+            }
+            let diagnostics = InboxFreshnessDiagnosticCollector()
+            let core = try NativeRelayCore(store: store, context: context, session: session,
+                onDiagnostic: { diagnostics.append($0) })
+            if mode == "write-failure" {
+                do { _ = try await core.resyncAndDrainOutbox(); XCTFail("Page commit must fail") }
+                catch let error as AttentionStoreError {
+                    guard case .persistence = error else { return XCTFail("Unexpected error") }
+                }
+                XCTAssertNil(try store.conversationSnapshot(context: context).threads[answered])
+                XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+                XCTAssertTrue(session.conversationACKs.isEmpty)
+                XCTAssertFalse(try store.snapshot(context: context).inboxCandidate?.hasInitialPage ?? true)
+                XCTAssertFalse(diagnostics.events.contains { $0.causeCode == "conversation_message_skipped" })
+                session.beforeConversationFrame = nil
+                _ = try await core.resyncAndDrainOutbox()
+                XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+                XCTAssertEqual(try store.conversationSnapshot(context: context).threads[answered]?
+                    .facts[ExactText("2")]?.delivered, true,
+                    "A failed page write must not consume restoration or erase the held receipt")
+            } else {
+                _ = try await core.resyncAndDrainOutbox()
+                let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+                let snapshot = try reloaded.conversationSnapshot(context: context)
+                XCTAssertEqual(snapshot.cursor, 3)
+                XCTAssertEqual(snapshot.threads[answered]?.facts[ExactText("2")]?.delivered,
+                    mode == "matching" ? true : nil)
+                let presentation = try LivePresentationStore(store: reloaded, context: context)
+                XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: answered)).belongsToReplied)
+                XCTAssertEqual(presentation.request(for: open)?.title, ExactText("Current"))
+                XCTAssertEqual(try session.conversationOpens.prefix(2).map {
+                    try JSONValue.parse($0).uniqueValue(named: "since")?.integerValue
+                }, [0, 2])
+                XCTAssertEqual(diagnostics.events.contains { $0.causeCode == "conversation_message_skipped" },
+                    mode != "matching")
+            }
+            await core.deactivate()
+        }
+    }
+
+    @MainActor
     func testRecoveredDiscussionUsesConfirmedOriginFeedOrderAroundPagedTerminal() throws {
         for targetID in ["2", "4"] {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),

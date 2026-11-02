@@ -884,7 +884,6 @@ final class NativeRelayLifecycle {
     private var transport: URLSessionInstallationSession?
     private var context: ProfileContext?
     private var confirmedRelayContext: ProfileContext?
-    private var requiresExplicitForegroundRetry = false
     private var activeTransportAttemptID: UUID?
     private let foregroundDeadline = ForegroundConnectDeadline()
     private var diagnosticJournal: NativeClientDiagnosticJournal?
@@ -950,7 +949,6 @@ final class NativeRelayLifecycle {
         refreshGeneration = generation
         refreshFlights.reset()
         foregroundDeadline.beginSession(transportAttemptID: transportAttemptID)
-        requiresExplicitForegroundRetry = false
         let priorCore = core
         let priorTransport = transport
         core = nil
@@ -1021,7 +1019,6 @@ final class NativeRelayLifecycle {
     func deactivate() async {
         refreshGeneration = UUID()
         refreshFlights.reset()
-        requiresExplicitForegroundRetry = false
         let priorCore = core
         let priorTransport = transport
         core = nil
@@ -1043,12 +1040,10 @@ final class NativeRelayLifecycle {
     /// sender, message, cursor, operation or answer.
     @discardableResult
     func refreshFromTrustedRelay() async -> Bool {
-        guard !requiresExplicitForegroundRetry else { return false }
         return await refreshResultFromTrustedRelay().relayConfirmed
     }
 
     func refreshResultFromTrustedRelay(checkBlockedPush: Bool = false) async -> NativeRelayRefreshResult {
-        guard !requiresExplicitForegroundRetry else { return .unavailable }
         if checkBlockedPush {
             return await refreshFlights.afterCurrent { [weak self] in
                 guard let self else { return .unavailable }
@@ -1294,7 +1289,7 @@ final class NativeRelayLifecycle {
 
     @discardableResult
     func fetchNextInboxPage() async -> Bool {
-        guard let core, let context, !requiresExplicitForegroundRetry else { return false }
+        guard let core, let context else { return false }
         do {
             let fetched = try await core.fetchNextInboxPage()
             guard self.context == context else { return false }
@@ -1361,7 +1356,7 @@ final class NativeRelayLifecycle {
 
     private func performRefresh(generation: UUID,
                                 checkBlockedPush: Bool = false) async -> NativeRelayRefreshResult {
-        guard refreshGeneration == generation, !requiresExplicitForegroundRetry else { return .unavailable }
+        guard refreshGeneration == generation else { return .unavailable }
         // A past replay is not proof that this connection attempt worked.
         confirmedRelayContext = nil
         recordDiagnostic(.relay, .projectionRefresh, .began, attemptID: activeTransportAttemptID)
@@ -1649,10 +1644,9 @@ final class NativeRelayLifecycle {
     private func cancelTimedOutSession(generation: UUID, expected: ProfileContext) async {
         guard refreshGeneration == generation, context == expected else { return }
         // Invalidate callbacks before awaiting actor shutdown. Keep the approved
-        // profile and immutable relay configuration so only an explicit retry
-        // can reopen this identity after timeout.
+        // profile and immutable relay configuration. A later normal refresh
+        // may reconnect; this timeout ends only the current pass.
         refreshGeneration = UUID()
-        requiresExplicitForegroundRetry = true
         activeTransportAttemptID = nil
         refreshFlights.reset()
         confirmedRelayContext = nil

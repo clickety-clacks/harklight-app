@@ -3653,9 +3653,14 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(operationSnapshot.operations.first?.requestRevision, 1)
         XCTAssertEqual(operationSnapshot.operations.first?.receiptState, "pending_unconfirmed")
 
-        let implicitRetry = await lifecycle.refreshFromTrustedRelay()
-        XCTAssertFalse(implicitRetry, "A timed-out approved identity waits for the visible, explicit retry action.")
-        XCTAssertEqual(server.acceptedConnectionCount, 1, "Background refresh must not silently reopen the timed-out session.")
+        let laterPass = await lifecycle.confirmForegroundProgress(for: context, deadline: .seconds(3))
+        XCTAssertEqual(laterPass.outcome, .timedOut,
+                       "The unavailable endpoint still fails this pass, rather than claiming success.")
+        XCTAssertGreaterThanOrEqual(server.acceptedConnectionCount, 2,
+                       "A later refresh retries the approved endpoint without a permanent timeout latch.")
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.first?.operationID,
+                       originalOperation.operationID)
         await lifecycle.deactivate()
     }
 

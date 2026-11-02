@@ -779,6 +779,18 @@ struct ConversationState: Codable, Equatable {
               var thread = threads[receipt.binding.request] else {
             throw ConversationError.conflict
         }
+        try restoreReferencedTurn(event, for: receipt, in: &thread, sameOriginFeed: sameOriginFeed)
+        threads[receipt.binding.request] = thread
+    }
+
+    private func restoreReferencedTurn(_ event: ConversationEvent, for receipt: ConversationEvent,
+                                      in thread: inout ConversationThread, sameOriginFeed: Bool) throws {
+        guard case let .delivered(target) = receipt.fact,
+              event.sequence > 0, event.sequence < receipt.sequence,
+              event.binding.request == receipt.binding.request,
+              thread.request == receipt.binding.request,
+              case let .turn(turn) = event.fact,
+              turn.id == target, turn.binding == event.binding else { throw ConversationError.conflict }
         // Recheck under the store's writer lock: recovery is only for the
         // missing target, never a way around another receipt validation error.
         do {
@@ -821,7 +833,6 @@ struct ConversationState: Codable, Equatable {
         try thread.merge(restored, event: event)
         thread.turns.removeLast()
         thread.turns.insert(restored, at: insertionIndex)
-        threads[receipt.binding.request] = thread
     }
 
     /// Re-checks a redacted revision whose sequence was already durably
@@ -1205,12 +1216,33 @@ struct ConversationState: Codable, Equatable {
     /// A missing thread means these journaled facts have not been applied yet.
     /// Threads are retained once seeded, so the first local request or delivery
     /// can apply all held facts in their original sequence.
-    func applyHeldEvents(to thread: inout ConversationThread) throws {
+    func applyHeldEvents(to thread: inout ConversationThread,
+                         restoredTurns: [UInt64: ConversationEvent] = [:],
+                         skipping: [UInt64: ConversationEvent] = [:],
+                         onFailure: ((ConversationEvent, any Error) -> Void)? = nil) throws {
         let held = events.values.filter {
             $0.binding.request == thread.request && $0.requiresLoadedThread
         }.sorted { $0.sequence < $1.sequence }
         for event in held {
-            try applyThreadFact(event, to: &thread)
+            if let ignored = skipping[event.sequence] {
+                guard ignored == event else {
+                    onFailure?(event, ConversationError.conflict)
+                    throw ConversationError.conflict
+                }
+                continue
+            }
+            // A rejected fact cannot leave half of its mutation in the page.
+            var updated = thread
+            do {
+                if let target = restoredTurns[event.sequence] {
+                    try restoreReferencedTurn(target, for: event, in: &updated, sameOriginFeed: true)
+                }
+                try applyThreadFact(event, to: &updated)
+            } catch {
+                onFailure?(event, error)
+                throw error
+            }
+            thread = updated
         }
     }
 

@@ -285,7 +285,7 @@ final class ConversationRelayTests: XCTestCase {
         await core.deactivate()
     }
 
-    func testInboxPageOpeningThreadPreservesHeldFactValidationErrorAndDetails() async throws {
+    func testInboxPageOpeningThreadSkipsUnresolvedHeldFactAndKeepsDiagnostics() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("local-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -299,26 +299,24 @@ final class ConversationRelayTests: XCTestCase {
 
         let session = Session(identity)
         session.inboxStartItemsJSON = #"[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1}}]"#
+        session.conversationOpenError = .conversationsUnavailable
+        session.ordinary = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
         let diagnostics = DiagnosticCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: { diagnostics.append($0) })
 
-        do {
-            _ = try await core.resyncAndDrainOutbox()
-            XCTFail("An inbox delivery must preserve the held-fact invalidBinding rejection.")
-        } catch let error as ConversationError {
-            XCTAssertEqual(error, .invalidBinding)
-        }
+        _ = try await core.resyncAndDrainOutbox()
 
         let event = try XCTUnwrap(diagnostics.events.first { $0.phase == .inboxPage })
-        XCTAssertEqual(event.transition, .failed)
+        XCTAssertEqual(event.transition, .observed)
         XCTAssertEqual(event.causeCode, "conversation_invalid_binding")
         XCTAssertEqual(event.conversationValidationRejection?.guardID, .referencedTurnExists)
         XCTAssertEqual(event.conversationValidationRejection?.eventKind, .receipt)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 0)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         let conversationSnapshot = try store.conversationSnapshot(context: context)
         XCTAssertEqual(conversationSnapshot.cursor, 1)
-        XCTAssertNil(conversationSnapshot.threads[key])
+        XCTAssertNotNil(conversationSnapshot.threads[key])
+        XCTAssertNotNil(diagnostics.events.first { $0.causeCode == "conversation_message_skipped" })
         XCTAssertTrue(session.ordinaryACKs.isEmpty)
         await core.deactivate()
     }
