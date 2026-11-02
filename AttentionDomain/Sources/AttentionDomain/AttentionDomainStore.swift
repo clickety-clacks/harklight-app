@@ -1104,7 +1104,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     private func applyOrdinaryConversationMetadata(_ event: RelayEvent,
-                                                   replayHeldFacts: Bool = true,
+                                                   terminalReceiptTarget: ExactText? = nil,
                                                    to next: inout PersistedAttentionState) throws {
         var conversation = next.conversation ?? ConversationState()
         switch event.body {
@@ -1140,7 +1140,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 if let availability = metadata.availability { thread.availability = availability }
                 thread.listeningSupport = metadata.listeningSupport
                 thread.terminal = next.remoteStates[request.key]?.state
-                if replayHeldFacts { try conversation.applyHeldEvents(to: &thread) }
+                // The paired page terminal proves this receipt target before
+                // its visible turn is appended after the held history.
+                thread.terminalTurn = terminalReceiptTarget
+                try conversation.applyHeldEvents(to: &thread)
             }
             if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
             if let reported = metadata.retractedAtMilliseconds { try thread.recordReportedRetraction(at: reported) }
@@ -1279,17 +1282,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     supersedesOriginTarget: previous?.supersedesOriginTarget)
                 if hasContent {
                     next.remoteStates[key] = current
-                    let needsHeldReplay = next.conversation?.threads[key] == nil
-                    // A held receipt may name this terminal. Seed both snapshot
-                    // facts before validating the ordered conversation history.
-                    try applyOrdinaryConversationMetadata(acceptance, replayHeldFacts: false, to: &next)
+                    try applyOrdinaryConversationMetadata(acceptance,
+                        terminalReceiptTarget: terminal.conversation?.eventID, to: &next)
                     try applyOrdinaryConversationMetadata(terminal, to: &next)
-                    if needsHeldReplay, var conversation = next.conversation,
-                       var thread = conversation.threads[key] {
-                        try conversation.applyHeldEvents(to: &thread)
-                        conversation.threads[key] = thread
-                        next.conversation = conversation
-                    }
                 } else {
                     var references = next.inboxReferences ?? [:]
                     references[key] = current

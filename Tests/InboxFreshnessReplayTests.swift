@@ -176,8 +176,14 @@ final class InboxFreshnessReplayTests: XCTestCase {
                     fact: .revision(turn, payload: try JSONValue.parse(data("{\"title\":\"Revision \(revision)\"}")))),
                     context: context)
             }
+            let discussionID = ExactText("discussion-before-answer")
+            let currentBinding = ConversationBinding(request: key, revision: 3)
+            let discussion = ConversationTurn(id: discussionID, binding: currentBinding,
+                author: .person, sessionHandle: handle, text: ExactText("Before answering"), kind: .discussion)
+            try store.applyConversation(ConversationEvent(sequence: 3, binding: currentBinding,
+                fact: .turn(discussion)), context: context)
             // The origin acknowledges the person-authored terminal, not revision 1.
-            let receipt = ConversationEvent(sequence: 3,
+            let receipt = ConversationEvent(sequence: 4,
                 binding: ConversationBinding(request: key, revision: 3),
                 fact: .delivered(turn: terminalID))
             if receiptHeld { try store.applyConversation(receipt, context: context) }
@@ -197,7 +203,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 items: [item], nextCursor: nil, receiptCursor: nil, context: context))
             let restored = try AttentionDomainStore(context: context, persistence: persistence)
             XCTAssertNil(try restored.conversationSnapshot(context: context).threads[key])
-            XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, receiptHeld ? 3 : 2)
+            XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, receiptHeld ? 4 : 3)
             XCTAssertNil(try restored.snapshot(context: context).requests[key])
             XCTAssertFalse(try XCTUnwrap(restored.snapshot(context: context).inboxCandidate).hasInitialPage)
 
@@ -211,8 +217,16 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertEqual(thread.terminalTurn, terminalID)
             XCTAssertEqual(thread.facts[terminalID]?.delivered, true)
             XCTAssertEqual(thread.currentRevision, 3)
+            let terminalIndex = try XCTUnwrap(thread.turns.firstIndex { $0.id == terminalID })
+            for revision in UInt64(2)...3 {
+                let revisionIndex = try XCTUnwrap(thread.turns.firstIndex { $0.id == ExactText("revision-\(revision)") })
+                XCTAssertLessThan(revisionIndex, terminalIndex,
+                                  "The terminal follows the earlier revisions it answered.")
+            }
+            let discussionIndex = try XCTUnwrap(thread.turns.firstIndex { $0.id == discussionID })
+            XCTAssertLessThan(discussionIndex, terminalIndex)
             XCTAssertEqual(try reloaded.snapshot(context: context).cursor, 2)
-            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 3)
+            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 4)
             let presentation = try LivePresentationStore(store: reloaded, context: context)
             let row = try XCTUnwrap(presentation.inboxRow(for: key))
             XCTAssertEqual(row.requestRevision, 3)
