@@ -910,7 +910,7 @@ struct InboxList: View {
         .onScrollVisibilityChange(threshold: 0.001) { isVisible in
             updateVisibility(.init(key: item.row.key, placement: .area), isVisible: isVisible)
         }
-        .accessibilityIdentifier("new-message-area-\(item.row.accessibilityID)")
+        .accessibilityIdentifier("new-message-area-\(InboxItem.request(item.row).accessibilityID)")
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
