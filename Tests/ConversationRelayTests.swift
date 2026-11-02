@@ -265,16 +265,18 @@ final class ConversationRelayTests: XCTestCase {
 
     func testSnapshotValidationFailureStopsOnlyItsPassAfterDurableEvents() async throws {
         let (context, _, store, session) = try setup()
+        // The barrier claims an event that was never delivered. Invalid optional
+        // read-position metadata is tolerated separately and is not a gap.
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             event("discussion", sequence: 1, fields: #""author":"person","event_id":"turn","text":"Question""#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1},{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
         let core = try NativeRelayCore(store: store, context: context, session: session)
 
         do {
             _ = try await core.resyncAndDrainOutbox()
             XCTFail("A rejected snapshot must not be treated as an accounted event.")
-        } catch let error as ConversationError {
-            XCTAssertEqual(error, .invalidBinding)
+        } catch let error as NativeRelayCoreError {
+            XCTAssertEqual(error, .invalidReplay)
         }
 
         let snapshot = try store.conversationSnapshot(context: context)

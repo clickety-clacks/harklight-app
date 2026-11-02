@@ -487,10 +487,10 @@ public actor NativeRelayCore {
                         using: pagingSession)
                 }
             }
-            failedStep = .readConversationState
-            let conversationThreads = try store.conversationSnapshot(context: context).threads
-            if !conversationThreads.isEmpty,
-               let conversationSession = session as? any AuthenticatedConversationSession {
+            // An empty local projection does not mean the server has no history.
+            // It can also have a durable cursor after accounting for an unusable
+            // message, and that progress still needs its conversation ACK.
+            if let conversationSession = session as? any AuthenticatedConversationSession {
                 failedStep = .replayConversationsAndAcknowledge
                 try await replayConversationAndAcknowledge(using: conversationSession)
             }
