@@ -101,8 +101,9 @@ enum InboxSelection: Hashable {
     case sample(String)
 }
 
-struct SupersedesTarget: Hashable {
-    let key: RequestKey
+enum RelatedMessageTarget: Hashable {
+    case supersedes(RequestKey)
+    case replacement(RequestKey)
 }
 
 enum InboxMessageTab: String, Hashable {
@@ -339,7 +340,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @State private var selection: InboxSelection?
-    @State private var supersedesNavigationPath: [SupersedesTarget] = []
+    @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var isWarningPresented = false
     @State private var settings = false
@@ -569,11 +570,23 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     .frame(width: min(360, geometry.size.width * 0.34))
             }
         }
-        .navigationDestination(for: SupersedesTarget.self) { target in
-            if conversationStore?.request(for: target.key) != nil {
-                requestDetail(target.key, .supersedesTarget)
-            } else {
-                ContentUnavailableView("Message not available", systemImage: "questionmark.folder")
+        .navigationDestination(for: RelatedMessageTarget.self) { target in
+            switch target {
+            case let .supersedes(key):
+                if conversationStore?.request(for: key) != nil {
+                    requestDetail(key, .supersedesTarget)
+                } else {
+                    ContentUnavailableView("Message not available", systemImage: "questionmark.folder")
+                }
+            case let .replacement(key):
+                if conversationStore?.request(for: key) != nil {
+                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
+                        .id(key)
+                } else {
+                    ContentUnavailableView("Replacement not available yet",
+                        systemImage: "clock",
+                        description: Text("The original message is still available."))
+                }
             }
         }
         .toolbar(horizontalSizeClass == .compact && item != nil ? .hidden : .automatic,
@@ -599,12 +612,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
         } detail: {
-            NavigationStack(path: $supersedesNavigationPath) {
+            NavigationStack(path: $relatedMessageNavigationPath) {
                 detailContent(for: selection, inlineChat: inlineChat,
                               geometry: geometry)
             }
             .onChange(of: selection) { _, _ in
-                supersedesNavigationPath.removeAll()
+                relatedMessageNavigationPath.removeAll()
             }
         }
     }
