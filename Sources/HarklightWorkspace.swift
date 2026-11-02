@@ -1160,18 +1160,6 @@ struct InboxList: View {
             if isUserScrolling != scrolling { isUserScrolling = scrolling }
             if oldPhase == .interacting && !scrolling { requestedInGesture = false }
         }
-        .simultaneousGesture(DragGesture(minimumDistance: 10)
-            .onChanged { value in
-                guard value.translation.height < -12 else { return }
-                if !isUserScrolling { isUserScrolling = true }
-                if canRequestOlderPageOnDrag {
-                    requestOlderPage()
-                }
-            }
-            .onEnded { _ in
-                isUserScrolling = false
-                requestedInGesture = false
-            })
     }
 
     @ViewBuilder
