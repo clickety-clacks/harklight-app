@@ -57,11 +57,30 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 
 enum HarklightReleaseNotes {
     /// Keep each update's identifier stable so it appears once for people who already use the app.
+    /// Keep new updates unnumbered until their containing build and archived source are recorded.
     /// Build 106 is the earliest confirmed containing build for the existing updates below;
     /// it does not establish when they first shipped.
     /// Stamp new updates with a first shipped build only after a successful Internal TestFlight
     /// distribution and its archived source have been recorded. Retain that number in later builds.
     static let updateEntries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            historyIdentifier: "failed-response-retry",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource(
+                "Response delivery improvements",
+                comment: "Release-note heading for explaining and retrying known response delivery failures."),
+            visibleFromBuildIdentifier: 79,
+            highlights: [
+                .init(
+                    id: "failed-response-retry",
+                    symbol: "exclamationmark.triangle",
+                    title: LocalizedStringResource(
+                        "See why a response was not accepted",
+                        comment: "Release-note title for safe failure details and retrying a response."),
+                    detail: LocalizedStringResource(
+                        "Known delivery failures show any safe recorded detail, let you retry the same response, and let you copy the visible summary and full detail.",
+                        comment: "Release-note detail for inspecting, retrying, and copying known delivery failures."))
+            ]),
         HarklightReleaseNote(
             historyIdentifier: "reply-drafts-after-navigation",
             marketingVersion: "0.1.0",
@@ -128,15 +147,6 @@ enum HarklightReleaseNotes {
             visibleFromBuildIdentifier: 79,
             confirmedContainingBuildIdentifier: 106,
             highlights: [
-                .init(
-                    id: "failed-response-retry",
-                    symbol: "exclamationmark.triangle",
-                    title: LocalizedStringResource(
-                        "See why a response was not accepted",
-                        comment: "Release-note title for safe failure details and retrying a response."),
-                    detail: LocalizedStringResource(
-                        "Known delivery failures show any safe recorded detail, let you retry the same response, and let you copy the visible summary and full detail.",
-                        comment: "Release-note detail for inspecting, retrying, and copying known delivery failures.")),
                 .init(
                     id: "inbox-message-context",
                     symbol: "tray.full",

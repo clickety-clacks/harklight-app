@@ -41,12 +41,19 @@ final class ReleaseNotesTests: XCTestCase {
         let draftNote = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "reply-drafts-after-navigation"
         })
+        let failedResponseNote = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
+            $0.id == "failed-response-retry"
+        })
         XCTAssertNil(note.buildIdentifier)
         XCTAssertNil(draftNote.buildIdentifier)
+        XCTAssertNil(failedResponseNote.buildIdentifier)
+        XCTAssertNil(failedResponseNote.confirmedContainingBuildIdentifier)
+        XCTAssertEqual(failedResponseNote.visibleFromBuildIdentifier, 79)
+        XCTAssertEqual(failedResponseNote.highlights.map(\.id), ["failed-response-retry"])
         XCTAssertEqual(HarklightReleaseNotes.updateEntries.map(\.confirmedContainingBuildIdentifier),
-                       [106, 106, 106, 106])
+                       [nil, 106, 106, 106, 106])
         XCTAssertEqual(HarklightReleaseNotes.updateEntries.map(\.visibleFromBuildIdentifier),
-                       [79, 79, 79, 79])
+                       [79, 79, 79, 79, 79])
         XCTAssertEqual(String(localized: draftNote.highlights[0].title),
                        "Keep an unfinished Reply")
         XCTAssertEqual(note.highlights.map(\.id),
@@ -65,11 +72,13 @@ final class ReleaseNotesTests: XCTestCase {
 
         let firstLaunch = ReleaseNotesPresentation(
             currentBuildIdentifier: "106", hasPriorAppState: true, entries: [], defaults: defaults)
-        XCTAssertEqual(firstLaunch.notesToShow.map(\.id), [draftNote.id, note.id])
+        XCTAssertEqual(firstLaunch.notesToShow.map(\.id),
+                       [failedResponseNote.id, draftNote.id, note.id])
         let history = HarklightReleaseNotes.settingsHistory(
             currentBuildIdentifier: "106", entries: [])
-        XCTAssertEqual(history.prefix(4).map(\.id),
-                       [draftNote.id, "chat-row-activity", "example-messages-removed", note.id])
+        XCTAssertEqual(history.prefix(5).map(\.id),
+                       [failedResponseNote.id, draftNote.id, "chat-row-activity",
+                        "example-messages-removed", note.id])
 
         let nextLaunch = ReleaseNotesPresentation(
             currentBuildIdentifier: "106", hasPriorAppState: true, entries: [], defaults: defaults)
