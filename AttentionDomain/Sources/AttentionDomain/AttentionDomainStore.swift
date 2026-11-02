@@ -1107,7 +1107,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                                    terminalReceiptTarget: ExactText? = nil,
                                                    restoredTurns: [UInt64: ConversationEvent] = [:],
                                                    skippingHeldEvents: [UInt64: ConversationEvent] = [:],
-                                                   onHeldEventFailure: ((ConversationEvent, any Error) -> Void)? = nil,
+                                                   onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil,
                                                    to next: inout PersistedAttentionState) throws {
         var conversation = next.conversation ?? ConversationState()
         switch event.body {
@@ -1233,7 +1233,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                         highWater: UInt64,
                                         restoredTurns: [UInt64: ConversationEvent] = [:],
                                         skippingHeldEvents: [UInt64: ConversationEvent] = [:],
-                                        onHeldEventFailure: ((ConversationEvent, any Error) -> Void)? = nil,
+                                        onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil,
                                         to next: inout PersistedAttentionState) throws {
         let acceptance = item.acceptance
         let key = item.key
@@ -1909,7 +1909,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                      validationRejection: inout ConversationValidationRejection?,
                                      restoredTurns: [UInt64: ConversationEvent] = [:],
                                      skippingHeldEvents: [UInt64: ConversationEvent] = [:],
-                                     onHeldEventFailure: ((ConversationEvent, any Error) -> Void)? = nil) throws {
+                                     onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
         validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -2016,7 +2016,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    validationRejection: inout ConversationValidationRejection?,
                                      restoredTurns: [UInt64: ConversationEvent] = [:],
                                      skippingHeldEvents: [UInt64: ConversationEvent] = [:],
-                                     onHeldEventFailure: ((ConversationEvent, any Error) -> Void)? = nil) throws {
+                                     onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
         validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }

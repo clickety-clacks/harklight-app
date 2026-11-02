@@ -658,19 +658,18 @@ public actor NativeRelayCore {
     /// targets, skipped facts and page checkpoint in the same transaction.
     private func saveInboxPageRecoveringHeldEvents(_ items: [InboxSnapshotItem],
         save: ([UInt64: ConversationEvent], [UInt64: ConversationEvent],
-               ((ConversationEvent, any Error) -> Void)?) throws -> Void) async throws {
+               ((ConversationEvent, ConversationValidationRejection?) -> Void)?) throws -> Void) async throws {
         var restored: [UInt64: ConversationEvent] = [:]
         var skipped: [UInt64: ConversationEvent] = [:]
         var historyOpened = false
         var attempted: Set<UInt64> = []
         while true {
-            var heldFailure: (ConversationEvent, any Error)?
+            var heldFailure: (ConversationEvent, ConversationValidationRejection?)?
             do {
-                try save(restored, skipped) { event, error in heldFailure = (event, error) }
+                try save(restored, skipped) { event, rejection in heldFailure = (event, rejection) }
             } catch {
-                guard let (event, cause) = heldFailure,
+                guard let (event, rejection) = heldFailure,
                       isUnusableConversationMessage(error), skipped[event.sequence] == nil else { throw error }
-                let rejection = (cause as? ConversationValidationRejectionError)?.rejection
                 diagnose(.conversation, .inboxPage, .observed, error: error,
                     conversationSequence: event.sequence, conversationValidationRejection: rejection,
                     request: event.binding.request, revision: event.binding.revision)

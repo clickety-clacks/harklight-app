@@ -1219,14 +1219,14 @@ struct ConversationState: Codable, Equatable {
     func applyHeldEvents(to thread: inout ConversationThread,
                          restoredTurns: [UInt64: ConversationEvent] = [:],
                          skipping: [UInt64: ConversationEvent] = [:],
-                         onFailure: ((ConversationEvent, any Error) -> Void)? = nil) throws {
+                         onFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
         let held = events.values.filter {
             $0.binding.request == thread.request && $0.requiresLoadedThread
         }.sorted { $0.sequence < $1.sequence }
         for event in held {
             if let ignored = skipping[event.sequence] {
                 guard ignored == event else {
-                    onFailure?(event, ConversationError.conflict)
+                    onFailure?(event, nil)
                     throw ConversationError.conflict
                 }
                 continue
@@ -1239,7 +1239,7 @@ struct ConversationState: Codable, Equatable {
                 }
                 try applyThreadFact(event, to: &updated)
             } catch {
-                onFailure?(event, error)
+                onFailure?(event, (error as? ConversationValidationRejectionError)?.rejection)
                 throw error
             }
             thread = updated
