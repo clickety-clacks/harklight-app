@@ -1103,7 +1103,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return state.cursor
     }
 
-    private func applyOrdinaryConversationMetadata(_ event: RelayEvent, to next: inout PersistedAttentionState) throws {
+    private func applyOrdinaryConversationMetadata(_ event: RelayEvent,
+                                                   replayHeldFacts: Bool = true,
+                                                   to next: inout PersistedAttentionState) throws {
         var conversation = next.conversation ?? ConversationState()
         switch event.body {
         case .delivery, .originReference:
@@ -1121,7 +1123,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 throw ConversationError.invalidBinding
             }
             var thread: ConversationThread
-            let isNewThread = conversation.threads[request.key] == nil
             if let prior = conversation.threads[request.key] {
                 guard prior.sessionHandle == handle,
                       prior.revisions[1]?.semanticallyEquals(request.originalPayload) == true else {
@@ -1139,6 +1140,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 if let availability = metadata.availability { thread.availability = availability }
                 thread.listeningSupport = metadata.listeningSupport
                 thread.terminal = next.remoteStates[request.key]?.state
+                if replayHeldFacts { try conversation.applyHeldEvents(to: &thread) }
             }
             if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
             if let reported = metadata.retractedAtMilliseconds { try thread.recordReportedRetraction(at: reported) }
@@ -1147,11 +1149,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 thread.turns.append(ConversationTurn(id: id, binding: ConversationBinding(request: request.key, revision: 1),
                     author: .origin, sessionHandle: handle, text: ExactText(""), files: metadata.files ?? [], kind: .revision))
                 thread.facts[id, default: ConversationTurnFacts()] = thread.facts[id] ?? ConversationTurnFacts()
-            }
-            if isNewThread {
-                // Held receipts and file facts can refer to this initial turn.
-                // Seed its identity and files before replaying their sequence.
-                try conversation.applyHeldEvents(to: &thread)
             }
             conversation.threads[request.key] = thread
         case let .terminal(key, terminal, _):
@@ -1282,9 +1279,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     supersedesOriginTarget: previous?.supersedesOriginTarget)
                 if hasContent {
                     next.remoteStates[key] = current
-                    // The acceptance opens the thread that the terminal's retraction is recorded on.
-                    try applyOrdinaryConversationMetadata(acceptance, to: &next)
+                    let needsHeldReplay = next.conversation?.threads[key] == nil
+                    // A held receipt may name this terminal. Seed both snapshot
+                    // facts before validating the ordered conversation history.
+                    try applyOrdinaryConversationMetadata(acceptance, replayHeldFacts: false, to: &next)
                     try applyOrdinaryConversationMetadata(terminal, to: &next)
+                    if needsHeldReplay, var conversation = next.conversation,
+                       var thread = conversation.threads[key] {
+                        try conversation.applyHeldEvents(to: &thread)
+                        conversation.threads[key] = thread
+                        next.conversation = conversation
+                    }
                 } else {
                     var references = next.inboxReferences ?? [:]
                     references[key] = current

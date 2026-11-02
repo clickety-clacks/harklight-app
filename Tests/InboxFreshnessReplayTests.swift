@@ -77,6 +77,102 @@ final class InboxFreshnessReplayTests: XCTestCase {
     private func data(_ string: String) -> Data { Data(string.utf8) }
 
     @MainActor
+    func testPagedTerminalRecoversLiveAndHeldReceiptsWithCurrentRevision() throws {
+        for receiptHeld in [false, true] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let persistence = MemoryAttentionStatePersistence()
+            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let key = RequestKey(accountScope: identity.personID,
+                senderID: ExactText("author"), messageID: ExactText("answered-request"))
+            let handle = ExactText("session")
+            let terminalID = ExactText("answer-terminal")
+            for revision in UInt64(2)...3 {
+                let binding = ConversationBinding(request: key, revision: revision)
+                let turn = ConversationTurn(id: ExactText("revision-\(revision)"), binding: binding,
+                    author: .origin, sessionHandle: handle, text: ExactText(""), kind: .revision)
+                try store.applyConversation(ConversationEvent(sequence: revision - 1, binding: binding,
+                    fact: .revision(turn, payload: try JSONValue.parse(data("{\"title\":\"Revision \(revision)\"}")))),
+                    context: context)
+            }
+            // The origin acknowledges the person-authored terminal, not revision 1.
+            let receipt = ConversationEvent(sequence: 3,
+                binding: ConversationBinding(request: key, revision: 3),
+                fact: .delivered(turn: terminalID))
+            if receiptHeld { try store.applyConversation(receipt, context: context) }
+            _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
+            let acceptance = RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key,
+                    originalPayload: try JSONValue.parse(data(#"{"title":"Original question"}"#))), .message),
+                conversation: RelayConversationMetadata(revision: 1, sessionHandle: handle,
+                    eventID: ExactText("initial-question")))
+            // These are the same join fields used by ordinary lifecycle replay.
+            let terminal = RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
+                conversation: RelayConversationMetadata(revision: 3, eventID: terminalID, author: .person),
+                accountAnswerOutcome: .noComment)
+            let item = InboxSnapshotItem(acceptance: acceptance, terminal: terminal)
+            persistence.failNextCommit()
+            XCTAssertThrowsError(try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+                items: [item], nextCursor: nil, receiptCursor: nil, context: context))
+            let restored = try AttentionDomainStore(context: context, persistence: persistence)
+            XCTAssertNil(try restored.conversationSnapshot(context: context).threads[key])
+            XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, receiptHeld ? 3 : 2)
+            XCTAssertNil(try restored.snapshot(context: context).requests[key])
+            XCTAssertFalse(try XCTUnwrap(restored.snapshot(context: context).inboxCandidate).hasInitialPage)
+    
+            try restored.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+                items: [item], nextCursor: nil, receiptCursor: nil, context: context)
+            _ = try restored.prepareInboxCheckpointAcknowledgement(context: context)
+            _ = try restored.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
+            if !receiptHeld { try restored.applyConversation(receipt, context: context) }
+            let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+            let thread = try XCTUnwrap(reloaded.conversationSnapshot(context: context).threads[key])
+            XCTAssertEqual(thread.terminalTurn, terminalID)
+            XCTAssertEqual(thread.facts[terminalID]?.delivered, true)
+            XCTAssertEqual(thread.currentRevision, 3)
+            XCTAssertEqual(try reloaded.snapshot(context: context).cursor, 2)
+            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 3)
+            let presentation = try LivePresentationStore(store: reloaded, context: context)
+            let row = try XCTUnwrap(presentation.inboxRow(for: key))
+            XCTAssertEqual(row.requestRevision, 3)
+            XCTAssertTrue(row.belongsToReplied)
+            XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Revision 3"))
+        }
+    }
+
+    func testPagedTerminalWithoutMatchingReceiptIdentityRemainsFatal() throws {
+        for suppliedID in [nil, ExactText("different-terminal")] as [ExactText?] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+            let key = RequestKey(accountScope: identity.personID,
+                senderID: ExactText("author"), messageID: ExactText("answered-request"))
+            try store.applyConversation(ConversationEvent(sequence: 1,
+                binding: ConversationBinding(request: key, revision: 1),
+                fact: .delivered(turn: ExactText("answer-terminal"))), context: context)
+            _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
+            let item = InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key, originalPayload: .null), .message),
+                conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"),
+                    eventID: ExactText("initial-question"))),
+                terminal: RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
+                    conversation: suppliedID.map { RelayConversationMetadata(revision: 1, eventID: $0, author: .person) }))
+            var rejection: ConversationValidationRejection?
+            XCTAssertThrowsError(try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+                items: [item], nextCursor: nil, receiptCursor: nil, context: context,
+                validationRejection: &rejection)) {
+                XCTAssertEqual($0 as? ConversationError, .invalidBinding)
+            }
+            XCTAssertEqual(rejection?.guardID, .referencedTurnExists)
+            XCTAssertEqual(try store.snapshot(context: context).cursor, 0)
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+            XCTAssertNil(try store.conversationSnapshot(context: context).threads[key])
+        }
+    }
+
+    @MainActor
     func testConversationInvalidBindingDoesNotBlockFollowingRevisionFromRefreshingInbox() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-person"), deviceID: ExactText("reader"))
