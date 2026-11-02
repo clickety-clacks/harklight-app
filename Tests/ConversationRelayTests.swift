@@ -263,7 +263,7 @@ final class ConversationRelayTests: XCTestCase {
         await core.deactivate()
     }
 
-    func testSnapshotValidationFailureRemainsFatalAfterDurableEvents() async throws {
+    func testSnapshotValidationFailureStopsOnlyItsPassAfterDurableEvents() async throws {
         let (context, _, store, session) = try setup()
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             event("discussion", sequence: 1, fields: #""author":"person","event_id":"turn","text":"Question""#),
@@ -282,6 +282,12 @@ final class ConversationRelayTests: XCTestCase {
             "The already committed event remains the last durable cursor.")
         XCTAssertTrue(session.conversationACKs.isEmpty,
             "A rejected resync snapshot cannot cross the barrier ACK.")
+        session.ordinary = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.conversationACKs.count, 1,
+            "The next valid pass can acknowledge the unchanged durable cursor")
         await core.deactivate()
     }
 
