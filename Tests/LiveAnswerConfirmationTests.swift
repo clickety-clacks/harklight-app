@@ -615,7 +615,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .lost)
     }
 
-    func testNewerRevisionReopensPendingNoCommentInInboxBeforeRejectedFact() throws {
+    // Synthetic typed store events demonstrate this app state path; they are not captured Server frames.
+    func testSyntheticNewerRevisionReopensPendingNoCommentInInboxBeforeRejectedFact() throws {
         let (context, store, live, key) = try setupReplyOnly()
         let firstPayload = try JSONValue.parse(Data(#"{"title":"Reply-only request"}"#.utf8))
         let firstBinding = ConversationBinding(request: key, revision: 1)
