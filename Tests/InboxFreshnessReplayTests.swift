@@ -190,6 +190,23 @@ final class InboxFreshnessReplayTests: XCTestCase {
         XCTAssertThrowsError(try store.applyConversation(receipt, context: context,
             validationRejection: &rejection))
         XCTAssertEqual(rejection?.guardID, .referencedTurnExists)
+        let beforeRecovery = try persistence.load(identity: identity)
+        let otherRequest = RequestKey(accountScope: identity.personID,
+            senderID: key.senderID, messageID: ExactText("different-request"))
+        for (target, request, session) in [
+            (ExactText("different-turn"), key, handle),
+            (discussion.id, otherRequest, handle),
+            (discussion.id, key, ExactText("different-session"))
+        ] {
+            let wrongBinding = ConversationBinding(request: request, revision: 1)
+            let wrongTurn = ConversationTurn(id: target, binding: wrongBinding,
+                author: .person, sessionHandle: session, text: discussion.text,
+                kind: .discussion, conversationSequence: 1)
+            XCTAssertThrowsError(try store.restoreReferencedConversationTurn(
+                ConversationEvent(sequence: 1, binding: wrongBinding, fact: .turn(wrongTurn)),
+                for: receipt, context: context))
+            XCTAssertEqual(try persistence.load(identity: identity), beforeRecovery)
+        }
         persistence.failNextCommit()
         XCTAssertThrowsError(try store.restoreReferencedConversationTurn(historical,
             for: receipt, context: context))
