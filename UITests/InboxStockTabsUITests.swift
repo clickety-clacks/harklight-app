@@ -106,7 +106,31 @@ final class InboxStockTabsUITests: XCTestCase {
         for title in ["Inbox", "Replied"] {
             let app = XCUIApplication()
             app.launchArguments = ["--reset-attention-fixture", "--harklight-test-list-refresh"]
+            if title == "Replied" { app.launchArguments.append("--harklight-samples") }
             app.launch()
+
+            if title == "Replied" {
+                let search = workspaceSearchField(in: app)
+                XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+                search.tap()
+                search.typeText("Archive\n")
+                let sample = app.descendants(matching: .any)["sample-approval-0"]
+                XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
+                sample.tap()
+                let keepHere = app.buttons.containing(.staticText, identifier: "Keep here").firstMatch
+                XCTAssertTrue(keepHere.waitForExistence(timeout: 5), app.debugDescription)
+                keepHere.tap()
+                let finish = app.descendants(matching: .any)["sample-finish"]
+                XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
+                finish.tap()
+                XCTAssertTrue(app.staticTexts["Answered locally · nothing sent"].waitForExistence(timeout: 5),
+                              app.debugDescription)
+                let back = workspaceBackButton(in: app)
+                XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+                back.tap()
+                let clearSearch = workspaceSearchField(in: app).buttons["Clear text"]
+                if clearSearch.exists && clearSearch.isHittable { clearSearch.tap() }
+            }
 
             let tab = workspaceTab(title, in: app)
             XCTAssertTrue(tab.waitForExistence(timeout: 10), app.debugDescription)
@@ -114,15 +138,11 @@ final class InboxStockTabsUITests: XCTestCase {
 
             let list = app.collectionViews.firstMatch
             XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-            let firstRow = app.buttons.matching(
-                NSPredicate(format: "identifier BEGINSWITH %@", "request-row-")).firstMatch
-            if title == "Inbox" {
-                XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
-                XCTAssertTrue(firstRow.isHittable, app.debugDescription)
-            }
-            let refreshStart = firstRow.exists
-                ? firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
-                : list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
+            let rowID = title == "Inbox" ? "request-row-unknown-01" : "sample-approval-0"
+            let firstRow = app.descendants(matching: .any)[rowID]
+            XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(firstRow.isHittable, app.debugDescription)
+            let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
             refreshStart.press(forDuration: 0.05,
                                thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
