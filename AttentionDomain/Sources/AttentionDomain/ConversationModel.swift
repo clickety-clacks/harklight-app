@@ -756,6 +756,47 @@ struct ConversationState: Codable, Equatable {
         cursor = event.sequence
     }
 
+    /// Restores one receipt dependency without replaying older facts or moving
+    /// the cursor. The caller obtains the event from authenticated history.
+    mutating func restoreReferencedTurn(_ event: ConversationEvent,
+                                       for receipt: ConversationEvent) throws {
+        guard case let .delivered(target) = receipt.fact,
+              cursor < UInt64.max, receipt.sequence == cursor + 1,
+              event.sequence > 0, event.sequence <= cursor,
+              event.binding.request == receipt.binding.request,
+              case let .turn(turn) = event.fact,
+              turn.id == target, turn.binding == event.binding,
+              var thread = threads[receipt.binding.request] else {
+            throw ConversationError.conflict
+        }
+        // Recheck under the store's writer lock: recovery is only for the
+        // missing target, never a way around another receipt validation error.
+        do {
+            try applyThreadFact(receipt, to: &thread)
+            return
+        } catch let error as ConversationValidationRejectionError {
+            guard error.rejection.guardID == .referencedTurnExists else { throw error }
+        }
+        guard thread.revisionNumbers.contains(event.binding.revision),
+              turn.sessionHandle == thread.sessionHandle,
+              turn.kind == .discussion || turn.kind == .reply else {
+            throw ConversationError.conflict
+        }
+        if let retained = events[event.sequence], retained != event {
+            throw ConversationError.conflict
+        }
+        // Merge the turn only. Applying the whole historical fact could settle
+        // an original pending operation, which recovery must preserve.
+        var restored = turn
+        restored.conversationSequence = event.sequence
+        try thread.merge(restored, event: event)
+        let sequences = Dictionary(uniqueKeysWithValues: thread.turns.compactMap { turn in
+            turn.conversationSequence.map { (turn.id, $0) }
+        })
+        thread.orderTurns(using: sequences)
+        threads[receipt.binding.request] = thread
+    }
+
     /// Re-checks a redacted revision whose sequence was already durably
     /// accounted without retaining the rejected event. This is used only for
     /// the narrowly approved ACK-behind replay case; it never mutates this

@@ -2422,6 +2422,38 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return try conversation.redactedRevisionRejectionForAccountedRedelivery(event)
     }
 
+    /// Restores only a missing receipt target from authenticated conversation
+    /// history. The receipt is retried through normal application afterwards.
+    public func restoreReferencedConversationTurn(_ event: ConversationEvent,
+                                                 for receipt: ConversationEvent,
+                                                 context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        try validate(event.binding.request, in: context.identity)
+        try validate(receipt.binding.request, in: context.identity)
+        let event = try Self.externalizingConversationFiles(in: event,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        guard case let .turn(turn) = event.fact else { throw ConversationError.conflict }
+        try validateConversationFiles(turn.files)
+        var next = state
+        var conversation = next.conversation ?? ConversationState()
+        do {
+            try conversation.restoreReferencedTurn(event, for: receipt)
+        } catch is ConversationValidationRejectionError {
+            throw ConversationError.invalidBinding
+        }
+        guard conversation != next.conversation else { return }
+        next.conversation = conversation
+        try commit(next)
+    }
+
     /// The conversation cursor commits in the same account transaction as its fact.
     /// Neither it nor its ACK can advance ordinary delivery/lifecycle replay.
     @discardableResult

@@ -157,6 +157,64 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
+    func testMissingDiscussionRestorationPreservesAnsweredRowAndDurableCursor() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("recovery-person"), deviceID: ExactText("reader"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("answered-request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let handle = ExactText("session")
+        _ = store.applyRelayEvent(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: .null), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: handle,
+                eventID: ExactText("initial-question"))), context: context)
+        // Synthetic recovery precondition, not a claimed normal loss path:
+        // the local cursor passed a discussion whose turn and event are absent.
+        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+        let discussion = ConversationTurn(id: ExactText("discussion"), binding: binding,
+            author: .person, sessionHandle: handle, text: ExactText("Before answering"),
+            kind: .discussion, conversationSequence: 1)
+        let historical = ConversationEvent(sequence: 1, binding: binding, fact: .turn(discussion))
+        let receipt = ConversationEvent(sequence: 2, binding: binding,
+            fact: .delivered(turn: discussion.id))
+        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
+            conversation: RelayConversationMetadata(revision: 1,
+                eventID: ExactText("terminal"), author: .person),
+            accountAnswerOutcome: .noComment), context: context)
+        let draft = ConversationDraft(binding: binding, text: ExactText("Keep this draft"))
+        try store.saveConversationDraft(draft, context: context)
+        var rejection: ConversationValidationRejection?
+        XCTAssertThrowsError(try store.applyConversation(receipt, context: context,
+            validationRejection: &rejection))
+        XCTAssertEqual(rejection?.guardID, .referencedTurnExists)
+        persistence.failNextCommit()
+        XCTAssertThrowsError(try store.restoreReferencedConversationTurn(historical,
+            for: receipt, context: context))
+        XCTAssertFalse(try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
+            .turns.contains { $0.id == discussion.id })
+        try store.restoreReferencedConversationTurn(historical, for: receipt, context: context)
+        let repaired = try AttentionDomainStore(context: context, persistence: persistence)
+        XCTAssertEqual(try repaired.conversationSnapshot(context: context).cursor, 1)
+        // Restoration stores the target, not a new historical journal entry.
+        XCTAssertThrowsError(try repaired.applyConversation(historical, context: context))
+        try repaired.applyConversation(receipt, context: context)
+        let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+        let snapshot = try reloaded.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(snapshot.threads[key])
+        XCTAssertEqual(snapshot.cursor, 2)
+        XCTAssertEqual(thread.facts[discussion.id]?.delivered, true)
+        XCTAssertEqual(thread.drafts[1], draft)
+        XCTAssertEqual(thread.terminal, .answered)
+        XCTAssertEqual(try reloaded.snapshot(context: context).cursor, 2)
+        let presentation = try LivePresentationStore(store: reloaded, context: context)
+        XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: key)).belongsToReplied)
+        XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 1)
+    }
+
+    @MainActor
     func testPagedTerminalRecoversLiveAndHeldReceiptsWithCurrentRevision() throws {
         for receiptHeld in [false, true] {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
