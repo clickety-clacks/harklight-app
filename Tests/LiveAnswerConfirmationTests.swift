@@ -212,8 +212,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
         XCTAssertFalse(live.request(for: key)?.noCommentUnavailable ?? true,
                        "A newly queued attempt replaces the prior unsupported result in the current status.")
-        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
-                      "A retried No comment response moves to Replied while it is pending.")
+        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
+                       "The known delivery failure keeps the row in Inbox until the retry is accepted.")
     }
 
     func testAcceptedNoCommentIsFinalAndCannotBeResubmitted() throws {
