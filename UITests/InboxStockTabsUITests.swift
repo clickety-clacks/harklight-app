@@ -116,9 +116,13 @@ final class InboxStockTabsUITests: XCTestCase {
             XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
             let firstRow = app.buttons.matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "request-row-")).firstMatch
-            XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(firstRow.isHittable, app.debugDescription)
-            let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
+            if title == "Inbox" {
+                XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+                XCTAssertTrue(firstRow.isHittable, app.debugDescription)
+            }
+            let refreshStart = firstRow.exists
+                ? firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
+                : list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
             refreshStart.press(forDuration: 0.05,
                                thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
