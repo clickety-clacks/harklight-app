@@ -1048,10 +1048,21 @@ struct InboxList: View {
     }
 
     @ViewBuilder
+    private func applyingRefreshAction<Content: View>(to content: Content) -> some View {
+        if let refreshInbox {
+            content
+                .scrollBounceBehavior(.always, axes: .vertical)
+                .refreshable { await refreshInbox() }
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
-        List(selection: listSelection) {
+        applyingRefreshAction(to: List(selection: listSelection) {
             if tab == .inbox && showsBasicOrderMarker {
                 Text("Basic order")
                     .font(.caption.weight(.semibold))
@@ -1086,7 +1097,7 @@ struct InboxList: View {
                 ProgressView().frame(maxWidth: .infinity).padding()
                     .listRowSeparator(.hidden)
             }
-        }
+        })
         .listStyle(.plain)
         .animation(reduceMotion ? nil : .default, value: tabMembershipIDs)
         .scrollContentBackground(.hidden)
@@ -1176,15 +1187,8 @@ struct InboxList: View {
 
     @ViewBuilder
     private func renderedList(using proxy: ScrollViewProxy) -> some View {
-        if let refreshInbox {
-            listContent(for: tab, using: proxy)
-                .scrollBounceBehavior(.always, axes: .vertical)
-                .refreshable { await refreshInbox() }
-                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
-        } else {
-            listContent(for: tab, using: proxy)
-                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
-        }
+        listContent(for: tab, using: proxy)
+            .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
     }
 
     var body: some View {
