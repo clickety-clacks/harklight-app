@@ -750,20 +750,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 }
 
-private struct InboxRefreshActionProbe: View {
-    @Environment(\.refresh) private var refreshAction
-
-    var body: some View {
-        Text("refresh=\(refreshAction != nil)")
-            .font(.system(size: 1))
-            .foregroundStyle(.clear)
-            .frame(width: 1, height: 1)
-            .clipped()
-            .allowsHitTesting(false)
-            .accessibilityIdentifier("inbox-refresh-action-environment")
-    }
-}
-
 @MainActor
 struct InboxList: View {
     let tab: InboxWorkspaceTab
@@ -802,6 +788,22 @@ struct InboxList: View {
     private var designPalette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
     }
+
+#if DEBUG
+    private struct RefreshActionProbe: View {
+        @Environment(\.refresh) private var refreshAction
+
+        var body: some View {
+            Text("refresh=\(refreshAction != nil)")
+                .font(.system(size: 1))
+                .foregroundStyle(.clear)
+                .frame(width: 1, height: 1)
+                .clipped()
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("inbox-refresh-action-environment")
+        }
+    }
+#endif
 
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
         InboxListProjection.filteredRows(rows, in: tab, search: search)
@@ -1066,11 +1068,13 @@ struct InboxList: View {
                              using proxy: ScrollViewProxy) -> some View {
         let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
         List(selection: listSelection) {
-            if UIDiagnostics.shared.enabled {
-                InboxRefreshActionProbe()
+#if DEBUG
+            if refreshInbox != nil {
+                RefreshActionProbe()
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
             }
+#endif
             if tab == .inbox && showsBasicOrderMarker {
                 Text("Basic order")
                     .font(.caption.weight(.semibold))
@@ -1179,26 +1183,36 @@ struct InboxList: View {
             if isUserScrolling != scrolling { isUserScrolling = scrolling }
             if oldPhase == .interacting && !scrolling { requestedInGesture = false }
         }
+        .simultaneousGesture(DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                guard value.translation.height < -12 else { return }
+                if !isUserScrolling { isUserScrolling = true }
+                if canRequestOlderPageOnDrag {
+                    requestOlderPage()
+                }
+            }
+            .onEnded { _ in
+                isUserScrolling = false
+                requestedInGesture = false
+            })
     }
 
     @ViewBuilder
     private func renderedList(using proxy: ScrollViewProxy) -> some View {
-        listContent(for: tab, using: proxy)
-            .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+        if let refreshInbox {
+            listContent(for: tab, using: proxy)
+                .scrollBounceBehavior(.always, axes: .vertical)
+                .refreshable { await refreshInbox() }
+                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+        } else {
+            listContent(for: tab, using: proxy)
+                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+        }
     }
 
-    @ViewBuilder
     var body: some View {
-        if let refreshInbox {
-            ScrollViewReader { proxy in
-                renderedList(using: proxy)
-            }
-            .scrollBounceBehavior(.always, axes: .vertical)
-            .refreshable { await refreshInbox() }
-        } else {
-            ScrollViewReader { proxy in
-                renderedList(using: proxy)
-            }
+        ScrollViewReader { proxy in
+            renderedList(using: proxy)
         }
     }
 }

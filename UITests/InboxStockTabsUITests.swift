@@ -122,10 +122,14 @@ final class InboxStockTabsUITests: XCTestCase {
                 NSPredicate(format: "identifier == %@ AND label CONTAINS %@",
                             "inbox-list-diagnostics", "refreshAvailable=true")).firstMatch
             XCTAssertTrue(listDiagnostics.waitForExistence(timeout: 5), app.debugDescription)
-            let refreshAction = app.descendants(matching: .any)["inbox-refresh-action-environment"]
-            XCTAssertTrue(refreshAction.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertEqual(refreshAction.label, "refresh=true")
-            list.swipeDown()
+            let refreshEnvironment = app.descendants(matching: .any)[
+                "inbox-refresh-action-environment"]
+            XCTAssertTrue(refreshEnvironment.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(refreshEnvironment.label, "refresh=true")
+            let refreshStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+            refreshStart.press(forDuration: 0.05,
+                               thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 260)),
+                               withVelocity: .slow, thenHoldForDuration: 0.3)
 
             let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
             XCTAssertTrue(refreshing.waitForExistence(timeout: 5),
