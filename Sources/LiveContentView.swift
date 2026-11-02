@@ -750,12 +750,19 @@ struct LiveRequestDetail: View {
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
-    @State private var failedResponsePresented = false
+    @State private var warningDialog: WarningDialogKind?
     @State private var activeReplyEditor: ReplyEditorTarget?
     @State private var replyDraftSession: ReplyEditorDraftSession?
     @State private var localReplyEditingActive = false
     @State private var storePresentationSnapshot: StorePresentationSnapshot
     @FocusState private var focusedReplyActionID: String?
+
+    private enum WarningDialogKind: String, Equatable, Identifiable {
+        case failedResponse
+        case skippedMessage
+
+        var id: String { rawValue }
+    }
 
     init(request: PresentedRequest,
          store: LivePresentationStore,
@@ -814,6 +821,11 @@ struct LiveRequestDetail: View {
         guard localExample == nil, fixtureStore == nil,
               request.informationalSeenStatus == nil else { return nil }
         return store.failedResponseWarning(for: request.key, revision: request.requestRevision)
+    }
+
+    private var skippedMessageWarning: LivePresentationStore.SkippedMessageWarning? {
+        guard localExample == nil, fixtureStore == nil else { return nil }
+        return store.skippedMessageWarning(for: request.key)
     }
 
     private static func canEditSnapshot(request: PresentedRequest,
@@ -1140,7 +1152,7 @@ struct LiveRequestDetail: View {
 
     private var failedResponseWarningButton: some View {
         Button {
-            failedResponsePresented = true
+            warningDialog = .failedResponse
         } label: {
             Image(systemName: "exclamationmark.triangle.fill")
         }
@@ -1149,6 +1161,19 @@ struct LiveRequestDetail: View {
         .accessibilityLabel("Response not delivered")
         .accessibilityHint("View the delivery details and retry the same response")
         .accessibilityIdentifier("request-delivery-warning")
+    }
+
+    private var skippedMessageWarningButton: some View {
+        Button {
+            warningDialog = .skippedMessage
+        } label: {
+            Image(systemName: "exclamationmark.triangle.fill")
+        }
+        .labelStyle(.iconOnly)
+        .tint(.red)
+        .accessibilityLabel("Message could not be loaded and was skipped")
+        .accessibilityHint("View the safe diagnostic details")
+        .accessibilityIdentifier("request-message-load-warning")
     }
 
     private var noCommentSelected: Bool {
@@ -1505,6 +1530,11 @@ struct LiveRequestDetail: View {
             .tint(detailColors.textColor)
         }
         .toolbar {
+            if skippedMessageWarning != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    skippedMessageWarningButton
+                }
+            }
             if !isSupersedesReadOnly {
                 ToolbarItemGroup(placement: .bottomBar) {
                     Spacer()
@@ -1547,12 +1577,28 @@ struct LiveRequestDetail: View {
         .sheet(isPresented: $requestDetailsPresented) {
             requestDetailsSheet
         }
-        .sheet(isPresented: $failedResponsePresented) {
-            if let warning = failedResponseWarning {
-                FailedResponseDialog(warning: warning,
-                    canRetry: store.canRetryFailedResponse(for: request.key),
-                    onRetry: { _ = store.retryFailedResponse(for: request.key) },
-                    onCopy: { UIPasteboard.general.string = $0 })
+        .sheet(item: $warningDialog) { dialogKind in
+            switch dialogKind {
+            case .failedResponse:
+                if let warning = failedResponseWarning {
+                    FailedResponseDialog(title: "Response delivery",
+                        summary: warning.summary,
+                        detail: .localized(warning.detail),
+                        canRetry: store.canRetryFailedResponse(for: request.key),
+                        onRetry: { _ = store.retryFailedResponse(for: request.key) },
+                        onCopy: { UIPasteboard.general.string = $0 })
+                }
+            case .skippedMessage:
+                if let warning = skippedMessageWarning {
+                    FailedResponseDialog(title: "Message not loaded",
+                        summary: "The message could not be loaded and was skipped.",
+                        detail: .plain(store.skippedMessageDiagnosticText(for: warning) ??
+                            "The safe diagnostic details are no longer retained."),
+                        accessibilityPrefix: "message-load-warning",
+                        canRetry: false,
+                        onRetry: nil,
+                        onCopy: { UIPasteboard.general.string = $0 })
+                }
             }
         }
         .sheet(isPresented: $chatPresented) {
@@ -1566,8 +1612,13 @@ struct LiveRequestDetail: View {
             refreshUneditedReplySession()
         }
         .onChange(of: failedResponseWarning) { previous, current in
-            if previous != nil, current == nil {
-                failedResponsePresented = false
+            if previous != nil, current == nil, warningDialog == .failedResponse {
+                warningDialog = nil
+            }
+        }
+        .onChange(of: skippedMessageWarning) { previous, current in
+            if previous != nil, current == nil, warningDialog == .skippedMessage {
+                warningDialog = nil
             }
         }
         .onChange(of: store.conversationThreads) { _, _ in
@@ -2539,36 +2590,53 @@ struct FailedResponseDialogCopyContent: Equatable {
 }
 
 private struct FailedResponseDialog: View {
-    let warning: LivePresentationStore.FailedResponseWarning
+    enum Detail {
+        case localized(LocalizedStringResource)
+        case plain(String)
+    }
+
+    let title: LocalizedStringResource
+    let summary: LocalizedStringResource
+    let detail: Detail
+    var accessibilityPrefix = "failed-response"
     let canRetry: Bool
-    let onRetry: () -> Void
+    let onRetry: (() -> Void)?
     let onCopy: (String) -> Void
     @Environment(\.locale) private var locale
 
     private var copyContent: FailedResponseDialogCopyContent {
-        var summary = warning.summary
-        summary.locale = locale
-        var detail = warning.detail
-        detail.locale = locale
+        var localizedSummary = summary
+        localizedSummary.locale = locale
+        let detailText: String
+        switch detail {
+        case let .localized(resource):
+            var localizedResource = resource
+            localizedResource.locale = locale
+            detailText = String(localized: localizedResource)
+        case let .plain(text):
+            detailText = text
+        }
         return FailedResponseDialogCopyContent(
-            summary: String(localized: summary),
-            detail: String(localized: detail))
+            summary: String(localized: localizedSummary),
+            detail: detailText)
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 16) {
-                Text("Response delivery")
+                Text(title)
                     .font(.headline)
-                    .accessibilityIdentifier("failed-response-title")
+                    .accessibilityIdentifier("\(accessibilityPrefix)-title")
                 Spacer(minLength: 8)
                 Button("Copy") { copyContent.copy(using: onCopy) }
                     .buttonStyle(.bordered)
-                    .accessibilityIdentifier(FailedResponseDialogCopyContent.buttonAccessibilityIdentifier)
-                Button("Retry", action: onRetry)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canRetry)
-                    .accessibilityIdentifier("failed-response-retry")
+                    .accessibilityIdentifier("\(accessibilityPrefix)-copy")
+                if let onRetry {
+                    Button("Retry", action: onRetry)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canRetry)
+                        .accessibilityIdentifier("failed-response-retry")
+                }
             }
             .padding()
             Divider().accessibilityHidden(true)
@@ -2578,7 +2646,7 @@ private struct FailedResponseDialog: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal)
                 .padding(.top, 16)
-                .accessibilityIdentifier("failed-response-summary")
+                .accessibilityIdentifier("\(accessibilityPrefix)-summary")
             ScrollView {
                 Text(copyContent.detail)
                     .font(.body)
@@ -2586,9 +2654,9 @@ private struct FailedResponseDialog: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
-                    .accessibilityIdentifier("failed-response-detail")
+                    .accessibilityIdentifier("\(accessibilityPrefix)-detail")
             }
-            .accessibilityIdentifier("failed-response-detail-scroll")
+            .accessibilityIdentifier("\(accessibilityPrefix)-detail-scroll")
         }
         .frame(minWidth: 280, minHeight: 260)
         .presentationDetents([.medium, .large])
