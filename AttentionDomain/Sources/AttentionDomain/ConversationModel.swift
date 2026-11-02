@@ -767,7 +767,6 @@ struct ConversationState: Codable, Equatable {
               event.binding.revision > 0,
               case let .redactedRevision(turn) = event.fact,
               turn.binding == event.binding, !turn.id.rawValue.isEmpty,
-              turn.contentRedacted == true,
               let existingThread = threads[event.binding.request],
               turn.sessionHandle == existingThread.sessionHandle else { return nil }
 

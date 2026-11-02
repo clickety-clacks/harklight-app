@@ -215,6 +215,91 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
+    func testMissingContentRedactedBitIsRecognizedForAccountedRedelivery() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("freshness-missing-redaction"), deviceID: ExactText("reader"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let firstPayload = try JSONValue.parse(data(#"{"title":"First wording"}"#))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: firstPayload), .message)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("handle"), payload: firstPayload)), context: context)
+
+        let binding = ConversationBinding(request: key, revision: 2)
+        let turn = ConversationTurn(id: ExactText("missing-content-redacted"),
+            binding: binding, author: .origin, sessionHandle: ExactText("handle"),
+            text: ExactText(""), contentRedacted: nil, kind: .revision)
+        let event = ConversationEvent(sequence: 2, binding: binding, fact: .redactedRevision(turn))
+        var firstPassRejection: ConversationValidationRejection?
+        XCTAssertThrowsError(try store.applyConversation(event, context: context,
+            validationRejection: &firstPassRejection)) {
+            XCTAssertEqual($0 as? ConversationError, .invalidBinding)
+        }
+        let firstRejection = try XCTUnwrap(firstPassRejection)
+        XCTAssertEqual(firstRejection.guardID, .redactedRevisionBinding)
+        XCTAssertEqual(firstRejection.facts.sessionHandleMatchesThread, true)
+        XCTAssertEqual(firstRejection.facts.contentRedactedPresent, false)
+        XCTAssertEqual(firstRejection.facts.contentRedactedIsTrue, false)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+
+        // Cursor advancement is the durable accounting for the rejected sequence.
+        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 2, context: context)
+        let replayRejection = try XCTUnwrap(
+            try store.redactedRevisionRejectionForAccountedRedelivery(event, context: context))
+        XCTAssertEqual(replayRejection, firstRejection,
+                       "ACK-behind replay recognizes the same guard without requiring contentRedacted==true.")
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+    }
+
+    @MainActor
+    func testRedactedRevisionSessionHandleMismatchIsFatalBeforeCursorAccounting() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("freshness-handle-mismatch"), deviceID: ExactText("reader"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+
+        let session = InboxFreshnessRelaySession(identity: identity)
+        session.ordinaryFrames = [
+            data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"First wording"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
+            data(#"{"v":1,"type":"resynced","seq":1}"#)
+        ]
+        session.conversationFrames = [
+            data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"other-handle","request_revision":2,"kind":"revision","author":"origin","event_id":"wrong-session-handle"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)
+        ]
+
+        let diagnostics = InboxFreshnessDiagnosticCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: { diagnostics.append($0) })
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("A redacted revision with a mismatched session handle must remain fatal.")
+        } catch {
+            let failure = try XCTUnwrap(diagnostics.events.first {
+                $0.area == .conversation && $0.phase == .conversationReplay &&
+                    $0.transition == .failed && $0.conversationValidationRejection != nil
+            })
+            let rejection = try XCTUnwrap(failure.conversationValidationRejection)
+            XCTAssertEqual(rejection.guardID, .redactedRevisionBinding)
+            XCTAssertEqual(rejection.facts.sessionHandleMatchesThread, false)
+        }
+
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0,
+                       "A handle association mismatch is not accounted by cursor advancement.")
+        XCTAssertTrue(session.conversationACKs.isEmpty,
+                      "A failed fresh association check cannot ACK the replay barrier.")
+        await core.deactivate()
+    }
+
+    @MainActor
     func testRequestAndRedactedRevisionForwardJumpsPreserveRedactedProjection() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-advance"), deviceID: ExactText("reader"))

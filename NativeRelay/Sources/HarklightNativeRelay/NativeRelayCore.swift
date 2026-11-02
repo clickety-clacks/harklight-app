@@ -1586,6 +1586,7 @@ public actor NativeRelayCore {
                     if let validationRejection {
                         guard validationRejection.guardID == .redactedRevisionBinding,
                               validationRejection.eventKind == .revision,
+                              validationRejection.facts.sessionHandleMatchesThread == true,
                               case .redactedRevision = event.fact else {
                             throw ConversationReplayValidationFailure(rejection: validationRejection)
                         }
