@@ -1624,7 +1624,7 @@ final class LivePresentationStore {
 
     var inboxRows: [InboxRequestRow] {
         let skippedMessageRequestTags = completedSkippedMessageRequestTags
-        presentation.requests
+        return presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
             .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
     }
