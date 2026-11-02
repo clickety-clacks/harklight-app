@@ -135,6 +135,10 @@ public actor NativeRelayCore {
     // A core owns one authenticated connection; a new connection probes again.
     public private(set) var conversationsUnavailable = false
     private var conversationReplay: ConversationReplayProgress?
+    // A failed receipt must not refetch full history on every later replay on
+    // this connection. Keep attempts for the core's lifetime, without storing
+    // rejection records or changing the durable conversation cursor.
+    private var conversationRecoveryAttempts: Set<UInt64> = []
     private var liveConversationConsumerTask: Task<Void, Never>?
     private var pendingLiveConversationReplay = false
     private var conversationReadPositionSupportForSession = false
@@ -327,7 +331,6 @@ public actor NativeRelayCore {
         let durableCursor: UInt64
         var accepted = false
         var high: UInt64?
-        var recoveryAttempts: Set<UInt64> = []
         var recoveryReceipt: ConversationEvent?
         var recoveryRejection: ConversationValidationRejection?
         var recoveryOrigin: ExactText?
@@ -1529,11 +1532,9 @@ public actor NativeRelayCore {
         try validate()
         defer { conversationReplay = nil }
         var since = cursor
-        var attempts: Set<UInt64> = []
         while true {
             conversationReplay = ConversationReplayProgress(expected: since,
-                durableCursor: try store.conversationSnapshot(context: context).cursor,
-                recoveryAttempts: attempts)
+                durableCursor: try store.conversationSnapshot(context: context).cursor)
             try await transport.openConversation(wire.open(since: since)) { frame in
                 try await self.consumeConversationReplay(frame)
             }
@@ -1546,7 +1547,7 @@ public actor NativeRelayCore {
             }
             // The first response is fully drained, but the failed receipt and
             // its suffix have not advanced the store or been acknowledged.
-            attempts.insert(receipt.sequence)
+            conversationRecoveryAttempts.insert(receipt.sequence)
             conversationReplay = ConversationReplayProgress(expected: 0,
                 durableCursor: try store.conversationSnapshot(context: context).cursor,
                 recoveryReceipt: receipt, recoveryRejection: rejection,
@@ -1652,7 +1653,7 @@ public actor NativeRelayCore {
                         if validationRejection.guardID == .referencedTurnExists,
                            validationRejection.eventKind == .receipt,
                            case .delivered = event.fact,
-                           !replay.recoveryAttempts.contains(event.sequence) {
+                           !conversationRecoveryAttempts.contains(event.sequence) {
                             let value = try JSONValue.parse(frame)
                             guard let origin = value.uniqueValue(named: "origin")?.stringValue,
                                   let handle = value.uniqueValue(named: "session_handle")?.stringValue else {

@@ -224,6 +224,14 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 XCTAssertEqual(session.conversationOpens.count, 2,
                     "Only one history attempt follows this receipt failure")
                 XCTAssertTrue(session.conversationACKs.isEmpty)
+                do {
+                    _ = try await core.resyncAndDrainOutbox()
+                    XCTFail("The same unrecoverable receipt must remain fatal on a later replay")
+                } catch { }
+                XCTAssertEqual(try session.conversationOpens.map {
+                    try JSONValue.parse($0).uniqueValue(named: "since")?.integerValue
+                }, [1, 0, 1], "A later replay must not fetch full history for this failure again")
+                XCTAssertTrue(session.conversationACKs.isEmpty)
             }
             let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
             let snapshot = try reloaded.conversationSnapshot(context: context)
