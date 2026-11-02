@@ -1238,12 +1238,34 @@ struct LiveRequestDetail: View {
                         ForEach(request.supersedesMessageIDs, id: \.self) { messageID in
                             let targetKey = RequestKey(accountScope: request.key.accountScope,
                                 senderID: request.key.senderID, messageID: messageID)
-                            NavigationLink(value: SupersedesTarget(key: targetKey)) {
+                            NavigationLink(value: RelatedMessageTarget.supersedes(targetKey)) {
                                 Text(messageID.rawValue)
                                     .font(.subheadline)
                                     .textSelection(.enabled)
                             }
                             .accessibilityIdentifier("request-supersedes-" + messageID.rawValue)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if !request.supersededByMessageKeys.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Replaced by")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(detailColors.secondaryTextColor)
+                        ForEach(request.supersededByMessageKeys.sorted {
+                            if $0.senderID.rawValue != $1.senderID.rawValue {
+                                return $0.senderID.rawValue < $1.senderID.rawValue
+                            }
+                            return $0.messageID.rawValue < $1.messageID.rawValue
+                        }, id: \.self) { replacementKey in
+                            NavigationLink(value: RelatedMessageTarget.replacement(replacementKey)) {
+                                Text(replacementKey.messageID.rawValue)
+                                    .font(.subheadline)
+                                    .textSelection(.enabled)
+                            }
+                            .accessibilityIdentifier("request-replaced-by-" +
+                                replacementKey.messageID.rawValue)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)

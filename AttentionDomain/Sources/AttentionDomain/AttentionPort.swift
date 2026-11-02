@@ -343,6 +343,8 @@ public struct PresentedRequest: Equatable, Sendable {
     /// Message IDs listed on the original delivery, if any. Later revisions
     /// cannot add or replace superseded targets.
     public let supersedesMessageIDs: [ExactText]
+    /// Locally received identities of accepted messages that replaced this one.
+    public let supersededByMessageKeys: [RequestKey]
 
     public var isResolved: Bool {
         lifecycleStatus != .open && lifecycleStatus != .pending
@@ -381,7 +383,8 @@ public struct PresentedRequest: Equatable, Sendable {
                 answerNotDelivered: Bool = false,
                 staleAnswerRevision: StaleAnswerRevision? = nil,
                 inboxStateIsCurrent: Bool = true,
-                supersedesMessageIDs: [ExactText] = []) {
+                supersedesMessageIDs: [ExactText] = [],
+                supersededByMessageKeys: [RequestKey] = []) {
         self.key = key
         self.senderDisplayName = senderDisplayName
         self.requestRevision = requestRevision
@@ -416,6 +419,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.staleAnswerRevision = staleAnswerRevision
         self.inboxStateIsCurrent = inboxStateIsCurrent
         self.supersedesMessageIDs = supersedesMessageIDs
+        self.supersededByMessageKeys = supersededByMessageKeys
     }
 
     public var defaultAnswerActionID: ExactText? { defaultAnswerAction?.actionID }
@@ -527,6 +531,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         return try present(StoredRequest(key: key, originalPayload: payload), acceptanceOrder: stored.acceptanceOrder ?? 0,
             draft: draft, deliveredFiles: deliveredFiles, session: nil, remote: nil, submission: nil, selector: nil,
             requestRevision: revision, supersedesMessageIDs: stored.supersedesMessageIDs,
+            supersededByMessageKeys: snapshot.remoteStates[key]?.supersededByMessageKeys ?? [],
             currentRevisionByWhenMilliseconds: currentRequest.byWhenMilliseconds,
             inboxViewEntry: inboxViewEntry)
     }
@@ -956,6 +961,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                             $0.contains(item.request.key)
                         } ?? true,
                         supersedesMessageIDs: item.request.supersedesMessageIDs,
+                        supersededByMessageKeys: snapshot.remoteStates[item.request.key]?.supersededByMessageKeys ?? [],
                         currentRevisionByWhenMilliseconds: currentRevisionRequest.byWhenMilliseconds,
                         defaultAnswerAction: presentedRevision == conversationRevision
                             ? Self.defaultAnswerAction(for: snapshot.remoteStates[item.request.key]?.accountAnswerOutcome,
@@ -1092,6 +1098,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          answerNotDelivered: Bool = false,
                          inboxStateIsCurrent: Bool = true,
                          supersedesMessageIDs: [ExactText] = [],
+                         supersededByMessageKeys: [RequestKey] = [],
                          currentRevisionByWhenMilliseconds: Int? = nil,
                          defaultAnswerAction: ProjectedActionReference? = nil,
                          inboxViewEntry: InboxViewEntry? = nil) throws -> PresentedRequest {
@@ -1267,7 +1274,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 answerNotDelivered: hasAccountTerminal ? false : answerNotDelivered,
                                 staleAnswerRevision: hasAccountTerminal ? nil : staleAnswerRevision,
                                 inboxStateIsCurrent: inboxStateIsCurrent,
-                                supersedesMessageIDs: supersedesMessageIDs)
+                                supersedesMessageIDs: supersedesMessageIDs,
+                                supersededByMessageKeys: supersededByMessageKeys)
     }
 
     private func submittedAnswer(for submission: Submission?,

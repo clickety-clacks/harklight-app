@@ -45,11 +45,12 @@ final class SupersedesPresentationTests: XCTestCase {
             senderID: ExactText("agent"), messageID: ExactText("old"))
         let replacement = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("agent"), messageID: ExactText("new"))
-        let payload = try JSONValue.parse(Data(#"{"title":"Message","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
+        let targetPayload = try JSONValue.parse(Data(#"{"title":"Message","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
+        let replacementPayload = try JSONValue.parse(Data(#"{"title":"Replacement","supersedes":["old"],"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
         try domain.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: target, originalPayload: payload), .message)), context: context)
+            body: .delivery(StoredRequest(key: target, originalPayload: targetPayload), .message)), context: context)
         try domain.apply(RelayEvent(sequence: 2,
-            body: .delivery(StoredRequest(key: replacement, originalPayload: payload), .message)), context: context)
+            body: .delivery(StoredRequest(key: replacement, originalPayload: replacementPayload), .message)), context: context)
         try domain.apply(RelayEvent(sequence: 3,
             body: .terminal(target, .superseded, nil)), context: context)
 
@@ -57,6 +58,114 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(model.inboxRows.map(\.key), [replacement])
         XCTAssertFalse(model.resolvedRequests.contains { $0.key == target })
         XCTAssertEqual(model.request(for: target)?.lifecycleStatus, .superseded)
+        XCTAssertEqual(model.request(for: target)?.supersededByMessageKeys, [replacement])
+        XCTAssertEqual(model.request(for: replacement)?.supersedesMessageIDs.map(\.rawValue), ["old"])
+    }
+
+    func testSupersededTargetKeepsEveryReplacementIdentity() throws {
+        let context = profile()
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        func key(_ message: String) -> RequestKey {
+            RequestKey(accountScope: context.identity.personID,
+                       senderID: ExactText("agent"), messageID: ExactText(message))
+        }
+        func payload(_ title: String, supersedes: String? = nil) throws -> JSONValue {
+            var members = [JSONMember("title", .string(ExactText(title)))]
+            if let supersedes {
+                members.append(JSONMember("supersedes", .array([.string(ExactText(supersedes))])))
+            }
+            return .object(members)
+        }
+
+        let target = key("old")
+        let firstReplacement = key("replacement-one")
+        let secondReplacement = key("replacement-two")
+        try store.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: target, originalPayload: try payload("Old")), .message)),
+            context: context)
+        try store.apply(RelayEvent(sequence: 2, body: .delivery(
+            StoredRequest(key: firstReplacement,
+                originalPayload: try payload("Replacement one", supersedes: "old")), .message)),
+            context: context)
+        try store.apply(RelayEvent(sequence: 3, body: .terminal(target, .superseded, nil)),
+            context: context)
+        try store.apply(RelayEvent(sequence: 4, body: .delivery(
+            StoredRequest(key: secondReplacement,
+                originalPayload: try payload("Replacement two", supersedes: "old")), .message)),
+            context: context)
+        try store.apply(RelayEvent(sequence: 5, body: .terminal(target, .superseded, nil)),
+            context: context)
+
+        let live = try LivePresentationStore(store: store, context: context)
+        XCTAssertEqual(live.request(for: target)?.supersededByMessageKeys,
+                       [firstReplacement, secondReplacement])
+        XCTAssertEqual(live.request(for: target)?.lifecycleStatus, .superseded)
+    }
+
+    func testReplacementIdentityRemainsNavigableBeforeItsContentLoads() throws {
+        let context = profile()
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        let target = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("old"))
+        let replacement = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("new"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Message"}"#.utf8))
+        _ = store.applyRelayEvent(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: target, originalPayload: payload), .message)),
+            context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .originReference(replacement)),
+            context: context)
+        _ = store.applyRelayEvent(RelayEvent(sequence: 3,
+            body: .terminal(target, .superseded, nil)), context: context)
+
+        let live = try LivePresentationStore(store: store, context: context)
+        XCTAssertNil(live.request(for: replacement), "Replacement content has not loaded on this phone.")
+        XCTAssertEqual(live.request(for: target)?.supersededByMessageKeys, [replacement],
+                       "The accepted replacement identity remains available for a graceful destination.")
+    }
+
+    func testLoadingOlderAccountStateBackfillsReplacementIdentity() throws {
+        let context = profile()
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let target = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("old"))
+        let replacement = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("new"))
+        let targetPayload = try JSONValue.parse(Data(#"{"title":"Message"}"#.utf8))
+        let replacementPayload = try JSONValue.parse(Data(#"{"title":"Replacement","supersedes":["old"]}"#.utf8))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: target, originalPayload: targetPayload), .message)),
+            context: context)
+        try store.apply(RelayEvent(sequence: 2,
+            body: .delivery(StoredRequest(key: replacement, originalPayload: replacementPayload), .message)),
+            context: context)
+        try store.apply(RelayEvent(sequence: 3,
+            body: .terminal(target, .superseded, nil)), context: context)
+
+        let encoded = try XCTUnwrap(persistence.load(identity: context.identity))
+        let propertyList = try PropertyListSerialization.propertyList(from: encoded,
+            options: [], format: nil)
+        func removingReplacementField(_ value: Any) -> Any {
+            if var dictionary = value as? [String: Any] {
+                dictionary.removeValue(forKey: "supersededByMessageKeys")
+                return dictionary.mapValues(removingReplacementField)
+            }
+            if let array = value as? [Any] {
+                return array.map(removingReplacementField)
+            }
+            return value
+        }
+        let olderAccountState = removingReplacementField(propertyList)
+        let olderEncoding = try PropertyListSerialization.data(fromPropertyList: olderAccountState,
+            format: .binary, options: 0)
+        try persistence.commit(olderEncoding, identity: context.identity)
+
+        let restoredStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try LivePresentationStore(store: restoredStore, context: context)
+        XCTAssertEqual(restored.request(for: target)?.supersededByMessageKeys, [replacement])
     }
 
     func testCrossIDSupersedesKeepsTheTargetSlotAndThreadAcrossAChain() throws {
@@ -104,6 +213,7 @@ final class SupersedesPresentationTests: XCTestCase {
         try store.apply(RelayEvent(sequence: 5, body: .terminal(target, .superseded, nil)), context: context)
         let live = try LivePresentationStore(store: store, context: context)
         let firstReplacement = try XCTUnwrap(live.request(for: replacementOne))
+        XCTAssertEqual(live.request(for: target)?.supersededByMessageKeys, [replacementOne])
         XCTAssertEqual(firstReplacement.inboxPriority, .high)
         XCTAssertEqual(firstReplacement.inboxThread, ExactText("release"))
         XCTAssertEqual(firstReplacement.inboxDueAtMilliseconds, 4000,
@@ -124,6 +234,7 @@ final class SupersedesPresentationTests: XCTestCase {
         try live.refreshFromDurableStore()
 
         let secondReplacement = try XCTUnwrap(live.request(for: replacementTwo))
+        XCTAssertEqual(live.request(for: replacementOne)?.supersededByMessageKeys, [replacementTwo])
         XCTAssertEqual(secondReplacement.inboxPriority, .high)
         XCTAssertEqual(secondReplacement.inboxThread, ExactText("release"))
         XCTAssertEqual(secondReplacement.inboxDueAtMilliseconds, 5000)
@@ -223,5 +334,46 @@ final class SupersedesPresentationTests: XCTestCase {
         let live = try LivePresentationStore(store: store, context: context)
         XCTAssertEqual(try XCTUnwrap(live.request(for: replacement)).inboxPriority, .high)
         XCTAssertEqual(try XCTUnwrap(live.request(for: replacement)).inboxThread, ExactText("release"))
+        XCTAssertEqual(live.request(for: target)?.supersededByMessageKeys, [replacement],
+                       "A paged target also retains its forward replacement link.")
+    }
+
+    func testPageBackfillsEveryReplacementLoadedAfterTargetTerminal() throws {
+        let context = profile()
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        func key(_ message: String) -> RequestKey {
+            RequestKey(accountScope: context.identity.personID,
+                       senderID: ExactText("agent"), messageID: ExactText(message))
+        }
+        func payload(_ title: String, supersedes: String? = nil) throws -> JSONValue {
+            var members = [JSONMember("title", .string(ExactText(title)))]
+            if let supersedes {
+                members.append(JSONMember("supersedes", .array([.string(ExactText(supersedes))])))
+            }
+            return .object(members)
+        }
+
+        let target = key("target")
+        let first = key("replacement-one")
+        let second = key("replacement-two")
+        _ = try store.beginInboxCandidate(startupID: "snapshot", since: 0,
+                                          batches: [], context: context)
+        try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 5,
+            items: [
+                InboxSnapshotItem(acceptance: RelayEvent(sequence: 1, body: .delivery(
+                    StoredRequest(key: target, originalPayload: try payload("Target")), .message)),
+                    terminal: RelayEvent(sequence: 5, body: .terminal(target, .superseded, nil))),
+                InboxSnapshotItem(acceptance: RelayEvent(sequence: 2, body: .delivery(
+                    StoredRequest(key: first, originalPayload: try payload("First", supersedes: "target")),
+                    .message))),
+                InboxSnapshotItem(acceptance: RelayEvent(sequence: 4, body: .delivery(
+                    StoredRequest(key: second, originalPayload: try payload("Second", supersedes: "target")),
+                    .message)))
+            ], nextCursor: nil, receiptCursor: nil, context: context)
+
+        let live = try LivePresentationStore(store: store, context: context)
+        XCTAssertEqual(live.request(for: target)?.supersededByMessageKeys, [first, second],
+                       "A page without full event history retains all accepted replacements.")
     }
 }
