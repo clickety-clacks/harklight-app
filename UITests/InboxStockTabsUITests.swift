@@ -117,9 +117,10 @@ final class InboxStockTabsUITests: XCTestCase {
             let firstRow = app.buttons.matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "request-row-")).firstMatch
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
-            let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            XCTAssertTrue(firstRow.isHittable, app.debugDescription)
+            let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
             refreshStart.press(forDuration: 0.05,
-                               thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 250)),
+                               thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
 
             let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
