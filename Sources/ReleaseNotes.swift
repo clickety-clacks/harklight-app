@@ -54,6 +54,24 @@ enum HarklightReleaseNotes {
     /// Keep each update's identifier stable so it appears once for people who already use the app.
     static let updateEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
+            historyIdentifier: "chat-row-activity",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource(
+                "Chat activity in the Inbox",
+                comment: "Release-note heading for message-row Chat activity."),
+            visibleFromBuildIdentifier: 79,
+            highlights: [
+                .init(
+                    id: "chat-row-activity",
+                    symbol: "bubble.left.and.bubble.right.fill",
+                    title: LocalizedStringResource(
+                        "See when Chat needs attention",
+                        comment: "Release-note title for the Inbox Chat activity marker."),
+                    detail: LocalizedStringResource(
+                        "A Chat icon appears after a conversation starts. It fills for an unseen agent reply, even on a closed request, and returns to an outline after you view Chat.",
+                        comment: "Release-note detail for started, unread, and read Chat markers."))
+            ]),
+        HarklightReleaseNote(
             historyIdentifier: "example-messages-removed",
             marketingVersion: "0.1.0",
             historyDateDescription: LocalizedStringResource(

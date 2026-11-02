@@ -1270,6 +1270,19 @@ final class LivePresentationStore {
         conversationThreads[key]?.hasUnreadAgentReply == true
     }
 
+    private func listChatUnread(_ key: RequestKey) -> Bool? {
+        guard let thread = conversationThreads[key],
+              thread.turns.contains(where: { turn in
+                  switch turn.kind {
+                  case .none, .some(.discussion), .some(.reply):
+                      return true // Older chat turns have no kind.
+                  case .some(.revision), .some(.result), .some(.terminal):
+                      return false
+                  }
+              }) else { return nil }
+        return thread.hasUnreadAgentReply
+    }
+
     /// Chat calls this while it is on screen. The mark is durable, so a reply
     /// replayed after a relaunch or background wake stays unread until shown.
     func markConversationRead(_ key: RequestKey) {
@@ -1634,7 +1647,7 @@ final class LivePresentationStore {
             status: statusParts.joined(separator: " · "),
             senderDisplayName: request.senderDisplayName?.rawValue,
             bodyText: request.body?.rawValue,
-            symbol: request.informationalSeenStatus == nil ? "text.bubble" : "info.circle",
+            symbol: request.informationalSeenStatus == nil ? "envelope" : "info.circle",
             isResolved: request.answerNotDelivered || receiptStatus == .failed ? false :
                 request.isResolved, createdAt: request.createdAt,
             localStatus: request.answerNotDelivered ? "Answer not delivered" : receiptStatus == .failed
@@ -1657,6 +1670,7 @@ final class LivePresentationStore {
                 request.lifecycleStatus == .noComment,
             hasFailedResponse: receiptStatus == .failed,
             isRetracted: retracted,
+            chatUnread: listChatUnread(request.key),
             tier: .middle,
             priority: request.inboxPriority,
             thread: request.inboxThread,
