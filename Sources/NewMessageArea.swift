@@ -172,7 +172,7 @@ final class NewMessageAreaStore {
     private(set) var ledger: NewMessageAreaLedger
     private(set) var summaries: [NewMessageAreaSummaryKey: String] = [:]
 
-    init(defaults: UserDefaults = .standard, defaultsKey: String = Self.defaultsKey) {
+    init(defaults: UserDefaults = .standard, defaultsKey: String = NewMessageAreaStore.defaultsKey) {
         self.defaults = defaults
         self.defaultsKey = defaultsKey
         if let data = defaults.data(forKey: defaultsKey),
