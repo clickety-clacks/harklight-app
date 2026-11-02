@@ -687,6 +687,15 @@ struct ConversationState: Codable, Equatable {
                 facts: ConversationValidationFacts(revisionIsZero: event.binding.revision == 0))
         }
         if event.sequence <= cursor {
+            // Exact dependency recovery retains the turn itself, not a second
+            // historical journal entry. ACK-behind replay may repeat that fact.
+            if events[event.sequence] == nil, case let .turn(turn) = event.fact,
+               turn.binding == event.binding,
+               turn.kind == .discussion || turn.kind == .reply,
+               turn.conversationSequence == event.sequence,
+               threads[event.binding.request]?.turns.contains(turn) == true {
+                return
+            }
             guard let previous = events[event.sequence], event.canEnrich(previous) else {
                 throw ConversationError.conflict
             }
@@ -754,6 +763,76 @@ struct ConversationState: Codable, Equatable {
         }
         events[event.sequence] = event
         cursor = event.sequence
+    }
+
+    /// Restores one receipt dependency without replaying older facts or moving
+    /// the cursor. The caller obtains the event from authenticated history.
+    mutating func restoreReferencedTurn(_ event: ConversationEvent,
+                                       for receipt: ConversationEvent,
+                                       sameOriginFeed: Bool) throws {
+        guard case let .delivered(target) = receipt.fact,
+              cursor < UInt64.max, receipt.sequence == cursor + 1,
+              event.sequence > 0, event.sequence <= cursor,
+              event.binding.request == receipt.binding.request,
+              case let .turn(turn) = event.fact,
+              turn.id == target, turn.binding == event.binding,
+              var thread = threads[receipt.binding.request] else {
+            throw ConversationError.conflict
+        }
+        try restoreReferencedTurn(event, for: receipt, in: &thread, sameOriginFeed: sameOriginFeed)
+        threads[receipt.binding.request] = thread
+    }
+
+    private func restoreReferencedTurn(_ event: ConversationEvent, for receipt: ConversationEvent,
+                                      in thread: inout ConversationThread, sameOriginFeed: Bool) throws {
+        guard case let .delivered(target) = receipt.fact,
+              event.sequence > 0, event.sequence < receipt.sequence,
+              event.binding.request == receipt.binding.request,
+              thread.request == receipt.binding.request,
+              case let .turn(turn) = event.fact,
+              turn.id == target, turn.binding == event.binding else { throw ConversationError.conflict }
+        // Recheck under the store's writer lock: recovery is only for the
+        // missing target, never a way around another receipt validation error.
+        do {
+            try applyThreadFact(receipt, to: &thread)
+            return
+        } catch let error as ConversationValidationRejectionError {
+            guard error.rejection.guardID == .referencedTurnExists else { throw error }
+        }
+        guard thread.revisionNumbers.contains(event.binding.revision),
+              turn.sessionHandle == thread.sessionHandle,
+              turn.kind == .discussion || turn.kind == .reply else {
+            throw ConversationError.conflict
+        }
+        if let retained = events[event.sequence], retained != event {
+            throw ConversationError.conflict
+        }
+        // Merge the turn only. Applying the whole historical fact could settle
+        // an original pending operation, which recovery must preserve.
+        var restored = turn
+        restored.conversationSequence = event.sequence
+        var insertionIndex = thread.turns.firstIndex {
+            ($0.conversationSequence ?? 0) > event.sequence
+        } ?? thread.turns.endIndex
+        // The terminal can arrive via paging without a conversation sequence.
+        // Canonical origin-feed IDs order these two authoritative entries only
+        // after the store has matched the history origin to this request's origin.
+        // Other opaque IDs are never parsed as a shared ordering domain.
+        if sameOriginFeed, let terminalID = thread.terminalTurn,
+           let terminalIndex = thread.turns.firstIndex(where: { $0.id == terminalID }),
+           let targetPosition = UInt64(turn.id.rawValue), targetPosition > 0,
+           String(targetPosition) == turn.id.rawValue,
+           let terminalPosition = UInt64(terminalID.rawValue), terminalPosition > 0,
+           String(terminalPosition) == terminalID.rawValue {
+            if targetPosition < terminalPosition {
+                insertionIndex = min(insertionIndex, terminalIndex)
+            } else {
+                insertionIndex = max(insertionIndex, terminalIndex + 1)
+            }
+        }
+        try thread.merge(restored, event: event)
+        thread.turns.removeLast()
+        thread.turns.insert(restored, at: insertionIndex)
     }
 
     /// Re-checks a redacted revision whose sequence was already durably
@@ -1137,12 +1216,33 @@ struct ConversationState: Codable, Equatable {
     /// A missing thread means these journaled facts have not been applied yet.
     /// Threads are retained once seeded, so the first local request or delivery
     /// can apply all held facts in their original sequence.
-    func applyHeldEvents(to thread: inout ConversationThread) throws {
+    func applyHeldEvents(to thread: inout ConversationThread,
+                         restoredTurns: [UInt64: ConversationEvent] = [:],
+                         skipping: [UInt64: ConversationEvent] = [:],
+                         onFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
         let held = events.values.filter {
             $0.binding.request == thread.request && $0.requiresLoadedThread
         }.sorted { $0.sequence < $1.sequence }
         for event in held {
-            try applyThreadFact(event, to: &thread)
+            if let ignored = skipping[event.sequence] {
+                guard ignored == event else {
+                    onFailure?(event, nil)
+                    throw ConversationError.conflict
+                }
+                continue
+            }
+            // A rejected fact cannot leave half of its mutation in the page.
+            var updated = thread
+            do {
+                if let target = restoredTurns[event.sequence] {
+                    try restoreReferencedTurn(target, for: event, in: &updated, sameOriginFeed: true)
+                }
+                try applyThreadFact(event, to: &updated)
+            } catch {
+                onFailure?(event, (error as? ConversationValidationRejectionError)?.rejection)
+                throw error
+            }
+            thread = updated
         }
     }
 

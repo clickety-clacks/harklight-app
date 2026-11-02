@@ -1104,7 +1104,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return state.cursor
     }
 
-    private func applyOrdinaryConversationMetadata(_ event: RelayEvent, to next: inout PersistedAttentionState) throws {
+    private func applyOrdinaryConversationMetadata(_ event: RelayEvent,
+                                                   terminalReceiptTarget: ExactText? = nil,
+                                                   restoredTurns: [UInt64: ConversationEvent] = [:],
+                                                   skippingHeldEvents: [UInt64: ConversationEvent] = [:],
+                                                   onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil,
+                                                   to next: inout PersistedAttentionState) throws {
         var conversation = next.conversation ?? ConversationState()
         switch event.body {
         case .delivery, .originReference:
@@ -1139,7 +1144,24 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 if let availability = metadata.availability { thread.availability = availability }
                 thread.listeningSupport = metadata.listeningSupport
                 thread.terminal = next.remoteStates[request.key]?.state
-                try conversation.applyHeldEvents(to: &thread)
+                // The paired page terminal proves this receipt target before
+                // its visible turn is appended after the held history.
+                thread.terminalTurn = terminalReceiptTarget
+                var preparedTurns: [UInt64: ConversationEvent] = [:]
+                for (sequence, target) in restoredTurns where target.binding.request == request.key {
+                    let prepared = try Self.externalizingConversationFiles(in: target,
+                        using: conversationFileReferences,
+                        allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+                    if case let .turn(turn) = prepared.fact { try validateConversationFiles(turn.files) }
+                    preparedTurns[sequence] = prepared
+                }
+                try conversation.applyHeldEvents(to: &thread, restoredTurns: preparedTurns,
+                    skipping: skippingHeldEvents, onFailure: onHeldEventFailure)
+                for (sequence, ignored) in skippingHeldEvents
+                    where ignored.binding.request == request.key {
+                    guard conversation.events[sequence] == ignored else { throw ConversationError.conflict }
+                    conversation.events.removeValue(forKey: sequence)
+                }
             }
             if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
             if let reported = metadata.retractedAtMilliseconds { try thread.recordReportedRetraction(at: reported) }
@@ -1210,6 +1232,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     private func applyInboxSnapshotItem(_ item: InboxSnapshotItem,
                                         highWater: UInt64,
+                                        restoredTurns: [UInt64: ConversationEvent] = [:],
+                                        skippingHeldEvents: [UInt64: ConversationEvent] = [:],
+                                        onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil,
                                         to next: inout PersistedAttentionState) throws {
         let acceptance = item.acceptance
         let key = item.key
@@ -1279,8 +1304,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     supersededByMessageKeys: previous?.supersededByMessageKeys)
                 if hasContent {
                     next.remoteStates[key] = current
-                    // The acceptance opens the thread that the terminal's retraction is recorded on.
-                    try applyOrdinaryConversationMetadata(acceptance, to: &next)
+                    try applyOrdinaryConversationMetadata(acceptance,
+                        terminalReceiptTarget: terminal.conversation?.eventID,
+                        restoredTurns: restoredTurns, skippingHeldEvents: skippingHeldEvents,
+                        onHeldEventFailure: onHeldEventFailure, to: &next)
                     try applyOrdinaryConversationMetadata(terminal, to: &next)
                 } else {
                     var references = next.inboxReferences ?? [:]
@@ -1324,7 +1351,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
             references[key] = tierState
             next.inboxReferences = references
         }
-        if hasContent { try applyOrdinaryConversationMetadata(acceptance, to: &next) }
+        if hasContent {
+            try applyOrdinaryConversationMetadata(acceptance, restoredTurns: restoredTurns,
+                skippingHeldEvents: skippingHeldEvents, onHeldEventFailure: onHeldEventFailure, to: &next)
+        }
 
         let pending = (next.pendingRelayOverlays ?? [:]).values
             .filter { Self.requestKey(in: $0) == key }
@@ -2104,7 +2134,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                      nextCursor: String?,
                                      receiptCursor: String?,
                                      context suppliedContext: ProfileContext,
-                                     validationRejection: inout ConversationValidationRejection?) throws {
+                                     validationRejection: inout ConversationValidationRejection?,
+                                     restoredTurns: [UInt64: ConversationEvent] = [:],
+                                     skippingHeldEvents: [UInt64: ConversationEvent] = [:],
+                                     onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
         validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -2140,7 +2173,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         var next = state
         do {
-            for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+            for item in items {
+                try applyInboxSnapshotItem(item, highWater: highWater, restoredTurns: restoredTurns,
+                    skippingHeldEvents: skippingHeldEvents, onHeldEventFailure: onHeldEventFailure, to: &next)
+            }
             Self.backfillSupersededByMessageKeys(in: &next,
                 affectedTargets: Self.supersedeTargets(in: items),
                 additionalEvents: Self.events(in: items))
@@ -2208,7 +2244,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                    items: [InboxSnapshotItem],
                                    nextCursor: String?,
                                    context suppliedContext: ProfileContext,
-                                   validationRejection: inout ConversationValidationRejection?) throws {
+                                   validationRejection: inout ConversationValidationRejection?,
+                                     restoredTurns: [UInt64: ConversationEvent] = [:],
+                                     skippingHeldEvents: [UInt64: ConversationEvent] = [:],
+                                     onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
         validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -2233,7 +2272,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
               nextCursor != cursor else { throw AttentionStoreError.inboxPageConflict }
         var next = state
         do {
-            for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
+            for item in items {
+                try applyInboxSnapshotItem(item, highWater: highWater, restoredTurns: restoredTurns,
+                    skippingHeldEvents: skippingHeldEvents, onHeldEventFailure: onHeldEventFailure, to: &next)
+            }
             Self.backfillSupersededByMessageKeys(in: &next,
                 affectedTargets: Self.supersedeTargets(in: items),
                 additionalEvents: Self.events(in: items))
@@ -2649,6 +2691,43 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try validateConversationFiles(turn.files)
         let conversation = state.conversation ?? ConversationState()
         return try conversation.redactedRevisionRejectionForAccountedRedelivery(event)
+    }
+
+    /// Restores only a missing receipt target from authenticated conversation
+    /// history. The receipt is retried through normal application afterwards.
+    public func restoreReferencedConversationTurn(_ event: ConversationEvent,
+                                                 for receipt: ConversationEvent,
+                                                 origin: ExactText? = nil,
+                                                 context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        try validate(event.binding.request, in: context.identity)
+        try validate(receipt.binding.request, in: context.identity)
+        let event = try Self.externalizingConversationFiles(in: event,
+            using: conversationFileReferences,
+            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        guard case let .turn(turn) = event.fact else { throw ConversationError.conflict }
+        try validateConversationFiles(turn.files)
+        var next = state
+        var conversation = next.conversation ?? ConversationState()
+        let savedOrigin = next.remoteStates[event.binding.request]?.attentionTierOrigin ??
+            next.inboxReferences?[event.binding.request]?.attentionTierOrigin
+        if let savedOrigin, let origin, savedOrigin != origin { throw ConversationError.conflict }
+        do {
+            try conversation.restoreReferencedTurn(event, for: receipt,
+                sameOriginFeed: origin != nil && origin == savedOrigin)
+        } catch is ConversationValidationRejectionError {
+            throw ConversationError.invalidBinding
+        }
+        guard conversation != next.conversation else { return }
+        next.conversation = conversation
+        try commit(next)
     }
 
     /// The conversation cursor commits in the same account transaction as its fact.
