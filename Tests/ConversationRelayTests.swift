@@ -61,7 +61,8 @@ final class ConversationRelayTests: XCTestCase {
             let value = try JSONValue.parse(request)
             if value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start",
                let items = inboxStartItemsJSON {
-                return data(#"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"held-fact-snapshot","high_water":1,"items":\#(items),"next_cursor":null,"receipt_cursor":null}"#)
+                let response = #"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"held-fact-snapshot","high_water":1,"items":\#(items),"next_cursor":null,"receipt_cursor":null}"#
+                return Data(response.utf8)
             }
             return try await emptyInboxReply(request, ref: ref)
         }
@@ -422,10 +423,11 @@ final class ConversationRelayTests: XCTestCase {
             author: .origin, sessionHandle: handle, text: ExactText("Reply"), kind: .reply)
         var thread = ConversationThread(request: request, sessionHandle: handle,
             revision: 1, payload: .null)
-        try thread.merge(oldTurn)
+        let oldTurnEvent = ConversationEvent(sequence: 1, binding: binding, fact: .turn(oldTurn))
+        try thread.merge(oldTurn, event: oldTurnEvent)
         var state = ConversationState()
         state.cursor = 1
-        state.events[1] = ConversationEvent(sequence: 1, binding: binding, fact: .turn(oldTurn))
+        state.events[1] = oldTurnEvent
         state.threads[request] = thread
 
         state.orderTurnsFromProjectionEvents()
