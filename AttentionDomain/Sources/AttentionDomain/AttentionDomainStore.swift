@@ -1685,7 +1685,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 guard let indexed = replacementIndex[target] else { return nil }
                 return indexed.last(where: { $0.0 < terminalSequence })?.1
             }
-            requests.values.compactMap { request -> (UInt64, RequestKey)? in
+            return requests.values.compactMap { request -> (UInt64, RequestKey)? in
                 guard request.key.accountScope == target.accountScope,
                       request.key.senderID == target.senderID,
                       request.supersedesMessageIDs.contains(target.messageID),
