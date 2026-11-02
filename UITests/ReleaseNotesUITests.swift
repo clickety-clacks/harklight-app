@@ -2,27 +2,29 @@ import XCTest
 
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
-    func testPost79UpdateAppearsWithoutAnEstimatedBuildNumber() {
+    func testPost79UpdateShowsEarliestConfirmedContainingBuildWithoutRelabeling() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "91"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "107"
         app.launch()
 
         XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Keep an unfinished Reply"].exists,
                       app.debugDescription)
-        let updateHeader = app.staticTexts["Version 0.1.0 · Changes since Build 79"]
+        let updateHeader = app.staticTexts["Version 0.1.0 · First confirmed in Build 106"]
         XCTAssertTrue(updateHeader.exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Changes since Build 79"].exists,
+                      "The earlier heading stays with the confirmed build label.")
         XCTAssertTrue(app.staticTexts["More context in the Inbox"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["See when Chat needs attention"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
                       app.debugDescription)
-        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build 91"].exists,
-                       "The update must not claim an unverified archive build number.")
+        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build 107"].exists,
+                       "A later installed build must not relabel this update.")
 
         app.buttons["Done"].tap()
         let settings = app.buttons["inbox-settings"]
@@ -34,7 +36,7 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
         XCTAssertTrue(updateHeader.exists,
-                      "Settings keeps the update in history without a guessed build number.")
+                      "Settings keeps the confirmed build label in history.")
     }
 
     func testUpdateSheetAndSettingsHistoryShowReleasedNotes() {
