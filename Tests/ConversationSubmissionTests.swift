@@ -78,10 +78,20 @@ final class ConversationSubmissionTests: XCTestCase {
         try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Exact original text"), files: files), context: context)
         return (context, persistence, domain, binding, session, core)
     }
-    func testUnknownRetryUsesTheExactFrozenOperationAndCannotEditOrCreateAnswerReceipt() async throws {
+    func testStorageUnavailableReplyKeepsUnknownOperationFrozenForExactRetry() async throws {
         let (context, _, domain, binding, session, core) = try await setup()
+        let wire = try ConversationWire(profile: context)
+        let storageUnavailableJSON =
+            #"{"v":1,"type":"error","ref":"native-discussion","reason":"storage_unavailable"}"# + "\n"
+        let storageUnavailableReply = Data(storageUnavailableJSON.utf8)
+        session.result = try wire.decodeDiscussionResult(storageUnavailableReply)
+        XCTAssertEqual(session.result, .unresolved,
+                       "A server-classified unknown outcome must not become a definite refusal.")
         _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
         let operation = try XCTUnwrap(session.sent.first?.1)
+        let pending = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        XCTAssertEqual(pending.text, ExactText("Exact original text"))
+        XCTAssertEqual(pending.disposition, .outcomeUnknown(operation))
         XCTAssertThrowsError(try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Changed")), context: context))
         try session.acceptedTurn(operation: operation, text: "Exact original text")
         session.result = .accepted(turnID: ExactText("2"))
@@ -96,6 +106,24 @@ final class ConversationSubmissionTests: XCTestCase {
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try domain.snapshot(context: context).cursor, 1)
         XCTAssertEqual(try domain.conversationSnapshot(context: context).cursor, 1)
+    }
+    func testClosedDiscussionReplyRemainsADefiniteRejection() async throws {
+        let (context, _, domain, binding, session, core) = try await setup()
+        let wire = try ConversationWire(profile: context)
+        let closedJSON = #"{"v":1,"type":"error","ref":"native-discussion","reason":"closed"}"# + "\n"
+        let closedReply = Data(closedJSON.utf8)
+        session.result = try wire.decodeDiscussionResult(closedReply)
+        XCTAssertEqual(session.result, .rejected(reason: ExactText("closed")))
+
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+
+        let rejected = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        guard case let .rejected(reason) = rejected.disposition else {
+            return XCTFail("A definite server refusal must remain a rejected draft.")
+        }
+        XCTAssertEqual(reason, ExactText("closed"))
+        XCTAssertEqual(rejected.text, ExactText("Exact original text"))
+        XCTAssertEqual(session.sent.count, 1)
     }
     func testAcceptedResponseSurvivesFailedReplayAndRestartWithoutResubmitting() async throws {
         let (context, persistence, domain, binding, session, core) = try await setup()

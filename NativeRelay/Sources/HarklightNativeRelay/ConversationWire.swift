@@ -148,7 +148,13 @@ public struct ConversationWire: Sendable {
         case "ok":
             guard try integer(value, "seq") > 0 else { throw RelayWireError.invalidFrame }
             return .accepted(turnID: ExactText(try text(value, "event_id")))
-        case "error": return .rejected(reason: ExactText(try text(value, "reason")))
+        case "error":
+            let reason = ExactText(try text(value, "reason"))
+            // The relay can return this after it fails to persist the result
+            // of dispatch. The server classifies that response as unknown, so
+            // keep the saved operation frozen for an exact retry.
+            if reason.rawValue == "storage_unavailable" { return .unresolved }
+            return .rejected(reason: reason)
         default: throw RelayWireError.unsupportedEvent
         }
     }
