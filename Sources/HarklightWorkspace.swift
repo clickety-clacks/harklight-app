@@ -750,6 +750,20 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 }
 
+private struct InboxRefreshActionProbe: View {
+    @Environment(\.refresh) private var refreshAction
+
+    var body: some View {
+        Text("refresh=\(refreshAction != nil)")
+            .font(.system(size: 1))
+            .foregroundStyle(.clear)
+            .frame(width: 1, height: 1)
+            .clipped()
+            .allowsHitTesting(false)
+            .accessibilityIdentifier("inbox-refresh-action-environment")
+    }
+}
+
 @MainActor
 struct InboxList: View {
     let tab: InboxWorkspaceTab
@@ -1053,6 +1067,11 @@ struct InboxList: View {
             content
                 .scrollBounceBehavior(.always, axes: .vertical)
                 .refreshable { await refreshInbox() }
+                .overlay(alignment: .topLeading) {
+                    if UIDiagnostics.shared.enabled {
+                        InboxRefreshActionProbe()
+                    }
+                }
         } else {
             content
         }
