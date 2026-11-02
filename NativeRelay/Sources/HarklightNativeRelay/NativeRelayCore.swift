@@ -337,6 +337,7 @@ public actor NativeRelayCore {
         var recoveryHandle: ExactText?
         var historyOnly = false
         var historyTarget: ConversationEvent?
+        var historyUnusable = false
     }
 
     private struct ConversationReplayValidationFailure: Error, Sendable {
@@ -1553,18 +1554,40 @@ public actor NativeRelayCore {
                 recoveryReceipt: receipt, recoveryRejection: rejection,
                 recoveryOrigin: replay.recoveryOrigin, recoveryHandle: replay.recoveryHandle,
                 historyOnly: true)
-            try await transport.openConversation(wire.open(since: 0)) { frame in
-                try await self.consumeConversationReplay(frame)
+            do {
+                try await transport.openConversation(wire.open(since: 0)) { frame in
+                    try await self.consumeConversationReplay(frame)
+                }
+            } catch InstallationTransportError.serverRejected {
+                try skipConversationMessage(receipt.sequence, error: InstallationTransportError.serverRejected,
+                    event: receipt, rejection: rejection)
+                since = try store.conversationSnapshot(context: context).cursor
+                continue
+            } catch InstallationTransportError.conversationsUnavailable {
+                try skipConversationMessage(receipt.sequence, error: InstallationTransportError.conversationsUnavailable,
+                    event: receipt, rejection: rejection)
+                since = try store.conversationSnapshot(context: context).cursor
+                continue
             }
             try validate()
-            guard conversationReplay?.high != nil,
-                  let target = conversationReplay?.historyTarget else {
-                throw ConversationReplayValidationFailure(rejection: rejection)
+            guard let history = conversationReplay, history.high != nil else {
+                throw NativeRelayCoreError.invalidReplay
             }
-            try store.restoreReferencedConversationTurn(target, for: receipt,
-                origin: replay.recoveryOrigin, context: context)
+            if let target = history.historyTarget, !history.historyUnusable {
+                do {
+                    try store.restoreReferencedConversationTurn(target, for: receipt,
+                        origin: replay.recoveryOrigin, context: context)
+                } catch {
+                    guard isUnusableConversationMessage(error) else { throw error }
+                    try skipConversationMessage(receipt.sequence, error: error,
+                        event: receipt, rejection: rejection)
+                }
+            } else {
+                try skipConversationMessage(receipt.sequence, error: ConversationError.invalidBinding,
+                    event: receipt, rejection: rejection)
+            }
             // History open moves the socket's stream position. Replay from the
-            // unchanged durable cursor so neither the drained suffix nor events
+            // durable cursor so neither the drained suffix nor events
             // arriving during recovery are mistaken for committed progress.
             since = try store.conversationSnapshot(context: context).cursor
         }
@@ -1607,7 +1630,33 @@ public actor NativeRelayCore {
             }
             replay.high = high
         } else {
-            switch try wire.decodeUpdate(frame) {
+            let update: ConversationWireUpdate
+            do {
+                update = try wire.decodeUpdate(frame)
+            } catch {
+                let sequence = try wire.sequenceForUnusableUpdate(frame)
+                guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
+                    throw NativeRelayCoreError.invalidReplay
+                }
+                if replay.historyOnly {
+                    let value = try JSONValue.parse(frame)
+                    if let receipt = replay.recoveryReceipt,
+                       case let .delivered(targetID) = receipt.fact,
+                       value.uniqueValue(named: "event_id")?.stringValue == targetID,
+                       value.uniqueValue(named: "sender_id")?.stringValue == receipt.binding.request.senderID,
+                       value.uniqueValue(named: "message_id")?.stringValue == receipt.binding.request.messageID {
+                        replay.historyUnusable = true
+                    }
+                    diagnose(.conversation, .conversationReplay, .observed, error: error,
+                        conversationSequence: sequence)
+                } else if replay.recoveryReceipt == nil {
+                    try skipConversationMessage(sequence, error: error)
+                }
+                replay.expected = sequence
+                conversationReplay = replay
+                return
+            }
+            switch update {
             case let .event(event):
                 guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
                     throw NativeRelayCoreError.invalidReplay
@@ -1618,12 +1667,15 @@ public actor NativeRelayCore {
                        case let .turn(turn) = event.fact,
                        turn.id == targetID, event.binding.request == receipt.binding.request {
                         let value = try JSONValue.parse(frame)
-                        guard value.uniqueValue(named: "origin")?.stringValue == replay.recoveryOrigin,
-                              turn.sessionHandle == replay.recoveryHandle,
-                              replay.historyTarget == nil || replay.historyTarget == event else {
-                            throw ConversationError.conflict
+                        if value.uniqueValue(named: "origin")?.stringValue != replay.recoveryOrigin ||
+                            turn.sessionHandle != replay.recoveryHandle ||
+                            (replay.historyTarget != nil && replay.historyTarget != event) {
+                            replay.historyUnusable = true
+                            diagnose(.conversation, .conversationReplay, .observed,
+                                error: ConversationError.conflict, conversationSequence: event.sequence)
+                        } else {
+                            replay.historyTarget = event
                         }
-                        replay.historyTarget = event
                     }
                     replay.expected = event.sequence
                     conversationReplay = replay
@@ -1634,31 +1686,20 @@ public actor NativeRelayCore {
                     conversationReplay = replay
                     return
                 }
-                if event.sequence <= replay.durableCursor,
-                   let rejection = try store.redactedRevisionRejectionForAccountedRedelivery(
-                       event, context: context),
-                   rejection.guardID == .redactedRevisionBinding,
-                   rejection.eventKind == .revision,
-                   case .redactedRevision = event.fact {
-                    replay.expected = event.sequence
-                    conversationReplay = replay
-                    return
-                }
                 var validationRejection: ConversationValidationRejection?
                 do {
                     _ = try store.applyConversation(event, context: context,
                         validationRejection: &validationRejection)
                 } catch {
-                    if let validationRejection {
-                        if validationRejection.guardID == .referencedTurnExists,
-                           validationRejection.eventKind == .receipt,
-                           case .delivered = event.fact,
-                           !conversationRecoveryAttempts.contains(event.sequence) {
-                            let value = try JSONValue.parse(frame)
-                            guard let origin = value.uniqueValue(named: "origin")?.stringValue,
-                                  let handle = value.uniqueValue(named: "session_handle")?.stringValue else {
-                                throw NativeRelayCoreError.invalidReplay
-                            }
+                    guard isUnusableConversationMessage(error) else { throw error }
+                    if let validationRejection,
+                       validationRejection.guardID == .referencedTurnExists,
+                       validationRejection.eventKind == .receipt,
+                       case .delivered = event.fact,
+                       !conversationRecoveryAttempts.contains(event.sequence) {
+                        let value = try JSONValue.parse(frame)
+                        if let origin = value.uniqueValue(named: "origin")?.stringValue,
+                           let handle = value.uniqueValue(named: "session_handle")?.stringValue {
                             replay.recoveryReceipt = event
                             replay.recoveryRejection = validationRejection
                             replay.recoveryOrigin = origin
@@ -1667,25 +1708,9 @@ public actor NativeRelayCore {
                             conversationReplay = replay
                             return
                         }
-                        guard validationRejection.guardID == .redactedRevisionBinding,
-                              validationRejection.eventKind == .revision,
-                              validationRejection.facts.sessionHandleMatchesThread == true,
-                              case .redactedRevision = event.fact else {
-                            throw ConversationReplayValidationFailure(rejection: validationRejection)
-                        }
-                        diagnose(.conversation, .conversationReplay, .observed,
-                            causeCode: NativeDiagnosticCauseCode.forError(ConversationError.invalidBinding),
-                            conversationSequence: event.sequence,
-                            conversationValidationRejection: validationRejection,
-                            request: event.binding.request, revision: event.binding.revision)
-                        let durableCursor = try store.advanceConversationCursor(
-                            overIgnoredUpdateAt: event.sequence, context: context)
-                        guard durableCursor >= event.sequence else { throw ConversationError.conflict }
-                        replay.expected = event.sequence
-                        conversationReplay = replay
-                        return
                     }
-                    throw error
+                    try skipConversationMessage(event.sequence, error: error,
+                        event: event, rejection: validationRejection)
                 }
                 replay.expected = event.sequence
             case let .ignored(sequence):
@@ -1700,6 +1725,37 @@ public actor NativeRelayCore {
             }
         }
         conversationReplay = replay
+    }
+
+    /// Message rejection can be accounted for; a failed durable write, stale
+    /// session, or missing sequence cannot be represented as successful progress.
+    private func isUnusableConversationMessage(_ error: Error) -> Bool {
+        if let error = error as? ConversationError {
+            if case .gap = error { return false }
+            return true
+        }
+        if let error = error as? AttentionStoreError {
+            switch error {
+            case .staleProfile, .fixtureOnlyOperation, .persistence, .eventGap,
+                 .replayAlreadyActive, .replayNotActive, .replayIncomplete,
+                 .inboxCheckpointPending, .inboxCheckpointIncomplete, .inboxStateUnrefreshed:
+                return false
+            default:
+                return true
+            }
+        }
+        return false
+    }
+
+    private func skipConversationMessage(_ sequence: UInt64, error: Error,
+                                         event: ConversationEvent? = nil,
+                                         rejection: ConversationValidationRejection? = nil) throws {
+        diagnose(.conversation, .conversationReplay, .observed, error: error,
+            conversationSequence: sequence, conversationValidationRejection: rejection,
+            request: event?.binding.request, revision: event?.binding.revision)
+        // The existing cursor commit is the skip's durable accounting. If it
+        // fails, propagate the error and never ACK this sequence.
+        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
     }
 
     private func diagnoseOperationReplay(_ transition: NativeDiagnosticTransition,

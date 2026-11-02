@@ -1540,6 +1540,14 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testReceiptRecoveryOnPagingSocketReplaysQueuedFramesBeforeAcknowledging() async throws {
+        try await exerciseReceiptCatchup(historyAvailable: true)
+    }
+
+    func testFailedReceiptHistoryAndUnusableMessageDoNotBlockPagingSocketCatchup() async throws {
+        try await exerciseReceiptCatchup(historyAvailable: false)
+    }
+
+    private func exerciseReceiptCatchup(historyAvailable: Bool) async throws {
         let namespace = "Harklight.receipt-history-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -1565,6 +1573,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let receipt = #"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed","request_revision":1,"kind":"receipt","author":"origin","event_id":"2","delivered":true}"# + "\n"
         let pending = #"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":2,"kind":"revision","author":"origin","event_id":"5","message":{"title":"Pending"}}"# + "\n"
         let arriving = #"{"v":1,"type":"conversation","conversation_seq":4,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":3,"kind":"revision","author":"origin","event_id":"6","message":{"title":"Newest"}}"# + "\n"
+        let unusable = #"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":0,"kind":"revision","author":"origin","event_id":"bad"}"# + "\n"
+        let suffix = historyAvailable ? pending : unusable
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
             guard let value = try? JSONValue.parse(Data(text.utf8)),
                   let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
@@ -1591,11 +1601,17 @@ final class NativeGuidedTLSTests: XCTestCase {
                 if count == 1 {
                     // The transport reader queues later frames while the core
                     // handles the missing target. A live frame follows the end.
-                    return [ok + "}\n", receipt, pending,
+                    return [ok + "}\n", receipt, suffix,
                             "{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":3}\n", arriving]
                 }
-                if since == 0 { return [ok + "}\n", discussion, receipt, pending, arriving, end] }
-                if since == 1 { return [ok + "}\n", receipt, pending, arriving, end] }
+                if since == 0 {
+                    if !historyAvailable {
+                        return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"unavailable\"}\n"]
+                    }
+                    return [ok + "}\n", discussion, receipt, pending, arriving, end]
+                }
+                if since == 2 { return [ok + "}\n", suffix, arriving, end] }
+                if since == 1 { return [ok + "}\n", receipt, suffix, arriving, end] }
                 return [ok + "}\n", end]
             case "conversation_ack":
                 return [ok + ",\"conversation_seq\":4}\n"]
@@ -1625,15 +1641,16 @@ final class NativeGuidedTLSTests: XCTestCase {
         let open = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("open"))
         XCTAssertEqual(snapshot.cursor, 4)
-        XCTAssertEqual(snapshot.threads[answered]?.facts[ExactText("2")]?.delivered, true)
-        XCTAssertNotNil(snapshot.threads[open]?.revisions[2])
+        XCTAssertEqual(snapshot.threads[answered]?.facts[ExactText("2")]?.delivered, historyAvailable ? true : nil)
+        if historyAvailable { XCTAssertNotNil(snapshot.threads[open]?.revisions[2]) }
+        else { XCTAssertNil(snapshot.threads[open]?.revisions[2]) }
         XCTAssertEqual(snapshot.threads[open]?.currentRevision, 3)
         let presentation = try LivePresentationStore(store: restored, context: context)
         XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: answered)).belongsToReplied)
         XCTAssertEqual(presentation.request(for: open)?.title, ExactText("Newest"))
         let values = try requests.snapshot().map { try JSONValue.parse($0) }
         let opens = values.filter { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open" }
-        XCTAssertEqual(Array(opens.prefix(3)).map { $0.uniqueValue(named: "since")?.integerValue }, [1, 0, 1])
+        XCTAssertEqual(Array(opens.prefix(3)).map { $0.uniqueValue(named: "since")?.integerValue }, [1, 0, historyAvailable ? 1 : 2])
         XCTAssertEqual(opens.filter { $0.uniqueValue(named: "since")?.integerValue == 0 }.count, 1)
         let acks = values.filter { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_ack" }
         XCTAssertFalse(acks.isEmpty)

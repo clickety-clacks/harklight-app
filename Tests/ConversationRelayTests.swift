@@ -215,7 +215,7 @@ final class ConversationRelayTests: XCTestCase {
         await core.deactivate()
     }
 
-    func testOtherConversationValidationGuardRemainsFatalAndUnacknowledged() async throws {
+    func testUnusableConversationHandleIsSkippedAndAcknowledged() async throws {
         let (context, _, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
@@ -234,19 +234,13 @@ final class ConversationRelayTests: XCTestCase {
         let core = try NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: diagnostics.append)
 
-        do {
-            _ = try await core.resyncAndDrainOutbox()
-            XCTFail("Only redacted_revision_binding may advance the cursor after a structured rejection.")
-        } catch let error as ConversationError {
-            XCTAssertEqual(error, .invalidBinding)
-        }
-
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
-        XCTAssertTrue(session.conversationACKs.isEmpty)
-        let rejection = try XCTUnwrap(diagnostics.events.first {
-            $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .failed
-        }?.conversationValidationRejection)
-        XCTAssertEqual(rejection.guardID, .revisionSessionHandlePresent)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+        XCTAssertEqual(session.conversationACKs.count, 1)
+        XCTAssertNotNil(diagnostics.events.first {
+            $0.area == .conversation && $0.phase == .conversationReplay &&
+                $0.transition == .observed && $0.conversationSequence == 2
+        })
         await core.deactivate()
     }
 
