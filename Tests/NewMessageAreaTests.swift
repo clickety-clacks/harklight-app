@@ -89,11 +89,10 @@ final class NewMessageAreaTests: XCTestCase {
         let firstSeen = baselineDate.addingTimeInterval(20)
         ledger.markFirstSeen(arrival.key, at: firstSeen)
 
-        let restored = try JSONDecoder().decode(NewMessageAreaLedger.self,
+        var restored = try JSONDecoder().decode(NewMessageAreaLedger.self,
             from: JSONEncoder().encode(ledger))
         XCTAssertEqual(restored.entries.first?.firstSeenAt, firstSeen)
 
-        var restored = restored
         XCTAssertFalse(restored.pruneExpired(now: firstSeen.addingTimeInterval(3_599)))
         XCTAssertTrue(restored.pruneExpired(now: firstSeen.addingTimeInterval(3_600)))
         XCTAssertTrue(restored.entries.isEmpty)
