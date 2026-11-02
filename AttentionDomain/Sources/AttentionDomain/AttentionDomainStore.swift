@@ -2426,6 +2426,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// history. The receipt is retried through normal application afterwards.
     public func restoreReferencedConversationTurn(_ event: ConversationEvent,
                                                  for receipt: ConversationEvent,
+                                                 origin: ExactText? = nil,
                                                  context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -2444,8 +2445,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try validateConversationFiles(turn.files)
         var next = state
         var conversation = next.conversation ?? ConversationState()
+        let savedOrigin = next.remoteStates[event.binding.request]?.attentionTierOrigin ??
+            next.inboxReferences?[event.binding.request]?.attentionTierOrigin
+        if let savedOrigin, let origin, savedOrigin != origin { throw ConversationError.conflict }
         do {
-            try conversation.restoreReferencedTurn(event, for: receipt)
+            try conversation.restoreReferencedTurn(event, for: receipt,
+                sameOriginFeed: origin != nil && origin == savedOrigin)
         } catch is ConversationValidationRejectionError {
             throw ConversationError.invalidBinding
         }

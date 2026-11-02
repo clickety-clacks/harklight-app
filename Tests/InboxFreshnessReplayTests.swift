@@ -236,12 +236,55 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertEqual(snapshot.cursor, succeeds ? 4 : 1)
             if succeeds {
                 XCTAssertEqual(snapshot.threads[key("answered")]?.facts[ExactText("2")]?.delivered, true)
+                let turns = try XCTUnwrap(snapshot.threads[key("answered")]).turns
+                XCTAssertLessThan(try XCTUnwrap(turns.firstIndex { $0.id == ExactText("2") }),
+                    try XCTUnwrap(turns.firstIndex { $0.id == ExactText("3") }))
                 XCTAssertNotNil(snapshot.threads[key("open")]?.revisions[2],
                     "The pending revision is retained, not skipped by the later revision")
                 XCTAssertEqual(presentation.request(for: key("open"))?.title, ExactText("Newest update"))
                 XCTAssertEqual(presentation.inboxRow(for: key("open"))?.requestRevision, 3)
             }
             await core.deactivate()
+        }
+    }
+
+    @MainActor
+    func testRecoveredDiscussionUsesConfirmedOriginFeedOrderAroundPagedTerminal() throws {
+        for targetID in ["2", "4"] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("ordered-recovery"), deviceID: ExactText("reader"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let persistence = MemoryAttentionStatePersistence()
+            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let key = RequestKey(accountScope: identity.personID,
+                senderID: ExactText("author"), messageID: ExactText("request"))
+            let binding = ConversationBinding(request: key, revision: 1)
+            _ = store.applyRelayEvent(RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key, originalPayload: .null), .message),
+                conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"),
+                    eventID: ExactText("1")), origin: ExactText("origin")), context: context)
+            _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
+                conversation: RelayConversationMetadata(revision: 1, eventID: ExactText("3"), author: .person),
+                origin: ExactText("origin")), context: context)
+            _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+            let target = ConversationEvent(sequence: 1, binding: binding, fact: .turn(
+                ConversationTurn(id: ExactText(targetID), binding: binding, author: .person,
+                    sessionHandle: ExactText("handle"), text: ExactText("Discussion"),
+                    kind: .discussion, conversationSequence: 1)))
+            let receipt = ConversationEvent(sequence: 2, binding: binding,
+                fact: .delivered(turn: ExactText(targetID)))
+            XCTAssertThrowsError(try store.restoreReferencedConversationTurn(target, for: receipt,
+                origin: ExactText("different-origin"), context: context))
+            try store.restoreReferencedConversationTurn(target, for: receipt,
+                origin: ExactText("origin"), context: context)
+            try store.applyConversation(receipt, context: context)
+            let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+            let thread = try XCTUnwrap(reloaded.conversationSnapshot(context: context).threads[key])
+            XCTAssertEqual(thread.turns.map(\.id), targetID == "2"
+                ? [ExactText("1"), ExactText("2"), ExactText("3")]
+                : [ExactText("1"), ExactText("3"), ExactText("4")])
+            XCTAssertEqual(thread.terminalTurn, ExactText("3"))
+            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 2)
         }
     }
 

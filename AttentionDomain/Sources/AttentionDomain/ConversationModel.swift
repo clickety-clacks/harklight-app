@@ -768,7 +768,8 @@ struct ConversationState: Codable, Equatable {
     /// Restores one receipt dependency without replaying older facts or moving
     /// the cursor. The caller obtains the event from authenticated history.
     mutating func restoreReferencedTurn(_ event: ConversationEvent,
-                                       for receipt: ConversationEvent) throws {
+                                       for receipt: ConversationEvent,
+                                       sameOriginFeed: Bool) throws {
         guard case let .delivered(target) = receipt.fact,
               cursor < UInt64.max, receipt.sequence == cursor + 1,
               event.sequence > 0, event.sequence <= cursor,
@@ -798,11 +799,28 @@ struct ConversationState: Codable, Equatable {
         // an original pending operation, which recovery must preserve.
         var restored = turn
         restored.conversationSequence = event.sequence
+        var insertionIndex = thread.turns.firstIndex {
+            ($0.conversationSequence ?? 0) > event.sequence
+        } ?? thread.turns.endIndex
+        // The terminal can arrive via paging without a conversation sequence.
+        // Canonical origin-feed IDs order these two authoritative entries only
+        // after the store has matched the history origin to this request's origin.
+        // Other opaque IDs are never parsed as a shared ordering domain.
+        if sameOriginFeed, let terminalID = thread.terminalTurn,
+           let terminalIndex = thread.turns.firstIndex(where: { $0.id == terminalID }),
+           let targetPosition = UInt64(turn.id.rawValue), targetPosition > 0,
+           String(targetPosition) == turn.id.rawValue,
+           let terminalPosition = UInt64(terminalID.rawValue), terminalPosition > 0,
+           String(terminalPosition) == terminalID.rawValue {
+            if targetPosition < terminalPosition {
+                insertionIndex = min(insertionIndex, terminalIndex)
+            } else {
+                insertionIndex = max(insertionIndex, terminalIndex + 1)
+            }
+        }
         try thread.merge(restored, event: event)
-        let sequences = Dictionary(uniqueKeysWithValues: thread.turns.compactMap { turn in
-            turn.conversationSequence.map { (turn.id, $0) }
-        })
-        thread.orderTurns(using: sequences)
+        thread.turns.removeLast()
+        thread.turns.insert(restored, at: insertionIndex)
         threads[receipt.binding.request] = thread
     }
 

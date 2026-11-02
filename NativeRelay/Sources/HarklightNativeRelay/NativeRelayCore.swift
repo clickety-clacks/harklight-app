@@ -1560,7 +1560,8 @@ public actor NativeRelayCore {
                   let target = conversationReplay?.historyTarget else {
                 throw ConversationReplayValidationFailure(rejection: rejection)
             }
-            try store.restoreReferencedConversationTurn(target, for: receipt, context: context)
+            try store.restoreReferencedConversationTurn(target, for: receipt,
+                origin: replay.recoveryOrigin, context: context)
             // History open moves the socket's stream position. Replay from the
             // unchanged durable cursor so neither the drained suffix nor events
             // arriving during recovery are mistaken for committed progress.
