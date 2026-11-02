@@ -343,6 +343,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var isRefreshing = false
     var conversationStore: LivePresentationStore? = nil
     var fetchOlderInboxPage: (() async -> Bool)? = nil
+    var refreshInbox: (@MainActor () async -> Void)? = nil
     var showsLocalExamples = false
     var notificationNavigation: NativeInboxNavigation? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -606,6 +607,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
+                  refreshInbox: refreshInbox,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab, search: $search,
@@ -755,6 +757,7 @@ struct InboxList: View {
     let warnings: [String]
     var showsBasicOrderMarker = false
     var isRefreshing = false
+    var refreshInbox: (@MainActor () async -> Void)? = nil
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var workspaceTab: InboxWorkspaceTab
@@ -1170,10 +1173,21 @@ struct InboxList: View {
             })
     }
 
-    var body: some View {
-        ScrollViewReader { proxy in
+    @ViewBuilder
+    private func renderedList(using proxy: ScrollViewProxy) -> some View {
+        if let refreshInbox {
+            listContent(for: tab, using: proxy)
+                .refreshable { await refreshInbox() }
+                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+        } else {
             listContent(for: tab, using: proxy)
                 .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
+        }
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            renderedList(using: proxy)
         }
     }
 }

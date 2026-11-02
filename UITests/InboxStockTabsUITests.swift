@@ -102,6 +102,36 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("Replied results for Archive", from: app)
     }
 
+    func testInboxAndRepliedPullToRefreshRunAndKeepFailureVisible() {
+        for title in ["Inbox", "Replied"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-test-list-refresh"]
+            app.launch()
+
+            let tab = workspaceTab(title, in: app)
+            XCTAssertTrue(tab.waitForExistence(timeout: 10), app.debugDescription)
+            if title == "Replied" { tab.tap() }
+
+            let list = app.collectionViews.firstMatch
+            XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+            let pullStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12))
+            pullStart.press(forDuration: 0.05,
+                            thenDragTo: pullStart.withOffset(CGVector(dx: 0, dy: 220)),
+                            withVelocity: .slow, thenHoldForDuration: 0.1)
+
+            let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
+            XCTAssertTrue(refreshing.waitForExistence(timeout: 5),
+                          "Pulling down from the top of \(title) starts its refresh action.\n\(app.debugDescription)")
+            let warningButton = app.buttons["inbox-warning-button"]
+            XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+            warningButton.tap()
+            let warning = app.staticTexts["inbox-warning-message"]
+            XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(warning.label, "The approved server could not be reached.")
+            app.terminate()
+        }
+    }
+
     func testNativeSearchFieldStaysInMasterBesideDetail() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
