@@ -1067,11 +1067,6 @@ struct InboxList: View {
             content
                 .scrollBounceBehavior(.always, axes: .vertical)
                 .refreshable { await refreshInbox() }
-                .overlay(alignment: .topLeading) {
-                    if UIDiagnostics.shared.enabled {
-                        InboxRefreshActionProbe()
-                    }
-                }
         } else {
             content
         }
@@ -1082,6 +1077,11 @@ struct InboxList: View {
                              using proxy: ScrollViewProxy) -> some View {
         let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
         applyingRefreshAction(to: List(selection: listSelection) {
+            if UIDiagnostics.shared.enabled {
+                InboxRefreshActionProbe()
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+            }
             if tab == .inbox && showsBasicOrderMarker {
                 Text("Basic order")
                     .font(.caption.weight(.semibold))
