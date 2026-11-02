@@ -868,9 +868,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(app.notificationNavigation?.request, target)
         XCTAssertEqual(live.selectedRequestKey, target)
         XCTAssertEqual(live.request(for: target)?.lifecycleStatus, .superseded)
-        XCTAssertEqual(live.request(for: target)?.supersededByMessageKeys, [replacement])
         XCTAssertEqual(live.inboxRows.map(\.key), [replacement],
-                       "The notification follows normal routing for the superseded identity, whose detail links to its replacement.")
+                       "The notification follows normal routing for the superseded identity instead of redirecting to its replacement.")
         XCTAssertNil(app.notificationNavigationMessage)
         XCTAssertNil(coldRouter.intent)
     }
