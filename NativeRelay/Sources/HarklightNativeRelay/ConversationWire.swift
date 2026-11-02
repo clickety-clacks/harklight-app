@@ -264,6 +264,19 @@ public struct ConversationWire: Sendable {
         }
     }
 
+    /// A malformed message can be skipped only when its own conversation
+    /// sequence is unambiguous. Control frames and missing sequences do not
+    /// establish durable progress.
+    func sequenceForUnusableUpdate(_ bytes: Data) throws -> UInt64 {
+        let value = try JSONValue.parse(bytes)
+        guard value.uniqueValue(named: "type")?.stringValue == ExactText("conversation"),
+              case let .number(number)? = value.uniqueValue(named: "conversation_seq"),
+              let sequence = UInt64(number.lexeme), sequence > 0 else {
+            throw RelayWireError.invalidFrame
+        }
+        return sequence
+    }
+
     private func decodeKnownEvent(_ value: JSONValue) throws -> ConversationEvent {
         guard try text(value, "type") == "conversation" else { throw RelayWireError.unsupportedEvent }
         let sequence = try integer(value, "conversation_seq")
