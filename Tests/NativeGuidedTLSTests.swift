@@ -4,6 +4,7 @@ import CryptoKit
 @testable import HarklightNativeRelay
 import Network
 import Security
+import UserNotifications
 import XCTest
 @testable import Harklight
 
@@ -776,6 +777,102 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNil(afterRestart.intent?.locator, "A replacement saved generation cannot inherit cold intent")
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         XCTAssertTrue(try domain.snapshot(context: context).intents.isEmpty)
+    }
+
+    @MainActor
+    func testNotificationResponseOpensSupersededMessageFromAnOlderInboxPageAfterColdLaunch() async throws {
+        let namespace = "Harklight.notification-response-route." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
+        defer { defaults.removePersistentDomain(forName: namespace); deleteEnrollmentRecord(service: namespace) }
+
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: namespace)
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
+                                     transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context,
+                                              persistence: MemoryAttentionStatePersistence())
+        func key(_ messageID: String) -> RequestKey {
+            RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                       messageID: ExactText(messageID))
+        }
+        let target = key("target")
+        let replacement = key("replacement")
+        let replacementPayload = try JSONValue.parse(Data(#"{"title":"Replacement","supersedes":["target"]}"#.utf8))
+        let targetPayload = try JSONValue.parse(Data(#"{"title":"Original"}"#.utf8))
+        let targetDelivery = RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: target, originalPayload: targetPayload), .message))
+        let targetTerminal = RelayEvent(sequence: 2, body: .terminal(target, .superseded, nil))
+        let replacementDelivery = RelayEvent(sequence: 3,
+            body: .delivery(StoredRequest(key: replacement, originalPayload: replacementPayload), .message))
+        _ = try domain.beginInboxCandidate(startupID: "notification-response-startup", since: 0,
+                                           batches: [], context: context)
+        try domain.saveInboxInitialPage(snapshotID: "notification-response-snapshot", highWater: 3,
+            items: [InboxSnapshotItem(acceptance: replacementDelivery)], nextCursor: "older",
+            receiptCursor: nil, context: context)
+        _ = try domain.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try domain.acceptInboxCheckpoint(snapshotID: "notification-response-snapshot", highWater: 3,
+                                             context: context)
+        let live = try LivePresentationStore(store: domain, context: context)
+
+        let userInfo: [AnyHashable: Any] = [
+            "aps": ["alert": ["title": "Sender", "body": "A message"]],
+            "attention": [
+                "v": 1,
+                "type": "sync",
+                "locator": [
+                    "v": 1,
+                    "binding_id": notificationBindingID,
+                    "person_id": "saved-person",
+                    "device_id": "saved-device-id",
+                    "sender_id": "sender",
+                    "message_id": "target",
+                    "acceptance_seq": 1
+                ]
+            ]
+        ]
+        let responseRouter = NativeNotificationRouter(defaults: defaults)
+        let dismissedPayload = DevelopmentPushRegistration.notificationNavigationPayload(
+            actionIdentifier: "dismiss", userInfo: userInfo)
+        DevelopmentPushRegistration.routeNotificationPayload(dismissedPayload, to: responseRouter)
+        XCTAssertNil(responseRouter.intent, "Dismissal must not become navigation.")
+        let openedPayload = try XCTUnwrap(DevelopmentPushRegistration.notificationNavigationPayload(
+            actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: userInfo))
+        DevelopmentPushRegistration.routeNotificationPayload(openedPayload, to: responseRouter)
+
+        // Recreate the router as a cold launch would, after the response handoff persisted its intent.
+        let coldRouter = NativeNotificationRouter(defaults: defaults)
+        XCTAssertEqual(coldRouter.intent?.locator?.request, target)
+        var pageFetches = 0
+        let app = NativeAppLaunch(arguments: [],
+            enrollmentStore: NativeEnrollmentStore(service: namespace),
+            joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
+            initialState: .live(live), initialEnrollmentRecord: record,
+            notificationRouter: coldRouter,
+            refreshOperation: { _ in
+                NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
+                    confirmedContext: context, confirmedTransportAttemptID: UUID())
+            },
+            fetchInboxPageOperation: { _ in
+                pageFetches += 1
+                try! domain.saveInboxOlderPage(snapshotID: "notification-response-snapshot", highWater: 3,
+                    cursor: "older", items: [InboxSnapshotItem(acceptance: targetDelivery,
+                        terminal: targetTerminal)], nextCursor: nil, context: context)
+                try! live.refreshFromDurableStore()
+                return true
+            })
+
+        await app.handleNotification()
+
+        XCTAssertEqual(pageFetches, 1)
+        XCTAssertEqual(app.notificationNavigation?.request, target)
+        XCTAssertEqual(live.selectedRequestKey, target)
+        XCTAssertEqual(live.request(for: target)?.lifecycleStatus, .superseded)
+        XCTAssertEqual(live.request(for: target)?.supersededByMessageKeys, [replacement])
+        XCTAssertEqual(live.inboxRows.map(\.key), [replacement],
+                       "The notification follows normal routing for the superseded identity, whose detail links to its replacement.")
+        XCTAssertNil(app.notificationNavigationMessage)
+        XCTAssertNil(coldRouter.intent)
     }
 
     func testNotificationRecoveryKeepsRetainedRowsWithoutMarkingThemSeen() async throws {
