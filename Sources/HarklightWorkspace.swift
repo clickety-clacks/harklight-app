@@ -602,12 +602,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                  for: .tabBar)
     }
 
+    @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
-        NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
+        let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
-                  refreshInbox: refreshInbox,
+                  refreshAvailable: refreshInbox != nil,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab, search: $search,
@@ -629,6 +630,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: selection) { _, _ in
                 relatedMessageNavigationPath.removeAll()
             }
+        }
+        if let refreshInbox {
+            splitView
+                .scrollBounceBehavior(.always, axes: .vertical)
+                .refreshable { await refreshInbox() }
+        } else {
+            splitView
         }
     }
 
@@ -757,7 +765,7 @@ struct InboxList: View {
     let warnings: [String]
     var showsBasicOrderMarker = false
     var isRefreshing = false
-    var refreshInbox: (@MainActor () async -> Void)? = nil
+    var refreshAvailable = false
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var workspaceTab: InboxWorkspaceTab
@@ -914,7 +922,7 @@ struct InboxList: View {
         return [
             "search=\(search) workspaceTab=\(workspaceTab) listTab=\(tab) tab=\(selectedMessageTab.rawValue)",
             "restoreLastViewed=\(restoreLastViewed) lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) selected=\(UIDiagnostics.describe(selected))",
-            "refreshAvailable=\(refreshInbox != nil) isRefreshing=\(isRefreshing)",
+            "refreshAvailable=\(refreshAvailable) isRefreshing=\(isRefreshing)",
             "rows=\(rows.count) inTab=\(inTab.count) filtered=\(filtered)",
         ].joined(separator: " | ")
     }
@@ -1164,15 +1172,8 @@ struct InboxList: View {
 
     @ViewBuilder
     private func renderedList(using proxy: ScrollViewProxy) -> some View {
-        if let refreshInbox {
-            listContent(for: tab, using: proxy)
-                .scrollBounceBehavior(.always, axes: .vertical)
-                .refreshable { await refreshInbox() }
-                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
-        } else {
-            listContent(for: tab, using: proxy)
-                .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
-        }
+        listContent(for: tab, using: proxy)
+            .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
     }
 
     var body: some View {
