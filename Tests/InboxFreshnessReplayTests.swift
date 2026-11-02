@@ -76,6 +76,27 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
 final class InboxFreshnessReplayTests: XCTestCase {
     private func data(_ string: String) -> Data { Data(string.utf8) }
 
+    func testSkippedMessageDiagnosticRetainsCauseAndItemAssociationThroughCoding() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("diagnostic-person"), deviceID: ExactText("reader"))
+        let request = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let event = NativeClientDiagnosticEvent(area: .conversation,
+            phase: .conversationReplay, transition: .observed,
+            causeCode: "conversation_message_skipped", conversationSequence: 7,
+            request: request, requestRevision: 3, occurredAtMilliseconds: 1_000)
+
+        let data = try JSONEncoder().encode(event)
+        let restored = try JSONDecoder().decode(NativeClientDiagnosticEvent.self, from: data)
+
+        XCTAssertEqual(event.causeCode, "conversation_message_skipped")
+        XCTAssertEqual(restored, event)
+        XCTAssertEqual(restored.causeCode, "conversation_message_skipped")
+        XCTAssertEqual(restored.requestTag?.count, 64)
+        XCTAssertEqual(restored.conversationSequence, 7)
+        XCTAssertEqual(restored.requestRevision, 3)
+    }
+
     @MainActor
     func testConversationInvalidBindingDoesNotBlockFollowingRevisionFromRefreshingInbox() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
