@@ -1568,19 +1568,11 @@ public actor NativeRelayCore {
                 guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
                     throw NativeRelayCoreError.invalidReplay
                 }
-                if let accounted = try store.conversationReplayRejection(at: event.sequence,
-                    for: event.binding.request, context: context) {
-                    guard event.sequence <= replay.durableCursor,
-                          accounted.rejection.eventKind == event.fact.diagnosticKind else {
-                        throw ConversationError.conflict
-                    }
+                if event.sequence <= replay.durableCursor,
+                   try store.conversationSequenceWasAccountedWithoutEvent(at: event.sequence,
+                       context: context) {
                     replay.expected = event.sequence
                     conversationReplay = replay
-                    diagnose(.conversation, .conversationReplay, .observed,
-                        causeCode: NativeDiagnosticCauseCode.forError(ConversationError.invalidBinding),
-                        conversationSequence: event.sequence,
-                        conversationValidationRejection: accounted.rejection,
-                        request: event.binding.request, revision: event.binding.revision)
                     return
                 }
                 var validationRejection: ConversationValidationRejection?
@@ -1589,13 +1581,19 @@ public actor NativeRelayCore {
                         validationRejection: &validationRejection)
                 } catch {
                     if let validationRejection {
+                        guard validationRejection.guardID == .redactedRevisionBinding,
+                              validationRejection.eventKind == .revision,
+                              case .redactedRevision = event.fact else {
+                            throw ConversationReplayValidationFailure(rejection: validationRejection)
+                        }
                         diagnose(.conversation, .conversationReplay, .observed,
                             causeCode: NativeDiagnosticCauseCode.forError(ConversationError.invalidBinding),
                             conversationSequence: event.sequence,
                             conversationValidationRejection: validationRejection,
                             request: event.binding.request, revision: event.binding.revision)
-                        _ = try store.accountForRejectedConversationEvent(at: event.sequence,
-                            for: event.binding.request, rejection: validationRejection, context: context)
+                        let durableCursor = try store.advanceConversationCursor(
+                            overIgnoredUpdateAt: event.sequence, context: context)
+                        guard durableCursor >= event.sequence else { throw ConversationError.conflict }
                         replay.expected = event.sequence
                         conversationReplay = replay
                         return

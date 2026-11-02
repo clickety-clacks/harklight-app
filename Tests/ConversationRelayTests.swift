@@ -175,7 +175,7 @@ final class ConversationRelayTests: XCTestCase {
         await replacement.deactivate()
     }
 
-    func testRejectedConversationAccountingWriteFailureDoesNotAdvanceOrAcknowledge() async throws {
+    func testRejectedConversationCursorWriteFailureDoesNotAdvanceOrAcknowledge() async throws {
         let (context, persistence, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
@@ -196,20 +196,53 @@ final class ConversationRelayTests: XCTestCase {
 
         do {
             _ = try await core.resyncAndDrainOutbox()
-            XCTFail("A rejected sequence must remain fatal when its accounting commit fails.")
+            XCTFail("A rejected sequence must remain fatal when its cursor commit fails.")
         } catch let error as AttentionStoreError {
             guard case .persistence = error else { return XCTFail("Unexpected store error: \(error)") }
         }
 
         let snapshot = try store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 1,
-            "The rejected sequence and cursor must commit atomically.")
-        XCTAssertTrue(snapshot.replayRejections.isEmpty,
-            "A failed accounting commit must not leave a rejection record.")
+            "A failed cursor commit must leave the prior durable cursor unchanged.")
         XCTAssertEqual(session.consumedConversationFrames.count, 2,
-            "Replay stops at the failed rejected-sequence commit.")
+            "Replay stops at the failed rejected-sequence cursor commit.")
         XCTAssertTrue(session.conversationACKs.isEmpty,
-            "A rejected sequence is not acknowledged unless its accounting record is durable.")
+            "A rejected sequence is not acknowledged unless its cursor is durable.")
+        await core.deactivate()
+    }
+
+    func testOtherConversationValidationGuardRemainsFatalAndUnacknowledged() async throws {
+        let (context, _, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        try store.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("handle"), payload: .object([
+                JSONMember("title", .string(ExactText("Question")))
+            ]))), context: context)
+
+        session.conversation = [
+            data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"","request_revision":2,"kind":"revision","author":"origin","event_id":"invalid-revision","message":{"title":"Later wording"}}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
+        ]
+        let diagnostics = DiagnosticCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: diagnostics.append)
+
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("Only redacted_revision_binding may advance the cursor after a structured rejection.")
+        } catch let error as ConversationError {
+            XCTAssertEqual(error, .invalidBinding)
+        }
+
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+        XCTAssertTrue(session.conversationACKs.isEmpty)
+        let rejection = try XCTUnwrap(diagnostics.events.first {
+            $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .failed
+        }?.conversationValidationRejection)
+        XCTAssertEqual(rejection.guardID, .revisionSessionHandlePresent)
         await core.deactivate()
     }
 
@@ -249,7 +282,6 @@ final class ConversationRelayTests: XCTestCase {
         let snapshot = try store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 1,
             "The already committed event remains the last durable cursor.")
-        XCTAssertTrue(snapshot.replayRejections.isEmpty)
         XCTAssertTrue(session.conversationACKs.isEmpty,
             "A rejected resync snapshot cannot cross the barrier ACK.")
         await core.deactivate()
@@ -979,8 +1011,7 @@ final class ConversationRelayTests: XCTestCase {
                 XCTAssertEqual(snapshot.cursor, 0)
             } else if failure == "wrong-high-water-after-rejection" {
                 XCTAssertEqual(snapshot.cursor, 2,
-                    "The rejected and following valid sequences remain durably accounted before the bad barrier.")
-                XCTAssertEqual(snapshot.replayRejections.map(\.sequence), [1])
+                    "The rejected sequence advances the cursor by one and the later valid event commits before the bad barrier.")
             } else {
                 XCTAssertEqual(snapshot.cursor, 1)
             }

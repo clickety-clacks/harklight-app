@@ -126,13 +126,6 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let snapshot = try store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 2)
         XCTAssertEqual(snapshot.threads[key]?.currentRevision, 2)
-        XCTAssertEqual(snapshot.replayRejections.count, 1)
-        XCTAssertEqual(snapshot.replayRejections[0].sequence, 1)
-        XCTAssertEqual(snapshot.replayRejections[0].requestTag, rejectedEventDiagnostic.requestTag)
-        XCTAssertEqual(snapshot.replayRejections[0].rejection, rejection)
-        let encodedRejection = String(decoding: try JSONEncoder().encode(snapshot.replayRejections[0]), as: UTF8.self)
-        XCTAssertFalse(encodedRejection.contains("redacted-revision"))
-        XCTAssertFalse(encodedRejection.contains("Second wording"))
         XCTAssertEqual(session.conversationACKs.map { String(decoding: $0, as: UTF8.self) },
             ["{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":2,\"ref\":\"native-conversation-ack\"}\n",
              "{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":2,\"ref\":\"native-conversation-ack\"}\n"],
@@ -147,8 +140,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let restoredStore = try AttentionDomainStore(context: context, persistence: persistence)
         let restored = try restoredStore.conversationSnapshot(context: context)
         XCTAssertEqual(restored.cursor, 2)
-        XCTAssertEqual(restored.replayRejections, snapshot.replayRejections,
-                       "The rejected sequence is durably accounted with only its request binding and safe reason.")
+        XCTAssertEqual(restored.threads[key]?.currentRevision, 2,
+                       "The cursor and later revision survive reload without a stored rejection record.")
         await core.deactivate()
     }
 
