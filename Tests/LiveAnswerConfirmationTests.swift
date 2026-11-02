@@ -212,7 +212,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
         XCTAssertFalse(live.request(for: key)?.noCommentUnavailable ?? true,
                        "A newly queued attempt replaces the prior unsupported result in the current status.")
-        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
+        let pendingRetryRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertTrue(pendingRetryRow.hasDeliveryWarning,
+                      "The known delivery failure remains visible until the retry is accepted.")
+        XCTAssertFalse(pendingRetryRow.belongsToReplied,
                        "The known delivery failure keeps the row in Inbox until the retry is accepted.")
     }
 
