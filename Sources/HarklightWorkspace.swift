@@ -789,22 +789,6 @@ struct InboxList: View {
         HarklightDesignSystem.palette(for: colorScheme)
     }
 
-#if DEBUG
-    private struct RefreshActionProbe: View {
-        @Environment(\.refresh) private var refreshAction
-
-        var body: some View {
-            Text("refresh=\(refreshAction != nil)")
-                .font(.system(size: 1))
-                .foregroundStyle(.clear)
-                .frame(width: 1, height: 1)
-                .clipped()
-                .allowsHitTesting(false)
-                .accessibilityIdentifier("inbox-refresh-action-environment")
-        }
-    }
-#endif
-
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
         InboxListProjection.filteredRows(rows, in: tab, search: search)
     }
@@ -1068,13 +1052,6 @@ struct InboxList: View {
                              using proxy: ScrollViewProxy) -> some View {
         let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
         List(selection: listSelection) {
-#if DEBUG
-            if refreshInbox != nil {
-                RefreshActionProbe()
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-            }
-#endif
             if tab == .inbox && showsBasicOrderMarker {
                 Text("Basic order")
                     .font(.caption.weight(.semibold))

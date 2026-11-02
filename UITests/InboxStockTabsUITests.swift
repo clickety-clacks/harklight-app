@@ -105,8 +105,7 @@ final class InboxStockTabsUITests: XCTestCase {
     func testInboxAndRepliedPullToRefreshRunAndKeepFailureVisible() {
         for title in ["Inbox", "Replied"] {
             let app = XCUIApplication()
-            app.launchArguments = ["--reset-attention-fixture", "--harklight-test-list-refresh",
-                                  "--harklight-ui-diagnostics"]
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-test-list-refresh"]
             app.launch()
 
             let tab = workspaceTab(title, in: app)
@@ -118,22 +117,14 @@ final class InboxStockTabsUITests: XCTestCase {
             let firstRow = app.buttons.matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "request-row-")).firstMatch
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
-            let listDiagnostics = app.descendants(matching: .any).matching(
-                NSPredicate(format: "identifier == %@ AND label CONTAINS %@",
-                            "inbox-list-diagnostics", "refreshAvailable=true")).firstMatch
-            XCTAssertTrue(listDiagnostics.waitForExistence(timeout: 5), app.debugDescription)
-            let refreshEnvironment = app.descendants(matching: .any)[
-                "inbox-refresh-action-environment"]
-            XCTAssertTrue(refreshEnvironment.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertEqual(refreshEnvironment.label, "refresh=true")
-            let refreshStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+            let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
             refreshStart.press(forDuration: 0.05,
-                               thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 260)),
+                               thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 250)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
 
             let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
             XCTAssertTrue(refreshing.waitForExistence(timeout: 5),
-                          "Pulling down from the top of \(title) starts its refresh action.\n\(listDiagnostics.label)\n\(app.debugDescription)")
+                          "Pulling down from the top of \(title) starts its refresh action.\n\(app.debugDescription)")
             let warningButton = app.buttons["inbox-warning-button"]
             XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
             warningButton.tap()
