@@ -31,6 +31,10 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
     var consumedConversationFrames: [Data] = []
     var ordinaryACKs: [Data] = []
     var conversationACKs: [Data] = []
+    var conversationOpens: [Data] = []
+    var conversationACKCountsAtOpen: [Int] = []
+    var readConversationCursor: (@Sendable () throws -> UInt64)?
+    var conversationCursorsAtOpen: [UInt64] = []
     var rejectFirstConversationACK = false
     private var conversationOpenCount = 0
 
@@ -62,6 +66,11 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
 
     func openConversation(_ request: Data,
                           consume: @Sendable (Data) async throws -> Void) async throws {
+        conversationOpens.append(request)
+        conversationACKCountsAtOpen.append(conversationACKs.count)
+        if let readConversationCursor {
+            conversationCursorsAtOpen.append(try readConversationCursor())
+        }
         let frames: [Data]
         if conversationFrameBatches.isEmpty {
             frames = conversationFrames
@@ -157,6 +166,85 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
+    func testDiscussionHistoryRecoveryReplaysPendingSuffixAndNewEventsBeforeAcknowledging() async throws {
+        for historyCase in ["matching", "missing", "contradictory"] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("discussion-recovery"), deviceID: ExactText("reader"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let persistence = MemoryAttentionStatePersistence()
+            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            // Explicit synthetic missing-local-history precondition. The Server
+            // sequence below produces a discussion followed by its origin ACK.
+            _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+            let session = InboxFreshnessRelaySession(identity: identity)
+            session.readConversationCursor = { try store.conversationSnapshot(context: context).cursor }
+            session.inboxStartHighWater = 3
+            session.inboxStartItemsJSON = #"""
+                [{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"answered","origin":"origin","as":"message","message":{"title":"Answered question"},"session_handle":"closed-handle","request_revision":1,"event_id":"1"},
+                  "terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"answered","origin":"origin","state":"answered","author":"person","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"},"event_id":"3","request_revision":1}},
+                 {"acceptance":{"v":1,"type":"delivery","seq":3,"sender_id":"author","message_id":"open","origin":"origin","as":"message","message":{"title":"Original open question"},"session_handle":"open-handle","request_revision":1,"event_id":"4"}}]
+                """#
+            session.ordinaryFrames = [data(#"{"v":1,"type":"resynced","seq":3}"#)]
+            let accepted = data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#)
+            let historyID = historyCase == "missing" ? "7" : "2"
+            let historyHandle = historyCase == "contradictory" ? "wrong-handle" : "closed-handle"
+            let discussion = data("""
+                {"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"\(historyHandle)","request_revision":1,"kind":"discussion","author":"person","event_id":"\(historyID)","text":"Before answering"}
+                """)
+            let receipt = data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed-handle","request_revision":1,"kind":"receipt","author":"origin","event_id":"2","delivered":true}"#)
+            let pending = data(#"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open-handle","request_revision":2,"kind":"revision","author":"origin","event_id":"5","message":{"title":"Pending update"}}"#)
+            let arriving = data(#"{"v":1,"type":"conversation","conversation_seq":4,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open-handle","request_revision":3,"kind":"revision","author":"origin","event_id":"6","message":{"title":"Newest update"}}"#)
+            let high3 = data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
+            let high4 = data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#)
+            session.conversationFrameBatches = [
+                [accepted, receipt, pending, high3],
+                [accepted, discussion, receipt, pending, arriving, high4],
+                [accepted, receipt, pending, arriving, high4],
+                [accepted, discussion, receipt, pending, arriving, high4]
+            ]
+            session.rejectFirstConversationACK = historyCase == "matching"
+            let core = try NativeRelayCore(store: store, context: context, session: session)
+            if historyCase == "matching" {
+                _ = try await core.resyncAndDrainOutbox()
+                XCTAssertEqual(session.conversationACKCountsAtOpen, [0, 0, 0, 1])
+                XCTAssertEqual(session.conversationCursorsAtOpen, [1, 1, 1, 4])
+                XCTAssertEqual(session.consumedConversationFrames.count, 21)
+                XCTAssertEqual(try session.conversationOpens.map {
+                    try JSONValue.parse($0).uniqueValue(named: "since")?.integerValue
+                }, [1, 0, 1, 0])
+                XCTAssertEqual(try session.conversationACKs.map {
+                    try JSONValue.parse($0).uniqueValue(named: "conversation_seq")?.integerValue
+                }, [4, 4])
+            } else {
+                do {
+                    _ = try await core.resyncAndDrainOutbox()
+                    XCTFail("Missing or contradictory history must remain fatal")
+                } catch { }
+                XCTAssertEqual(session.conversationOpens.count, 2,
+                    "Only one history attempt follows this receipt failure")
+                XCTAssertTrue(session.conversationACKs.isEmpty)
+            }
+            let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+            let snapshot = try reloaded.conversationSnapshot(context: context)
+            func key(_ message: String) -> RequestKey {
+                RequestKey(accountScope: identity.personID, senderID: ExactText("author"),
+                    messageID: ExactText(message))
+            }
+            let presentation = try LivePresentationStore(store: reloaded, context: context)
+            XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: key("answered"))).belongsToReplied)
+            XCTAssertEqual(snapshot.cursor, historyCase == "matching" ? 4 : 1)
+            if historyCase == "matching" {
+                XCTAssertEqual(snapshot.threads[key("answered")]?.facts[ExactText("2")]?.delivered, true)
+                XCTAssertNotNil(snapshot.threads[key("open")]?.revisions[2],
+                    "The pending revision is retained, not skipped by the later revision")
+                XCTAssertEqual(presentation.request(for: key("open"))?.title, ExactText("Newest update"))
+                XCTAssertEqual(presentation.inboxRow(for: key("open"))?.requestRevision, 3)
+            }
+            await core.deactivate()
+        }
+    }
+
+    @MainActor
     func testMissingDiscussionRestorationPreservesAnsweredRowAndDurableCursor() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("recovery-person"), deviceID: ExactText("reader"))
@@ -215,8 +303,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
         try store.restoreReferencedConversationTurn(historical, for: receipt, context: context)
         let repaired = try AttentionDomainStore(context: context, persistence: persistence)
         XCTAssertEqual(try repaired.conversationSnapshot(context: context).cursor, 1)
-        // Restoration stores the target, not a new historical journal entry.
-        XCTAssertThrowsError(try repaired.applyConversation(historical, context: context))
+        // An exact repeat compares to the restored turn without adding history
+        // or advancing its already-durable cursor.
+        XCTAssertEqual(try repaired.applyConversation(historical, context: context), 1)
         try repaired.applyConversation(receipt, context: context)
         let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
         let snapshot = try reloaded.conversationSnapshot(context: context)

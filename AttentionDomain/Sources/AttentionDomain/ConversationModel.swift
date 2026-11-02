@@ -687,6 +687,15 @@ struct ConversationState: Codable, Equatable {
                 facts: ConversationValidationFacts(revisionIsZero: event.binding.revision == 0))
         }
         if event.sequence <= cursor {
+            // Exact dependency recovery retains the turn itself, not a second
+            // historical journal entry. ACK-behind replay may repeat that fact.
+            if events[event.sequence] == nil, case let .turn(turn) = event.fact,
+               turn.binding == event.binding,
+               turn.kind == .discussion || turn.kind == .reply,
+               turn.conversationSequence == event.sequence,
+               threads[event.binding.request]?.turns.contains(turn) == true {
+                return
+            }
             guard let previous = events[event.sequence], event.canEnrich(previous) else {
                 throw ConversationError.conflict
             }

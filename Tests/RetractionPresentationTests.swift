@@ -118,13 +118,23 @@ final class RetractionPresentationTests: XCTestCase {
     }
 
     func testFreshInboxPageKeepsTheRetractionTimeOfItsTerminal() throws {
+        try checkFreshInboxRetraction(terminal: snapshotTerminal, enriched: false)
+    }
+
+    func testFreshInboxPageWithAuthoritativeRetractionIdentityJoinsConversationReplay() throws {
+        // Paging enrichment copies these existing lifecycle identity fields;
+        // it does not add a session handle or a new retraction event.
+        try checkFreshInboxRetraction(terminal: ordinary, enriched: true)
+    }
+
+    private func checkFreshInboxRetraction(terminal: Data, enriched: Bool) throws {
         let context = profile()
         let persistence = MemoryAttentionStatePersistence()
         let domain = try AttentionDomainStore(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let delivery = #"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"origin","as":"message","message":{"title":"Retained question"},"request_revision":1,"session_handle":"handle","event_id":"1"}"#
         let frame = Data((#"{"v":1,"type":"ok","ref":"native-inbox","paging_version":1,"snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":"#
-            + delivery + #","terminal":"# + String(decoding: snapshotTerminal, as: UTF8.self)
+            + delivery + #","terminal":"# + String(decoding: terminal, as: UTF8.self)
             + #"}],"next_cursor":null,"receipt_cursor":null}"#).utf8)
         let page = try InboxPagingWire(profile: context).decodeStart(frame, ref: "native-inbox")
         XCTAssertEqual(page.items.first?.terminal?.conversation?.retractedAtMilliseconds, Self.retractedAt)
@@ -135,7 +145,13 @@ final class RetractionPresentationTests: XCTestCase {
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
         XCTAssertTrue(thread.isRetracted)
         XCTAssertEqual(thread.terminal, .cleared)
-        XCTAssertEqual(thread.reportedRetractedAtMilliseconds, Self.retractedAt)
+        if enriched {
+            XCTAssertEqual(thread.terminalTurn, ExactText("3"))
+            XCTAssertEqual(thread.retraction?.revision, 1)
+            XCTAssertEqual(thread.retraction?.retractedAtMilliseconds, Self.retractedAt)
+        } else {
+            XCTAssertEqual(thread.reportedRetractedAtMilliseconds, Self.retractedAt)
+        }
         try restored.applyConversation(ConversationWire(profile: context).decodeEvent(projected), context: context)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
                        Self.retractedAt, "The conversation stream adds the retraction turn at the same time")

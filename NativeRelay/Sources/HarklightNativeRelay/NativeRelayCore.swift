@@ -327,6 +327,13 @@ public actor NativeRelayCore {
         let durableCursor: UInt64
         var accepted = false
         var high: UInt64?
+        var recoveryAttempts: Set<UInt64> = []
+        var recoveryReceipt: ConversationEvent?
+        var recoveryRejection: ConversationValidationRejection?
+        var recoveryOrigin: ExactText?
+        var recoveryHandle: ExactText?
+        var historyOnly = false
+        var historyTarget: ConversationEvent?
     }
 
     private struct ConversationReplayValidationFailure: Error, Sendable {
@@ -1520,15 +1527,45 @@ public actor NativeRelayCore {
     private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,
                                     wire: ConversationWire) async throws -> UInt64 {
         try validate()
-        conversationReplay = ConversationReplayProgress(expected: cursor,
-            durableCursor: try store.conversationSnapshot(context: context).cursor)
         defer { conversationReplay = nil }
-        try await transport.openConversation(wire.open(since: cursor)) { frame in
-            try await self.consumeConversationReplay(frame)
+        var since = cursor
+        var attempts: Set<UInt64> = []
+        while true {
+            conversationReplay = ConversationReplayProgress(expected: since,
+                durableCursor: try store.conversationSnapshot(context: context).cursor,
+                recoveryAttempts: attempts)
+            try await transport.openConversation(wire.open(since: since)) { frame in
+                try await self.consumeConversationReplay(frame)
+            }
+            try validate()
+            guard let replay = conversationReplay, let high = replay.high else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            guard let receipt = replay.recoveryReceipt, let rejection = replay.recoveryRejection else {
+                return high
+            }
+            // The first response is fully drained, but the failed receipt and
+            // its suffix have not advanced the store or been acknowledged.
+            attempts.insert(receipt.sequence)
+            conversationReplay = ConversationReplayProgress(expected: 0,
+                durableCursor: try store.conversationSnapshot(context: context).cursor,
+                recoveryReceipt: receipt, recoveryRejection: rejection,
+                recoveryOrigin: replay.recoveryOrigin, recoveryHandle: replay.recoveryHandle,
+                historyOnly: true)
+            try await transport.openConversation(wire.open(since: 0)) { frame in
+                try await self.consumeConversationReplay(frame)
+            }
+            try validate()
+            guard conversationReplay?.high != nil,
+                  let target = conversationReplay?.historyTarget else {
+                throw ConversationReplayValidationFailure(rejection: rejection)
+            }
+            try store.restoreReferencedConversationTurn(target, for: receipt, context: context)
+            // History open moves the socket's stream position. Replay from the
+            // unchanged durable cursor so neither the drained suffix nor events
+            // arriving during recovery are mistaken for committed progress.
+            since = try store.conversationSnapshot(context: context).cursor
         }
-        try validate()
-        guard let high = conversationReplay?.high else { throw NativeRelayCoreError.invalidReplay }
-        return high
     }
 
     private func consumeConversationReplay(_ frame: Data) throws {
@@ -1543,8 +1580,13 @@ public actor NativeRelayCore {
             let high = snapshot.highWater
             let durableCursor = try store.conversationSnapshot(context: context).cursor
             guard high >= replay.durableCursor,
-                  high == replay.expected,
-                  high == durableCursor else { throw NativeRelayCoreError.invalidReplay }
+                  high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
+            if replay.historyOnly || replay.recoveryReceipt != nil {
+                replay.high = high
+                conversationReplay = replay
+                return
+            }
+            guard high == durableCursor else { throw NativeRelayCoreError.invalidReplay }
             var validationRejection: ConversationValidationRejection?
             do {
                 try store.finishConversationReplay(at: high,
@@ -1568,6 +1610,28 @@ public actor NativeRelayCore {
                 guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
                     throw NativeRelayCoreError.invalidReplay
                 }
+                if replay.historyOnly {
+                    if let receipt = replay.recoveryReceipt,
+                       case let .delivered(targetID) = receipt.fact,
+                       case let .turn(turn) = event.fact,
+                       turn.id == targetID, event.binding.request == receipt.binding.request {
+                        let value = try JSONValue.parse(frame)
+                        guard value.uniqueValue(named: "origin")?.stringValue == replay.recoveryOrigin,
+                              turn.sessionHandle == replay.recoveryHandle,
+                              replay.historyTarget == nil || replay.historyTarget == event else {
+                            throw ConversationError.conflict
+                        }
+                        replay.historyTarget = event
+                    }
+                    replay.expected = event.sequence
+                    conversationReplay = replay
+                    return
+                }
+                if replay.recoveryReceipt != nil {
+                    replay.expected = event.sequence
+                    conversationReplay = replay
+                    return
+                }
                 if event.sequence <= replay.durableCursor,
                    let rejection = try store.redactedRevisionRejectionForAccountedRedelivery(
                        event, context: context),
@@ -1584,6 +1648,23 @@ public actor NativeRelayCore {
                         validationRejection: &validationRejection)
                 } catch {
                     if let validationRejection {
+                        if validationRejection.guardID == .referencedTurnExists,
+                           validationRejection.eventKind == .receipt,
+                           case .delivered = event.fact,
+                           !replay.recoveryAttempts.contains(event.sequence) {
+                            let value = try JSONValue.parse(frame)
+                            guard let origin = value.uniqueValue(named: "origin")?.stringValue,
+                                  let handle = value.uniqueValue(named: "session_handle")?.stringValue else {
+                                throw NativeRelayCoreError.invalidReplay
+                            }
+                            replay.recoveryReceipt = event
+                            replay.recoveryRejection = validationRejection
+                            replay.recoveryOrigin = origin
+                            replay.recoveryHandle = handle
+                            replay.expected = event.sequence
+                            conversationReplay = replay
+                            return
+                        }
                         guard validationRejection.guardID == .redactedRevisionBinding,
                               validationRejection.eventKind == .revision,
                               validationRejection.facts.sessionHandleMatchesThread == true,
@@ -1609,7 +1690,9 @@ public actor NativeRelayCore {
                 guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
                     throw NativeRelayCoreError.invalidReplay
                 }
-                _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
+                if !replay.historyOnly && replay.recoveryReceipt == nil {
+                    _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
+                }
                 replay.expected = sequence
                 diagnose(.conversation, .conversationReplay, .observed, causeCode: "unknown_update_kind")
             }
