@@ -218,9 +218,15 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 try JSONValue.parse($0).uniqueValue(named: "conversation_seq")?.integerValue
             }, [4, 4])
             if !succeeds {
-                XCTAssertNotNil(diagnostics.events.first {
-                    $0.transition == .observed && $0.conversationSequence == 2
+                let skipped = try XCTUnwrap(diagnostics.events.first {
+                    $0.causeCode == "conversation_message_skipped" && $0.conversationSequence == 2
                 })
+                let request = RequestKey(accountScope: identity.personID,
+                    senderID: ExactText("author"), messageID: ExactText("answered"))
+                let expectedTag = NativeClientDiagnosticEvent(area: .conversation,
+                    phase: .conversationReplay, transition: .observed, request: request).requestTag
+                XCTAssertEqual(skipped.requestTag, expectedTag)
+                XCTAssertEqual(skipped.requestRevision, 1)
             }
             let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
             let snapshot = try reloaded.conversationSnapshot(context: context)
@@ -323,7 +329,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
             } else if failure == "transport" {
                 session.conversationOpenErrors[1] = .unexpectedServerFrame
             }
-            let core = try NativeRelayCore(store: store, context: context, session: session)
+            let diagnostics = InboxFreshnessDiagnosticCollector()
+            let core = try NativeRelayCore(store: store, context: context, session: session,
+                onDiagnostic: { diagnostics.append($0) })
             do {
                 _ = try await core.resyncAndDrainOutbox()
                 XCTFail("An actual gap, failed durable write or transport failure must not be acknowledged")
@@ -338,6 +346,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 }
             }
             XCTAssertTrue(session.conversationACKs.isEmpty)
+            XCTAssertFalse(diagnostics.events.contains { $0.causeCode == "conversation_message_skipped" },
+                "Do not report a completed skip before its cursor is durable")
             let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
             XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 0)
             XCTAssertTrue(try reloaded.conversationSnapshot(context: context).threads.isEmpty)

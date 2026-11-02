@@ -1756,6 +1756,9 @@ public actor NativeRelayCore {
         // The existing cursor commit is the skip's durable accounting. If it
         // fails, propagate the error and never ACK this sequence.
         _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
+        diagnose(.conversation, .conversationReplay, .observed,
+            causeCode: "conversation_message_skipped", conversationSequence: sequence,
+            request: event?.binding.request, revision: event?.binding.revision)
     }
 
     private func diagnoseOperationReplay(_ transition: NativeDiagnosticTransition,
