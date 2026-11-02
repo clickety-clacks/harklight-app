@@ -22,6 +22,7 @@ final class ConversationRelayTests: XCTestCase {
         let authenticatedIdentity: ProfileIdentity
         var ordinary: [Data] = []
         var conversation: [Data] = []
+        var consumedConversationFrames: [Data] = []
         var inboxStartItemsJSON: String?
         var ordinaryACKs: [Data] = []
         var conversationACKs: [Data] = []
@@ -104,7 +105,10 @@ final class ConversationRelayTests: XCTestCase {
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             onConversationOpen?()
             if let conversationOpenError { throw conversationOpenError }
-            for frame in conversation { try await consume(frame) }
+            for frame in conversation {
+                consumedConversationFrames.append(frame)
+                try await consume(frame)
+            }
         }
         func acknowledgeConversation(_ request: Data) async throws {
             try onConversationACK?()
