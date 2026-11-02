@@ -19,8 +19,8 @@ struct HarklightReleaseNote: Identifiable, Sendable {
     let buildIdentifier: Int?
     let marketingVersion: String
     let historyDateDescription: LocalizedStringResource?
-    /// Minimum installed build where an unnumbered note can appear.
-    /// Source inclusion, rather than this value, determines its first containing build.
+    /// Minimum installed build where an update can appear. For a numbered update,
+    /// this is its evidenced first shipped build.
     let visibleFromBuildIdentifier: Int?
     let highlights: [Highlight]
 
@@ -38,13 +38,14 @@ struct HarklightReleaseNote: Identifiable, Sendable {
         marketingVersion: String,
         historyDateDescription: LocalizedStringResource,
         visibleFromBuildIdentifier: Int,
+        firstShippedBuildIdentifier: Int? = nil,
         highlights: [Highlight]
     ) {
         id = historyIdentifier
-        buildIdentifier = nil
+        buildIdentifier = firstShippedBuildIdentifier
         self.marketingVersion = marketingVersion
         self.historyDateDescription = historyDateDescription
-        self.visibleFromBuildIdentifier = visibleFromBuildIdentifier
+        self.visibleFromBuildIdentifier = firstShippedBuildIdentifier ?? visibleFromBuildIdentifier
         self.highlights = highlights
     }
 }

@@ -3,6 +3,35 @@ import XCTest
 import AttentionDomain
 
 final class ReleaseNotesTests: XCTestCase {
+    func testAttributedUpdateUsesItsFirstShippedBuildAndStableSeenIdentity() {
+        // Synthetic build numbers exercise the model without attributing a real release.
+        let update = HarklightReleaseNote(
+            historyIdentifier: "attributed-update",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource("An update"),
+            visibleFromBuildIdentifier: 79,
+            firstShippedBuildIdentifier: 10_000,
+            highlights: [])
+
+        XCTAssertEqual(update.id, "attributed-update")
+        XCTAssertEqual(update.buildIdentifier, 10_000)
+        XCTAssertEqual(update.visibleFromBuildIdentifier, 10_000)
+        XCTAssertTrue(HarklightReleaseNotes.visibleUpdateEntries(
+            currentBuildIdentifier: "9999", entries: [update]).isEmpty)
+        XCTAssertEqual(HarklightReleaseNotes.visibleUpdateEntries(
+            currentBuildIdentifier: "10000", entries: [update]).map(\.id), [update.id])
+        XCTAssertEqual(HarklightReleaseNotes.visibleUpdateEntries(
+            currentBuildIdentifier: "10001", entries: [update]).map(\.id), [update.id])
+        XCTAssertEqual(HarklightReleaseNotes.settingsHistory(
+            currentBuildIdentifier: "10001", entries: [], historyEntries: [],
+            updateEntries: [update]).map(\.id), [update.id])
+
+        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "10001", entries: [], updateEntries: [update],
+            seenUpdateIdentifiers: [update.id], lastSeenBuildIdentifier: 10_000,
+            hasPriorAppState: true).isEmpty)
+    }
+
     @MainActor
     func testPost79UpdateShowsOnceForExistingUsersWithoutClaimingAnArchiveBuild() throws {
         let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
