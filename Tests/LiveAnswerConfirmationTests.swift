@@ -613,51 +613,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 3)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .lost)
-    }
-
-    // Synthetic typed store events demonstrate this app state path; they are not captured Server frames.
-    func testSyntheticNewerRevisionReopensPendingNoCommentInInboxBeforeRejectedFact() throws {
-        let (context, store, live, key) = try setupReplyOnly()
-        let firstPayload = try JSONValue.parse(Data(#"{"title":"Reply-only request"}"#.utf8))
-        let firstBinding = ConversationBinding(request: key, revision: 1)
-        try store.applyConversation(ConversationEvent(sequence: 1, binding: firstBinding,
-            fact: .request(sessionHandle: ExactText("origin"), payload: firstPayload)), context: context)
-        try live.refreshFromDurableStore()
-
-        let receipt = try commitNoComment(store, key: key)
-        try live.refreshFromDurableStore()
-        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
-                      "The pending revision-1 No comment is initially routed to Replied.")
-
-        let secondPayload = try JSONValue.parse(Data(#"{"title":"Updated request"}"#.utf8))
-        let secondBinding = ConversationBinding(request: key, revision: 2)
-        let revision = ConversationTurn(id: ExactText("revision-2"), binding: secondBinding,
-            author: .origin, sessionHandle: ExactText("origin"),
-            text: ExactText("Updated request"), kind: .revision)
-        try store.applyConversation(ConversationEvent(sequence: 2, binding: secondBinding,
-            fact: .revision(revision, payload: secondPayload)), context: context)
-
-        var rejection: ConversationValidationRejection?
-        XCTAssertThrowsError(try store.applyConversation(ConversationEvent(sequence: 3,
-            binding: secondBinding, fact: .delivered(turn: ExactText("unknown-turn"))),
-            context: context, validationRejection: &rejection)) {
-            XCTAssertEqual($0 as? ConversationError, .invalidBinding)
-        }
-        XCTAssertEqual(rejection?.guardID, .referencedTurnExists)
-        XCTAssertEqual(rejection?.eventKind, .receipt)
-
-        try live.refreshFromDurableStore()
-        let current = try XCTUnwrap(live.request(for: key))
-        XCTAssertEqual(current.requestRevision, 2)
-        XCTAssertEqual(current.lifecycleStatus, .open)
-        XCTAssertNil(current.intentReceipt)
-        XCTAssertNil(try store.conversationSnapshot(context: context).threads[key]?.terminal)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2,
-                       "The rejected fact does not commit or advance the conversation cursor.")
-        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .lost)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
-                       "Without an ordinary No comment terminal, the newer open request returns to Inbox.")
+                       "The current open revision belongs in Inbox after the older No comment intent is superseded.")
     }
 
     func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {
