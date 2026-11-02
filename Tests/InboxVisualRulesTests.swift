@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 @testable import Harklight
 import AttentionDomain
+import SwiftUI
 
 final class InboxVisualRulesTests: XCTestCase {
     func testServerPriorityUsesPlainLanguageLabelsAndOmitsNormal() {
@@ -26,6 +27,48 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(AttentionTier.top.inboxRowStyleTier, .top)
         XCTAssertEqual(AttentionTier.middle.inboxRowStyleTier, .middle)
         XCTAssertEqual(AttentionTier.low.inboxRowStyleTier, .low)
+    }
+
+    func testWashedPriorityRowsUseModeSpecificColorsAndEmphasizeNow() throws {
+        let lightHigh = try XCTUnwrap(
+            InboxPriorityRowTreatment.forPriority(.high, colorScheme: .light))
+        XCTAssertEqual(lightHigh.topHex, "#73592A")
+        XCTAssertEqual(lightHigh.bottomHex, "#5E4720")
+        XCTAssertEqual(lightHigh.primaryTextHex, "#F6F1E7")
+        XCTAssertEqual(lightHigh.secondaryTextHex, "#E3DCCF")
+        XCTAssertNil(lightHigh.leadingBandHex)
+
+        let lightNow = try XCTUnwrap(
+            InboxPriorityRowTreatment.forPriority(.now, colorScheme: .light))
+        XCTAssertEqual(lightNow.topHex, "#A63A2A")
+        XCTAssertEqual(lightNow.bottomHex, "#8A2C1E")
+        XCTAssertEqual(lightNow.primaryTextHex, "#F6F1E7")
+        XCTAssertEqual(lightNow.secondaryTextHex, "#E3DCCF")
+        XCTAssertEqual(lightNow.leadingBandHex, "#5A1A10")
+
+        let darkHigh = try XCTUnwrap(
+            InboxPriorityRowTreatment.forPriority(.high, colorScheme: .dark))
+        XCTAssertEqual(darkHigh.topHex, "#3A3119")
+        XCTAssertEqual(darkHigh.bottomHex, "#2B2516")
+        XCTAssertEqual(darkHigh.primaryTextHex, "#E6D9B8")
+        XCTAssertEqual(darkHigh.secondaryTextHex, "#AEA283")
+        XCTAssertNil(darkHigh.leadingBandHex)
+
+        let darkNow = try XCTUnwrap(
+            InboxPriorityRowTreatment.forPriority(.now, colorScheme: .dark))
+        XCTAssertEqual(darkNow.topHex, "#5A2219")
+        XCTAssertEqual(darkNow.bottomHex, "#3A1A14")
+        XCTAssertEqual(darkNow.primaryTextHex, "#F2C9BE")
+        XCTAssertEqual(darkNow.secondaryTextHex, "#C0948A")
+        XCTAssertEqual(darkNow.leadingBandHex, "#EE8B75")
+
+        for treatment in [lightHigh, lightNow, darkHigh, darkNow] {
+            XCTAssertEqual(treatment.capsuleFillHex, treatment.primaryTextHex)
+            XCTAssertEqual(treatment.capsuleTextHex, treatment.topHex)
+            XCTAssertEqual(treatment.initialsFillOpacity, 0.18)
+        }
+        XCTAssertNil(InboxPriorityRowTreatment.forPriority(.normal, colorScheme: .light))
+        XCTAssertNil(InboxPriorityRowTreatment.forPriority(.low, colorScheme: .dark))
     }
 
     func testSenderLabelUsesLastKindAndAgentSegment() {

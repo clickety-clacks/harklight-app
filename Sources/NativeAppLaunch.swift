@@ -77,6 +77,7 @@ final class NativeAppLaunch {
     @ObservationIgnored private var notificationSynchronized = false
     @ObservationIgnored private var notificationRefreshFinished = false
     @ObservationIgnored private var handledNotificationSerial: UInt64?
+    @ObservationIgnored private var resolvingNotificationSerial: UInt64?
     @ObservationIgnored private var pendingMessageDeepLink: NativeMessageDeepLink?
     @ObservationIgnored private var didFinishRestoring = false
     @ObservationIgnored private var foregroundActivationPushCheckPending = false
@@ -606,7 +607,8 @@ final class NativeAppLaunch {
             deviceID: ExactText(departure.record.deviceID)), transportMode: .relay)
         let persistence = try FileAttentionStatePersistence.applicationSupport()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
-        return try LivePresentationStore(disconnectedStore: store, context: context)
+        return try LivePresentationStore(disconnectedStore: store, context: context,
+                                        newMessageAreaDefaults: .standard)
     }
 
     private var disconnectedStore: LivePresentationStore? {
@@ -797,7 +799,8 @@ final class NativeAppLaunch {
         let store = try AttentionDomainStore(context: installation.context, persistence: persistence,
                                              conversationFileReferences: fileStorage)
         let presentation = try LivePresentationStore(store: store, context: installation.context,
-                                                     diagnostics: diagnostics)
+                                                     diagnostics: diagnostics,
+                                                     newMessageAreaDefaults: .standard)
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
                                                            context: installation.context,
@@ -812,7 +815,9 @@ final class NativeAppLaunch {
             throw error
         }
         guard activationGeneration == generation else { return }
-        presentation.notificationProjectionDidChange = { [weak self] in self?.resolveNotificationNavigation() }
+        presentation.notificationProjectionDidChange = { [weak self] in
+            Task { await self?.resolveNotificationNavigation() }
+        }
         presentation.confirmedRelayRefresh = { [weak self, weak presentation] in
             guard let self, let presentation,
                   case let .live(current) = self.state, current === presentation,
@@ -927,7 +932,7 @@ final class NativeAppLaunch {
         presentation.applyRefreshResult(result)
         notificationRefreshFinished = true
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
-        resolveNotificationNavigation()
+        await resolveNotificationNavigation()
         await resolveMessageDeepLink(synchronized: notificationSynchronized)
     }
 
@@ -1007,7 +1012,9 @@ final class NativeAppLaunch {
                 _ = notificationRouter.resolve(records: [record], context: presentation.notificationContext,
                     requests: [], synchronized: false)
             }
-            presentation.notificationProjectionDidChange = { [weak self] in self?.resolveNotificationNavigation() }
+            presentation.notificationProjectionDidChange = { [weak self] in
+                Task { await self?.resolveNotificationNavigation() }
+            }
             await refreshLive()
         } else {
             notificationRouter.fallback()
@@ -1015,33 +1022,95 @@ final class NativeAppLaunch {
         }
     }
 
-    func resolveNotificationNavigation() {
+    func resolveNotificationNavigation() async {
         guard notificationRefreshFinished, let intent = notificationRouter.intent,
               handledNotificationSerial == intent.serial,
-              case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample else { return }
+              case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample,
+              resolvingNotificationSerial != intent.serial else { return }
+        resolvingNotificationSerial = intent.serial
+        defer {
+            if resolvingNotificationSerial == intent.serial {
+                resolvingNotificationSerial = nil
+            }
+        }
         let record: NativeEnrollmentRecord?
         do { record = try enrollment.load() }
         catch {
             notificationNavigationMessage = "Could not check this notification's account."
             return
         }
-        if let key = notificationRouter.resolve(records: record.map { [$0] } ?? [],
+        let records = record.map { [$0] } ?? []
+        if let key = notificationRouter.resolve(records: records,
             context: presentation.notificationContext, requests: presentation.presentation.requests,
             synchronized: notificationSynchronized) {
             presentation.selectRequest(key)
             notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key)
             notificationNavigationMessage = nil
             notificationRouter.consumed()
-        } else if notificationRouter.intent?.locator != nil {
-            presentation.selectRequest(nil)
-            notificationNavigationMessage = notificationSynchronized
-                ? "This notification's message has not loaded yet."
-                : "Could not verify notification. Checking again while open."
-        } else {
+            return
+        }
+        guard let locator = notificationRouter.intent?.locator else {
             presentation.selectRequest(nil)
             notificationNavigationMessage = nil
             notificationRouter.consumed()
+            return
         }
+
+        presentation.selectRequest(nil)
+        guard notificationSynchronized else {
+            notificationNavigationMessage = "Could not verify notification. Checking again while open."
+            return
+        }
+
+        var pageAvailability = presentation.inboxPageAvailability()
+        while pageAvailability == .more {
+            guard notificationRouter.intent?.serial == intent.serial,
+                  notificationRouter.intent?.locator != nil,
+                  notificationSynchronized, notificationRefreshFinished,
+                  case let .live(current) = state, current === presentation else { return }
+            // A present identity with a different acceptance sequence is stale;
+            // older pages cannot make it current.
+            if presentation.presentation.requests.contains(where: { $0.key == locator.request }) {
+                break
+            }
+
+            let revisionBeforePage = presentation.presentation.revision
+            let fetched: Bool
+            if let fetchInboxPageOperation {
+                fetched = await fetchInboxPageOperation(presentation)
+            } else {
+                fetched = await presentation.fetchNextInboxPage()
+            }
+            guard notificationRouter.intent?.serial == intent.serial,
+                  notificationRouter.intent?.locator != nil,
+                  notificationSynchronized, notificationRefreshFinished,
+                  case let .live(current) = state, current === presentation else { return }
+
+            if let key = notificationRouter.resolve(records: records,
+                context: presentation.notificationContext,
+                requests: presentation.presentation.requests, synchronized: true) {
+                presentation.selectRequest(key)
+                notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key)
+                notificationNavigationMessage = nil
+                notificationRouter.consumed()
+                return
+            }
+            guard notificationRouter.intent?.locator != nil else {
+                presentation.selectRequest(nil)
+                notificationNavigationMessage = nil
+                notificationRouter.consumed()
+                return
+            }
+            if presentation.presentation.requests.contains(where: { $0.key == locator.request }) {
+                break
+            }
+
+            pageAvailability = presentation.inboxPageAvailability()
+            guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
+        }
+        guard notificationRouter.intent?.serial == intent.serial,
+              notificationRouter.intent?.locator != nil else { return }
+        notificationNavigationMessage = "This notification's message has not loaded yet."
     }
 
     func retryForegroundConnection() async {
@@ -1185,6 +1254,7 @@ final class LivePresentationStore {
     private(set) var isReadOnly: Bool
     @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
+    @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
     // Reply edits remain local until submission, but must outlive a detail view
@@ -1206,11 +1276,13 @@ final class LivePresentationStore {
     convenience init(store: AttentionDomainStore, context: ProfileContext,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
-                     clearedRetractionDefaults: UserDefaults = .standard) throws {
+                     clearedRetractionDefaults: UserDefaults = .standard,
+                     newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
                       conversationAvailability: conversationAvailability,
-                      clearedRetractionDefaults: clearedRetractionDefaults)
+                      clearedRetractionDefaults: clearedRetractionDefaults,
+                      newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
@@ -1220,17 +1292,22 @@ final class LivePresentationStore {
                       diagnostics: nil)
     }
 
-    convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext) throws {
+    convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext,
+                     newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true, diagnostics: nil)
+        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true,
+                      diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
     private init(store: AttentionDomainStore, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
-                 clearedRetractionDefaults: UserDefaults = .standard) throws {
+                 clearedRetractionDefaults: UserDefaults = .standard,
+                 newMessageAreaDefaults: UserDefaults? = nil) throws {
         self.clearedRetractionDefaults = clearedRetractionDefaults
+        let areaStore = newMessageAreaDefaults.map { NewMessageAreaStore(defaults: $0) }
+        self.messageAreaStore = areaStore
         self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
@@ -1245,6 +1322,7 @@ final class LivePresentationStore {
         self.conversationThreads = try port.conversations(context: port.context).threads
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
+        reconcileNewMessageArea(snapshot.requests, using: areaStore)
         if let data = clearedRetractionDefaults.data(forKey: Self.clearedRetractionsDefaultsKey),
            let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
             clearedRetractions = cleared
@@ -1627,6 +1705,21 @@ final class LivePresentationStore {
         return presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
             .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
+    }
+
+    var newMessageAreaStore: NewMessageAreaStore? { messageAreaStore }
+
+    private func reconcileNewMessageArea(_ requests: [PresentedRequest],
+                                         using store: NewMessageAreaStore? = nil) {
+        guard let store = store ?? messageAreaStore else { return }
+        let messages = requests.map {
+            NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
+                                  isResolved: $0.isResolved,
+                                  hasSubmittedAnswer: $0.intentReceipt != nil)
+        }
+        let revisions = Dictionary(uniqueKeysWithValues: requests.map { ($0.key, $0.requestRevision) })
+        store.reconcile(messages, revisions: revisions,
+                        accountScopes: [profileContext.identity.personID])
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
@@ -2557,6 +2650,7 @@ final class LivePresentationStore {
             diagnose(.localStore, .projectionRefresh, .failed, error: error)
         }
         presentation = snapshot
+        reconcileNewMessageArea(snapshot.requests)
         refreshFailedResponseWarnings(for: snapshot.requests)
         recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)

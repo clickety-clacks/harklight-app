@@ -63,27 +63,41 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping @Sendable () -> Void) {
-        // Default opening is navigation only. Dismissal and unsupported actions
-        // do not alter navigation, domain state, or notification presentation.
-        let navigationPayload: JSONValue?
-        if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
-            let info = response.notification.request.content.userInfo
-            var payload: JSONValue = .null
-            let sequence = ((info["attention"] as? [String: Any])?["locator"] as? [String: Any])?["acceptance_seq"] as? NSNumber
-            let integerSequence = sequence.map { !["d", "f"].contains(String(cString: $0.objCType)) && CFGetTypeID($0) != CFBooleanGetTypeID() } ?? true
-            if integerSequence, let data = try? JSONSerialization.data(withJSONObject: info),
-               let decoded = try? JSONValue.parse(data) { payload = decoded }
-            navigationPayload = payload
-        } else {
-            navigationPayload = nil
-        }
+        let actionIdentifier = response.actionIdentifier
+        let userInfo = response.notification.request.content.userInfo
+        let navigationPayload = Self.notificationNavigationPayload(
+            actionIdentifier: actionIdentifier, userInfo: userInfo)
         Task { @MainActor in
-            if let navigationPayload {
-                NativeNotificationRouter.shared.receive(navigationPayload, opened: true)
-            }
+            Self.routeNotificationPayload(navigationPayload, to: .shared)
             // UIKit snapshots the app after this completion; finish on the main thread.
             completionHandler()
         }
+    }
+
+    /// Keep the system response handoff testable without constructing a
+    /// device-owned UNNotificationResponse.
+    nonisolated static func notificationNavigationPayload(actionIdentifier: String,
+                                                          userInfo: [AnyHashable: Any]) -> JSONValue? {
+        // Default opening is navigation only. Dismissal and unsupported actions
+        // do not alter navigation, domain state, or notification presentation.
+        guard actionIdentifier == UNNotificationDefaultActionIdentifier else { return nil }
+
+        var payload: JSONValue = .null
+        let sequence = ((userInfo["attention"] as? [String: Any])?["locator"] as? [String: Any])?["acceptance_seq"] as? NSNumber
+        let integerSequence = sequence.map {
+            !["d", "f"].contains(String(cString: $0.objCType)) && CFGetTypeID($0) != CFBooleanGetTypeID()
+        } ?? true
+        if integerSequence,
+           let data = try? JSONSerialization.data(withJSONObject: userInfo),
+           let decoded = try? JSONValue.parse(data) {
+            payload = decoded
+        }
+        return payload
+    }
+
+    static func routeNotificationPayload(_ payload: JSONValue?, to router: NativeNotificationRouter) {
+        guard let payload else { return }
+        router.receive(payload, opened: true)
     }
 
     private func clearAddressAndSetStatus(_ status: String) {

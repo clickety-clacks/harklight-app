@@ -13,12 +13,14 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Keep an unfinished Reply"].exists,
                       app.debugDescription)
+        let unconfirmedUpdateHeader = app.staticTexts[
+            "Version 0.1.0 · Response delivery improvements"
+        ]
+        XCTAssertTrue(unconfirmedUpdateHeader.exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["See why a response was not accepted"].exists,
+                      app.debugDescription)
         let updateHeader = app.staticTexts["Version 0.1.0 · First confirmed in Build 106"]
         XCTAssertTrue(updateHeader.exists, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Changes since Build 79"].exists,
-                      "The earlier heading stays with the confirmed build label.")
-        XCTAssertTrue(app.staticTexts["More context in the Inbox"].exists,
-                      app.debugDescription)
         XCTAssertTrue(app.staticTexts["See when Chat needs attention"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
@@ -35,8 +37,16 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        XCTAssertTrue(updateHeader.exists,
-                      "Settings keeps the confirmed build label in history.")
+        let historicalSection = app.cells.containing(
+            .staticText, identifier: "Changes since Build 79").firstMatch
+        revealHistoryElement(historicalSection, in: app)
+        XCTAssertTrue(historicalSection.staticTexts[
+            "Version 0.1.0 · First confirmed in Build 106"
+        ].exists, "Settings keeps the historical entry's confirmed build label.")
+        let earlierHighlight = app.staticTexts["More context in the Inbox"]
+        revealHistoryElement(earlierHighlight, in: app)
+        XCTAssertTrue(earlierHighlight.exists,
+                      "The earlier historical entry remains available in Settings.")
     }
 
     func testUpdateSheetAndSettingsHistoryShowReleasedNotes() {
