@@ -62,7 +62,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
     private func data(_ string: String) -> Data { Data(string.utf8) }
 
     @MainActor
-    func testRejectedConversationEventPreventsFollowingRevisionFromRefreshingInbox() async throws {
+    func testConversationInvalidBindingDoesNotBlockFollowingRevisionFromRefreshingInbox() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -94,12 +94,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let diagnostics = InboxFreshnessDiagnosticCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: { diagnostics.append($0) })
-        do {
-            _ = try await core.resyncAndDrainOutbox()
-            XCTFail("The invalid redacted revision should stop the current replay.")
-        } catch let error as ConversationError {
-            XCTAssertEqual(error, .invalidBinding)
-        }
+        _ = try await core.resyncAndDrainOutbox()
 
         let replayFailure = try XCTUnwrap(diagnostics.events.first {
             $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .failed
@@ -117,18 +112,19 @@ final class InboxFreshnessReplayTests: XCTestCase {
 
         XCTAssertEqual(session.conversationFrames.count, 4,
                        "A valid revision follows the rejected event in the synthetic stream.")
-        XCTAssertEqual(session.consumedConversationFrames.count, 2,
-                       "Replay stops before the later valid revision and barrier.")
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 1)
-        XCTAssertTrue(session.conversationACKs.isEmpty,
-                      "The rejected event leaves the replay cursor unacknowledged.")
+        XCTAssertEqual(session.consumedConversationFrames.count, 4,
+                       "Replay accounts for the rejected event, then consumes the valid revision and barrier.")
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 2)
+        XCTAssertEqual(session.conversationACKs.map { String(decoding: $0, as: UTF8.self) },
+            ["{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":3,\"ref\":\"native-conversation-ack\"}\n"],
+            "Replay acknowledges the barrier only after the rejected sequence and later valid revision are accounted for.")
 
         let presentation = try LivePresentationStore(store: store, context: context)
-        XCTAssertEqual(presentation.request(for: key)?.requestRevision, 1)
-        XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 1,
-                       "The Inbox still projects the last accepted revision.")
-        XCTAssertEqual(presentation.request(for: key)?.title, ExactText("First wording"))
+        XCTAssertEqual(presentation.request(for: key)?.requestRevision, 2)
+        XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 2,
+                       "The Inbox projects the later valid revision after the rejected event is accounted for.")
+        XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Second wording"))
         await core.deactivate()
     }
 
