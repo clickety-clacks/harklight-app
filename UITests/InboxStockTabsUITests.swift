@@ -117,7 +117,7 @@ final class InboxStockTabsUITests: XCTestCase {
             let firstRow = app.buttons.matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "request-row-")).firstMatch
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
-            let pullStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let pullStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
             pullStart.press(forDuration: 0.05,
                             thenDragTo: pullStart.withOffset(CGVector(dx: 0, dy: 220)),
                             withVelocity: .slow, thenHoldForDuration: 0.1)
