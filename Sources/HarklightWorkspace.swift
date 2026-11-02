@@ -1062,21 +1062,10 @@ struct InboxList: View {
     }
 
     @ViewBuilder
-    private func applyingRefreshAction<Content: View>(to content: Content) -> some View {
-        if let refreshInbox {
-            content
-                .scrollBounceBehavior(.always, axes: .vertical)
-                .refreshable { await refreshInbox() }
-        } else {
-            content
-        }
-    }
-
-    @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
-        applyingRefreshAction(to: List(selection: listSelection) {
+        List(selection: listSelection) {
             if UIDiagnostics.shared.enabled {
                 InboxRefreshActionProbe()
                     .listRowInsets(EdgeInsets())
@@ -1116,7 +1105,7 @@ struct InboxList: View {
                 ProgressView().frame(maxWidth: .infinity).padding()
                     .listRowSeparator(.hidden)
             }
-        })
+        }
         .listStyle(.plain)
         .animation(reduceMotion ? nil : .default, value: tabMembershipIDs)
         .scrollContentBackground(.hidden)
@@ -1198,9 +1187,18 @@ struct InboxList: View {
             .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
     }
 
+    @ViewBuilder
     var body: some View {
-        ScrollViewReader { proxy in
-            renderedList(using: proxy)
+        if let refreshInbox {
+            ScrollViewReader { proxy in
+                renderedList(using: proxy)
+            }
+            .scrollBounceBehavior(.always, axes: .vertical)
+            .refreshable { await refreshInbox() }
+        } else {
+            ScrollViewReader { proxy in
+                renderedList(using: proxy)
+            }
         }
     }
 }
