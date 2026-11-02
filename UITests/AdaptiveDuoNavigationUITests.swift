@@ -37,6 +37,63 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachScreenshot("portrait-master-after-native-back")
     }
 
+    func testSelectingAnotherMessageFromPortraitOverlayUpdatesDetailAndDismissesIt() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics"]
+        app.launch()
+
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
+        let review = app.descendants(matching: .any)["request-row-review-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        facilities.tap()
+
+        let card = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(card.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        let back = workspaceBackButton(in: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(review.isHittable, app.debugDescription)
+        attachScreenshot("portrait-overlay-before-second-selection")
+
+        review.tap()
+
+        XCTAssertTrue(card.staticTexts["Studio review"].waitForExistence(timeout: 5),
+                      "The second row must replace the selected detail. \(app.debugDescription)")
+        XCTAssertFalse(review.isHittable,
+                       "Selecting from the reopened portrait list must dismiss it. \(app.debugDescription)")
+        attachScreenshot("portrait-detail-after-second-selection")
+        attachHierarchy("portrait-second-selection-hierarchy", app: app)
+    }
+
+    func testLandscapeDuoSelectionKeepsListAndDetailVisible() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics"]
+        app.launch()
+
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        facilities.tap()
+
+        let card = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(card.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertTrue(app.searchFields.firstMatch.isHittable,
+                      "Selecting a message in the side-by-side layout must leave the list visible. \(app.debugDescription)")
+        XCTAssertTrue(facilities.isHittable,
+                      "The selected row remains visible with the detail. \(app.debugDescription)")
+        attachScreenshot("duo-landscape-list-and-detail-after-selection")
+        attachHierarchy("duo-landscape-split-hierarchy", app: app)
+    }
+
     func testSeenReturnsToListOnlyWhenNoListPaneIsVisible() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
@@ -100,5 +157,12 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         screenshot.name = name
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    private func attachHierarchy(_ name: String, app: XCUIApplication) {
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = name
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
     }
 }
