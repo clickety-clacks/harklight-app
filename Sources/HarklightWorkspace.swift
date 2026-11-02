@@ -1348,6 +1348,57 @@ private struct InboxScrollMetrics: Equatable {
     let contentFits: Bool
 }
 
+struct InboxPriorityRowTreatment: Equatable {
+    let topHex: String
+    let bottomHex: String
+    let primaryTextHex: String
+    let secondaryTextHex: String
+    let leadingBandHex: String?
+
+    var topColor: Color { Color(harklightToken: topHex) }
+    var primaryTextColor: Color { Color(harklightToken: primaryTextHex) }
+    var secondaryTextColor: Color { Color(harklightToken: secondaryTextHex) }
+    var capsuleFillHex: String { primaryTextHex }
+    var capsuleTextHex: String { topHex }
+    var capsuleFillColor: Color { Color(harklightToken: capsuleFillHex) }
+    var capsuleTextColor: Color { Color(harklightToken: capsuleTextHex) }
+    var initialsFillOpacity: Double { 0.18 }
+    var initialsFillColor: Color { Color.white.opacity(initialsFillOpacity) }
+    var leadingBandColor: Color? {
+        leadingBandHex.map { Color(harklightToken: $0) }
+    }
+    var backgroundStyle: AnyShapeStyle {
+        AnyShapeStyle(LinearGradient(
+            colors: [topColor, Color(harklightToken: bottomHex)],
+            startPoint: .top,
+            endPoint: .bottom))
+    }
+
+    static func forPriority(_ priority: InboxMessagePriority?, colorScheme: ColorScheme)
+        -> InboxPriorityRowTreatment? {
+        guard let priority else { return nil }
+
+        let values: (String, String, String, String, String?)
+        switch (priority, colorScheme) {
+        case (.high, .light):
+            values = ("#73592A", "#5E4720", "#F6F1E7", "#E3DCCF", nil)
+        case (.now, .light):
+            values = ("#A63A2A", "#8A2C1E", "#F6F1E7", "#E3DCCF", "#5A1A10")
+        case (.high, .dark):
+            values = ("#3A3119", "#2B2516", "#E6D9B8", "#AEA283", nil)
+        case (.now, .dark):
+            values = ("#5A2219", "#3A1A14", "#F2C9BE", "#C0948A", "#EE8B75")
+        default:
+            return nil
+        }
+
+        return InboxPriorityRowTreatment(topHex: values.0, bottomHex: values.1,
+                                         primaryTextHex: values.2,
+                                         secondaryTextHex: values.3,
+                                         leadingBandHex: values.4)
+    }
+}
+
 private struct NewMessageAreaRowContent: View {
     let key: RequestKey
     let title: String
@@ -1362,6 +1413,14 @@ private struct NewMessageAreaRowContent: View {
 
     private var palette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
+    }
+
+    private var priorityTreatment: InboxPriorityRowTreatment? {
+        .forPriority(priority, colorScheme: colorScheme)
+    }
+
+    private var rowBackgroundStyle: AnyShapeStyle {
+        priorityTreatment?.backgroundStyle ?? AnyShapeStyle(palette.neutral.backgroundColor)
     }
 
     private var summaryInput: String {
@@ -1380,14 +1439,15 @@ private struct NewMessageAreaRowContent: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(store?.summary(for: key, revision: requestRevision) ?? fallbackText)
                 .font(.subheadline)
-                .foregroundStyle(palette.neutral.textColor)
+                .foregroundStyle(priorityTreatment?.primaryTextColor ?? palette.neutral.textColor)
                 .lineLimit(2)
                 .truncationMode(.tail)
 
             HStack(spacing: 8) {
                 Text(InboxFriendlyDate.label(for: createdAt ?? receivedAt))
                     .font(.caption)
-                    .foregroundStyle(palette.neutral.secondaryTextColor)
+                    .foregroundStyle(priorityTreatment?.secondaryTextColor
+                                     ?? palette.neutral.secondaryTextColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 4)
@@ -1395,10 +1455,12 @@ private struct NewMessageAreaRowContent: View {
                    let priorityLabel = InboxPriorityDisplay.label(for: priority) {
                     Text(priorityLabel.title)
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(priorityColor(for: priority))
+                        .foregroundStyle(priorityTreatment?.capsuleTextColor
+                                         ?? priorityColor(for: priority))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
-                        .background(priorityColor(for: priority).opacity(0.14), in: Capsule())
+                        .background(priorityTreatment?.capsuleFillColor
+                                    ?? priorityColor(for: priority).opacity(0.14), in: Capsule())
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .accessibilityLabel(Text(priorityLabel.title))
@@ -1408,7 +1470,15 @@ private struct NewMessageAreaRowContent: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.neutral.backgroundColor)
+        .background(rowBackgroundStyle)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(priorityTreatment?.leadingBandColor ?? .clear)
+                .frame(width: priorityTreatment?.leadingBandColor == nil ? 0 : 5)
+                .frame(maxHeight: .infinity)
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+        }
         .accessibilityElement(children: .combine)
         .task(id: summaryKey) {
             guard let store else { return }
@@ -1443,6 +1513,18 @@ struct InboxRowContent: View {
         palette.messageType(row.resolvedMessageType)
     }
 
+    private var priorityTreatment: InboxPriorityRowTreatment? {
+        .forPriority(row.priority, colorScheme: colorScheme)
+    }
+
+    private var secondaryRowTextColor: Color {
+        priorityTreatment?.secondaryTextColor ?? palette.neutral.secondaryTextColor
+    }
+
+    private var rowBackgroundStyle: AnyShapeStyle {
+        priorityTreatment?.backgroundStyle ?? AnyShapeStyle(palette.neutral.backgroundColor)
+    }
+
     private var cameBackBarWidth: CGFloat {
         horizontalSizeClass == .regular ? 10 : 6
     }
@@ -1458,7 +1540,10 @@ struct InboxRowContent: View {
                 Text(displayInitials)
                     .font(.caption2.bold())
                     .frame(width: 24, height: 24)
-                    .background(palette.neutral.separatorColor, in: Circle())
+                    .foregroundStyle(priorityTreatment?.primaryTextColor
+                                     ?? palette.neutral.secondaryTextColor)
+                    .background(priorityTreatment?.initialsFillColor
+                                ?? palette.neutral.separatorColor, in: Circle())
                 Text(verbatim: row.senderLabel).lineLimit(1)
                 Spacer(minLength: 4)
                 if let createdAt = row.createdAt {
@@ -1467,12 +1552,13 @@ struct InboxRowContent: View {
                 }
             }
             .font(.caption)
-            .foregroundStyle(palette.neutral.secondaryTextColor)
+            .foregroundStyle(secondaryRowTextColor)
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 if row.isRetracted {
                     Text("Retracted")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(palette.neutral.textColor)
+                        .foregroundStyle(priorityTreatment?.primaryTextColor
+                                         ?? palette.neutral.textColor)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
                         .background(palette.neutral.separatorColor, in: Capsule())
@@ -1480,19 +1566,20 @@ struct InboxRowContent: View {
                 }
                 Image(systemName: row.symbol)
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(typeTokens.listIconColor)
+                    .foregroundStyle(priorityTreatment?.primaryTextColor
+                                     ?? typeTokens.listIconColor)
                     .accessibilityHidden(true)
                 if row.hasDeliveryWarning {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(priorityTreatment?.primaryTextColor ?? .red)
                         .accessibilityLabel("Response not delivered")
                         .accessibilityIdentifier("inbox-response-delivery-warning")
                 }
                 if row.hasMessageLoadWarning {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(priorityTreatment?.primaryTextColor ?? .red)
                         .accessibilityLabel("Message could not be loaded and was skipped")
                         .accessibilityIdentifier("inbox-message-load-warning")
                 }
@@ -1504,10 +1591,12 @@ struct InboxRowContent: View {
                    let priorityLabel = InboxPriorityDisplay.label(for: priority) {
                     Text(priorityLabel.title)
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(priorityColor(for: priority))
+                        .foregroundStyle(priorityTreatment?.capsuleTextColor
+                                         ?? priorityColor(for: priority))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
-                        .background(priorityColor(for: priority).opacity(0.14), in: Capsule())
+                        .background(priorityTreatment?.capsuleFillColor
+                                    ?? priorityColor(for: priority).opacity(0.14), in: Capsule())
                         .accessibilityLabel(Text(priorityLabel.title))
                         .accessibilityIdentifier("inbox-priority-\(priority.rawValue)")
                 }
@@ -1516,13 +1605,15 @@ struct InboxRowContent: View {
                           ? "bubble.left.and.bubble.right.fill"
                           : "bubble.left.and.bubble.right")
                         .font(.caption)
-                        .foregroundStyle(chatUnread ? palette.accent.color : palette.neutral.secondaryTextColor)
+                        .foregroundStyle(chatUnread
+                                         ? (priorityTreatment?.primaryTextColor ?? palette.accent.color)
+                                         : secondaryRowTextColor)
                         .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
                 }
                 if row.localSeenSelected || row.informationalSeenStatus == .confirmed {
                     Image(systemName: "checkmark")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(palette.neutral.secondaryTextColor)
+                        .foregroundStyle(secondaryRowTextColor)
                         .accessibilityLabel("Seen")
                 }
             }
@@ -1533,37 +1624,46 @@ struct InboxRowContent: View {
             if let bodyText = row.bodyText, !bodyText.isEmpty {
                 Text(bodyText)
                     .font(.subheadline)
-                    .foregroundStyle(palette.neutral.secondaryTextColor)
+                    .foregroundStyle(secondaryRowTextColor)
                     .lineLimit(row.tier.bodyLineLimit)
                     .truncationMode(.tail)
             }
             if let duePhrase = row.duePhrase {
                 Text(duePhrase)
                     .font(.caption2)
-                    .foregroundStyle(palette.neutral.secondaryTextColor)
+                    .foregroundStyle(secondaryRowTextColor)
                     .accessibilityIdentifier("inbox-due-phrase")
             }
             if let reason = row.orderingReason {
                 Text(reason)
                     .font(.caption2)
-                    .foregroundStyle(palette.neutral.secondaryTextColor)
+                    .foregroundStyle(secondaryRowTextColor)
                     .accessibilityIdentifier("inbox-ordering-reason")
             }
             if let defaultAnswerStatus = row.defaultAnswerStatus {
-                Text(defaultAnswerStatus).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
+                Text(defaultAnswerStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
                     .accessibilityIdentifier("inbox-default-answer-status")
             } else if !row.isResolved && !row.visibleStatus.isEmpty {
-                Text(row.visibleStatus).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
+                Text(row.visibleStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
             }
             if let localStatus = row.localStatus {
-                Text(localStatus).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
+                Text(localStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, row.tier == .top ? 18 : 13)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.neutral.backgroundColor)
-        .foregroundStyle(row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor)
+        .background(rowBackgroundStyle)
+        .foregroundStyle(priorityTreatment?.primaryTextColor
+                         ?? (row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor))
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(priorityTreatment?.leadingBandColor ?? .clear)
+                .frame(width: priorityTreatment?.leadingBandColor == nil ? 0 : 5)
+                .frame(maxHeight: .infinity)
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+        }
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(palette.neutral.separatorColor)
@@ -1595,7 +1695,8 @@ struct InboxRowContent: View {
     }
 
     private var titleColor: Color {
-        row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor
+        priorityTreatment?.primaryTextColor
+            ?? (row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor)
     }
 
     private func priorityColor(for priority: InboxMessagePriority) -> Color {
