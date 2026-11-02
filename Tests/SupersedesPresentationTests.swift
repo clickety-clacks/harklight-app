@@ -103,10 +103,8 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(live.request(for: target)?.lifecycleStatus, .superseded)
     }
 
-    func testOneForwardSupersedingSeveralOpenTargetsLinksAllAndKeepsFirstOrigin() throws {
+    func testOneForwardSupersedingSeveralTargetsLinksAllAndKeepsFirstOriginLiveAndReplay() throws {
         let context = profile()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
         func key(_ message: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID,
                        senderID: ExactText("agent"), messageID: ExactText(message))
@@ -123,27 +121,40 @@ final class SupersedesPresentationTests: XCTestCase {
         let firstTarget = key("first")
         let secondTarget = key("second")
         let replacement = key("replacement")
-        try store.apply(RelayEvent(sequence: 1, body: .delivery(
-            StoredRequest(key: firstTarget, originalPayload: try payload("First")), .message)),
-            context: context)
-        try store.apply(RelayEvent(sequence: 2, body: .delivery(
-            StoredRequest(key: secondTarget, originalPayload: try payload("Second")), .message)),
-            context: context)
-        try store.apply(RelayEvent(sequence: 3, body: .delivery(
-            StoredRequest(key: replacement,
-                originalPayload: try payload("Replacement", supersedes: ["first", "second"])),
-            .message)), context: context)
-        try store.apply(RelayEvent(sequence: 4,
-            body: .terminal(firstTarget, .superseded, nil)), context: context)
-        try store.apply(RelayEvent(sequence: 5,
-            body: .terminal(secondTarget, .superseded, nil)), context: context)
+        let events = [
+            RelayEvent(sequence: 1, body: .delivery(
+                StoredRequest(key: firstTarget, originalPayload: try payload("First")), .message)),
+            RelayEvent(sequence: 2, body: .delivery(
+                StoredRequest(key: secondTarget, originalPayload: try payload("Second")), .message)),
+            RelayEvent(sequence: 3, body: .delivery(
+                StoredRequest(key: replacement,
+                    originalPayload: try payload("Replacement", supersedes: ["first", "second"])),
+                .message)),
+            RelayEvent(sequence: 4, body: .terminal(firstTarget, .superseded, nil)),
+            RelayEvent(sequence: 5, body: .terminal(secondTarget, .superseded, nil))
+        ]
 
-        let snapshot = try store.snapshot(context: context)
-        XCTAssertEqual(snapshot.cursor, 5, "Both server terminals must commit so sync can continue.")
-        XCTAssertEqual(snapshot.remoteStates[firstTarget]?.supersededByMessageKeys, [replacement])
-        XCTAssertEqual(snapshot.remoteStates[secondTarget]?.supersededByMessageKeys, [replacement])
-        XCTAssertEqual(snapshot.remoteStates[replacement]?.supersedesOriginTarget, firstTarget,
+        let liveStore = try AttentionDomainStore(context: context,
+                                                 persistence: MemoryAttentionStatePersistence())
+        for event in events { try liveStore.apply(event, context: context) }
+        let liveSnapshot = try liveStore.snapshot(context: context)
+        XCTAssertEqual(liveSnapshot.cursor, 5, "Both live terminals must commit so sync can continue.")
+        XCTAssertEqual(liveSnapshot.remoteStates[firstTarget]?.supersededByMessageKeys, [replacement])
+        XCTAssertEqual(liveSnapshot.remoteStates[secondTarget]?.supersededByMessageKeys, [replacement])
+        XCTAssertEqual(liveSnapshot.remoteStates[replacement]?.supersedesOriginTarget, firstTarget,
                        "The forward keeps the first target as its inbox origin.")
+
+        let replayStore = try AttentionDomainStore(context: context,
+                                                   persistence: MemoryAttentionStatePersistence())
+        try replayStore.beginReplay(through: 5, context: context)
+        for event in events { try replayStore.apply(event, context: context) }
+        try replayStore.finishReplay(at: 5, context: context)
+        let replaySnapshot = try replayStore.snapshot(context: context)
+        XCTAssertEqual(replaySnapshot.cursor, 5, "Both replayed terminals must commit.")
+        XCTAssertEqual(replaySnapshot.remoteStates[firstTarget]?.supersededByMessageKeys, [replacement])
+        XCTAssertEqual(replaySnapshot.remoteStates[secondTarget]?.supersededByMessageKeys, [replacement])
+        XCTAssertEqual(replaySnapshot.remoteStates[replacement]?.supersedesOriginTarget, firstTarget,
+                       "Replay must retain the first target as the forward origin.")
     }
 
     func testReplacementIdentityRemainsNavigableBeforeItsContentLoads() throws {
