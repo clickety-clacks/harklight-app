@@ -1820,7 +1820,7 @@ final class LivePresentationStore {
             return true
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error,
-                     request: key, requestRevision: warning.requestRevision,
+                     request: key, revision: warning.requestRevision,
                      receiptState: .unknown)
             actionErrorRequest = key
             actionError = "The saved response could not be retried. Review the latest message and try again."
