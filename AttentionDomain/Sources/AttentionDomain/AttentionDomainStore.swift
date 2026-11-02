@@ -224,6 +224,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
             let validConversationEvents = loaded.conversation?.events.values.allSatisfy {
                 $0.binding.request.accountScope == context.identity.personID
             } ?? true
+            let validConversationReplayRejections = loaded.conversation?.replayRejections?.allSatisfy { entry in
+                entry.key == entry.value.sequence &&
+                    entry.key <= (loaded.conversation?.cursor ?? 0) &&
+                    Self.isConversationRequestTag(entry.value.requestTag) &&
+                    loaded.conversation?.events[entry.key] == nil
+            } ?? true
             let validConversationReadPositions = loaded.conversation?.chatReadPositions?.keys.allSatisfy {
                 $0.accountScope == context.identity.personID
             } ?? true
@@ -231,7 +237,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 $0.key.accountScope == context.identity.personID && $0.key == $0.value.request &&
                     $0.value.readThroughConversationSequence > 0
             } ?? true
-            guard validConversationThreads, validConversationEvents,
+            guard validConversationThreads, validConversationEvents, validConversationReplayRejections,
                   validConversationReadPositions, validPendingConversationReadPositions else {
                 throw AttentionStoreError.persistence("The conversation store contains a different account's requests.")
             }
@@ -2391,10 +2397,28 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
             return $0.request.messageID.rawValue < $1.request.messageID.rawValue
         }
+        let replayRejections = (conversation.replayRejections ?? [:]).values.sorted {
+            $0.sequence < $1.sequence
+        }
         return ConversationSnapshot(cursor: conversation.cursor, threads: conversation.threads,
+            replayRejections: replayRejections,
             chatReadPositions: conversation.chatReadPositions,
             chatReadPositionSupport: conversation.chatReadPositionSupport,
             pendingChatReadPositions: pending)
+    }
+
+    /// Reads the payload-free accounting record for one conversation sequence.
+    public func conversationReplayRejection(at sequence: UInt64, for request: RequestKey,
+                                             context suppliedContext: ProfileContext) throws -> ConversationReplayRejection? {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(request, in: context.identity)
+        guard let rejection = state.conversation?.replayRejections?[sequence] else { return nil }
+        guard rejection.requestTag == Self.conversationRequestTag(for: request) else {
+            throw ConversationError.conflict
+        }
+        return rejection
     }
 
     /// The conversation cursor commits in the same account transaction as its fact.
@@ -2541,6 +2565,52 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw ConversationError.gap(expected: expected, received: sequence)
         }
         conversation.cursor = sequence
+        var next = state
+        next.conversation = conversation
+        try commit(next)
+        return state.conversation?.cursor ?? 0
+    }
+
+    /// Durably accounts for one decoded contiguous event rejected by a
+    /// structured conversation validation guard. The safe rejection record and
+    /// cursor commit together, so replay can continue without retaining the
+    /// rejected event or its content.
+    @discardableResult
+    public func accountForRejectedConversationEvent(at sequence: UInt64, for request: RequestKey,
+                                                     rejection: ConversationValidationRejection,
+                                                     context suppliedContext: ProfileContext) throws -> UInt64 {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        try validate(request, in: context.identity)
+        let record = ConversationReplayRejection(sequence: sequence,
+            requestTag: Self.conversationRequestTag(for: request), rejection: rejection)
+
+        var conversation = state.conversation ?? ConversationState()
+        if sequence <= conversation.cursor {
+            guard conversation.replayRejections?[sequence] == record else {
+                throw ConversationError.conflict
+            }
+            return conversation.cursor
+        }
+        guard conversation.cursor < UInt64.max,
+              sequence == conversation.cursor + 1 else {
+            let expected = conversation.cursor == UInt64.max ? UInt64.max : conversation.cursor + 1
+            throw ConversationError.gap(expected: expected, received: sequence)
+        }
+
+        var records = conversation.replayRejections ?? [:]
+        guard records[sequence] == nil,
+              conversation.events[sequence] == nil else { throw ConversationError.conflict }
+        records[sequence] = record
+        conversation.replayRejections = records
+        conversation.cursor = sequence
+
         var next = state
         next.conversation = conversation
         try commit(next)
@@ -3522,6 +3592,22 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     private func fingerprint(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Matches the payload-free diagnostic tag while keeping raw request IDs
+    /// out of the durable rejected-sequence record.
+    private static func conversationRequestTag(for request: RequestKey) -> String {
+        let value = [request.accountScope.rawValue, request.senderID.rawValue, request.messageID.rawValue]
+            .joined(separator: "\u{0}")
+        return SHA256.hash(data: Data(value.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func isConversationRequestTag(_ value: String) -> Bool {
+        value.count == 64 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (97...102).contains($0)
+        }
     }
 
     private func submissionSignature(for interface: RequestInterface) -> String {

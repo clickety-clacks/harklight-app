@@ -28,6 +28,7 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
     var consumedConversationFrames: [Data] = []
     var ordinaryACKs: [Data] = []
     var conversationACKs: [Data] = []
+    var rejectFirstConversationACK = false
 
     init(identity: ProfileIdentity) {
         authenticatedIdentity = identity
@@ -55,6 +56,10 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
 
     func acknowledgeConversation(_ request: Data) async throws {
         conversationACKs.append(request)
+        if rejectFirstConversationACK {
+            rejectFirstConversationACK = false
+            throw InstallationTransportError.acknowledgementBehind
+        }
     }
 }
 
@@ -66,16 +71,13 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
-        let firstPayload = try JSONValue.parse(data(#"{"title":"First wording"}"#))
-        try store.applyConversation(ConversationEvent(sequence: 1,
-            binding: ConversationBinding(request: key, revision: 1),
-            fact: .request(sessionHandle: ExactText("handle"), payload: firstPayload)), context: context)
 
         let session = InboxFreshnessRelaySession(identity: identity)
+        session.rejectFirstConversationACK = true
         session.ordinaryFrames = [
             data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
             data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"First wording"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
@@ -83,12 +85,13 @@ final class InboxFreshnessReplayTests: XCTestCase {
         ]
         session.conversationFrames = [
             data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            // This is a synthetic guard exercise, not a captured Server frame.
             // Deliberately malformed for a redacted revision: the Server .22
             // source emits author=origin for its revision entries. This frame
             // reaches the client's exact redactedRevisionBinding guard.
-            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"redacted-revision"}"#),
-            data(#"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"valid-revision","message":{"title":"Second wording"}}"#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"redacted-revision"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"valid-revision","message":{"title":"Second wording"}}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
         ]
 
         let diagnostics = InboxFreshnessDiagnosticCollector()
@@ -96,11 +99,14 @@ final class InboxFreshnessReplayTests: XCTestCase {
             onDiagnostic: { diagnostics.append($0) })
         _ = try await core.resyncAndDrainOutbox()
 
-        let replayFailure = try XCTUnwrap(diagnostics.events.first {
-            $0.area == .conversation && $0.phase == .conversationReplay && $0.transition == .failed
+        let rejectedEventDiagnostic = try XCTUnwrap(diagnostics.events.first {
+            $0.area == .conversation && $0.phase == .conversationReplay &&
+                $0.transition == .observed && $0.conversationValidationRejection != nil
         })
-        XCTAssertEqual(replayFailure.causeCode, "conversation_invalid_binding")
-        let rejection = try XCTUnwrap(replayFailure.conversationValidationRejection)
+        XCTAssertEqual(rejectedEventDiagnostic.causeCode, "conversation_invalid_binding")
+        XCTAssertEqual(rejectedEventDiagnostic.conversationSequence, 1)
+        XCTAssertNotNil(rejectedEventDiagnostic.requestTag)
+        let rejection = try XCTUnwrap(rejectedEventDiagnostic.conversationValidationRejection)
         XCTAssertEqual(rejection.guardID, .redactedRevisionBinding)
         XCTAssertEqual(rejection.eventKind, .revision)
         XCTAssertEqual(rejection.facts.sessionHandlePresent, true)
@@ -109,22 +115,40 @@ final class InboxFreshnessReplayTests: XCTestCase {
         XCTAssertEqual(rejection.facts.contentRedactedIsTrue, true)
         XCTAssertEqual(rejection.facts.authorIsOrigin, false)
         XCTAssertEqual(rejection.facts.revisionIsNext, true)
+        let encodedDiagnostic = String(decoding: try JSONEncoder().encode(rejectedEventDiagnostic), as: UTF8.self)
+        XCTAssertFalse(encodedDiagnostic.contains("redacted-revision"))
+        XCTAssertFalse(encodedDiagnostic.contains("Second wording"))
 
         XCTAssertEqual(session.conversationFrames.count, 4,
                        "A valid revision follows the rejected event in the synthetic stream.")
-        XCTAssertEqual(session.consumedConversationFrames.count, 4,
-                       "Replay accounts for the rejected event, then consumes the valid revision and barrier.")
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 2)
+        XCTAssertEqual(session.consumedConversationFrames.count, 8,
+                       "Replay accounts for the rejected event, recovers after an ACK-behind response, then consumes the history again.")
+        let snapshot = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 2)
+        XCTAssertEqual(snapshot.threads[key]?.currentRevision, 2)
+        XCTAssertEqual(snapshot.replayRejections.count, 1)
+        XCTAssertEqual(snapshot.replayRejections[0].sequence, 1)
+        XCTAssertEqual(snapshot.replayRejections[0].requestTag, rejectedEventDiagnostic.requestTag)
+        XCTAssertEqual(snapshot.replayRejections[0].rejection, rejection)
+        let encodedRejection = String(decoding: try JSONEncoder().encode(snapshot.replayRejections[0]), as: UTF8.self)
+        XCTAssertFalse(encodedRejection.contains("redacted-revision"))
+        XCTAssertFalse(encodedRejection.contains("Second wording"))
         XCTAssertEqual(session.conversationACKs.map { String(decoding: $0, as: UTF8.self) },
-            ["{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":3,\"ref\":\"native-conversation-ack\"}\n"],
-            "Replay acknowledges the barrier only after the rejected sequence and later valid revision are accounted for.")
+            ["{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":2,\"ref\":\"native-conversation-ack\"}\n",
+             "{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":2,\"ref\":\"native-conversation-ack\"}\n"],
+            "Replay acknowledges only after the rejected sequence and later valid revision are accounted for, including recovery from an ACK-behind response.")
 
         let presentation = try LivePresentationStore(store: store, context: context)
         XCTAssertEqual(presentation.request(for: key)?.requestRevision, 2)
         XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 2,
                        "The Inbox projects the later valid revision after the rejected event is accounted for.")
         XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Second wording"))
+
+        let restoredStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try restoredStore.conversationSnapshot(context: context)
+        XCTAssertEqual(restored.cursor, 2)
+        XCTAssertEqual(restored.replayRejections, snapshot.replayRejections,
+                       "The rejected sequence is durably accounted with only its request binding and safe reason.")
         await core.deactivate()
     }
 

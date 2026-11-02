@@ -218,6 +218,22 @@ public struct ConversationValidationRejection: Equatable, Codable, Sendable {
     }
 }
 
+/// A locally retained, payload-free account of a contiguous conversation event
+/// whose decoded fact failed a structured validation guard. The event itself
+/// is intentionally not retained as rejected history.
+public struct ConversationReplayRejection: Equatable, Codable, Sendable {
+    public let sequence: UInt64
+    public let requestTag: String
+    public let rejection: ConversationValidationRejection
+
+    public init(sequence: UInt64, requestTag: String,
+                rejection: ConversationValidationRejection) {
+        self.sequence = sequence
+        self.requestTag = requestTag
+        self.rejection = rejection
+    }
+}
+
 struct ConversationValidationRejectionError: Error, Sendable {
     let rejection: ConversationValidationRejection
 }
@@ -605,6 +621,9 @@ public struct PendingConversationReadPosition: Equatable, Codable, Sendable {
 struct ConversationState: Codable, Equatable {
     var cursor: UInt64 = 0
     var events: [UInt64: ConversationEvent] = [:]
+    /// Rejected facts are represented only by their cursor, request binding,
+    /// and closed validation metadata, never by their decoded payload.
+    var replayRejections: [UInt64: ConversationReplayRejection]? = nil
     var threads: [RequestKey: ConversationThread] = [:]
     /// nil means no server read map has been observed in this saved state.
     var chatReadPositions: [RequestKey: UInt64]? = nil
@@ -1140,16 +1159,19 @@ struct ConversationState: Codable, Equatable {
 public struct ConversationSnapshot: Sendable {
     public let cursor: UInt64
     public let threads: [RequestKey: ConversationThread]
+    public let replayRejections: [ConversationReplayRejection]
     public let chatReadPositions: [RequestKey: UInt64]?
     public let chatReadPositionSupport: Bool?
     public let pendingChatReadPositions: [PendingConversationReadPosition]
 
     public init(cursor: UInt64, threads: [RequestKey: ConversationThread],
+                replayRejections: [ConversationReplayRejection] = [],
                 chatReadPositions: [RequestKey: UInt64]? = nil,
                 chatReadPositionSupport: Bool? = nil,
                 pendingChatReadPositions: [PendingConversationReadPosition] = []) {
         self.cursor = cursor
         self.threads = threads
+        self.replayRejections = replayRejections.sorted { $0.sequence < $1.sequence }
         self.chatReadPositions = chatReadPositions
         self.chatReadPositionSupport = chatReadPositionSupport
         self.pendingChatReadPositions = pendingChatReadPositions

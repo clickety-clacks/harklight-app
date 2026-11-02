@@ -219,6 +219,7 @@ final class NativeClientDiagnosticJournal {
             }
             if let sequence = event.terminalSequence { fields.append("terminal_sequence=\(sequence)") }
             if let sequence = event.lifecycleSequence { fields.append("lifecycle_sequence=\(sequence)") }
+            if let sequence = event.conversationSequence { fields.append("conversation_sequence=\(sequence)") }
             if let route = event.noReplyRoute { fields.append("no_reply_route=\(route.rawValue)") }
             if let id = event.attemptID { fields.append("attempt_id=\(id.uuidString.lowercased())") }
             if let id = event.transportAttemptID { fields.append("transport_attempt_id=\(id.uuidString.lowercased())") }

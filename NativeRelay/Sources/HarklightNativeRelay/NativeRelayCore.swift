@@ -1541,7 +1541,10 @@ public actor NativeRelayCore {
             replay.accepted = true
         } else if let snapshot = try? wire.decodeResyncedSnapshot(frame) {
             let high = snapshot.highWater
-            guard high >= replay.durableCursor, high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
+            let durableCursor = try store.conversationSnapshot(context: context).cursor
+            guard high >= replay.durableCursor,
+                  high == replay.expected,
+                  high == durableCursor else { throw NativeRelayCoreError.invalidReplay }
             var validationRejection: ConversationValidationRejection?
             do {
                 try store.finishConversationReplay(at: high,
@@ -1565,13 +1568,37 @@ public actor NativeRelayCore {
                 guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
                     throw NativeRelayCoreError.invalidReplay
                 }
+                if let accounted = try store.conversationReplayRejection(at: event.sequence,
+                    for: event.binding.request, context: context) {
+                    guard event.sequence <= replay.durableCursor,
+                          accounted.rejection.eventKind == event.fact.diagnosticKind else {
+                        throw ConversationError.conflict
+                    }
+                    replay.expected = event.sequence
+                    conversationReplay = replay
+                    diagnose(.conversation, .conversationReplay, .observed,
+                        causeCode: NativeDiagnosticCauseCode.forError(ConversationError.invalidBinding),
+                        conversationSequence: event.sequence,
+                        conversationValidationRejection: accounted.rejection,
+                        request: event.binding.request, revision: event.binding.revision)
+                    return
+                }
                 var validationRejection: ConversationValidationRejection?
                 do {
                     _ = try store.applyConversation(event, context: context,
                         validationRejection: &validationRejection)
                 } catch {
                     if let validationRejection {
-                        throw ConversationReplayValidationFailure(rejection: validationRejection)
+                        diagnose(.conversation, .conversationReplay, .observed,
+                            causeCode: NativeDiagnosticCauseCode.forError(ConversationError.invalidBinding),
+                            conversationSequence: event.sequence,
+                            conversationValidationRejection: validationRejection,
+                            request: event.binding.request, revision: event.binding.revision)
+                        _ = try store.accountForRejectedConversationEvent(at: event.sequence,
+                            for: event.binding.request, rejection: validationRejection, context: context)
+                        replay.expected = event.sequence
+                        conversationReplay = replay
+                        return
                     }
                     throw error
                 }
@@ -1885,6 +1912,7 @@ public actor NativeRelayCore {
                           terminalSequence: UInt64? = nil,
                           lifecycleSequence: UInt64? = nil,
                           noReplyRoute: NativeDiagnosticNoReplyRoute? = nil,
+                          conversationSequence: UInt64? = nil,
                           conversationValidationRejection: ConversationValidationRejection? = nil,
                           occurredAtMilliseconds: Int64? = nil,
                           operationID: UUID? = nil,
@@ -1900,6 +1928,7 @@ public actor NativeRelayCore {
             terminalSequence: terminalSequence,
             lifecycleSequence: lifecycleSequence,
             noReplyRoute: noReplyRoute,
+            conversationSequence: conversationSequence,
             conversationValidationRejection: conversationValidationRejection,
             attemptID: attemptID, transportAttemptID: attemptID,
             operationID: operationID, request: request,
