@@ -1307,7 +1307,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "Diagnostics must not change the existing unsupported-result application.")
     }
 
-    func testStaleNoCommentRevisionRefusalNamesTheCurrentRevision() async throws {
+    func testStaleNoCommentAtRevisionThreeReturnsOpenRequestToInbox() async throws {
         let namespace = "Harklight.no-comment-stale-revision-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -1316,29 +1316,97 @@ final class NativeGuidedTLSTests: XCTestCase {
             SecItemDelete([kSecClass as String: kSecClassKey,
                            kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
         }
+        let staleResponse =
+            #"{"v":1,"type":"error","reason":"stale_revision","field":"request_revision","current_revision":4}"# + "\n"
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
             guard text.contains("\"type\":\"answer_no_comment\"") else { return [] }
-            guard text.contains("\"request_revision\":2") else {
+            guard text.contains("\"request_id\":\"conversation\""),
+                  text.contains("\"request_revision\":3") else {
                 return ["{\"v\":1,\"type\":\"error\",\"reason\":\"unsupported_version\"}\n"]
             }
-            return ["{\"v\":1,\"type\":\"error\",\"reason\":\"stale_revision\",\"field\":\"request_revision\",\"current_revision\":3}\n"]
+            return [staleResponse]
         }
         defer { relay.close() }
         let port = try await relay.start()
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
             deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("conversation"))
+        let first = JSONValue.object([JSONMember("title", .string(ExactText("First wording")))])
+        let second = JSONValue.object([JSONMember("title", .string(ExactText("Second wording")))])
+        let third = JSONValue.object([JSONMember("title", .string(ExactText("Current wording")))])
+        let firstBinding = ConversationBinding(request: key, revision: 1)
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: first), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("origin"))),
+            context: context)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: firstBinding,
+            fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
+        for (revision, payload, title) in [(UInt64(2), second, "Second wording"),
+                                           (UInt64(3), third, "Current wording")] {
+            let binding = ConversationBinding(request: key, revision: revision)
+            let turn = ConversationTurn(id: ExactText("revision-\(revision)"), binding: binding,
+                author: .origin, sessionHandle: ExactText("origin"), text: ExactText(title), kind: .revision)
+            try store.applyConversation(ConversationEvent(sequence: revision, binding: binding,
+                fact: .revision(turn, payload: payload)), context: context)
+        }
+        let presentation = try LivePresentationStore(store: store, context: context)
+        let answerPort = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(answerPort.inspect(context: answerPort.context,
+            request: key).requests.first?.selector)
+        let receipt = try answerPort.submitNoComment(context: answerPort.context,
+            selector: selector, intentID: UUID())
+        let original = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        XCTAssertEqual(original.operationID, receipt.opID)
+        XCTAssertEqual(original.requestRevision, 3)
+        let directRequest = try JSONValue.parse(original.wireFrame)
+        XCTAssertEqual(directRequest.uniqueValue(named: "type")?.stringValue?.rawValue, "answer_no_comment")
+        XCTAssertEqual(String(decoding: original.wireFrame, as: UTF8.self),
+                       #"{"type":"answer_no_comment","request_id":"conversation","request_revision":3}"# + "\n")
+        XCTAssertNil(directRequest.uniqueValue(named: "op_id"),
+                     "The direct No comment request has no wire operation ID; its operation ID is local.")
+
+        let transportDiagnostics = NativeDiagnosticEventCollector()
         let session = try URLSessionInstallationSession(
             profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
-            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
-        let operationID = UUID()
-        let result = try await session.sendOriginalOperation(
-            Data(#"{"type":"answer_no_comment","request_id":"request","request_revision":2}"#.utf8)
-                + Data([0x0A]),
-            operationID: operationID)
-        XCTAssertEqual(result, .staleRevision(operationID: operationID, currentRevision: 3),
-                       "The current revision lets the inbox show the changed question and release this answer for retry.")
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER,
+            onDiagnostic: { transportDiagnostics.append($0) })
+        let coreDiagnostics = NativeDiagnosticEventCollector()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: { coreDiagnostics.append($0) })
+        let attempted = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(attempted, 1)
         await session.close()
+
+        let decodedResponse = transportDiagnostics.events.filter {
+            $0.phase == .noReplyResponseDecode
+        }
+        XCTAssertEqual(decodedResponse.compactMap(\.noReplyResponseClass), [.serverError])
+        XCTAssertEqual(decodedResponse.compactMap(\.operationID), [receipt.opID])
+        let staleResult = coreDiagnostics.events.filter {
+            $0.phase == .originalOperationDelivery && $0.transition == .rejected
+        }
+        XCTAssertEqual(staleResult.compactMap(\.causeCode), ["conversation_stale_revision"])
+        XCTAssertEqual(staleResult.compactMap(\.operationID), [receipt.opID])
+
+        try presentation.refreshFromDurableStore()
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition,
+                       .staleRevision(currentRevision: 4))
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "A definite stale-revision refusal retires this local attempt.")
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 3,
+                       "The refusal reports the server revision without changing the local conversation.")
+        let request = try XCTUnwrap(presentation.request(for: key))
+        XCTAssertEqual(request.lifecycleStatus, .open)
+        XCTAssertTrue(request.answerNotDelivered)
+        XCTAssertFalse(request.noCommentUnavailable)
+        let row = try XCTUnwrap(presentation.inboxRow(for: key))
+        XCTAssertFalse(row.belongsToReplied)
+        XCTAssertTrue(row.hasFailedResponse)
+        XCTAssertEqual(row.localStatus, "Answer not delivered")
     }
 
     func testUnavailableChatMessageIsLocalToConversationAndDoesNotHideConnectionWarning() throws {
