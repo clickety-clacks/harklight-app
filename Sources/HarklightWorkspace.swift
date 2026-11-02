@@ -229,6 +229,8 @@ struct InboxRequestRow: Identifiable {
     var localSeenSelected = false
     var hasUserAction = false
     var hasFailedResponse = false
+    var hasDeliveryWarning = false
+    var hasMessageLoadWarning = false
     var isRetracted = false
     var chatUnread: Bool? = nil
     var initials: String = ""
@@ -242,6 +244,12 @@ struct InboxRequestRow: Identifiable {
     var orderingReason: String? = nil
     var defaultAnswerStatus: String? = nil
     var id: RequestKey { key }
+
+    var visibleStatus: String {
+        status.components(separatedBy: " · ")
+            .filter { $0 != "Open" }
+            .joined(separator: " · ")
+    }
 
     var senderLabel: String {
         InboxSenderDisplay.label(displayName: senderDisplayName, senderID: sender)
@@ -1474,6 +1482,20 @@ struct InboxRowContent: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(typeTokens.listIconColor)
                     .accessibilityHidden(true)
+                if row.hasDeliveryWarning {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("Response not delivered")
+                        .accessibilityIdentifier("inbox-response-delivery-warning")
+                }
+                if row.hasMessageLoadWarning {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("Message could not be loaded and was skipped")
+                        .accessibilityIdentifier("inbox-message-load-warning")
+                }
                 Text(row.title)
                     .font(titleFont)
                     .foregroundStyle(titleColor)
@@ -1530,8 +1552,8 @@ struct InboxRowContent: View {
             if let defaultAnswerStatus = row.defaultAnswerStatus {
                 Text(defaultAnswerStatus).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
                     .accessibilityIdentifier("inbox-default-answer-status")
-            } else if !row.isResolved && !row.status.isEmpty && row.status != "Open" {
-                Text(row.status).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
+            } else if !row.isResolved && !row.visibleStatus.isEmpty {
+                Text(row.visibleStatus).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)
             }
             if let localStatus = row.localStatus {
                 Text(localStatus).font(.caption2).foregroundStyle(palette.neutral.secondaryTextColor)

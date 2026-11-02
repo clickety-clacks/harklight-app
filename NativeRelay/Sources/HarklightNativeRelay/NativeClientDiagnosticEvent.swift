@@ -321,7 +321,7 @@ public enum NativeDiagnosticCauseCode {
         "invalid_relay_endpoint", "invalid_trust_anchor", "wrong_device_identity",
         "relay_fixture_profile", "relay_wrong_installation", "relay_inactive", "relay_invalid_replay",
         "relay_origin_content_missing", "relay_event_rejected", "relay_operation_result_mismatch",
-        "conversation_invalid_binding", "conversation_request_missing", "conversation_conflict",
+        "conversation_invalid_binding", "conversation_message_skipped", "conversation_request_missing", "conversation_conflict",
         "conversation_event_gap", "conversation_closed", "conversation_stale_revision",
         "conversation_submission_pending", "conversation_empty_draft", "conversation_file_mismatch",
         "conversation_upload_required", "conversation_upload_cap_exceeded",
