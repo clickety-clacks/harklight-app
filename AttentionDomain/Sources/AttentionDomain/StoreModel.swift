@@ -338,6 +338,9 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
     /// The immediately superseded row whose held view slot this message takes.
     /// Optional so existing account state remains readable.
     public var supersedesOriginTarget: RequestKey?
+    /// Accepted messages that replaced this message. Optional so existing
+    /// schema-2 account state remains readable.
+    public var supersededByMessageKeys: [RequestKey]?
 
     public init(state: TerminalState? = nil,
                 authorizedOriginAnswer: JSONValue? = nil,
@@ -348,7 +351,8 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
                 attentionTierSequence: UInt64? = nil,
                 attentionTierFeed: AttentionTierFeed? = nil,
                 attentionTierOrigin: ExactText? = nil,
-                supersedesOriginTarget: RequestKey? = nil) {
+                supersedesOriginTarget: RequestKey? = nil,
+                supersededByMessageKeys: [RequestKey]? = nil) {
         self.state = state
         self.authorizedOriginAnswer = authorizedOriginAnswer
         self.accountAnswerOutcome = accountAnswerOutcome
@@ -359,6 +363,7 @@ public struct RemoteRequestState: Equatable, Codable, Sendable {
         self.attentionTierFeed = attentionTierFeed
         self.attentionTierOrigin = attentionTierOrigin
         self.supersedesOriginTarget = supersedesOriginTarget
+        self.supersededByMessageKeys = supersededByMessageKeys
     }
 
     public var isTerminal: Bool { state != nil }

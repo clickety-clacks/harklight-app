@@ -692,6 +692,40 @@ struct LiveInboxSettings: View {
     }
 }
 
+@MainActor
+private struct ReplacedByMessagesSection: View {
+    let replacementKeys: [RequestKey]
+    let secondaryTextColor: Color
+
+    private var orderedReplacementKeys: [RequestKey] {
+        replacementKeys.sorted {
+            if $0.senderID.rawValue != $1.senderID.rawValue {
+                return $0.senderID.rawValue < $1.senderID.rawValue
+            }
+            return $0.messageID.rawValue < $1.messageID.rawValue
+        }
+    }
+
+    var body: some View {
+        if !replacementKeys.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Replaced by")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(secondaryTextColor)
+                ForEach(orderedReplacementKeys, id: \.self) { replacementKey in
+                    NavigationLink(value: RelatedMessageTarget.replacement(replacementKey)) {
+                        Text(replacementKey.messageID.rawValue)
+                            .font(.subheadline)
+                            .textSelection(.enabled)
+                    }
+                    .accessibilityIdentifier("request-replaced-by-" + replacementKey.messageID.rawValue)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 struct LiveRequestDetail: View {
     private struct StorePresentationSnapshot: Equatable {
         let conversationRevision: UInt64?
@@ -1238,7 +1272,7 @@ struct LiveRequestDetail: View {
                         ForEach(request.supersedesMessageIDs, id: \.self) { messageID in
                             let targetKey = RequestKey(accountScope: request.key.accountScope,
                                 senderID: request.key.senderID, messageID: messageID)
-                            NavigationLink(value: SupersedesTarget(key: targetKey)) {
+                            NavigationLink(value: RelatedMessageTarget.supersedes(targetKey)) {
                                 Text(messageID.rawValue)
                                     .font(.subheadline)
                                     .textSelection(.enabled)
@@ -1248,6 +1282,10 @@ struct LiveRequestDetail: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                ReplacedByMessagesSection(
+                    replacementKeys: request.supersededByMessageKeys,
+                    secondaryTextColor: detailColors.secondaryTextColor
+                )
                 if let localExample {
                     if localExample.message.revised || localExample.message.deadline != nil {
                         LocalSampleContext(response: localExample)
