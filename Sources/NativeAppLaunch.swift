@@ -606,7 +606,8 @@ final class NativeAppLaunch {
             deviceID: ExactText(departure.record.deviceID)), transportMode: .relay)
         let persistence = try FileAttentionStatePersistence.applicationSupport()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
-        return try LivePresentationStore(disconnectedStore: store, context: context)
+        return try LivePresentationStore(disconnectedStore: store, context: context,
+                                        newMessageAreaDefaults: .standard)
     }
 
     private var disconnectedStore: LivePresentationStore? {
@@ -797,7 +798,8 @@ final class NativeAppLaunch {
         let store = try AttentionDomainStore(context: installation.context, persistence: persistence,
                                              conversationFileReferences: fileStorage)
         let presentation = try LivePresentationStore(store: store, context: installation.context,
-                                                     diagnostics: diagnostics)
+                                                     diagnostics: diagnostics,
+                                                     newMessageAreaDefaults: .standard)
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
                                                            context: installation.context,
@@ -1158,6 +1160,7 @@ final class LivePresentationStore {
     private(set) var isReadOnly: Bool
     @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
+    @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
     // Reply edits remain local until submission, but must outlive a detail view
@@ -1179,11 +1182,13 @@ final class LivePresentationStore {
     convenience init(store: AttentionDomainStore, context: ProfileContext,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
-                     clearedRetractionDefaults: UserDefaults = .standard) throws {
+                     clearedRetractionDefaults: UserDefaults = .standard,
+                     newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
                       conversationAvailability: conversationAvailability,
-                      clearedRetractionDefaults: clearedRetractionDefaults)
+                      clearedRetractionDefaults: clearedRetractionDefaults,
+                      newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
@@ -1193,17 +1198,22 @@ final class LivePresentationStore {
                       diagnostics: nil)
     }
 
-    convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext) throws {
+    convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext,
+                     newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true, diagnostics: nil)
+        try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true,
+                      diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
     private init(store: AttentionDomainStore, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
-                 clearedRetractionDefaults: UserDefaults = .standard) throws {
+                 clearedRetractionDefaults: UserDefaults = .standard,
+                 newMessageAreaDefaults: UserDefaults? = nil) throws {
         self.clearedRetractionDefaults = clearedRetractionDefaults
+        let areaStore = newMessageAreaDefaults.map { NewMessageAreaStore(defaults: $0) }
+        self.messageAreaStore = areaStore
         self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
@@ -1218,6 +1228,7 @@ final class LivePresentationStore {
         self.conversationThreads = try port.conversations(context: port.context).threads
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
+        reconcileNewMessageArea(snapshot.requests, using: areaStore)
         if let data = clearedRetractionDefaults.data(forKey: Self.clearedRetractionsDefaultsKey),
            let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
             clearedRetractions = cleared
@@ -1598,6 +1609,21 @@ final class LivePresentationStore {
         presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
             .compactMap { makeInboxRow(for: $0) }
+    }
+
+    var newMessageAreaStore: NewMessageAreaStore? { messageAreaStore }
+
+    private func reconcileNewMessageArea(_ requests: [PresentedRequest],
+                                         using store: NewMessageAreaStore? = nil) {
+        guard let store = store ?? messageAreaStore else { return }
+        let messages = requests.map {
+            NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
+                                  isResolved: $0.isResolved,
+                                  hasSubmittedAnswer: $0.intentReceipt != nil)
+        }
+        let revisions = Dictionary(uniqueKeysWithValues: requests.map { ($0.key, $0.requestRevision) })
+        store.reconcile(messages, revisions: revisions,
+                        accountScopes: [profileContext.identity.personID])
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
@@ -2408,6 +2434,7 @@ final class LivePresentationStore {
             diagnose(.localStore, .projectionRefresh, .failed, error: error)
         }
         presentation = snapshot
+        reconcileNewMessageArea(snapshot.requests)
         recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)
         if let key = actionErrorRequest,

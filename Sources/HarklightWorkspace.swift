@@ -179,6 +179,27 @@ struct InboxNotificationDestination: Equatable {
 private struct InboxListRowScrollTarget: Hashable {
     let tab: InboxWorkspaceTab
     let selection: InboxSelection
+    var placement: InboxListRowPlacement = .normal
+}
+
+private enum InboxListRowPlacement: Hashable {
+    case normal
+    case newMessageArea
+}
+
+private struct NewMessageAreaVisibility: Hashable {
+    enum Placement: Hashable {
+        case area
+        case normalList
+    }
+
+    let key: RequestKey
+    let placement: Placement
+}
+
+private struct NewMessageAreaExpiryTaskKey: Hashable {
+    let scenePhase: String
+    let nextExpiry: Date?
 }
 
 enum InboxResponseReceiptStatus: Equatable {
@@ -339,6 +360,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var notificationNavigation: NativeInboxNavigation? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selection: InboxSelection?
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
@@ -392,6 +414,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
     private var activeNotificationNavigation: NativeInboxNavigation? {
         notificationNavigation ?? testNotificationNavigation
+    }
+    private var newMessageAreaExpiryTaskKey: NewMessageAreaExpiryTaskKey {
+        NewMessageAreaExpiryTaskKey(
+            scenePhase: String(describing: scenePhase),
+            nextExpiry: conversationStore?.newMessageAreaStore?.nextExpiry)
     }
     private var exposesNotificationTestAction: Bool {
         ProcessInfo.processInfo.arguments.contains("--harklight-test-notification-navigation")
@@ -450,7 +477,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newSampleID: String? = if case let .sample(id) = next { id } else { nil }
 
         if let next { lastViewedSelection = next }
-        if let newRequest { selectRequest(newRequest) }
+        if let newRequest {
+            conversationStore?.newMessageAreaStore?.open(newRequest)
+            selectRequest(newRequest)
+        }
         samples.select(newSampleID, departingFrom: oldSampleID)
     }
 
@@ -598,6 +628,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
+                  newMessageAreaStore: conversationStore?.newMessageAreaStore,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab, search: $search,
@@ -691,8 +722,30 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 selection = destination.selection
                 preferredCompactColumn = selection == nil ? .sidebar : .detail
                 if let key = route.request {
+                    conversationStore?.newMessageAreaStore?.open(key)
                     lastViewedSelection = .request(key)
                     selectRequest(key)
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active, UIApplication.shared.isProtectedDataAvailable else { return }
+                conversationStore?.newMessageAreaStore?.removeExpired()
+            }
+            .task(id: newMessageAreaExpiryTaskKey) {
+                guard scenePhase == .active,
+                      UIApplication.shared.isProtectedDataAvailable,
+                      let areaStore = conversationStore?.newMessageAreaStore else { return }
+                while let expiry = areaStore.nextExpiry {
+                    let delay = max(0, expiry.timeIntervalSinceNow)
+                    do {
+                        try await Task.sleep(for: .seconds(delay))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled,
+                          scenePhase == .active,
+                          UIApplication.shared.isProtectedDataAvailable else { return }
+                    areaStore.removeExpired()
                 }
             }
             .onChange(of: samples.selectedID) { _, id in
@@ -747,6 +800,7 @@ struct InboxList: View {
     let warnings: [String]
     var showsBasicOrderMarker = false
     var isRefreshing = false
+    let newMessageAreaStore: NewMessageAreaStore?
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var workspaceTab: InboxWorkspaceTab
@@ -767,12 +821,21 @@ struct InboxList: View {
         reduceMotionOverride ?? systemReduceMotion
     }
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var canRequestOlderPageOnDrag = false
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
     @State private var warningContentHeight: CGFloat = 0
     @State private var expandedThreadGroups: Set<InboxListEntryID> = []
+    @State private var isNewMessageAreaExpanded = false
+    @State private var visibleMessagePlacements: Set<NewMessageAreaVisibility> = []
+
+    private struct NewMessageAreaListRow: Identifiable {
+        let entry: NewMessageAreaEntry
+        let row: InboxRequestRow
+        var id: RequestKey { entry.key }
+    }
 
     private var designPalette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
@@ -780,6 +843,77 @@ struct InboxList: View {
 
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
         InboxListProjection.filteredRows(rows, in: tab, search: search)
+    }
+
+    private var matchingNewMessageAreaRows: [NewMessageAreaListRow] {
+        guard tab == .inbox, let newMessageAreaStore else { return [] }
+        var requestRows: [RequestKey: InboxRequestRow] = [:]
+        for item in rows {
+            guard case let .request(row) = item else { continue }
+            requestRows[row.key] = row
+        }
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return newMessageAreaStore.entries.compactMap { entry in
+            guard let row = requestRows[entry.key],
+                  query.isEmpty || InboxItem.request(row).matchesSearch(query) else { return nil }
+            return NewMessageAreaListRow(entry: entry, row: row)
+        }
+    }
+
+    private func updateVisibility(_ token: NewMessageAreaVisibility, isVisible: Bool) {
+        if isVisible {
+            guard workspaceTab == tab else {
+                visibleMessagePlacements.remove(token)
+                return
+            }
+            visibleMessagePlacements.insert(token)
+            if canRecordFirstSeen {
+                newMessageAreaStore?.markFirstSeen(token.key)
+            }
+        } else {
+            visibleMessagePlacements.remove(token)
+        }
+    }
+
+    private var canRecordFirstSeen: Bool {
+        scenePhase == .active && workspaceTab == tab &&
+            UIApplication.shared.isProtectedDataAvailable
+    }
+
+    private func recordVisibleMessagesAsSeen() {
+        guard canRecordFirstSeen else { return }
+        for placement in visibleMessagePlacements {
+            newMessageAreaStore?.markFirstSeen(placement.key)
+        }
+    }
+
+    @ViewBuilder
+    private func newMessageAreaRow(_ item: NewMessageAreaListRow,
+                                  in tab: InboxWorkspaceTab) -> some View {
+        NavigationLink(value: InboxSelection.request(item.row.key)) {
+            NewMessageAreaRowContent(
+                key: item.row.key,
+                title: item.row.title,
+                bodyText: item.row.bodyText,
+                requestRevision: item.row.requestRevision,
+                createdAt: item.row.createdAt,
+                receivedAt: item.entry.receivedAt,
+                priority: item.row.priority,
+                store: newMessageAreaStore)
+        }
+        .buttonStyle(.plain)
+        .navigationLinkIndicatorVisibility(.hidden)
+        .tag(InboxSelection.request(item.row.key))
+        .id(InboxListRowScrollTarget(tab: tab,
+                                     selection: .request(item.row.key),
+                                     placement: .newMessageArea))
+        .onScrollVisibilityChange(threshold: 0.001) { isVisible in
+            updateVisibility(.init(key: item.row.key, placement: .area), isVisible: isVisible)
+        }
+        .accessibilityIdentifier("new-message-area-\(item.row.accessibilityID)")
+        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
     }
 
     private var tabMembershipIDs: Set<InboxSelection> {
@@ -998,6 +1132,11 @@ struct InboxList: View {
             .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
             .listRowSeparator(.hidden)
             .listRowBackground(Color.clear)
+            .onScrollVisibilityChange(threshold: 0.001) { isVisible in
+                guard case let .request(request) = row else { return }
+                updateVisibility(.init(key: request.key, placement: .normalList),
+                                  isVisible: isVisible)
+            }
     }
 
     private func threadExpansionBinding(for id: InboxListEntryID) -> Binding<Bool> {
@@ -1039,7 +1178,24 @@ struct InboxList: View {
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
+        let areaRows = matchingNewMessageAreaRows
+        let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
+            if !areaRows.isEmpty {
+                Section {
+                    ForEach(shownAreaRows) { item in
+                        newMessageAreaRow(item, in: tab)
+                    }
+                    if areaRows.count > 5 {
+                        Button(isNewMessageAreaExpanded ? "Less" : "More…") {
+                            isNewMessageAreaExpanded.toggle()
+                        }
+                        .accessibilityIdentifier("new-message-area-more")
+                    }
+                } header: {
+                    Text("New messages")
+                }
+            }
             if tab == .inbox && showsBasicOrderMarker {
                 Text("Basic order")
                     .font(.caption.weight(.semibold))
@@ -1066,7 +1222,7 @@ struct InboxList: View {
                     .listRowBackground(Color.clear)
                 }
             }
-            if visibleEntries.isEmpty, let triggerNotification {
+            if visibleEntries.isEmpty, areaRows.isEmpty, let triggerNotification {
                 Button("Open notification", action: triggerNotification)
                     .accessibilityIdentifier("harklight-test-notification")
             }
@@ -1099,14 +1255,22 @@ struct InboxList: View {
         .onAppear {
             guard workspaceTab == tab else { return }
             restoreLastViewed(using: proxy, in: tab)
+            recordVisibleMessagesAsSeen()
         }
         .onChange(of: workspaceTab) { _, activeTab in
-            guard activeTab == tab else { return }
+            guard activeTab == tab else {
+                visibleMessagePlacements.removeAll()
+                return
+            }
+            recordVisibleMessagesAsSeen()
             if restoreLastViewed {
                 restoreLastViewed(using: proxy, in: tab)
             } else {
                 showFirstRow(using: proxy, in: tab)
             }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { recordVisibleMessagesAsSeen() }
         }
         .onChange(of: restoreLastViewed) { _, shouldRestore in
             if shouldRestore, workspaceTab == tab {
@@ -1174,6 +1338,86 @@ private struct InboxScrollMetrics: Equatable {
     let offsetY: CGFloat
     let distanceToBottom: CGFloat
     let contentFits: Bool
+}
+
+private struct NewMessageAreaRowContent: View {
+    let key: RequestKey
+    let title: String
+    let bodyText: String?
+    let requestRevision: UInt64
+    let createdAt: Date?
+    let receivedAt: Date
+    let priority: InboxMessagePriority?
+    let store: NewMessageAreaStore?
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: HarklightDesignSource.Appearance {
+        HarklightDesignSystem.palette(for: colorScheme)
+    }
+
+    private var summaryInput: String {
+        NewMessageAreaSummaryText.source(title: title, body: bodyText)
+    }
+
+    private var summaryKey: NewMessageAreaSummaryKey {
+        NewMessageAreaSummaryKey(request: key, revision: requestRevision)
+    }
+
+    private var fallbackText: String {
+        NewMessageAreaSummaryText.fallback(summaryInput)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(store?.summary(for: key, revision: requestRevision) ?? fallbackText)
+                .font(.subheadline)
+                .foregroundStyle(palette.neutral.textColor)
+                .lineLimit(2)
+                .truncationMode(.tail)
+
+            HStack(spacing: 8) {
+                Text(InboxFriendlyDate.label(for: createdAt ?? receivedAt))
+                    .font(.caption)
+                    .foregroundStyle(palette.neutral.secondaryTextColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 4)
+                if let priority,
+                   let priorityLabel = InboxPriorityDisplay.label(for: priority) {
+                    Text(priorityLabel.title)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(priorityColor(for: priority))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(priorityColor(for: priority).opacity(0.14), in: Capsule())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .accessibilityLabel(Text(priorityLabel.title))
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.neutral.backgroundColor)
+        .accessibilityElement(children: .combine)
+        .task(id: summaryKey) {
+            guard let store else { return }
+            await store.createSummaryIfNeeded(
+                for: NewMessageAreaSummaryInput(key: key,
+                    revision: requestRevision, text: summaryInput))
+        }
+    }
+
+    private func priorityColor(for priority: InboxMessagePriority) -> Color {
+        switch priority {
+        case .low: palette.neutral.secondaryTextColor
+        case .normal: palette.accent.color
+        case .high: .orange
+        case .now: .red
+        }
+    }
 }
 
 struct InboxRowContent: View {
