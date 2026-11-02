@@ -608,7 +608,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
-                  refreshAvailable: refreshInbox != nil,
+                  refreshInbox: refreshInbox,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab, search: $search,
@@ -632,15 +632,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
         }
         splitView.scrollBounceBehavior(.always, axes: .vertical)
-    }
-
-    @ViewBuilder
-    private func attachingRefreshAction<Content: View>(to content: Content) -> some View {
-        if let refreshInbox {
-            content.refreshable { await refreshInbox() }
-        } else {
-            content
-        }
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
@@ -699,7 +690,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: visibleWarnings, initial: true) { _, newWarnings in
                 dismissWarningWhenCleared(newWarnings)
             }
-            attachingRefreshAction(to: tabs)
+            tabs
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route else { return }
                 settings = false
@@ -768,7 +759,7 @@ struct InboxList: View {
     let warnings: [String]
     var showsBasicOrderMarker = false
     var isRefreshing = false
-    var refreshAvailable = false
+    var refreshInbox: (@MainActor () async -> Void)? = nil
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var workspaceTab: InboxWorkspaceTab
@@ -925,7 +916,7 @@ struct InboxList: View {
         return [
             "search=\(search) workspaceTab=\(workspaceTab) listTab=\(tab) tab=\(selectedMessageTab.rawValue)",
             "restoreLastViewed=\(restoreLastViewed) lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) selected=\(UIDiagnostics.describe(selected))",
-            "refreshAvailable=\(refreshAvailable) isRefreshing=\(isRefreshing)",
+            "refreshAvailable=\(refreshInbox != nil) isRefreshing=\(isRefreshing)",
             "rows=\(rows.count) inTab=\(inTab.count) filtered=\(filtered)",
         ].joined(separator: " | ")
     }
@@ -1171,6 +1162,18 @@ struct InboxList: View {
             if isUserScrolling != scrolling { isUserScrolling = scrolling }
             if oldPhase == .interacting && !scrolling { requestedInGesture = false }
         }
+        .simultaneousGesture(DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                guard value.translation.height < -12 else { return }
+                if !isUserScrolling { isUserScrolling = true }
+                if canRequestOlderPageOnDrag {
+                    requestOlderPage()
+                }
+            }
+            .onEnded { _ in
+                isUserScrolling = false
+                requestedInGesture = false
+            })
     }
 
     @ViewBuilder
@@ -1181,7 +1184,12 @@ struct InboxList: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            renderedList(using: proxy)
+            if let refreshInbox {
+                renderedList(using: proxy)
+                    .refreshable { await refreshInbox() }
+            } else {
+                renderedList(using: proxy)
+            }
         }
     }
 }

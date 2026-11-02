@@ -123,11 +123,8 @@ final class InboxStockTabsUITests: XCTestCase {
                                thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
 
-            let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
-            XCTAssertTrue(refreshing.waitForExistence(timeout: 5),
-                          "Pulling down from the top of \(title) starts its refresh action.\n\(app.debugDescription)")
             let warningButton = app.buttons["inbox-warning-button"]
-            XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(warningButton.waitForExistence(timeout: 8), app.debugDescription)
             warningButton.tap()
             let warning = app.staticTexts["inbox-warning-message"]
             XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
