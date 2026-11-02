@@ -1121,6 +1121,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 throw ConversationError.invalidBinding
             }
             var thread: ConversationThread
+            let isNewThread = conversation.threads[request.key] == nil
             if let prior = conversation.threads[request.key] {
                 guard prior.sessionHandle == handle,
                       prior.revisions[1]?.semanticallyEquals(request.originalPayload) == true else {
@@ -1138,7 +1139,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 if let availability = metadata.availability { thread.availability = availability }
                 thread.listeningSupport = metadata.listeningSupport
                 thread.terminal = next.remoteStates[request.key]?.state
-                try conversation.applyHeldEvents(to: &thread)
             }
             if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
             if let reported = metadata.retractedAtMilliseconds { try thread.recordReportedRetraction(at: reported) }
@@ -1147,6 +1147,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 thread.turns.append(ConversationTurn(id: id, binding: ConversationBinding(request: request.key, revision: 1),
                     author: .origin, sessionHandle: handle, text: ExactText(""), files: metadata.files ?? [], kind: .revision))
                 thread.facts[id, default: ConversationTurnFacts()] = thread.facts[id] ?? ConversationTurnFacts()
+            }
+            if isNewThread {
+                // Held receipts and file facts can refer to this initial turn.
+                // Seed its identity and files before replaying their sequence.
+                try conversation.applyHeldEvents(to: &thread)
             }
             conversation.threads[request.key] = thread
         case let .terminal(key, terminal, _):
