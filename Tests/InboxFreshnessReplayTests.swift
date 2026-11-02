@@ -101,6 +101,23 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
 final class InboxFreshnessReplayTests: XCTestCase {
     private func data(_ string: String) -> Data { Data(string.utf8) }
 
+    func testSkippedMessageDiagnosticRetainsCauseAndItemAssociationThroughCoding() throws {
+        let request = RequestKey(accountScope: ExactText("diagnostic-account"),
+            senderID: ExactText("diagnostic-sender"), messageID: ExactText("diagnostic-request"))
+        let event = NativeClientDiagnosticEvent(area: .conversation, phase: .conversationReplay,
+            transition: .observed, causeCode: "conversation_message_skipped",
+            conversationSequence: 12, request: request, requestRevision: 3)
+        XCTAssertEqual(event.causeCode, "conversation_message_skipped")
+        let restored = try JSONDecoder().decode(NativeClientDiagnosticEvent.self,
+            from: JSONEncoder().encode(event))
+        XCTAssertEqual(restored, event)
+        XCTAssertEqual(restored.causeCode, "conversation_message_skipped")
+        XCTAssertEqual(restored.requestTag, event.requestTag)
+        XCTAssertEqual(restored.requestTag?.count, 64)
+        XCTAssertEqual(restored.requestRevision, 3)
+        XCTAssertEqual(restored.conversationSequence, 12)
+    }
+
     @MainActor
     func testTerminalReceiptWithoutPagingIdentityDoesNotBlockCurrentInbox() async throws {
         for terminalIdentityIncluded in [false, true] {
