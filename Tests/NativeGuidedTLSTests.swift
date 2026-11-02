@@ -1539,6 +1539,109 @@ final class NativeGuidedTLSTests: XCTestCase {
         await session.close()
     }
 
+    func testReceiptRecoveryOnPagingSocketReplaysQueuedFramesBeforeAcknowledging() async throws {
+        let namespace = "Harklight.receipt-history-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("history-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        // Synthetic saved-state precondition: the cursor passed a discussion
+        // whose local dependency is absent. No current-client loss is asserted.
+        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+        let requests = ConversationFrameCollector()
+        let items = #"""
+            [{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"answered","origin":"origin","as":"message","message":{"title":"Answered"},"session_handle":"closed","request_revision":1,"event_id":"1"},
+              "terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"answered","origin":"origin","state":"answered","author":"person","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"},"event_id":"3","request_revision":1}},
+             {"acceptance":{"v":1,"type":"delivery","seq":3,"sender_id":"author","message_id":"open","origin":"origin","as":"message","message":{"title":"Open"},"session_handle":"open","request_revision":1,"event_id":"4"}}]
+            """#
+        let discussion = #"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed","request_revision":1,"kind":"discussion","author":"person","event_id":"2","text":"Before answering"}"# + "\n"
+        let receipt = #"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed","request_revision":1,"kind":"receipt","author":"origin","event_id":"2","delivered":true}"# + "\n"
+        let pending = #"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":2,"kind":"revision","author":"origin","event_id":"5","message":{"title":"Pending"}}"# + "\n"
+        let arriving = #"{"v":1,"type":"conversation","conversation_seq":4,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":3,"kind":"revision","author":"origin","event_id":"6","message":{"title":"Newest"}}"# + "\n"
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
+                  let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue else { return [] }
+            requests.append(Data(text.utf8))
+            let ok = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\""
+            switch kind {
+            case "inbox_start":
+                return [ok + ",\"paging_version\":1,\"snapshot_id\":\"history-snapshot\",\"high_water\":3,\"items\":\(items),\"next_cursor\":null,\"receipt_cursor\":null}\n"]
+            case "inbox_checkpoint_ack":
+                return [ok + ",\"paging_version\":1,\"snapshot_id\":\"history-snapshot\",\"high_water\":3,\"checkpoint_accepted\":true}\n"]
+            case "inbox_attach":
+                if value.uniqueValue(named: "mode")?.stringValue?.rawValue == "checkpoint_status" {
+                    return [ok + ",\"paging_version\":1,\"snapshot_id\":\"history-snapshot\",\"high_water\":3,\"checkpoint_accepted\":false,\"replay_started\":false}\n"]
+                }
+                return [ok + ",\"paging_version\":1,\"snapshot_id\":\"history-snapshot\",\"high_water\":3,\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        "{\"v\":1,\"type\":\"resynced\",\"seq\":3}\n"]
+            case "ack":
+                return [ok + ",\"seq\":3}\n"]
+            case "conversation_open":
+                let since = value.uniqueValue(named: "since")?.integerValue ?? -1
+                let count = requests.types.filter { $0 == "conversation_open" }.count
+                let end = "{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":4}\n"
+                if count == 1 {
+                    // The transport reader queues later frames while the core
+                    // handles the missing target. A live frame follows the end.
+                    return [ok + "}\n", receipt, pending,
+                            "{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":3}\n", arriving]
+                }
+                if since == 0 { return [ok + "}\n", discussion, receipt, pending, arriving, end] }
+                if since == 1 { return [ok + "}\n", receipt, pending, arriving, end] }
+                return [ok + "}\n", end]
+            case "conversation_ack":
+                return [ok + ",\"conversation_seq\":4}\n"]
+            default:
+                return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"unknown_type\"}\n"]
+            }
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let session = try URLSessionInstallationSession(profile: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+        } catch {
+            await core.deactivate()
+            await session.close()
+            throw error
+        }
+        await core.deactivate()
+        await session.close()
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let snapshot = try restored.conversationSnapshot(context: context)
+        let answered = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("answered"))
+        let open = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("open"))
+        XCTAssertEqual(snapshot.cursor, 4)
+        XCTAssertEqual(snapshot.threads[answered]?.facts[ExactText("2")]?.delivered, true)
+        XCTAssertNotNil(snapshot.threads[open]?.revisions[2])
+        XCTAssertEqual(snapshot.threads[open]?.currentRevision, 3)
+        let presentation = try LivePresentationStore(store: restored, context: context)
+        XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: answered)).belongsToReplied)
+        XCTAssertEqual(presentation.request(for: open)?.title, ExactText("Newest"))
+        let values = try requests.snapshot().map { try JSONValue.parse($0) }
+        let opens = values.filter { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open" }
+        XCTAssertEqual(Array(opens.prefix(3)).map { $0.uniqueValue(named: "since")?.integerValue }, [1, 0, 1])
+        XCTAssertEqual(opens.filter { $0.uniqueValue(named: "since")?.integerValue == 0 }.count, 1)
+        let acks = values.filter { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_ack" }
+        XCTAssertFalse(acks.isEmpty)
+        XCTAssertTrue(acks.allSatisfy { $0.uniqueValue(named: "conversation_seq")?.integerValue == 4 })
+        let firstACK = try XCTUnwrap(values.firstIndex { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_ack" })
+        XCTAssertEqual(values[..<firstACK].filter { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open" }.count, 3)
+    }
+
     func testLongConversationCatchUpWithASlowConsumerDeliversEveryEntryInOrder() async throws {
         let namespace = "Harklight.relay-conversation-catch-up-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -4009,6 +4112,11 @@ private final class ConversationFrameCollector: @unchecked Sendable {
                   value.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation" else { return nil }
             return value.uniqueValue(named: "conversation_seq")?.integerValue
         }
+    }
+
+    func snapshot() -> [Data] {
+        lock.lock(); defer { lock.unlock() }
+        return frames
     }
 
     func append(_ frame: Data) {
