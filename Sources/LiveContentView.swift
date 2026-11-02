@@ -1441,11 +1441,11 @@ struct LiveRequestDetail: View {
             .tint(detailColors.textColor)
         }
         .toolbar {
+            ToolbarItemGroup(placement: .bottomBar) {
+                Spacer()
+                chatButton
+            }
             if !isSupersedesReadOnly {
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Spacer()
-                    chatButton
-                }
                 if pinsAnsweredStatusInWidePhoneToolbar {
                     ToolbarItem(placement: .topBarPinnedTrailing) {
                         answeredStatusButton
@@ -1683,7 +1683,10 @@ struct LiveRequestDetail: View {
 
     private var conversationPanel: some View {
         ConversationPanel(store: store, key: request.key,
-            sender: detailSenderLabel, title: request.title?.rawValue ?? "")
+            sender: detailSenderLabel, title: request.title?.rawValue ?? "",
+            discussionUnavailableReason: isSupersedesReadOnly
+                ? ConversationPanelText.supersededReadOnlyReason
+                : nil)
     }
 
     static func informationalSeenText(_ status: InformationalSeenStatus) -> String {
