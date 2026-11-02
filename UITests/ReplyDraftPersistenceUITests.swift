@@ -2,6 +2,39 @@ import XCTest
 
 @MainActor
 final class ReplyDraftPersistenceUITests: XCTestCase {
+    func testUnsentChoiceSurvivesLeavingAndReopeningRequest() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture"]
+        app.launch()
+
+        let row = app.descendants(matching: .any)["request-row-review-01"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+        row.tap()
+        let choice = app.buttons["Cover A"]
+        XCTAssertTrue(choice.waitForExistence(timeout: 5), app.debugDescription)
+        choice.tap()
+        XCTAssertTrue(choice.isSelected)
+
+        let back = workspaceBackButton(in: app)
+        if back.exists && back.isHittable {
+            back.tap()
+            XCTAssertTrue(workspaceSearchField(in: app).waitForExistence(timeout: 5),
+                          app.debugDescription)
+        } else {
+            let other = app.descendants(matching: .any)["request-row-facilities-01"]
+            XCTAssertTrue(other.waitForExistence(timeout: 5), app.debugDescription)
+            other.tap()
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+
+        XCTAssertTrue(app.buttons["Cover A"].isSelected,
+                      "An unsent choice survives leaving and reopening the request.")
+        XCTAssertTrue(app.buttons["request-finish"].isEnabled,
+                      "The retained choice remains ready for deliberate submission.")
+    }
+
     func testReplyContentsAreNotSavedAcrossAppRelaunch() async throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

@@ -739,9 +739,7 @@ struct LiveRequestDetail: View {
         let canSubmit = localExample == nil &&
             Self.canEditSnapshot(request: request, store: store, context: context)
         if canSubmit {
-            _replyDraftSession = State(initialValue: ReplyEditorDraftSession(
-                request: request,
-                canSubmitFromSnapshot: canSubmit))
+            _replyDraftSession = State(initialValue: store.replyEditorSession(for: request))
         } else {
             _replyDraftSession = State(initialValue: nil)
         }
@@ -815,7 +813,9 @@ struct LiveRequestDetail: View {
     }
 
     private var isEditingLocalReply: Bool {
-        localReplyEditingActive && localReplySession?.canSubmitFromSnapshot == true
+        guard let session = localReplySession, session.canSubmitFromSnapshot else { return false }
+        // The view's focus flag resets on navigation; the retained draft does not.
+        return localReplyEditingActive || session.hasLocalChanges
     }
 
     private func markLocalReplyInteraction() {
@@ -1501,9 +1501,7 @@ struct LiveRequestDetail: View {
             let canSubmit = localExample == nil &&
                 Self.canEditSnapshot(request: request, store: store, context: context)
             if canSubmit {
-                replyDraftSession = ReplyEditorDraftSession(
-                    request: request,
-                    canSubmitFromSnapshot: canSubmit)
+                replyDraftSession = store.replyEditorSession(for: request)
             } else {
                 replyDraftSession = nil
             }
@@ -1519,10 +1517,12 @@ struct LiveRequestDetail: View {
             if let session = localReplySession {
                 session.adoptUneditedRequest(request, canSubmit: true)
             } else {
-                replyDraftSession = ReplyEditorDraftSession(request: request,
-                                                            canSubmitFromSnapshot: true)
+                replyDraftSession = store.replyEditorSession(for: request)
             }
         } else {
+            if request.lifecycleStatus != .open || request.intentReceipt != nil {
+                store.discardReplyEditorSession(for: request.key)
+            }
             replyDraftSession = nil
         }
     }
@@ -1572,6 +1572,7 @@ struct LiveRequestDetail: View {
                                                  requestRevision: request.requestRevision)
                 guard submitted else { return }
             }
+            store.discardReplyEditorSession(for: request.key)
             localReplyEditingActive = false
             replyDraftSession = nil
             closeReplyEditor()
@@ -1586,6 +1587,7 @@ struct LiveRequestDetail: View {
 
     private func endLocalReplyIfRequestChanged(_ session: ReplyEditorDraftSession) {
         guard let current = store.request(for: session.requestKey) else {
+            store.discardReplyEditorSession(for: session.requestKey)
             localReplyEditingActive = false
             replyDraftSession = nil
             closeReplyEditor()
@@ -1599,8 +1601,11 @@ struct LiveRequestDetail: View {
         localReplyEditingActive = false
         let canEditCurrentRequest = localExample == nil &&
             Self.canEditSnapshot(request: current, store: store, context: context)
+        if !canEditCurrentRequest {
+            store.discardReplyEditorSession(for: current.key)
+        }
         replyDraftSession = canEditCurrentRequest
-            ? ReplyEditorDraftSession(request: current, canSubmitFromSnapshot: true)
+            ? store.replyEditorSession(for: current)
             : nil
         closeReplyEditor()
     }

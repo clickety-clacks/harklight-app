@@ -11,6 +11,8 @@ final class ReleaseNotesUITests: XCTestCase {
 
         XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
                       app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Keep an unfinished Reply"].exists,
+                      app.debugDescription)
         let updateHeader = app.staticTexts["Version 0.1.0 · Changes since Build 79"]
         XCTAssertTrue(updateHeader.exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["More context in the Inbox"].exists,
