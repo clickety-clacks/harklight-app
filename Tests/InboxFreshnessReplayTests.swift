@@ -24,6 +24,8 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
                                                 @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     var ordinaryFrames: [Data] = []
+    var inboxStartItemsJSON: String?
+    var inboxStartHighWater: UInt64 = 0
     var conversationFrames: [Data] = []
     var conversationFrameBatches: [[Data]] = []
     var consumedConversationFrames: [Data] = []
@@ -38,6 +40,16 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
 
     func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         for frame in ordinaryFrames { try await consume(frame) }
+    }
+
+    func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        let value = try JSONValue.parse(request)
+        if value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start",
+           let items = inboxStartItemsJSON {
+            let reply = #"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"receipt-snapshot-h\#(inboxStartHighWater)","high_water":\#(inboxStartHighWater),"items":\#(items),"next_cursor":null,"receipt_cursor":null}"#
+            return Data(reply.utf8)
+        }
+        return try await emptyInboxReply(request, ref: ref)
     }
 
     func acknowledge(_ request: Data) async throws {
@@ -75,6 +87,74 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
 
 final class InboxFreshnessReplayTests: XCTestCase {
     private func data(_ string: String) -> Data { Data(string.utf8) }
+
+    @MainActor
+    func testTerminalReceiptWireReplayNeedsAuthoritativePagingIdentity() async throws {
+        for terminalIdentityIncluded in [false, true] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let persistence = MemoryAttentionStatePersistence()
+            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let session = InboxFreshnessRelaySession(identity: identity)
+            session.inboxStartHighWater = 3
+            let terminalIdentity = terminalIdentityIncluded
+                ? #", "event_id":"2", "request_revision":1"# : ""
+            session.inboxStartItemsJSON = #"""
+                [{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"answered","origin":"origin","as":"message","message":{"title":"Answered question"},"session_handle":"closed-handle","request_revision":1,"event_id":"1"},
+                  "terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"answered","origin":"origin","state":"answered","author":"person","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"}\#(terminalIdentity)}},
+                 {"acceptance":{"v":1,"type":"delivery","seq":3,"sender_id":"author","message_id":"open","origin":"origin","as":"message","message":{"title":"Original open question"},"session_handle":"open-handle","request_revision":1,"event_id":"3"}}]
+                """#
+            session.ordinaryFrames = [
+                data(#"{"v":1,"type":"delivery","seq":4,"sender_id":"author","message_id":"after-snapshot","origin":"origin","as":"message","message":{"title":"Arrived after snapshot"}}"#),
+                data(#"{"v":1,"type":"resynced","seq":4}"#)
+            ]
+            // Feed entry 2 is the person-authored terminal acknowledged by the
+            // origin. It never has its own conversation-stream turn event.
+            session.conversationFrames = [
+                data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+                data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed-handle","request_revision":1,"kind":"receipt","author":"origin","event_id":"2","delivered":true}"#),
+                data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open-handle","request_revision":2,"kind":"revision","author":"origin","event_id":"4","message":{"title":"Current open question"}}"#),
+                data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
+            ]
+            session.rejectFirstConversationACK = terminalIdentityIncluded
+            let diagnostics = InboxFreshnessDiagnosticCollector()
+            let core = try NativeRelayCore(store: store, context: context, session: session,
+                onDiagnostic: { diagnostics.append($0) })
+            if terminalIdentityIncluded {
+                _ = try await core.resyncAndDrainOutbox()
+                XCTAssertEqual(session.conversationACKs.count, 2)
+                XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+            } else {
+                do {
+                    _ = try await core.resyncAndDrainOutbox()
+                    XCTFail("A terminal without its authoritative identity cannot satisfy a receipt.")
+                } catch let error as ConversationError {
+                    XCTAssertEqual(error, .invalidBinding)
+                }
+                XCTAssertTrue(session.conversationACKs.isEmpty)
+                XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0)
+                XCTAssertEqual(diagnostics.events.last { $0.conversationValidationRejection != nil }?
+                    .conversationValidationRejection?.guardID, .referencedTurnExists)
+            }
+            let restored = try AttentionDomainStore(context: context, persistence: persistence)
+            XCTAssertEqual(try restored.snapshot(context: context).cursor, 4)
+            let presentation = try LivePresentationStore(store: restored, context: context)
+            func key(_ message: String) -> RequestKey {
+                RequestKey(accountScope: identity.personID, senderID: ExactText("author"), messageID: ExactText(message))
+            }
+            XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: key("answered"))).belongsToReplied)
+            XCTAssertFalse(try XCTUnwrap(presentation.inboxRow(for: key("open"))).belongsToReplied)
+            XCTAssertNotNil(presentation.request(for: key("after-snapshot")))
+            if terminalIdentityIncluded {
+                XCTAssertEqual(presentation.request(for: key("open"))?.title, ExactText("Current open question"))
+                XCTAssertEqual(presentation.inboxRow(for: key("open"))?.requestRevision, 2)
+                XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key("answered")]?
+                    .facts[ExactText("2")]?.delivered, true)
+            }
+            await core.deactivate()
+        }
+    }
 
     @MainActor
     func testPagedTerminalRecoversLiveAndHeldReceiptsWithCurrentRevision() throws {
