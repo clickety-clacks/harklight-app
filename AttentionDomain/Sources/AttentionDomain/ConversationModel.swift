@@ -756,6 +756,30 @@ struct ConversationState: Codable, Equatable {
         cursor = event.sequence
     }
 
+    /// Re-checks a redacted revision whose sequence was already durably
+    /// accounted without retaining the rejected event. This is used only for
+    /// the narrowly approved ACK-behind replay case; it never mutates this
+    /// conversation state.
+    func redactedRevisionRejectionForAccountedRedelivery(
+        _ event: ConversationEvent
+    ) throws -> ConversationValidationRejection? {
+        guard event.sequence <= cursor, events[event.sequence] == nil,
+              event.binding.revision > 0,
+              case let .redactedRevision(turn) = event.fact,
+              turn.binding == event.binding, !turn.id.rawValue.isEmpty,
+              turn.contentRedacted == true,
+              let existingThread = threads[event.binding.request],
+              turn.sessionHandle == existingThread.sessionHandle else { return nil }
+
+        var thread = existingThread
+        do {
+            try applyThreadFact(event, to: &thread)
+        } catch let rejection as ConversationValidationRejectionError {
+            return rejection.rejection
+        }
+        return nil
+    }
+
     private mutating func applyRequest(handle: ExactText, payload: JSONValue,
                                        binding: ConversationBinding, event: ConversationEvent) throws {
         guard !handle.rawValue.isEmpty else {
@@ -768,7 +792,10 @@ struct ConversationState: Codable, Equatable {
             if let old = thread.revisions[binding.revision] {
                 guard old == payload else { throw ConversationError.conflict }
             } else {
-                guard binding.revision == thread.currentRevision + 1 else {
+                guard thread.redactedRevisions?.contains(binding.revision) != true else {
+                    throw ConversationError.conflict
+                }
+                guard binding.revision > thread.currentRevision else {
                     throw ConversationError.staleRevision(current: thread.currentRevision)
                 }
                 thread.revisions[binding.revision] = payload
@@ -974,7 +1001,10 @@ struct ConversationState: Codable, Equatable {
             if let old = thread.revisions[binding.revision] {
                 guard old == payload else { throw ConversationError.conflict }
             } else {
-                guard binding.revision == thread.currentRevision + 1 else {
+                guard thread.redactedRevisions?.contains(binding.revision) != true else {
+                    throw ConversationError.conflict
+                }
+                guard binding.revision > thread.currentRevision else {
                     throw ConversationError.staleRevision(current: thread.currentRevision)
                 }
                 thread.revisions[binding.revision] = payload
@@ -982,7 +1012,7 @@ struct ConversationState: Codable, Equatable {
             }
         case let .redactedRevision(turn):
             guard turn.contentRedacted == true, turn.sessionHandle == thread.sessionHandle,
-                  turn.author == .origin, binding.revision == thread.currentRevision + 1 else {
+                  turn.author == .origin else {
                 throw conversationValidationRejection(.redactedRevisionBinding,
                     eventKind: event.fact.diagnosticKind,
                     facts: ConversationValidationFacts(
@@ -994,8 +1024,14 @@ struct ConversationState: Codable, Equatable {
                         revisionIsNext: thread.currentRevision < UInt64.max &&
                             binding.revision == thread.currentRevision + 1))
             }
-            thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
-            thread.currentRevision = binding.revision
+            guard thread.revisions[binding.revision] == nil else { throw ConversationError.conflict }
+            if thread.redactedRevisions?.contains(binding.revision) != true {
+                guard binding.revision > thread.currentRevision else {
+                    throw ConversationError.staleRevision(current: thread.currentRevision)
+                }
+                thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
+                thread.currentRevision = binding.revision
+            }
         default:
             break
         }

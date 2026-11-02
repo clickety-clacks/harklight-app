@@ -2397,16 +2397,24 @@ public final class AttentionDomainStore: @unchecked Sendable {
             pendingChatReadPositions: pending)
     }
 
-    /// A missing retained event at or below the durable cursor was already
-    /// accounted for without applying a fact. This lets full-history replay
-    /// recover after an ACK-behind response without storing rejected content.
-    public func conversationSequenceWasAccountedWithoutEvent(at sequence: UInt64,
-                                                              context suppliedContext: ProfileContext) throws -> Bool {
+    /// Re-validates an already-accounted redacted revision without applying or
+    /// persisting it. Replay may ignore it only when the normal profile/request
+    /// checks pass and the exact redacted-revision guard still rejects it.
+    public func redactedRevisionRejectionForAccountedRedelivery(
+        _ event: ConversationEvent,
+        context suppliedContext: ProfileContext
+    ) throws -> ConversationValidationRejection? {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        try validate(event.binding.request, in: context.identity)
+        guard case let .redactedRevision(turn) = event.fact else { return nil }
+        try validateConversationFiles(turn.files)
         let conversation = state.conversation ?? ConversationState()
-        return sequence <= conversation.cursor && conversation.events[sequence] == nil
+        return try conversation.redactedRevisionRejectionForAccountedRedelivery(event)
     }
 
     /// The conversation cursor commits in the same account transaction as its fact.

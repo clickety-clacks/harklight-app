@@ -25,10 +25,12 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
     let authenticatedIdentity: ProfileIdentity
     var ordinaryFrames: [Data] = []
     var conversationFrames: [Data] = []
+    var conversationFrameBatches: [[Data]] = []
     var consumedConversationFrames: [Data] = []
     var ordinaryACKs: [Data] = []
     var conversationACKs: [Data] = []
     var rejectFirstConversationACK = false
+    private var conversationOpenCount = 0
 
     init(identity: ProfileIdentity) {
         authenticatedIdentity = identity
@@ -48,7 +50,15 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
 
     func openConversation(_ request: Data,
                           consume: @Sendable (Data) async throws -> Void) async throws {
-        for frame in conversationFrames {
+        let frames: [Data]
+        if conversationFrameBatches.isEmpty {
+            frames = conversationFrames
+        } else {
+            let index = min(conversationOpenCount, conversationFrameBatches.count - 1)
+            frames = conversationFrameBatches[index]
+        }
+        conversationOpenCount += 1
+        for frame in frames {
             consumedConversationFrames.append(frame)
             try await consume(frame)
         }
@@ -90,7 +100,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             // source emits author=origin for its revision entries. This frame
             // reaches the client's exact redactedRevisionBinding guard.
             data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"redacted-revision"}"#),
-            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"valid-revision","message":{"title":"Second wording"}}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":3,"kind":"revision","author":"origin","event_id":"valid-revision","message":{"title":"Third wording"}}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
         ]
 
@@ -117,7 +127,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         XCTAssertEqual(rejection.facts.revisionIsNext, true)
         let encodedDiagnostic = String(decoding: try JSONEncoder().encode(rejectedEventDiagnostic), as: UTF8.self)
         XCTAssertFalse(encodedDiagnostic.contains("redacted-revision"))
-        XCTAssertFalse(encodedDiagnostic.contains("Second wording"))
+        XCTAssertFalse(encodedDiagnostic.contains("Third wording"))
 
         XCTAssertEqual(session.conversationFrames.count, 4,
                        "A valid revision follows the rejected event in the synthetic stream.")
@@ -125,24 +135,127 @@ final class InboxFreshnessReplayTests: XCTestCase {
                        "Replay accounts for the rejected event, recovers after an ACK-behind response, then consumes the history again.")
         let snapshot = try store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 2)
-        XCTAssertEqual(snapshot.threads[key]?.currentRevision, 2)
+        XCTAssertEqual(snapshot.threads[key]?.currentRevision, 3)
+        XCTAssertEqual(snapshot.threads[key]?.revisionNumbers, [1, 3],
+                       "The skipped revision remains absent while the complete later revision becomes current.")
         XCTAssertEqual(session.conversationACKs.map { String(decoding: $0, as: UTF8.self) },
             ["{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":2,\"ref\":\"native-conversation-ack\"}\n",
              "{\"v\":1,\"type\":\"conversation_ack\",\"conversation_seq\":2,\"ref\":\"native-conversation-ack\"}\n"],
             "Replay acknowledges only after the rejected sequence and later valid revision are accounted for, including recovery from an ACK-behind response.")
 
         let presentation = try LivePresentationStore(store: store, context: context)
-        XCTAssertEqual(presentation.request(for: key)?.requestRevision, 2)
-        XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 2,
+        XCTAssertEqual(presentation.request(for: key)?.requestRevision, 3)
+        XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 3,
                        "The Inbox projects the later valid revision after the rejected event is accounted for.")
-        XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Second wording"))
+        XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Third wording"))
+
+        let lowerPayload = try JSONValue.parse(data(#"{"title":"Older wording"}"#))
+        let lowerBinding = ConversationBinding(request: key, revision: 2)
+        let lowerRequest = ConversationEvent(sequence: 3, binding: lowerBinding,
+            fact: .request(sessionHandle: ExactText("handle"), payload: lowerPayload))
+        XCTAssertThrowsError(try store.applyConversation(lowerRequest, context: context)) {
+            XCTAssertEqual($0 as? ConversationError, .staleRevision(current: 3))
+        }
+        let lowerTurn = ConversationTurn(id: ExactText("lower-revision"), binding: lowerBinding,
+            author: .origin, sessionHandle: ExactText("handle"), text: ExactText("Older wording"),
+            kind: .revision)
+        let lowerRevision = ConversationEvent(sequence: 3, binding: lowerBinding,
+            fact: .revision(lowerTurn, payload: lowerPayload))
+        XCTAssertThrowsError(try store.applyConversation(lowerRevision, context: context)) {
+            XCTAssertEqual($0 as? ConversationError, .staleRevision(current: 3))
+        }
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
 
         let restoredStore = try AttentionDomainStore(context: context, persistence: persistence)
         let restored = try restoredStore.conversationSnapshot(context: context)
         XCTAssertEqual(restored.cursor, 2)
-        XCTAssertEqual(restored.threads[key]?.currentRevision, 2,
+        XCTAssertEqual(restored.threads[key]?.currentRevision, 3,
                        "The cursor and later revision survive reload without a stored rejection record.")
         await core.deactivate()
+    }
+
+    @MainActor
+    func testAccountedRedeliveryWithoutMatchingConversationRemainsFatal() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("freshness-person"), deviceID: ExactText("reader"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+
+        let session = InboxFreshnessRelaySession(identity: identity)
+        session.rejectFirstConversationACK = true
+        session.ordinaryFrames = [
+            data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"resynced","seq":0}"#)
+        ]
+        session.conversationFrameBatches = [
+            [
+                data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+                data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)
+            ],
+            [
+                data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+                data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"other-sender","message_id":"other-request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"unbound-revision"}"#),
+                data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)
+            ]
+        ]
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("A redelivery without a matching request thread must not be treated as accounted.")
+        } catch {
+            XCTAssertEqual(error as? ConversationError, .conflict)
+        }
+
+        XCTAssertEqual(session.conversationACKs.count, 1,
+                       "Only the first barrier ACK is attempted; the mismatched replay is not ACKed.")
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+        await core.deactivate()
+    }
+
+    @MainActor
+    func testRequestAndRedactedRevisionForwardJumpsPreserveRedactedProjection() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("freshness-advance"), deviceID: ExactText("reader"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let first = try JSONValue.parse(data(#"{"title":"First wording"}"#))
+        let third = try JSONValue.parse(data(#"{"title":"Third wording"}"#))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("handle"), payload: first)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 2,
+            binding: ConversationBinding(request: key, revision: 3),
+            fact: .request(sessionHandle: ExactText("handle"), payload: third)), context: context)
+
+        let redactedBinding = ConversationBinding(request: key, revision: 5)
+        let redacted = ConversationTurn(id: ExactText("redacted-revision-five"),
+            binding: redactedBinding, author: .origin, sessionHandle: ExactText("handle"),
+            text: ExactText(""), contentRedacted: true, kind: .revision)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: redactedBinding,
+            fact: .redactedRevision(redacted)), context: context)
+
+        let thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.currentRevision, 5)
+        XCTAssertEqual(thread.revisionNumbers, [1, 3, 5])
+        XCTAssertTrue(thread.currentContentRedacted)
+        XCTAssertNil(thread.revisions[2])
+        XCTAssertNil(thread.revisions[4])
+
+        let presentation = try LivePresentationStore(store: store, context: context)
+        let presented = try XCTUnwrap(presentation.request(for: key))
+        XCTAssertEqual(presented.requestRevision, 5)
+        XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 5)
+        XCTAssertEqual(presented.title, ExactText("Question content unavailable on this device"))
+        XCTAssertNil(presented.selector,
+                     "A redacted current revision must not expose an answer selector.")
+        XCTAssertThrowsError(try store.selector(for: key, requestRevision: 5, context: context),
+                             "Revision-bound actions remain unavailable for redacted content.")
     }
 
     @MainActor

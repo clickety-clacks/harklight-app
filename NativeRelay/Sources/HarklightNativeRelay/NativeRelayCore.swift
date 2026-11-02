@@ -1569,8 +1569,11 @@ public actor NativeRelayCore {
                     throw NativeRelayCoreError.invalidReplay
                 }
                 if event.sequence <= replay.durableCursor,
-                   try store.conversationSequenceWasAccountedWithoutEvent(at: event.sequence,
-                       context: context) {
+                   let rejection = try store.redactedRevisionRejectionForAccountedRedelivery(
+                       event, context: context),
+                   rejection.guardID == .redactedRevisionBinding,
+                   rejection.eventKind == .revision,
+                   case .redactedRevision = event.fact {
                     replay.expected = event.sequence
                     conversationReplay = replay
                     return
