@@ -818,7 +818,9 @@ struct LiveRequestDetail: View {
     }
 
     private var isEditingLocalReply: Bool {
-        localReplyEditingActive && localReplySession?.canSubmitFromSnapshot == true
+        guard let session = localReplySession, session.canSubmitFromSnapshot else { return false }
+        // The view's focus flag resets on navigation; the retained draft does not.
+        return localReplyEditingActive || session.hasLocalChanges
     }
 
     private func markLocalReplyInteraction() {
