@@ -105,7 +105,8 @@ final class InboxStockTabsUITests: XCTestCase {
     func testInboxAndRepliedPullToRefreshRunAndKeepFailureVisible() {
         for title in ["Inbox", "Replied"] {
             let app = XCUIApplication()
-            app.launchArguments = ["--reset-attention-fixture", "--harklight-test-list-refresh"]
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-test-list-refresh",
+                                  "--harklight-ui-diagnostics"]
             app.launch()
 
             let tab = workspaceTab(title, in: app)
@@ -117,6 +118,10 @@ final class InboxStockTabsUITests: XCTestCase {
             let firstRow = app.buttons.matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "request-row-")).firstMatch
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+            let listDiagnostics = app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier == %@ AND label CONTAINS %@",
+                            "inbox-list-diagnostics", "refreshAvailable=true")).firstMatch
+            XCTAssertTrue(listDiagnostics.waitForExistence(timeout: 5), app.debugDescription)
             let pullStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
             pullStart.press(forDuration: 0.05,
                             thenDragTo: pullStart.withOffset(CGVector(dx: 0, dy: 220)),
@@ -124,7 +129,7 @@ final class InboxStockTabsUITests: XCTestCase {
 
             let refreshing = app.descendants(matching: .any)["inbox-refreshing-badge"]
             XCTAssertTrue(refreshing.waitForExistence(timeout: 5),
-                          "Pulling down from the top of \(title) starts its refresh action.\n\(app.debugDescription)")
+                          "Pulling down from the top of \(title) starts its refresh action.\n\(listDiagnostics.label)\n\(app.debugDescription)")
             let warningButton = app.buttons["inbox-warning-button"]
             XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
             warningButton.tap()

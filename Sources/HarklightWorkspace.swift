@@ -914,6 +914,7 @@ struct InboxList: View {
         return [
             "search=\(search) workspaceTab=\(workspaceTab) listTab=\(tab) tab=\(selectedMessageTab.rawValue)",
             "restoreLastViewed=\(restoreLastViewed) lastViewed=\(UIDiagnostics.describe(lastViewedSelection)) selected=\(UIDiagnostics.describe(selected))",
+            "refreshAvailable=\(refreshInbox != nil) isRefreshing=\(isRefreshing)",
             "rows=\(rows.count) inTab=\(inTab.count) filtered=\(filtered)",
         ].joined(separator: " | ")
     }
