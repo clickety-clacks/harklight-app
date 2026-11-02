@@ -1178,6 +1178,7 @@ struct InboxList: View {
     private func renderedList(using proxy: ScrollViewProxy) -> some View {
         if let refreshInbox {
             listContent(for: tab, using: proxy)
+                .scrollBounceBehavior(.always, axes: .vertical)
                 .refreshable { await refreshInbox() }
                 .uiDiagnostics("inbox-list-diagnostics", diagnosticSummary)
         } else {
