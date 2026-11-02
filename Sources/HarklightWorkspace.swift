@@ -554,11 +554,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .frame(maxWidth: .infinity)
             if inlineChat, case let .request(key)? = item, let conversationStore,
-               let request = conversationStore.request(for: key),
-               request.lifecycleStatus != .superseded {
+               let request = conversationStore.request(for: key) {
                 Divider()
                 ConversationPanel(store: conversationStore, key: key,
-                    sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                    sender: key.senderID.rawValue, title: request.title?.rawValue ?? "",
+                    discussionUnavailableReason: request.lifecycleStatus == .superseded
+                        ? ConversationPanelText.supersededReadOnlyReason
+                        : nil)
                     .frame(width: min(360, geometry.size.width * 0.34))
             }
             if inlineChat, case let .sample(id)? = item,
