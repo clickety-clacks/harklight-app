@@ -120,7 +120,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, receiptHeld ? 3 : 2)
             XCTAssertNil(try restored.snapshot(context: context).requests[key])
             XCTAssertFalse(try XCTUnwrap(restored.snapshot(context: context).inboxCandidate).hasInitialPage)
-    
+
             try restored.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
                 items: [item], nextCursor: nil, receiptCursor: nil, context: context)
             _ = try restored.prepareInboxCheckpointAcknowledgement(context: context)
