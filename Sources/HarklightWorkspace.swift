@@ -631,12 +631,15 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 relatedMessageNavigationPath.removeAll()
             }
         }
+        splitView.scrollBounceBehavior(.always, axes: .vertical)
+    }
+
+    @ViewBuilder
+    private func attachingRefreshAction<Content: View>(to content: Content) -> some View {
         if let refreshInbox {
-            splitView
-                .scrollBounceBehavior(.always, axes: .vertical)
-                .refreshable { await refreshInbox() }
+            content.refreshable { await refreshInbox() }
         } else {
-            splitView
+            content
         }
     }
 
@@ -696,7 +699,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: visibleWarnings, initial: true) { _, newWarnings in
                 dismissWarningWhenCleared(newWarnings)
             }
-            tabs
+            attachingRefreshAction(to: tabs)
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route else { return }
                 settings = false
