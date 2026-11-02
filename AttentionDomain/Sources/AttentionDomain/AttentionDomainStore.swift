@@ -1287,9 +1287,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     references[key] = current
                     next.inboxReferences = references
                 }
-                if terminalState == .superseded {
-                    try recordSupersedesOriginTarget(for: key, terminalEvent: terminal, in: &next)
-                }
             }
         } else {
             if (previous?.eventSequence ?? 0) <= highWater {
@@ -1500,54 +1497,96 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard let replacement = next.requests[replacementKey],
               replacement.supersedesMessageIDs.contains(target.messageID) else { return }
         var replacementState = next.remoteStates[replacementKey] ?? RemoteRequestState()
-        let originTarget = next.remoteStates[target]?.supersedesOriginTarget ?? target
-        if let priorTarget = replacementState.supersedesOriginTarget,
-           priorTarget != originTarget {
-            throw AttentionStoreError.eventConflict(terminalEvent.sequence)
+        if let originTarget = Self.firstSupersededOriginTarget(for: replacement, in: next) {
+            // A single forward may supersede several open targets. Its first
+            // superseded terminal establishes the inbox origin; later
+            // terminals add their own forward links without conflicting.
+            replacementState.supersedesOriginTarget = originTarget
         }
-        replacementState.supersedesOriginTarget = originTarget
         next.remoteStates[replacementKey] = replacementState
     }
 
     /// Older account files and paged inbox projections may lack the inverse
     /// relationship field. Reconstruct it from retained terminal and accepted
     /// request identities so older messages can show their forward link.
-    private static func backfillSupersededByMessageKeys(in state: inout PersistedAttentionState) {
-        var terminals = state.appliedEvents.values.compactMap { event -> (RequestKey, UInt64)? in
-            guard case let .terminal(target, .superseded, _) = event.body else { return nil }
-            return (target, event.sequence)
+    private static func backfillSupersededByMessageKeys(
+        in state: inout PersistedAttentionState,
+        affectedTargets: Set<RequestKey>? = nil,
+        additionalEvents: [UInt64: RelayEvent] = [:]
+    ) {
+        let targetKeys: Set<RequestKey>
+        if let affectedTargets {
+            targetKeys = affectedTargets
+        } else {
+            targetKeys = Set(state.remoteStates.compactMap { key, remote in
+                remote.state == .superseded ? key : nil
+            } + (state.inboxReferences ?? [:]).compactMap { key, remote in
+                remote.state == .superseded ? key : nil
+            })
         }
-        terminals += state.remoteStates.compactMap { target, remote -> (RequestKey, UInt64)? in
-            guard remote.state == .superseded, let sequence = remote.eventSequence else { return nil }
-            return (target, sequence)
-        }
-        terminals += (state.inboxReferences ?? [:]).compactMap { target, remote -> (RequestKey, UInt64)? in
-            guard remote.state == .superseded, let sequence = remote.eventSequence else { return nil }
-            return (target, sequence)
-        }
-        terminals.sort { $0.1 < $1.1 }
+        guard !targetKeys.isEmpty else { return }
 
-        for (target, sequence) in terminals {
-            guard target.accountScope == state.profileIdentity.personID, sequence > 0 else { continue }
-            var replacementOrders = state.requests.values.compactMap { request -> (UInt64, RequestKey)? in
-                guard request.key.accountScope == target.accountScope,
-                      request.key.senderID == target.senderID,
-                      request.supersedesMessageIDs.contains(target.messageID),
-                      let acceptanceOrder = request.acceptanceOrder,
-                      acceptanceOrder < sequence else { return nil }
-                return (acceptanceOrder, request.key)
+        var terminalSequences: [RequestKey: UInt64] = [:]
+        for target in targetKeys {
+            let remote = state.remoteStates[target] ?? state.inboxReferences?[target]
+            if remote?.state == .superseded, let sequence = remote?.eventSequence, sequence > 0 {
+                terminalSequences[target] = sequence
             }
-            if let inferred = supersedingReplacementKey(
-                for: target, before: sequence,
-                requests: state.requests, appliedEvents: state.appliedEvents,
-                pendingEvents: state.pendingRelayOverlays ?? [:]),
-               !replacementOrders.contains(where: { $0.1 == inferred }) {
-                replacementOrders.append((state.requests[inferred]?.acceptanceOrder ?? sequence - 1, inferred))
+        }
+        guard !terminalSequences.isEmpty else { return }
+
+        // Build the inverse lookup once, then visit only superseded targets
+        // touched by this load/page. The former per-terminal scan repeated a
+        // full request scan and could grow as O(superseded × request history).
+        var acceptanceSequences: [RequestKey: UInt64] = [:]
+        for (sequence, event) in state.appliedEvents.merging(additionalEvents, uniquingKeysWith: { _, new in new }) {
+            switch event.body {
+            case let .delivery(request, _):
+                acceptanceSequences[request.key] = min(acceptanceSequences[request.key] ?? sequence, sequence)
+            case let .originReference(key):
+                acceptanceSequences[key] = min(acceptanceSequences[key] ?? sequence, sequence)
+            case .terminal, .attentionTierChange:
+                break
+            }
+        }
+
+        var replacementsByTarget: [RequestKey: [(UInt64, RequestKey)]] = [:]
+        for request in state.requests.values {
+            guard let acceptanceSequence = request.acceptanceOrder ?? acceptanceSequences[request.key] else {
+                continue
+            }
+            for messageID in request.supersedesMessageIDs {
+                let target = RequestKey(accountScope: request.key.accountScope,
+                                        senderID: request.key.senderID,
+                                        messageID: messageID)
+                guard terminalSequences[target] != nil else { continue }
+                replacementsByTarget[target, default: []].append((acceptanceSequence, request.key))
+            }
+        }
+        for target in replacementsByTarget.keys {
+            replacementsByTarget[target]?.sort {
+                if $0.0 != $1.0 { return $0.0 < $1.0 }
+                return $0.1.messageID.rawValue < $1.1.messageID.rawValue
+            }
+        }
+
+        var affectedReplacementKeys = Set<RequestKey>()
+        for (target, sequence) in terminalSequences {
+            var replacementOrders = (replacementsByTarget[target] ?? []).filter { $0.0 < sequence }
+            if replacementOrders.isEmpty,
+               let inferred = supersedingReplacementKey(
+                    for: target, before: sequence,
+                    requests: state.requests, appliedEvents: state.appliedEvents,
+                    pendingEvents: state.pendingRelayOverlays ?? [:],
+                    replacementIndex: replacementsByTarget,
+                    additionalEvents: additionalEvents) {
+                replacementOrders.append((acceptanceSequences[inferred] ?? sequence - 1, inferred))
             }
             var seen = Set<RequestKey>()
-            let replacementKeys = replacementOrders.sorted { $0.0 < $1.0 }.compactMap { pair in
+            let replacementKeys = replacementOrders.compactMap { pair in
                 seen.insert(pair.1).inserted ? pair.1 : nil
             }
+            affectedReplacementKeys.formUnion(replacementKeys)
 
             if var targetState = state.remoteStates[target] {
                 var replacements = targetState.supersededByMessageKeys ?? []
@@ -1567,6 +1606,69 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 state.inboxReferences = references
             }
         }
+
+        // Inbox pages can arrive in display order rather than terminal-event
+        // order. Recompute each affected forward request's slot from the
+        // earliest superseded target currently known, allowing an older page
+        // to refine an origin first learned from a newer page.
+        for replacementKey in affectedReplacementKeys {
+            guard let replacement = state.requests[replacementKey],
+                  let acceptanceSequence = replacement.acceptanceOrder ?? acceptanceSequences[replacementKey],
+                  let originTarget = firstSupersededOriginTarget(
+                    for: replacement, after: acceptanceSequence, in: state) else { continue }
+            var replacementState = state.remoteStates[replacementKey] ?? RemoteRequestState()
+            replacementState.supersedesOriginTarget = originTarget
+            state.remoteStates[replacementKey] = replacementState
+        }
+    }
+
+    private static func firstSupersededOriginTarget(
+        for replacement: StoredRequest,
+        after acceptanceSequence: UInt64? = nil,
+        in state: PersistedAttentionState
+    ) -> RequestKey? {
+        let acceptance = acceptanceSequence ?? replacement.acceptanceOrder
+        var first: (sequence: UInt64, root: RequestKey)?
+        for messageID in replacement.supersedesMessageIDs {
+            let target = RequestKey(accountScope: replacement.key.accountScope,
+                                    senderID: replacement.key.senderID,
+                                    messageID: messageID)
+            guard let targetState = state.remoteStates[target] ?? state.inboxReferences?[target],
+                  targetState.state == .superseded,
+                  let sequence = targetState.eventSequence,
+                  acceptance.map({ sequence > $0 }) ?? true else { continue }
+            let root = targetState.supersedesOriginTarget ?? target
+            if let current = first, sequence >= current.sequence { continue }
+            first = (sequence, root)
+        }
+        return first?.root
+    }
+
+    private static func supersedeTargets(in items: [InboxSnapshotItem]) -> Set<RequestKey> {
+        var targets = Set<RequestKey>()
+        for item in items {
+            if let terminal = item.terminal,
+               case let .terminal(target, .superseded, _) = terminal.body {
+                targets.insert(target)
+            }
+            if case let .delivery(request, _) = item.acceptance.body {
+                for messageID in request.supersedesMessageIDs {
+                    targets.insert(RequestKey(accountScope: request.key.accountScope,
+                                              senderID: request.key.senderID,
+                                              messageID: messageID))
+                }
+            }
+        }
+        return targets
+    }
+
+    private static func events(in items: [InboxSnapshotItem]) -> [UInt64: RelayEvent] {
+        var events: [UInt64: RelayEvent] = [:]
+        for item in items {
+            events[item.acceptance.sequence] = item.acceptance
+            if let terminal = item.terminal { events[terminal.sequence] = terminal }
+        }
+        return events
     }
 
     private static func supersedingReplacementKey(
@@ -1574,9 +1676,15 @@ public final class AttentionDomainStore: @unchecked Sendable {
         before terminalSequence: UInt64,
         requests: [RequestKey: StoredRequest],
         appliedEvents: [UInt64: RelayEvent],
-        pendingEvents: [UInt64: RelayEvent]
+        pendingEvents: [UInt64: RelayEvent],
+        replacementIndex: [RequestKey: [(UInt64, RequestKey)]]? = nil,
+        additionalEvents: [UInt64: RelayEvent] = [:]
     ) -> RequestKey? {
         func latestAcceptedReplacement() -> RequestKey? {
+            if let replacementIndex {
+                guard let indexed = replacementIndex[target] else { return nil }
+                return indexed.last(where: { $0.0 < terminalSequence })?.1
+            }
             requests.values.compactMap { request -> (UInt64, RequestKey)? in
                 guard request.key.accountScope == target.accountScope,
                       request.key.senderID == target.senderID,
@@ -1590,7 +1698,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard terminalSequence > 1 else { return nil }
         var sequence = terminalSequence - 1
         while sequence > 0 {
-            guard let previousEvent = appliedEvents[sequence] ?? pendingEvents[sequence] else {
+            guard let previousEvent = appliedEvents[sequence] ?? additionalEvents[sequence] ?? pendingEvents[sequence] else {
                 return latestAcceptedReplacement()
             }
             switch previousEvent.body {
@@ -2033,7 +2141,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         do {
             for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
-            Self.backfillSupersededByMessageKeys(in: &next)
+            Self.backfillSupersededByMessageKeys(in: &next,
+                affectedTargets: Self.supersedeTargets(in: items),
+                additionalEvents: Self.events(in: items))
         } catch let error as ConversationValidationRejectionError {
             validationRejection = error.rejection
             throw ConversationError.invalidBinding
@@ -2124,7 +2234,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         do {
             for item in items { try applyInboxSnapshotItem(item, highWater: highWater, to: &next) }
-            Self.backfillSupersededByMessageKeys(in: &next)
+            Self.backfillSupersededByMessageKeys(in: &next,
+                affectedTargets: Self.supersedeTargets(in: items),
+                additionalEvents: Self.events(in: items))
         } catch let error as ConversationValidationRejectionError {
             validationRejection = error.rejection
             throw ConversationError.invalidBinding
