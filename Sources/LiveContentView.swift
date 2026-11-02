@@ -333,7 +333,7 @@ struct LiveContentView: View {
     private func refreshListForTesting() async {
         store.beginRefresh()
         defer { store.endRefresh() }
-        try? await Task.sleep(for: .milliseconds(1_500))
+        try? await Task.sleep(for: .seconds(4))
         store.connectionWarning = "The approved server could not be reached."
     }
     #endif
