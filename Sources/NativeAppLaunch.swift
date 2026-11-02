@@ -1095,6 +1095,12 @@ final class LivePresentationStore {
         }
     }
 
+    struct SkippedMessageWarning: Equatable {
+        let eventID: UUID
+        let requestRevision: UInt64
+        let conversationSequence: UInt64
+    }
+
     enum InboxPageAvailability: Equatable {
         case more
         case exhausted
@@ -1617,21 +1623,25 @@ final class LivePresentationStore {
     }
 
     var inboxRows: [InboxRequestRow] {
+        let skippedMessageRequestTags = completedSkippedMessageRequestTags
         presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
-            .compactMap { makeInboxRow(for: $0) }
+            .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
         guard let request = presentation.requests.first(where: { $0.key == key }) else { return nil }
-        return makeInboxRow(for: request)
+        return makeInboxRow(for: request, skippedMessageRequestTags: completedSkippedMessageRequestTags)
     }
 
-    private func makeInboxRow(for request: PresentedRequest) -> InboxRequestRow? {
+    private func makeInboxRow(for request: PresentedRequest,
+                              skippedMessageRequestTags: Set<String>) -> InboxRequestRow? {
         let retracted = isRetracted(request)
         if retracted, clearedRetractions.contains(request.key) { return nil }
         let hasKnownDeliveryFailure = failedResponseWarning(for: request) != nil
         let hasDeliveryWarning = hasKnownDeliveryFailure || request.staleAnswerRevision != nil
+        let hasMessageLoadWarning = requestTag(for: request.key)
+            .map(skippedMessageRequestTags.contains) ?? false
         let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
             request.receiptFacts?.ownOutcome == .unconfirmed &&
             request.lifecycleStatus != .pending
@@ -1700,6 +1710,7 @@ final class LivePresentationStore {
                 request.lifecycleStatus == .noComment,
             hasFailedResponse: receiptStatus == .failed || hasDeliveryWarning,
             hasDeliveryWarning: hasDeliveryWarning,
+            hasMessageLoadWarning: hasMessageLoadWarning,
             isRetracted: retracted,
             chatUnread: listChatUnread(request.key),
             tier: .middle,
@@ -1786,6 +1797,48 @@ final class LivePresentationStore {
         guard let request = request(for: key),
               revision == nil || request.requestRevision == revision else { return nil }
         return failedResponseWarning(for: request)
+    }
+
+    func skippedMessageWarning(for request: RequestKey) -> SkippedMessageWarning? {
+        guard let diagnostics, let requestTag = requestTag(for: request) else { return nil }
+        guard let event = diagnostics.events.reversed().first(where: {
+            Self.isCompletedSkippedMessage($0) && $0.requestTag == requestTag
+        }), let requestRevision = event.requestRevision,
+           let conversationSequence = event.conversationSequence else { return nil }
+        return SkippedMessageWarning(eventID: event.id,
+                                     requestRevision: requestRevision,
+                                     conversationSequence: conversationSequence)
+    }
+
+    func skippedMessageDiagnosticText(for warning: SkippedMessageWarning) -> String? {
+        guard let diagnostics,
+              diagnostics.events.contains(where: { $0.id == warning.eventID }) else { return nil }
+        return diagnostics.shareText
+    }
+
+    private var completedSkippedMessageRequestTags: Set<String> {
+        Set((diagnostics?.events ?? []).compactMap { event in
+            guard Self.isCompletedSkippedMessage(event) else { return nil }
+            return event.requestTag
+        })
+    }
+
+    private static func isCompletedSkippedMessage(_ event: NativeClientDiagnosticEvent) -> Bool {
+        // A rejection can be logged before a cursor write fails; only this
+        // post-commit event marks a message as actually skipped.
+        event.area == .conversation &&
+            event.phase == .conversationReplay &&
+            event.transition == .observed &&
+            event.causeCode == "conversation_message_skipped" &&
+            event.requestRevision != nil &&
+            event.conversationSequence != nil
+    }
+
+    private func requestTag(for request: RequestKey) -> String? {
+        NativeClientDiagnosticEvent(area: .conversation,
+                                    phase: .conversationReplay,
+                                    transition: .observed,
+                                    request: request).requestTag
     }
 
     private func failedResponseWarning(for request: PresentedRequest) -> FailedResponseWarning? {
@@ -2752,10 +2805,12 @@ final class LivePresentationStore {
 
     private func noReplyRoutingStates(for requests: [PresentedRequest]) -> [RequestKey: NoReplyRoutingState] {
         var states: [RequestKey: NoReplyRoutingState] = [:]
+        let skippedMessageRequestTags = completedSkippedMessageRequestTags
         for request in requests {
             let isNoReply = request.intentReceipt?.answerKind == .noComment ||
                 request.lifecycleStatus == .noComment || request.noCommentUnavailable
-            let route = isNoReply ? makeInboxRow(for: request).map {
+            let route = isNoReply ? makeInboxRow(for: request,
+                                                 skippedMessageRequestTags: skippedMessageRequestTags).map {
                 $0.belongsToReplied ? NativeDiagnosticNoReplyRoute.replied : .inbox
             } : nil
             states[request.key] = NoReplyRoutingState(requestRevision: request.requestRevision,

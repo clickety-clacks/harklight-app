@@ -209,6 +209,7 @@ struct InboxRequestRow: Identifiable {
     var hasUserAction = false
     var hasFailedResponse = false
     var hasDeliveryWarning = false
+    var hasMessageLoadWarning = false
     var isRetracted = false
     var chatUnread: Bool? = nil
     var initials: String = ""
@@ -1243,6 +1244,13 @@ struct InboxRowContent: View {
                         .foregroundStyle(.red)
                         .accessibilityLabel("Response not delivered")
                         .accessibilityIdentifier("inbox-response-delivery-warning")
+                }
+                if row.hasMessageLoadWarning {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("Message could not be loaded and was skipped")
+                        .accessibilityIdentifier("inbox-message-load-warning")
                 }
                 Text(row.title)
                     .font(titleFont)
