@@ -15,6 +15,7 @@ final class ReleaseNotesTests: XCTestCase {
 
         XCTAssertEqual(update.id, "attributed-update")
         XCTAssertEqual(update.buildIdentifier, 10_000)
+        XCTAssertNil(update.confirmedContainingBuildIdentifier)
         XCTAssertEqual(update.visibleFromBuildIdentifier, 10_000)
         XCTAssertTrue(HarklightReleaseNotes.visibleUpdateEntries(
             currentBuildIdentifier: "9999", entries: [update]).isEmpty)
@@ -33,7 +34,7 @@ final class ReleaseNotesTests: XCTestCase {
     }
 
     @MainActor
-    func testPost79UpdateShowsOnceForExistingUsersWithoutClaimingAnArchiveBuild() throws {
+    func testPost79UpdatesRetainTheirSeenIdentityWithOnlyAConfirmedContainingBuild() throws {
         let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "changes-after-build-79"
         })
@@ -42,6 +43,10 @@ final class ReleaseNotesTests: XCTestCase {
         })
         XCTAssertNil(note.buildIdentifier)
         XCTAssertNil(draftNote.buildIdentifier)
+        XCTAssertEqual(HarklightReleaseNotes.updateEntries.map(\.confirmedContainingBuildIdentifier),
+                       [106, 106, 106, 106])
+        XCTAssertEqual(HarklightReleaseNotes.updateEntries.map(\.visibleFromBuildIdentifier),
+                       [79, 79, 79, 79])
         XCTAssertEqual(String(localized: draftNote.highlights[0].title),
                        "Keep an unfinished Reply")
         XCTAssertEqual(note.highlights.map(\.id),
@@ -54,31 +59,32 @@ final class ReleaseNotesTests: XCTestCase {
         let suite = "ReleaseNotesTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set(90, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
+        defaults.set(105, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
         defaults.set(["chat-row-activity", "example-messages-removed"],
                      forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey)
 
         let firstLaunch = ReleaseNotesPresentation(
-            currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
+            currentBuildIdentifier: "106", hasPriorAppState: true, entries: [], defaults: defaults)
         XCTAssertEqual(firstLaunch.notesToShow.map(\.id), [draftNote.id, note.id])
         let history = HarklightReleaseNotes.settingsHistory(
-            currentBuildIdentifier: "91", entries: [])
+            currentBuildIdentifier: "106", entries: [])
         XCTAssertEqual(history.prefix(4).map(\.id),
                        [draftNote.id, "chat-row-activity", "example-messages-removed", note.id])
 
         let nextLaunch = ReleaseNotesPresentation(
-            currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
+            currentBuildIdentifier: "106", hasPriorAppState: true, entries: [], defaults: defaults)
         XCTAssertTrue(nextLaunch.notesToShow.isEmpty)
         let laterBuild = ReleaseNotesPresentation(
-            currentBuildIdentifier: "92", hasPriorAppState: true, entries: [], defaults: defaults)
+            currentBuildIdentifier: "107", hasPriorAppState: true, entries: [], defaults: defaults)
         XCTAssertTrue(laterBuild.notesToShow.isEmpty)
     }
 
-    func testExampleRemovalNoteDescribesTheShippedChangeWithoutGuessingAnArchiveBuild() throws {
+    func testExampleRemovalNotePreservesItsContentAndConfirmedContainingBuild() throws {
         let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "example-messages-removed"
         })
         XCTAssertNil(note.buildIdentifier)
+        XCTAssertEqual(note.confirmedContainingBuildIdentifier, 106)
         XCTAssertEqual(note.highlights.map(\.id), ["example-messages-removed"])
         let highlight = try XCTUnwrap(note.highlights.first)
         XCTAssertEqual(highlight.symbol, "tray")
@@ -94,10 +100,10 @@ final class ReleaseNotesTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         let firstLaunch = ReleaseNotesPresentation(
-            currentBuildIdentifier: "91", hasPriorAppState: false, entries: [], defaults: defaults)
+            currentBuildIdentifier: "106", hasPriorAppState: false, entries: [], defaults: defaults)
         XCTAssertTrue(firstLaunch.notesToShow.isEmpty)
         let nextLaunch = ReleaseNotesPresentation(
-            currentBuildIdentifier: "91", hasPriorAppState: true, entries: [], defaults: defaults)
+            currentBuildIdentifier: "106", hasPriorAppState: true, entries: [], defaults: defaults)
         XCTAssertTrue(nextLaunch.notesToShow.isEmpty)
     }
 

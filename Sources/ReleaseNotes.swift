@@ -17,6 +17,8 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 
     let id: String
     let buildIdentifier: Int?
+    /// Earliest build confirmed to contain this update when its first shipped build is unknown.
+    let confirmedContainingBuildIdentifier: Int?
     let marketingVersion: String
     let historyDateDescription: LocalizedStringResource?
     /// Minimum installed build where an update can appear. For a numbered update,
@@ -27,6 +29,7 @@ struct HarklightReleaseNote: Identifiable, Sendable {
     init(buildIdentifier: Int, marketingVersion: String, highlights: [Highlight]) {
         id = String(buildIdentifier)
         self.buildIdentifier = buildIdentifier
+        confirmedContainingBuildIdentifier = nil
         self.marketingVersion = marketingVersion
         historyDateDescription = nil
         visibleFromBuildIdentifier = nil
@@ -38,11 +41,13 @@ struct HarklightReleaseNote: Identifiable, Sendable {
         marketingVersion: String,
         historyDateDescription: LocalizedStringResource,
         visibleFromBuildIdentifier: Int,
+        confirmedContainingBuildIdentifier: Int? = nil,
         firstShippedBuildIdentifier: Int? = nil,
         highlights: [Highlight]
     ) {
         id = historyIdentifier
         buildIdentifier = firstShippedBuildIdentifier
+        self.confirmedContainingBuildIdentifier = confirmedContainingBuildIdentifier
         self.marketingVersion = marketingVersion
         self.historyDateDescription = historyDateDescription
         self.visibleFromBuildIdentifier = firstShippedBuildIdentifier ?? visibleFromBuildIdentifier
@@ -51,8 +56,11 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 }
 
 enum HarklightReleaseNotes {
-    /// Source inclusion makes these notes available without predicting the archive build number.
     /// Keep each update's identifier stable so it appears once for people who already use the app.
+    /// Build 106 is the earliest confirmed containing build for the existing updates below;
+    /// it does not establish when they first shipped.
+    /// Stamp new updates with a first shipped build only after a successful Internal TestFlight
+    /// distribution and its archived source have been recorded. Retain that number in later builds.
     static let updateEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
             historyIdentifier: "reply-drafts-after-navigation",
@@ -61,6 +69,7 @@ enum HarklightReleaseNotes {
                 "Reply drafts stay while you browse",
                 comment: "Release-note heading for unfinished replies retained during navigation."),
             visibleFromBuildIdentifier: 79,
+            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "reply-drafts-after-navigation",
@@ -79,6 +88,7 @@ enum HarklightReleaseNotes {
                 "Chat activity in the Inbox",
                 comment: "Release-note heading for message-row Chat activity."),
             visibleFromBuildIdentifier: 79,
+            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "chat-row-activity",
@@ -97,6 +107,7 @@ enum HarklightReleaseNotes {
                 "Example messages removed",
                 comment: "Release-note heading for removal of local example messages."),
             visibleFromBuildIdentifier: 79,
+            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "example-messages-removed",
@@ -115,6 +126,7 @@ enum HarklightReleaseNotes {
                 "Changes since Build 79",
                 comment: "Release-note heading for changes after the last numbered update."),
             visibleFromBuildIdentifier: 79,
+            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "inbox-message-context",
@@ -824,12 +836,21 @@ private struct ReleaseNoteSection: View {
                 ReleaseNoteRow(highlight: highlight)
             }
         } header: {
-            if let buildIdentifier = note.buildIdentifier {
-                Text("Version \(note.marketingVersion) · Build \(buildIdentifier)",
-                     comment: "Marketing version and build number associated with this release-notes entry.")
-            } else if let historyDateDescription = note.historyDateDescription {
-                Text("Version \(note.marketingVersion) · \(historyDateDescription)",
-                     comment: "Marketing version and date associated with this history-only entry.")
+            VStack(alignment: .leading, spacing: 2) {
+                if let buildIdentifier = note.buildIdentifier {
+                    Text("Version \(note.marketingVersion) · Build \(buildIdentifier)",
+                         comment: "Marketing version and first shipped build for this release-note entry.")
+                } else if let confirmedBuild = note.confirmedContainingBuildIdentifier {
+                    Text("Version \(note.marketingVersion) · First confirmed in Build \(confirmedBuild)",
+                         comment: "Earliest evidenced containing build; earlier shipment is unconfirmed.")
+                } else if let historyDateDescription = note.historyDateDescription {
+                    Text("Version \(note.marketingVersion) · \(historyDateDescription)",
+                         comment: "Marketing version and date associated with this history-only entry.")
+                }
+                if note.buildIdentifier != nil || note.confirmedContainingBuildIdentifier != nil,
+                   let historyDateDescription = note.historyDateDescription {
+                    Text(historyDateDescription)
+                }
             }
         }
     }
