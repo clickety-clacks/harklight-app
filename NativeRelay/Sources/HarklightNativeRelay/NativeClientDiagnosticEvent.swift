@@ -27,6 +27,7 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case webSocketOpen
     case relayAdmission
     case ordinaryReplay
+    case inboxPage
     case conversationReplay
     case conversationReadPosition
     case acknowledgement
@@ -181,6 +182,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public let terminalSequence: UInt64?
     public let lifecycleSequence: UInt64?
     public let noReplyRoute: NativeDiagnosticNoReplyRoute?
+    public let conversationSequence: UInt64?
+    public let conversationValidationRejection: ConversationValidationRejection?
     public let attemptID: UUID?
     public let transportAttemptID: UUID?
     public let operationID: UUID?
@@ -192,6 +195,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         case id, occurredAtMilliseconds, area, phase, transition, causeCode, terminalReason
         case postAckBoundary, postAckDrainTransition, postAckFailureStep, postAckFailureErrorCode
         case noReplyResponseClass, operationIDSource, terminalSequence, lifecycleSequence, noReplyRoute
+        case conversationSequence, conversationValidationRejection
         case attemptID, transportAttemptID, operationID, requestTag, requestRevision, receiptState
     }
 
@@ -209,6 +213,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
                 terminalSequence: UInt64? = nil,
                 lifecycleSequence: UInt64? = nil,
                 noReplyRoute: NativeDiagnosticNoReplyRoute? = nil,
+                conversationSequence: UInt64? = nil,
+                conversationValidationRejection: ConversationValidationRejection? = nil,
                 attemptID: UUID? = nil,
                 transportAttemptID: UUID? = nil,
                 operationID: UUID? = nil,
@@ -233,6 +239,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         self.terminalSequence = terminalSequence
         self.lifecycleSequence = lifecycleSequence
         self.noReplyRoute = noReplyRoute
+        self.conversationSequence = conversationSequence
+        self.conversationValidationRejection = conversationValidationRejection
         self.attemptID = attemptID
         self.transportAttemptID = transportAttemptID
         self.operationID = operationID
@@ -260,6 +268,9 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         terminalSequence = try values.decodeIfPresent(UInt64.self, forKey: .terminalSequence)
         lifecycleSequence = try values.decodeIfPresent(UInt64.self, forKey: .lifecycleSequence)
         noReplyRoute = try values.decodeIfPresent(NativeDiagnosticNoReplyRoute.self, forKey: .noReplyRoute)
+        conversationSequence = try values.decodeIfPresent(UInt64.self, forKey: .conversationSequence)
+        conversationValidationRejection = try values.decodeIfPresent(
+            ConversationValidationRejection.self, forKey: .conversationValidationRejection)
         attemptID = try values.decodeIfPresent(UUID.self, forKey: .attemptID)
         transportAttemptID = try values.decodeIfPresent(UUID.self, forKey: .transportAttemptID)
         operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)

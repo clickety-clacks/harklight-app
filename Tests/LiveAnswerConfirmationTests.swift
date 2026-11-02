@@ -613,6 +613,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 3)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .lost)
+        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied,
+                       "The current open revision belongs in Inbox after the older No comment intent is superseded.")
     }
 
     func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {

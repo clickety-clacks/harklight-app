@@ -219,6 +219,7 @@ final class NativeClientDiagnosticJournal {
             }
             if let sequence = event.terminalSequence { fields.append("terminal_sequence=\(sequence)") }
             if let sequence = event.lifecycleSequence { fields.append("lifecycle_sequence=\(sequence)") }
+            if let sequence = event.conversationSequence { fields.append("conversation_sequence=\(sequence)") }
             if let route = event.noReplyRoute { fields.append("no_reply_route=\(route.rawValue)") }
             if let id = event.attemptID { fields.append("attempt_id=\(id.uuidString.lowercased())") }
             if let id = event.transportAttemptID { fields.append("transport_attempt_id=\(id.uuidString.lowercased())") }
@@ -226,11 +227,38 @@ final class NativeClientDiagnosticJournal {
             if let tag = event.requestTag { fields.append("request_tag_sha256=\(tag)") }
             if let revision = event.requestRevision { fields.append("request_revision=\(revision)") }
             if let receipt = event.receiptState { fields.append("receipt_state=\(receipt.rawValue)") }
+            if let rejection = event.conversationValidationRejection {
+                fields.append("conversation_validation_guard=\(rejection.guardID.rawValue)")
+                fields.append("conversation_event_kind=\(rejection.eventKind.rawValue)")
+                let facts = rejection.facts
+                append("conversation_revision_is_zero", facts.revisionIsZero, to: &fields)
+                append("conversation_revision_is_one", facts.revisionIsOne, to: &fields)
+                append("conversation_event_identifier_present", facts.eventIdentifierPresent, to: &fields)
+                append("conversation_read_position_positive", facts.readPositionPositive, to: &fields)
+                append("conversation_session_handle_present", facts.sessionHandlePresent, to: &fields)
+                append("conversation_session_handle_matches_thread", facts.sessionHandleMatchesThread, to: &fields)
+                append("conversation_turn_binding_matches_event", facts.turnBindingMatchesEvent, to: &fields)
+                append("conversation_turn_request_matches_thread", facts.turnRequestMatchesThread, to: &fields)
+                append("conversation_turn_identifier_present", facts.turnIdentifierPresent, to: &fields)
+                append("conversation_content_redacted_present", facts.contentRedactedPresent, to: &fields)
+                append("conversation_content_redacted_is_true", facts.contentRedactedIsTrue, to: &fields)
+                append("conversation_author_is_origin", facts.authorIsOrigin, to: &fields)
+                append("conversation_revision_is_next", facts.revisionIsNext, to: &fields)
+                append("conversation_actor_present", facts.actorPresent, to: &fields)
+                append("conversation_referenced_turn_present", facts.referencedTurnPresent, to: &fields)
+                append("conversation_referenced_file_present", facts.referencedFilePresent, to: &fields)
+                append("conversation_request_key_is_unique", facts.requestKeyIsUnique, to: &fields)
+            }
             lines.append(fields.joined(separator: " "))
         }
         if events.isEmpty { lines.append("events=none_retained") }
         lines.append("payloads_urls_file_names_credentials_and_keys=excluded")
         return lines.joined(separator: "\n")
+    }
+
+    private func append(_ name: String, _ value: Bool?, to fields: inout [String]) {
+        guard let value else { return }
+        fields.append("\(name)=\(value ? "yes" : "no")")
     }
 
     private func load() {

@@ -329,6 +329,10 @@ public actor NativeRelayCore {
         var high: UInt64?
     }
 
+    private struct ConversationReplayValidationFailure: Error, Sendable {
+        let rejection: ConversationValidationRejection
+    }
+
     private struct ReplayProgress {
         var expected: UInt64
         let durableCursor: UInt64
@@ -534,8 +538,18 @@ public actor NativeRelayCore {
             try validate()
             let page = try inboxWire.decodePage(reply, ref: ref,
                                                 snapshotID: snapshotID, highWater: highWater)
-            try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
-                cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context)
+            var validationRejection: ConversationValidationRejection?
+            do {
+                try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
+                    cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context,
+                    validationRejection: &validationRejection)
+            } catch {
+                if let validationRejection {
+                    diagnoseInboxPageValidationFailure(validationRejection)
+                    throw ConversationError.invalidBinding
+                }
+                throw error
+            }
             return true
         } catch {
             throw error
@@ -613,10 +627,19 @@ public actor NativeRelayCore {
                                      ref: startRef), ref: startRef)
             try validate()
             let firstPage = try inboxWire.decodeStart(startReply, ref: startRef)
-            try store.saveInboxInitialPage(snapshotID: firstPage.snapshotID,
-                highWater: firstPage.highWater, items: firstPage.items,
-                nextCursor: firstPage.nextCursor, receiptCursor: firstPage.receiptCursor,
-                context: context)
+            var validationRejection: ConversationValidationRejection?
+            do {
+                try store.saveInboxInitialPage(snapshotID: firstPage.snapshotID,
+                    highWater: firstPage.highWater, items: firstPage.items,
+                    nextCursor: firstPage.nextCursor, receiptCursor: firstPage.receiptCursor,
+                    context: context, validationRejection: &validationRejection)
+            } catch {
+                if let validationRejection {
+                    diagnoseInboxPageValidationFailure(validationRejection)
+                    throw ConversationError.invalidBinding
+                }
+                throw error
+            }
         }
 
         let eligible = try await prepareInboxCandidate(using: transport)
@@ -1388,6 +1411,11 @@ public actor NativeRelayCore {
             // Ordinary replay and answer delivery already succeeded. The missing
             // optional projection must not undo their connection confirmation.
             return
+        } catch let failure as ConversationReplayValidationFailure {
+            diagnose(.conversation, .conversationReplay, .failed,
+                     error: ConversationError.invalidBinding,
+                     conversationValidationRejection: failure.rejection)
+            throw ConversationError.invalidBinding
         } catch {
             diagnose(.conversation, .conversationReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
@@ -1513,9 +1541,21 @@ public actor NativeRelayCore {
             replay.accepted = true
         } else if let snapshot = try? wire.decodeResyncedSnapshot(frame) {
             let high = snapshot.highWater
-            guard high >= replay.durableCursor, high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
-            try store.finishConversationReplay(at: high,
-                chatReadPositions: snapshot.chatReadPositions, context: context)
+            let durableCursor = try store.conversationSnapshot(context: context).cursor
+            guard high >= replay.durableCursor,
+                  high == replay.expected,
+                  high == durableCursor else { throw NativeRelayCoreError.invalidReplay }
+            var validationRejection: ConversationValidationRejection?
+            do {
+                try store.finishConversationReplay(at: high,
+                    chatReadPositions: snapshot.chatReadPositions, context: context,
+                    validationRejection: &validationRejection)
+            } catch {
+                if let validationRejection {
+                    throw ConversationReplayValidationFailure(rejection: validationRejection)
+                }
+                throw error
+            }
             conversationReadPositionSupportForSession = snapshot.chatReadPositions != nil
             if snapshot.hasInvalidChatReadPositions {
                 diagnose(.conversation, .conversationReadPosition, .observed,
@@ -1528,7 +1568,42 @@ public actor NativeRelayCore {
                 guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
                     throw NativeRelayCoreError.invalidReplay
                 }
-                _ = try store.applyConversation(event, context: context)
+                if event.sequence <= replay.durableCursor,
+                   let rejection = try store.redactedRevisionRejectionForAccountedRedelivery(
+                       event, context: context),
+                   rejection.guardID == .redactedRevisionBinding,
+                   rejection.eventKind == .revision,
+                   case .redactedRevision = event.fact {
+                    replay.expected = event.sequence
+                    conversationReplay = replay
+                    return
+                }
+                var validationRejection: ConversationValidationRejection?
+                do {
+                    _ = try store.applyConversation(event, context: context,
+                        validationRejection: &validationRejection)
+                } catch {
+                    if let validationRejection {
+                        guard validationRejection.guardID == .redactedRevisionBinding,
+                              validationRejection.eventKind == .revision,
+                              validationRejection.facts.sessionHandleMatchesThread == true,
+                              case .redactedRevision = event.fact else {
+                            throw ConversationReplayValidationFailure(rejection: validationRejection)
+                        }
+                        diagnose(.conversation, .conversationReplay, .observed,
+                            causeCode: NativeDiagnosticCauseCode.forError(ConversationError.invalidBinding),
+                            conversationSequence: event.sequence,
+                            conversationValidationRejection: validationRejection,
+                            request: event.binding.request, revision: event.binding.revision)
+                        let durableCursor = try store.advanceConversationCursor(
+                            overIgnoredUpdateAt: event.sequence, context: context)
+                        guard durableCursor >= event.sequence else { throw ConversationError.conflict }
+                        replay.expected = event.sequence
+                        conversationReplay = replay
+                        return
+                    }
+                    throw error
+                }
                 replay.expected = event.sequence
             case let .ignored(sequence):
                 guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
@@ -1839,6 +1914,8 @@ public actor NativeRelayCore {
                           terminalSequence: UInt64? = nil,
                           lifecycleSequence: UInt64? = nil,
                           noReplyRoute: NativeDiagnosticNoReplyRoute? = nil,
+                          conversationSequence: UInt64? = nil,
+                          conversationValidationRejection: ConversationValidationRejection? = nil,
                           occurredAtMilliseconds: Int64? = nil,
                           operationID: UUID? = nil,
                           request: RequestKey? = nil,
@@ -1853,10 +1930,17 @@ public actor NativeRelayCore {
             terminalSequence: terminalSequence,
             lifecycleSequence: lifecycleSequence,
             noReplyRoute: noReplyRoute,
+            conversationSequence: conversationSequence,
+            conversationValidationRejection: conversationValidationRejection,
             attemptID: attemptID, transportAttemptID: attemptID,
             operationID: operationID, request: request,
             requestRevision: revision, receiptState: receipt,
             occurredAtMilliseconds: occurredAtMilliseconds ?? NativeClientDiagnosticEvent.nowMilliseconds()))
+    }
+
+    private func diagnoseInboxPageValidationFailure(_ rejection: ConversationValidationRejection) {
+        diagnose(.relay, .inboxPage, .failed, error: ConversationError.invalidBinding,
+            conversationValidationRejection: rejection)
     }
 
     private func validatedRelayCursor() throws -> UInt64 {
