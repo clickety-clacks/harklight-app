@@ -56,12 +56,10 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 }
 
 enum HarklightReleaseNotes {
-    /// Keep each update's identifier stable so it appears once for people who already use the app.
-    /// Keep new updates unnumbered until their containing build and archived source are recorded.
+    /// Keep these older updates' identifiers stable for existing installations.
     /// Build 106 is the earliest confirmed containing build for the existing updates below;
     /// it does not establish when they first shipped.
-    /// Stamp new updates with a first shipped build only after a successful Internal TestFlight
-    /// distribution and its archived source have been recorded. Retain that number in later builds.
+    /// Add future releases to the numbered entries below using their expected shipping build.
     static let updateEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
             historyIdentifier: "failed-response-retry",
@@ -197,6 +195,20 @@ enum HarklightReleaseNotes {
 
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            buildIdentifier: 119,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "whats-new-per-build",
+                    symbol: "sparkles",
+                    title: LocalizedStringResource(
+                        "See what's new in each release",
+                        comment: "Release-note title for showing current-build notes automatically."),
+                    detail: LocalizedStringResource(
+                        "What’s New opens the first time you use a release with new notes. New release notes show their build number here and in Settings.",
+                        comment: "Release-note detail for automatic presentation and build labels."))
+            ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
             buildIdentifier: 79,
@@ -653,6 +665,9 @@ enum HarklightReleaseNotes {
 }
 
 enum ReleaseNotesLifecycle {
+    // Earlier numbered notes predate first-install release announcements.
+    // Keep their existing first-install behavior when a person installs an old build.
+    private static let lastHistoricalBuildIdentifier = 79
     static let seenBuildIdentifiersDefaultsKey = "release-notes.seen-build-identifiers"
     static let lastSeenBuildIdentifierDefaultsKey = "release-notes.last-seen-build-identifier"
     static let seenUpdateIdentifiersDefaultsKey = "release-notes.seen-update-identifiers"
@@ -671,6 +686,7 @@ enum ReleaseNotesLifecycle {
         entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries,
         updateEntries: [HarklightReleaseNote] = HarklightReleaseNotes.updateEntries,
         seenUpdateIdentifiers: Set<String> = [],
+        seenBuildIdentifiers: Set<Int> = [],
         lastSeenBuildIdentifier: Int?,
         hasPriorAppState: Bool
     ) -> [HarklightReleaseNote] {
@@ -681,9 +697,21 @@ enum ReleaseNotesLifecycle {
             currentBuildIdentifier: currentBuildIdentifier,
             entries: updateEntries).filter { !seenUpdateIdentifiers.contains($0.id) }
         guard let lastSeenBuildIdentifier else {
-            return hasPriorAppState ? unseenUpdates + Array(released.prefix(1)) : []
+            if hasPriorAppState {
+                return unseenUpdates + Array(released.prefix(1))
+            }
+            // A new installation should see notes written for its own current
+            // release, while older history remains available from Settings.
+            guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
+            return released.filter {
+                guard let build = $0.buildIdentifier else { return false }
+                return build > lastHistoricalBuildIdentifier && build == currentBuild
+            }
         }
-        return unseenUpdates + released.filter { ($0.buildIdentifier ?? 0) > lastSeenBuildIdentifier }
+        return unseenUpdates + released.filter {
+            guard let build = $0.buildIdentifier else { return false }
+            return build > lastSeenBuildIdentifier && !seenBuildIdentifiers.contains(build)
+        }
     }
 }
 
@@ -706,6 +734,9 @@ final class ReleaseNotesPresentation {
         let lastSeenBuildIdentifier = ReleaseNotesLifecycle.lastSeenBuildIdentifier(defaults: defaults)
         let seenUpdateIdentifiers = Set(defaults.stringArray(
             forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey) ?? [])
+        let seenBuildIdentifiers = Set((defaults.stringArray(
+            forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) ?? [])
+            .compactMap(Int.init))
         let visibleUpdates = HarklightReleaseNotes.visibleUpdateEntries(
             currentBuildIdentifier: currentBuildIdentifier)
         let released = HarklightReleaseNotes.releasedEntries(
@@ -715,6 +746,7 @@ final class ReleaseNotesPresentation {
             currentBuildIdentifier: currentBuildIdentifier,
             entries: entries,
             seenUpdateIdentifiers: seenUpdateIdentifiers,
+            seenBuildIdentifiers: seenBuildIdentifiers,
             lastSeenBuildIdentifier: lastSeenBuildIdentifier,
             hasPriorAppState: hasPriorAppState)
 
