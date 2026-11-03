@@ -281,7 +281,7 @@ final class HarklightUITests: XCTestCase {
         let detail = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(detail.waitForExistence(timeout: 5),
                       "The pending row is reopened to simulate its later server outcome.")
-        XCTAssertTrue(app.buttons["request-answered"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
                       "The reopened detail reflects the accepted answer.")
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
                       "A confirmed answer is no longer an available submit action.")
@@ -304,22 +304,19 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         row.tap()
 
-        let answeredControl = app.buttons["request-answered"]
-        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
-                      "An accepted answer shows Answered on the toolbar checkmark.")
-        XCTAssertEqual(answeredControl.value as? String, "Completed",
-                       "The Answered checkmark presents its completed state like Seen does.")
-        XCTAssertFalse(answeredControl.isEnabled,
-                       "The Answered state is a completed status, not an action.")
+        let answeredCard = app.descendants(matching: .any)["request-answered"]
+        XCTAssertTrue(answeredCard.waitForExistence(timeout: 5),
+                      "An accepted answer replaces the selector with its Answered card.")
+        XCTAssertEqual(answeredCard.value as? String, "Completed")
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
                        "The content area omits the redundant Answered status line.")
         XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
                        "Internal evidence wording stays out of the content area.")
-        let knownPoint = app.descendants(matching: .any)["Established submitted location"].firstMatch
-        XCTAssertTrue(knownPoint.waitForExistence(timeout: 5),
-                      "The accepted original operation should select the known sender result scene.")
-        XCTAssertEqual(knownPoint.value as? String,
-                       "Horizontal \(submittedPoint.x), vertical \(submittedPoint.y)")
+        let answerText = app.staticTexts["request-account-answer"]
+        XCTAssertTrue(answerText.waitForExistence(timeout: 5),
+                      "The Answered card shows the accepted answer in formatted text.")
+        XCTAssertEqual(answerText.label,
+                       "Established submitted location\nHorizontal \(submittedPoint.x), vertical \(submittedPoint.y)\nNote\nNear the east entrance")
 
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
     }
@@ -332,7 +329,9 @@ final class HarklightUITests: XCTestCase {
 
         let answeredControl = app.buttons["request-answered"]
         XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
-                      "A server-answered request shows Answered on the toolbar checkmark.")
+                      "An answer with an unconfirmed outcome keeps the existing generic status.")
+        XCTAssertFalse(app.staticTexts["request-account-answer"].exists,
+                       "The attempted local answer is not presented as the unknown accepted answer.")
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
                        "The content area omits the redundant Answered status line.")
         XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
@@ -565,31 +564,18 @@ final class HarklightUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Seen available"].exists)
         attachScreenshot("Notice detail Seen available", from: app)
         finishSeen.tap()
-        XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"].waitForExistence(timeout: 5))
-        XCTAssertTrue(finishSeen.exists,
-                      "The Seen button stays in place after the action.")
-        XCTAssertTrue(finishSeen.label.contains("Seen"), finishSeen.label)
-        XCTAssertEqual(finishSeen.value as? String, "Completed")
-        XCTAssertFalse(finishSeen.isEnabled,
-                       "The completed toolbar Seen button cannot be tapped again.")
-        XCTAssertTrue(seenAction.exists,
-                      "The body Seen action remains alongside the toolbar check.")
-        XCTAssertFalse(seenAction.isEnabled,
-                       "The completed body Seen action cannot be tapped again.")
-        XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1,
-                       "The restored body Seen control remains singular after completion.")
-        XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1,
-                       "The completed toolbar Seen control stays in place by itself.")
-        let compactSeenControl = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            let frame = finishSeen.frame
-            return frame.width > 70 && frame.width < 160 && frame.height < 60
-        }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [compactSeenControl], timeout: 3), .completed,
-                       "The confirmed Seen label must settle into one compact toolbar button.")
-        // The accessibility frame reaches its final size before the glass
-        // background finishes animating; capture the completed visual state.
-        Thread.sleep(forTimeInterval: 2)
-        attachScreenshot("Notice detail Seen completed", from: app)
+        let seenConfirmation = app.descendants(matching: .any)["request-seen-confirmation"]
+        XCTAssertTrue(seenConfirmation.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(seenConfirmation.value as? String, "Completed")
+        XCTAssertFalse(app.staticTexts["Seen selected locally · nothing sent"].exists,
+                       "The card is the single Seen confirmation.")
+        XCTAssertFalse(finishSeen.exists,
+                       "The toolbar action disappears after Seen is confirmed.")
+        XCTAssertFalse(seenAction.exists,
+                       "The available Seen button is replaced by its confirmation card.")
+        XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 0)
+        XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 0)
+        attachScreenshot("Notice detail Seen confirmation card", from: app)
     }
 
     func testTextChoiceCardMatchesReferenceCapture() throws {
@@ -653,7 +639,8 @@ final class HarklightUITests: XCTestCase {
         let detail = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(detail.waitForExistence(timeout: 5),
                       "The pending row is reopened to simulate its later accepted result.")
-        XCTAssertTrue(app.buttons["request-answered"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
+                      app.debugDescription)
         XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
                       "A confirmed answer is no longer an available submit action.")
 
@@ -675,10 +662,10 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("Answered request in Replied", from: app)
 
         facilities.tap()
-        let answeredControl = app.buttons["request-answered"]
-        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
-                      "An accepted answer shows Answered on the toolbar checkmark.")
-        attachScreenshot("Replied toolbar confirmed", from: app)
+        let answeredCard = app.descendants(matching: .any)["request-answered"]
+        XCTAssertTrue(answeredCard.waitForExistence(timeout: 5),
+                      "An accepted answer shows the selected Answered card in Replied.")
+        attachScreenshot("Replied answered card", from: app)
     }
 
     private func applyFixtureOutcome(_ scenario: String, in app: XCUIApplication) {

@@ -42,6 +42,183 @@ struct SeenActionPresentation: Equatable {
     }
 }
 
+enum AnswerConfirmationText {
+    static func formatted(accountAnswerOutcome: AccountAnswerOutcome?,
+                         submittedAnswer: RequestDraft?,
+                         projection: AdmittedRequestProjection,
+                         defaultAnswerAction: ProjectedActionReference? = nil) -> String? {
+        switch accountAnswerOutcome {
+        case let .some(.reply(text)):
+            if !text.rawValue.isEmpty { return text.rawValue }
+        case let .some(.defaultAnswer(_, text)):
+            if let text, !text.rawValue.isEmpty { return text.rawValue }
+            if let defaultAnswerAction,
+               let action = projectedAction(defaultAnswerAction, in: projection) {
+                return action.label.rawValue
+            }
+            return nil
+        case .some(.noComment), .some(.seen):
+            return nil
+        case .none:
+            break
+        }
+
+        guard let submittedAnswer, !submittedAnswer.noCommentSelected else { return nil }
+        return formatted(submittedAnswer, projection: projection)
+    }
+
+    private static func formatted(_ answer: RequestDraft,
+                                  projection: AdmittedRequestProjection) -> String? {
+        switch projection {
+        case let .compatibility(actions):
+            return actionText(answer.compatibility.selectedActionID,
+                              textByActionID: answer.compatibility.textByActionID,
+                              actions: actions)
+        case let .sender(sender):
+            var lines: [String] = []
+            for input in sender.inputs {
+                guard let draft = answer.inputs[input.id] else { continue }
+                let value: String?
+                var includeInputLabel = true
+                switch input.kind {
+                case let .response(actions):
+                    value = actionText(draft.selectedActionID,
+                                       textByActionID: draft.textByActionID,
+                                       actions: actions)
+                case .text:
+                    value = draft.text?.rawValue.isEmpty == false ? draft.text?.rawValue : nil
+                case .point:
+                    guard let point = draft.effectivePoint else { continue }
+                    let coordinates = "Horizontal \(point.x), vertical \(point.y)"
+                    if let label = pointResultLabel(in: sender.scene, matching: point) {
+                        value = "\(label)\n\(coordinates)"
+                        includeInputLabel = false
+                    } else {
+                        value = coordinates
+                    }
+                }
+                guard let value else { continue }
+                if sender.inputs.count > 1 && input.label.rawValue != "Response" && includeInputLabel {
+                    lines.append("\(input.label.rawValue)\n\(value)")
+                } else {
+                    lines.append(value)
+                }
+            }
+            return lines.isEmpty ? nil : lines.joined(separator: "\n")
+        case .unsupported:
+            return nil
+        }
+    }
+
+    private static func actionText(_ selectedActionID: ExactText?,
+                                   textByActionID: [ExactText: ExactText],
+                                   actions: [ProjectedAction]) -> String? {
+        if let selectedActionID,
+           let action = actions.first(where: { $0.id == selectedActionID }) {
+            if action.kind == .text,
+               let text = textByActionID[selectedActionID], !text.rawValue.isEmpty {
+                return text.rawValue
+            }
+            return action.label.rawValue
+        }
+        for action in actions where action.kind == .text {
+            if let text = textByActionID[action.id], !text.rawValue.isEmpty {
+                return text.rawValue
+            }
+        }
+        return nil
+    }
+
+    private static func projectedAction(_ reference: ProjectedActionReference,
+                                        in projection: AdmittedRequestProjection) -> ProjectedAction? {
+        switch projection {
+        case let .compatibility(actions) where reference.inputID == nil:
+            return actions.first { $0.id == reference.actionID }
+        case let .sender(sender):
+            guard let inputID = reference.inputID,
+                  let input = sender.inputs.first(where: { $0.id == inputID }),
+                  case let .response(actions) = input.kind else { return nil }
+            return actions.first { $0.id == reference.actionID }
+        case .compatibility, .unsupported:
+            return nil
+        }
+    }
+
+    private static func pointResultLabel(in node: ProjectedSceneNode,
+                                         matching point: PointValue) -> String? {
+        switch node.kind {
+        case let .resultPoint(_, label, result) where result == point:
+            return label.rawValue
+        case let .stack(_, children), let .grid(_, children):
+            for child in children {
+                if let label = pointResultLabel(in: child, matching: point) { return label }
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+}
+
+private struct AnswerConfirmationCard: View {
+    let title: LocalizedStringResource
+    let answer: String?
+    let identifier: String
+    let accessibilityValue: LocalizedStringResource
+    let symbolName: String?
+    var answerIdentifier: String? = nil
+    var isMuted = false
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var appearance: HarklightDesignSource.Appearance {
+        HarklightDesignSystem.palette(for: colorScheme)
+    }
+
+    private var messageColors: HarklightDesignSource.MessageType {
+        appearance.messageType(messageType)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if let symbolName {
+                    Image(systemName: symbolName)
+                        .font(.headline.weight(.semibold))
+                }
+                Text(title).font(.headline.weight(.semibold))
+            }
+            .foregroundStyle(isMuted ? messageColors.secondaryTextColor : messageColors.textColor)
+
+            if let answer, !answer.isEmpty {
+                Text(answer)
+                    .font(.body.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 28)
+                    .foregroundStyle(messageColors.textColor)
+                    .accessibilityIdentifier(answerIdentifier ?? "\(identifier)-answer")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(appearance.detail.selectedChoiceColor)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(messageColors.textColor.opacity(isMuted ? 0.3 : 1),
+                              lineWidth: 1.5)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(identifier)
+        .accessibilityValue(Text(accessibilityValue))
+    }
+}
+
 /// True while a reply editor below has keyboard focus. The foreground connection
 /// alert defers while this is set, because presenting over the editor resigns
 /// first responder mid-typing.
@@ -1070,9 +1247,81 @@ struct LiveRequestDetail: View {
                                            answerNotDelivered: request.answerNotDelivered)
     }
 
+    private var showsAnsweredConfirmation: Bool {
+        answerIsComplete && !isSupersedesReadOnly && confirmedAnswerText != nil
+    }
+
     private var pinsAnsweredStatusInWidePhoneToolbar: Bool {
-        answerIsComplete && UIDevice.current.userInterfaceIdiom == .phone &&
-            horizontalSizeClass == .regular
+        answerIsComplete && !showsAnsweredConfirmation &&
+            UIDevice.current.userInterfaceIdiom == .phone && horizontalSizeClass == .regular
+    }
+
+    private var showsNoCommentConfirmation: Bool {
+        Self.showsNoCommentConfirmation(lifecycleStatus: request.lifecycleStatus,
+                                       isSupersedesReadOnly: isSupersedesReadOnly)
+    }
+
+    static func showsNoCommentConfirmation(lifecycleStatus: AppLifecycleStatus,
+                                           isSupersedesReadOnly: Bool) -> Bool {
+        lifecycleStatus == .noComment && !isSupersedesReadOnly
+    }
+
+    private var showsPendingAnswerConfirmation: Bool {
+        !isSupersedesReadOnly && !storePresentationSnapshot.isRetracted &&
+            request.lifecycleStatus == .pending && request.receiptFacts?.ownOutcome == .unconfirmed
+    }
+
+    private var showsNotAcceptedConfirmation: Bool {
+        !isSupersedesReadOnly && storePresentationSnapshot.isRetracted &&
+            request.receiptFacts?.ownOutcome == .refused
+    }
+
+    private var confirmedAnswerText: String? {
+        AnswerConfirmationText.formatted(
+            accountAnswerOutcome: request.accountAnswerOutcome,
+            submittedAnswer: request.receiptFacts?.ownOutcome == .accepted ? request.submittedAnswer : nil,
+            projection: request.projection,
+            defaultAnswerAction: request.defaultAnswerAction)
+    }
+
+    private var pendingAnswerText: String? {
+        AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
+            submittedAnswer: request.submittedAnswer,
+            projection: request.projection)
+    }
+
+    private var attemptedAnswerText: String? {
+        AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
+            submittedAnswer: request.submittedAnswer,
+            projection: request.projection)
+    }
+
+    private var answeredStatusButton: some View {
+        Button(action: {}) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                Text(Self.answeredStatusTitle(accountAnswerOutcome: request.accountAnswerOutcome,
+                                              isLiveRequest: localExample == nil && fixtureStore == nil))
+            }
+                .padding(.horizontal, 6)
+        }
+        .tint(nil)
+        .disabled(true)
+        .accessibilityLabel(Self.answeredStatusTitle(accountAnswerOutcome: request.accountAnswerOutcome,
+                                                       isLiveRequest: localExample == nil && fixtureStore == nil))
+        .accessibilityValue("Completed")
+        .accessibilityIdentifier("request-answered")
+    }
+
+    static func answeredStatusTitle(accountAnswerOutcome: AccountAnswerOutcome?,
+                                    isLiveRequest: Bool) -> String {
+        switch accountAnswerOutcome {
+        case .some(.seen): "Seen"
+        case .some(.reply(_)): "Replied"
+        case .some(.noComment): "No comment"
+        case .some(.defaultAnswer(_, _)): "Answered by default"
+        case .none: isLiveRequest ? "Answered" : "Replied"
+        }
     }
 
     /// A pending or refused send never counts as Answered; only a request the
@@ -1111,7 +1360,7 @@ struct LiveRequestDetail: View {
         case .open, .answered:
             return nil
         case .noComment:
-            return "The sender recorded your No comment answer."
+            return nil
         case .pending:
             return ownOutcome == .unconfirmed
                 ? "Your answer is saved on this device. Delivery is not yet confirmed."
@@ -1125,49 +1374,6 @@ struct LiveRequestDetail: View {
             }
             return nil
         }
-    }
-
-    private var answeredStatusButton: some View {
-        Button(action: {}) {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark")
-                Text(Self.answeredStatusTitle(accountAnswerOutcome: request.accountAnswerOutcome,
-                                              isLiveRequest: localExample == nil && fixtureStore == nil))
-            }
-                .padding(.horizontal, 6)
-        }
-        .tint(nil)
-        .disabled(true)
-        .accessibilityLabel(Self.answeredStatusTitle(accountAnswerOutcome: request.accountAnswerOutcome,
-                                                       isLiveRequest: localExample == nil && fixtureStore == nil))
-        .accessibilityValue("Completed")
-        .accessibilityIdentifier("request-answered")
-    }
-
-    static func answeredStatusTitle(accountAnswerOutcome: AccountAnswerOutcome?,
-                                    isLiveRequest: Bool) -> String {
-        switch accountAnswerOutcome {
-        case .some(.seen): "Seen"
-        case .some(.reply(_)): "Replied"
-        case .some(.noComment): "No comment"
-        case .some(.defaultAnswer(_, _)): "Answered by default"
-        case .none: isLiveRequest ? "Answered" : "Replied"
-        }
-    }
-
-    private var noCommentStatusButton: some View {
-        Button(action: {}) {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark")
-                Text("No comment")
-            }
-                .padding(.horizontal, 6)
-        }
-        .tint(nil)
-        .disabled(true)
-        .accessibilityLabel("No comment")
-        .accessibilityValue("Completed")
-        .accessibilityIdentifier("request-no-comment-status")
     }
 
     private var failedResponseWarningButton: some View {
@@ -1369,7 +1575,7 @@ struct LiveRequestDetail: View {
                     if localExample.message.revised || localExample.message.deadline != nil {
                         LocalSampleContext(response: localExample)
                     }
-                    if localExample.finished {
+                    if localExample.finished && !localExample.localSeenSelected {
                         Label(localExample.noCommentSelected
                               ? "No comment selected locally · nothing sent"
                               : request.informationalSeenStatus == nil
@@ -1399,55 +1605,80 @@ struct LiveRequestDetail: View {
                 if localExample?.message.kind == .review {
                     SampleDiffView()
                 }
-                switch request.projection {
-                case let .sender(sender):
-                    VStack(alignment: .leading, spacing: 10) {
-                        LiveProjectedSceneView(request: request,
-                                               sender: sender,
-                                               node: sender.scene,
-                                               store: store,
-                                               readOnly: controlsReadOnly,
-                                               hideAnswerControls: isSupersedesReadOnly,
-                                               focusedReplyActionID: $focusedReplyActionID,
-                                               activeReplyEditor: activeReplyEditor,
-                                               localReplyDraftSession: localReplySession,
-                                               openReplyEditor: { openReplyEditor($0) },
-                                               replyTextBinding: { replyTextBinding(for: $0) },
-                                               closeReplyEditor: closeReplyEditor,
-                                               onLocalReplyInteraction: markLocalReplyInteraction,
-                                               localExample: localExample,
-                                               enlargePicture: { enlargedPicture = $0 })
-                        if canOfferNoComment { noCommentChoice }
-                    }
-                case let .compatibility(actions):
-                    LiveCompatibilityActions(request: request,
-                                             actions: actions,
-                                             store: store,
-                                             readOnly: controlsReadOnly,
-                                             hideAnswerControls: isSupersedesReadOnly,
-                                             sendDisabled: sendControlsDisabled,
-                                             localExample: localExample,
-                                             onSeen: { action in
-                                                 submitSeenAction(action)
-                                                 returnToListIfSinglePane()
-                                             },
-                                             canOfferNoComment: canOfferNoComment,
-                                             noCommentSelected: noCommentSelected,
-                                             noCommentUnavailable: showsNoCommentUnavailable,
-                                             canOpenFailureDetails: failedResponseWarning != nil,
-                                             onSelectNoComment: selectNoCommentAction,
-                                             focusedReplyActionID: $focusedReplyActionID,
-                                             replyTextBinding: { replyTextBinding(for: $0) },
-                                             localReplyDraftSession: localReplySession,
-                                             activeReplyEditor: activeReplyEditor,
-                                             openReplyEditor: { openReplyEditor($0) },
-                                             closeReplyEditor: closeReplyEditor,
-                                             onLocalReplyInteraction: markLocalReplyInteraction)
-                case .unsupported:
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("This request uses an unsupported answer format.")
-                            .foregroundStyle(detailColors.secondaryTextColor)
-                        if canOfferNoComment { noCommentChoice }
+                if showsAnsweredConfirmation {
+                    AnswerConfirmationCard(
+                        title: request.isDefaultAnswered ? "Answered by default" : "Answered",
+                        answer: confirmedAnswerText,
+                        identifier: "request-answered",
+                        accessibilityValue: "Completed",
+                        symbolName: "checkmark",
+                        answerIdentifier: request.isDefaultAnswered
+                            ? "request-default-answer" : "request-account-answer")
+                } else if showsNoCommentConfirmation {
+                    AnswerConfirmationCard(title: "No comment", answer: nil,
+                        identifier: "request-no-comment-status",
+                        accessibilityValue: "Completed", symbolName: "checkmark")
+                } else if showsPendingAnswerConfirmation {
+                    AnswerConfirmationCard(title: "Pending", answer: pendingAnswerText,
+                        identifier: "request-pending-answer-status",
+                        accessibilityValue: "Pending", symbolName: "clock",
+                        answerIdentifier: "request-pending-answer", isMuted: true)
+                } else if showsNotAcceptedConfirmation {
+                    AnswerConfirmationCard(title: "Not accepted", answer: attemptedAnswerText,
+                        identifier: "request-not-accepted-status",
+                        accessibilityValue: "Not accepted", symbolName: "xmark",
+                        answerIdentifier: "request-not-accepted-answer", isMuted: true)
+                } else {
+                    switch request.projection {
+                    case let .sender(sender):
+                        VStack(alignment: .leading, spacing: 10) {
+                            LiveProjectedSceneView(request: request,
+                                                   sender: sender,
+                                                   node: sender.scene,
+                                                   store: store,
+                                                   readOnly: controlsReadOnly,
+                                                   hideAnswerControls: isSupersedesReadOnly,
+                                                   focusedReplyActionID: $focusedReplyActionID,
+                                                   activeReplyEditor: activeReplyEditor,
+                                                   localReplyDraftSession: localReplySession,
+                                                   openReplyEditor: { openReplyEditor($0) },
+                                                   replyTextBinding: { replyTextBinding(for: $0) },
+                                                   closeReplyEditor: closeReplyEditor,
+                                                   onLocalReplyInteraction: markLocalReplyInteraction,
+                                                   localExample: localExample,
+                                                   enlargePicture: { enlargedPicture = $0 })
+                            if canOfferNoComment { noCommentChoice }
+                        }
+                    case let .compatibility(actions):
+                        LiveCompatibilityActions(request: request,
+                                                 actions: actions,
+                                                 store: store,
+                                                 readOnly: controlsReadOnly,
+                                                 hideAnswerControls: isSupersedesReadOnly,
+                                                 sendDisabled: sendControlsDisabled,
+                                                 localExample: localExample,
+                                                 onSeen: { action in
+                                                     submitSeenAction(action)
+                                                     returnToListIfSinglePane()
+                                                 },
+                                                 canOfferNoComment: canOfferNoComment,
+                                                 noCommentSelected: noCommentSelected,
+                                                 noCommentUnavailable: showsNoCommentUnavailable,
+                                                 canOpenFailureDetails: failedResponseWarning != nil,
+                                                 onSelectNoComment: selectNoCommentAction,
+                                                 focusedReplyActionID: $focusedReplyActionID,
+                                                 replyTextBinding: { replyTextBinding(for: $0) },
+                                                 localReplyDraftSession: localReplySession,
+                                                 activeReplyEditor: activeReplyEditor,
+                                                 openReplyEditor: { openReplyEditor($0) },
+                                                 closeReplyEditor: closeReplyEditor,
+                                                 onLocalReplyInteraction: markLocalReplyInteraction)
+                    case .unsupported:
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("This request uses an unsupported answer format.")
+                                .foregroundStyle(detailColors.secondaryTextColor)
+                            if canOfferNoComment { noCommentChoice }
+                        }
                     }
                 }
                 if request.inboxStateIsCurrent {
@@ -1459,12 +1690,14 @@ struct LiveRequestDetail: View {
                         Text(String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                             .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                             .accessibilityIdentifier("request-lifecycle-status")
-                    } else if request.lifecycleStatus != .open && request.lifecycleStatus != .answered {
+                    } else if request.lifecycleStatus != .open && request.lifecycleStatus != .answered &&
+                                !showsNoCommentConfirmation {
                         Text(String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
                             .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                             .accessibilityIdentifier("request-lifecycle-status")
                     }
-                    if case let .reply(answerText)? = request.accountAnswerOutcome {
+                    if case let .reply(answerText)? = request.accountAnswerOutcome,
+                       !showsAnsweredConfirmation {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Reply")
                                 .font(.caption.weight(.semibold))
@@ -1477,7 +1710,8 @@ struct LiveRequestDetail: View {
                         }
                     }
                     if let seenStatus = request.informationalSeenStatus,
-                       seenStatus != .available || isSupersedesReadOnly {
+                       (seenStatus != .available || isSupersedesReadOnly),
+                       !(seenActionIsComplete && !isSupersedesReadOnly) {
                         Label(Self.informationalSeenText(seenStatus),
                               systemImage: Self.informationalSeenSymbol(seenStatus))
                             .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
@@ -1492,7 +1726,7 @@ struct LiveRequestDetail: View {
                         Text(localStatus).font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                     }
                 }
-                if request.isDefaultAnswered {
+                if request.isDefaultAnswered && !showsAnsweredConfirmation {
                     VStack(alignment: .leading, spacing: 4) {
                         Label("Answered by default", systemImage: "clock")
                             .font(.caption.weight(.semibold))
@@ -1567,21 +1801,26 @@ struct LiveRequestDetail: View {
                 } else {
                     ToolbarItem(placement: .confirmationAction) {
                         if request.informationalSeenStatus != nil {
-                            finishSeenButton
+                            if seenActionIsComplete { EmptyView() } else { finishSeenButton }
                         } else if let localExample {
-                            Button("Finish locally", systemImage: "checkmark") {
-                                closeReplyEditor()
-                                localExample.finishLocally()
+                            if localExample.localSeenSelected {
+                                EmptyView()
+                            } else {
+                                Button("Finish locally", systemImage: "checkmark") {
+                                    closeReplyEditor()
+                                    localExample.finishLocally()
+                                }
+                                .labelStyle(.iconOnly)
+                                .disabled(!localExample.canFinishLocally || localExample.finished)
+                                .accessibilityIdentifier("sample-finish")
                             }
-                            .labelStyle(.iconOnly)
-                            .disabled(!localExample.canFinishLocally || localExample.finished)
-                            .accessibilityIdentifier("sample-finish")
                         } else if failedResponseWarning != nil {
                             failedResponseWarningButton
                         } else if isEditingLocalReply {
                             submitReplyButton
-                        } else if request.lifecycleStatus == .noComment {
-                            noCommentStatusButton
+                        } else if showsAnsweredConfirmation || showsNoCommentConfirmation ||
+                                    showsNotAcceptedConfirmation {
+                            EmptyView()
                         } else if answerIsComplete {
                             answeredStatusButton
                         } else {
@@ -2398,10 +2637,6 @@ private struct LiveCompatibilityActions: View {
         HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
     }
 
-    private var seenColor: Color {
-        HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
-    }
-
     private var selected: ExactText? {
         if request.isDefaultAnswered {
             return request.defaultAnswerAction?.inputID == nil
@@ -2420,22 +2655,6 @@ private struct LiveCompatibilityActions: View {
 
     private var seenActionIsComplete: Bool {
         localExample?.localSeenSelected == true || seenActionPresentation.isCompleted
-    }
-
-    private var seenActionIsPending: Bool {
-        seenActionPresentation.isPending
-    }
-
-    private var seenActionColor: Color {
-        if seenActionIsComplete { return seenColor }
-        if seenActionIsPending { return detailColors.secondaryTextColor }
-        return detailColors.textColor
-    }
-
-    private var seenActionSymbol: String {
-        if seenActionIsComplete { return "checkmark" }
-        if seenActionIsPending { return seenActionPresentation.symbolName ?? "clock" }
-        return "eye"
     }
 
     private func activate(_ action: ProjectedAction) {
@@ -2489,6 +2708,10 @@ private struct LiveCompatibilityActions: View {
                     }
                 }
             }
+        } else if seenActionIsComplete {
+            AnswerConfirmationCard(title: "Seen", answer: nil,
+                identifier: "request-seen-confirmation",
+                accessibilityValue: "Completed", symbolName: "checkmark")
         } else if let seenStatus = request.informationalSeenStatus {
             VStack(alignment: .leading, spacing: 8) {
                 Label("FYI", systemImage: "info.circle.fill")
@@ -2496,7 +2719,7 @@ private struct LiveCompatibilityActions: View {
                     .foregroundStyle(detailColors.secondaryTextColor)
                     .accessibilityIdentifier("request-seen-form-label")
                 switch seenStatus {
-                case .available, .pending, .confirmed:
+                case .available:
                     Button {
                         guard seenStatus == .available, let action = actions.first else { return }
                         if let onSeen {
@@ -2506,32 +2729,39 @@ private struct LiveCompatibilityActions: View {
                                                  requestRevision: request.requestRevision)
                         }
                     } label: {
+                        Label("Seen", systemImage: "eye")
+                            .font(.body)
+                            .foregroundStyle(detailColors.textColor)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .tint(detailColors.textColor)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .disabled(sendDisabled)
+                    .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
+                    .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
+                    .accessibilityIdentifier("request-seen-action")
+                case .pending:
+                    Button {} label: {
                         HStack(spacing: 10) {
-                            Image(systemName: seenActionSymbol)
-                                .foregroundStyle(seenActionColor)
-                            if seenActionIsComplete {
-                                Text("Seen").foregroundStyle(seenActionColor)
-                            } else if seenActionIsPending {
-                                Text(seenActionPresentation.title).foregroundStyle(seenActionColor)
-                            } else {
-                                Text(actions.first?.label.rawValue ?? "Seen")
-                                    .foregroundStyle(seenActionColor)
-                            }
+                            Image(systemName: "clock")
+                                .foregroundStyle(detailColors.secondaryTextColor)
+                            Text(seenActionPresentation.title)
+                                .foregroundStyle(detailColors.secondaryTextColor)
                         }
                         .font(.headline)
                         .frame(maxWidth: .infinity, minHeight: 50)
                     }
                     .buttonStyle(.glass)
-                    .tint(seenActionColor)
-                    .disabled(sendDisabled || seenStatus != .available)
-                    .opacity(seenActionIsComplete ? 0.76 : (sendDisabled ? 0.48 : 1))
-                    .accessibilityLabel(Text(localExample?.localSeenSelected == true
-                                             ? "Seen with green checkmark"
-                                             : seenActionPresentation.accessibilityLabel))
-                    .accessibilityValue(Text(localExample?.localSeenSelected == true
-                                             ? "Completed"
-                                             : seenActionPresentation.accessibilityValue))
+                    .tint(detailColors.secondaryTextColor)
+                    .disabled(true)
+                    .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
+                    .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
                     .accessibilityIdentifier("request-seen-action")
+                case .confirmed:
+                    AnswerConfirmationCard(title: "Seen", answer: nil,
+                        identifier: "request-seen-confirmation",
+                        accessibilityValue: "Completed", symbolName: "checkmark")
                 case .resolvedWithoutSeen:
                     Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
                 }
