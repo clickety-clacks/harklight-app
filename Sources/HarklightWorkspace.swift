@@ -17,7 +17,7 @@ enum InboxPriorityDisplay: String, Equatable {
 
     static func forScore(_ score: Double?) -> Self? {
         guard let score, score.isFinite, (0.0...1.0).contains(score) else { return nil }
-        switch score {
+        return switch score {
         case ..<0.25: .low
         case ..<0.70: nil
         case ..<0.90: .high
