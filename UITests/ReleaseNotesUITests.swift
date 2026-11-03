@@ -26,9 +26,13 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 119"].exists,
+        let buildHeader = app.staticTexts["Version 0.1.0 · Build 119"]
+        revealHistoryElement(buildHeader, in: app)
+        XCTAssertTrue(buildHeader.exists,
                       "Settings keeps the current release's build label.")
-        XCTAssertTrue(app.staticTexts["See what's new in each release"].exists,
+        let updateTitle = app.staticTexts["See what's new in each release"]
+        revealHistoryElement(updateTitle, in: app)
+        XCTAssertTrue(updateTitle.exists,
                       app.debugDescription)
     }
 
