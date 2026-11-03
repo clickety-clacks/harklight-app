@@ -35,10 +35,12 @@ final class ConversationSampleUITests: XCTestCase {
             "This local file demonstrates distinct transfer and use facts."
         ].waitForExistence(timeout: 5), "Chat A must be visible before chat B alerts.\n\(app.debugDescription)")
 
-        let indicator = app.buttons["foreground-chat-notification"]
-        XCTAssertTrue(indicator.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(indicator.isHittable,
+        let indicators = app.buttons.matching(identifier: "foreground-chat-notification")
+        XCTAssertTrue(indicators.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        let indicator = indicators.allElementsBoundByIndex.first { $0.isHittable }
+        XCTAssertNotNil(indicator,
                       "The chat B indicator must appear above the open chat A sheet.\n\(app.debugDescription)")
+        guard let indicator else { return }
         capture("foreground-chat-indicator-over-open-chat-a", app)
         indicator.tap()
 
