@@ -35,7 +35,9 @@ struct HarklightApp: App {
             currentBuildIdentifier: isReferenceOrFixtureRun
                 ? nil
                 : HarklightReleaseNotes.currentBuildIdentifier(),
-            hasPriorAppState: isReleaseNotesUITest ? true : launch.hasPriorAppState,
+            hasPriorAppState: isReleaseNotesUITest
+                ? ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST_FRESH_INSTALL"] != "1"
+                : launch.hasPriorAppState,
             defaults: defaults))
     }
 

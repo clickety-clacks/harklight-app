@@ -56,12 +56,10 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 }
 
 enum HarklightReleaseNotes {
-    /// Keep each update's identifier stable so it appears once for people who already use the app.
-    /// Keep new updates unnumbered until their containing build and archived source are recorded.
+    /// Keep these older updates' identifiers stable for existing installations.
     /// Build 106 is the earliest confirmed containing build for the existing updates below;
     /// it does not establish when they first shipped.
-    /// Stamp new updates with a first shipped build only after a successful Internal TestFlight
-    /// distribution and its archived source have been recorded. Retain that number in later builds.
+    /// Add future releases to the numbered entries below using their expected shipping build.
     static let updateEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
             historyIdentifier: "failed-response-retry",
@@ -197,6 +195,20 @@ enum HarklightReleaseNotes {
 
     /// Keep entries newest first. A future build stays hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            buildIdentifier: 119,
+            marketingVersion: "0.1.0",
+            highlights: [
+                .init(
+                    id: "whats-new-per-build",
+                    symbol: "sparkles",
+                    title: LocalizedStringResource(
+                        "See what's new in each release",
+                        comment: "Release-note title for showing current-build notes automatically."),
+                    detail: LocalizedStringResource(
+                        "What’s New opens the first time you use a release with new notes. New release notes show their build number here and in Settings.",
+                        comment: "Release-note detail for automatic presentation and build labels."))
+            ]),
         // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
             buildIdentifier: 79,

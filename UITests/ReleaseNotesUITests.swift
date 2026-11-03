@@ -2,6 +2,36 @@ import XCTest
 
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
+    func testCurrentReleaseOpensOnFirstInstallAndShowsItsBuildInSettings() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture"]
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_FRESH_INSTALL"] = "1"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "119"
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
+                      app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 119"].exists,
+                      app.debugDescription)
+        XCTAssertTrue(app.staticTexts["See what's new in each release"].exists,
+                      app.debugDescription)
+
+        app.buttons["Done"].tap()
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
+        settings.tap()
+        let historyLink = app.buttons["Release notes"]
+        XCTAssertTrue(historyLink.waitForExistence(timeout: 5), app.debugDescription)
+        historyLink.tap()
+        XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 119"].exists,
+                      "Settings keeps the current release's build label.")
+        XCTAssertTrue(app.staticTexts["See what's new in each release"].exists,
+                      app.debugDescription)
+    }
+
     func testPost79UpdateShowsEarliestConfirmedContainingBuildWithoutRelabeling() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]

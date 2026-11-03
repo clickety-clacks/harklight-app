@@ -508,6 +508,29 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertFalse(buildWithoutNewNotes.isShowingCurrentRelease)
     }
 
+    @MainActor
+    func testCurrentCatalogReleaseWaitsForItsBuildAndAppearsOnce() throws {
+        let currentNote = try XCTUnwrap(HarklightReleaseNotes.entries.first)
+        XCTAssertEqual(currentNote.buildIdentifier, 119)
+        XCTAssertEqual(currentNote.highlights.map(\.id), ["whats-new-per-build"])
+        XCTAssertFalse(HarklightReleaseNotes.releasedEntries(
+            currentBuildIdentifier: "118").contains { $0.id == currentNote.id })
+
+        let suite = "ReleaseNotesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(118, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
+        defaults.set(HarklightReleaseNotes.updateEntries.map(\.id),
+                     forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey)
+
+        let firstLaunch = ReleaseNotesPresentation(
+            currentBuildIdentifier: "119", hasPriorAppState: true, defaults: defaults)
+        XCTAssertEqual(firstLaunch.notesToShow.map(\.id), [currentNote.id])
+        let nextLaunch = ReleaseNotesPresentation(
+            currentBuildIdentifier: "119", hasPriorAppState: true, defaults: defaults)
+        XCTAssertFalse(nextLaunch.isShowingCurrentRelease)
+    }
+
     func testLegacyUpgradeShowsNewestReleasedNoteOnly() {
         let notes = [releaseNote(1), releaseNote(3), releaseNote(2), releaseNote(4)]
 
