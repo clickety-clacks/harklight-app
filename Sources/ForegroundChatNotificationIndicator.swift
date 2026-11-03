@@ -38,3 +38,44 @@ struct ForegroundChatNotificationIndicatorView: View {
         .accessibilityIdentifier("foreground-chat-notification")
     }
 }
+
+/// Places the one pending foreground chat indicator in the presentation that
+/// is currently visible. A root inset alone is covered by a sheet on iPhone,
+/// so every sheet root uses this same modifier as the app root.
+@MainActor
+struct ForegroundChatNotificationLayer: ViewModifier {
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(NativeAppLaunch.self) private var launch: NativeAppLaunch?
+
+    var includeAppLaunch = true
+    var testRouter: NativeNotificationRouter? = nil
+    var testOpen: (() -> Void)? = nil
+
+    func body(content: Content) -> some View {
+        let router = testRouter ?? (includeAppLaunch ? launch?.notificationRouter : nil)
+        content.safeAreaInset(edge: .top, spacing: 0) {
+            if scenePhase == .active,
+               let indicator = router?.foregroundChatIndicator {
+                ForegroundChatNotificationIndicatorView(indicator: indicator) {
+                    if let testOpen {
+                        testOpen()
+                    } else if includeAppLaunch, let launch {
+                        Task { await launch.openForegroundChatIndicator(id: indicator.id) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+extension View {
+    @MainActor
+    func foregroundChatNotificationLayer(
+        includeAppLaunch: Bool = true,
+        testRouter: NativeNotificationRouter? = nil,
+        testOpen: (() -> Void)? = nil
+    ) -> some View {
+        modifier(ForegroundChatNotificationLayer(includeAppLaunch: includeAppLaunch,
+                                                 testRouter: testRouter, testOpen: testOpen))
+    }
+}

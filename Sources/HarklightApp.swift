@@ -122,14 +122,7 @@ struct HarklightApp: App {
                 }
             }
             .modifier(AcceptanceReduceMotionOverride(isEnabled: acceptanceReduceMotionOverride))
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if scenePhase == .active,
-                   let indicator = launch.notificationRouter.foregroundChatIndicator {
-                    ForegroundChatNotificationIndicatorView(indicator: indicator) {
-                        Task { await launch.openForegroundChatIndicator(id: indicator.id) }
-                    }
-                }
-            }
+            .foregroundChatNotificationLayer()
             .task {
                 if loadsSampleMessages { samples.populate() }
             }
@@ -163,8 +156,10 @@ struct HarklightApp: App {
             .sheet(isPresented: $releaseNotes.isShowingCurrentRelease) {
                 if !releaseNotes.notesToShow.isEmpty {
                     ReleaseNotesSheet(notes: releaseNotes.notesToShow)
+                        .foregroundChatNotificationLayer()
                 }
             }
+            .environment(launch)
         }
     }
 }

@@ -10,7 +10,8 @@ struct HarklightConversationUITestHost: App {
     @State private var conversationFixture: SampleFixtureDomain?
     @State private var prototypeFixture: PrototypeStore?
     @State private var testNotificationNavigation: NativeInboxNavigation? = nil
-    @State private var testForegroundChatIndicator: NativeForegroundChatIndicator? = nil
+    @State private var didPrepareNotificationFixture = false
+    @State private var didInjectReplyWhileChatWasOpen = false
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
@@ -35,16 +36,18 @@ struct HarklightConversationUITestHost: App {
                 if let conversationFixture {
                     LiveContentView(store: conversationFixture.viewModel, samples: samples,
                                     testNotificationNavigation: testNotificationNavigation,
-                                    testForegroundChatIndicator: testForegroundChatIndicator,
+                                    testNotificationRouter: .shared,
                                     testOpenForegroundChatIndicator: openTestChatIndicator,
+                                    testConversationSheetDidAppear: testChatSheetDidAppear,
                                     testNotificationChatRouteDidOpen: consumeTestChatRoute)
                 } else if let prototypeFixture {
                     if let presentation = prototypeFixture.presentationStore {
                         LiveContentView(store: presentation, samples: samples,
                                         fixtureStore: prototypeFixture,
                                         testNotificationNavigation: testNotificationNavigation,
-                                        testForegroundChatIndicator: testForegroundChatIndicator,
+                                        testNotificationRouter: .shared,
                                         testOpenForegroundChatIndicator: openTestChatIndicator,
+                                        testConversationSheetDidAppear: testChatSheetDidAppear,
                                         testNotificationChatRouteDidOpen: consumeTestChatRoute)
                     } else {
                         ContentUnavailableView(
@@ -63,10 +66,28 @@ struct HarklightConversationUITestHost: App {
     }
 
     private func prepareTestChatIndicatorIfRequested() {
-        guard ProcessInfo.processInfo.arguments.contains("--harklight-test-foreground-chat-indicator"),
-              let conversationFixture,
-              let message = SampleCatalog.messages.first(where: { $0.id == "sample-information-0" }) else {
+        guard !didPrepareNotificationFixture else { return }
+        didPrepareNotificationFixture = true
+
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--harklight-test-foreground-chat-indicator-over-chat") {
+            guard let conversationFixture,
+                  let message = SampleCatalog.messages.first(where: { $0.id == "sample-information-2" }) else {
+                preconditionFailure("The local fixture has no other chat to keep open while a reply arrives.")
+            }
+            testNotificationNavigation = NativeInboxNavigation(
+                serial: 1, request: conversationFixture.key(for: message), opensChat: true)
             return
+        }
+
+        guard arguments.contains("--harklight-test-foreground-chat-indicator") else { return }
+        receiveTestChatReply(for: "sample-information-0")
+    }
+
+    private func receiveTestChatReply(for messageID: String) {
+        guard let conversationFixture,
+              let message = SampleCatalog.messages.first(where: { $0.id == messageID }) else {
+            preconditionFailure("The local chat notification fixture could not be found.")
         }
         let key = conversationFixture.key(for: message)
         guard conversationFixture.viewModel.conversation(for: key)?.latestAgentReply != nil else {
@@ -90,21 +111,29 @@ struct HarklightConversationUITestHost: App {
             preconditionFailure("The local chat fixture notification could not be encoded.")
         }
         let router = NativeNotificationRouter.shared
-        guard router.receiveForegroundNotification(
-            payload, title: "Agent reply", body: "A new chat reply is ready."),
-              let indicator = router.foregroundChatIndicator else {
+        guard router.receiveForegroundNotification(payload, title: "Agent reply",
+                                                   body: "A new chat reply is ready."),
+              router.foregroundChatIndicator != nil else {
             preconditionFailure("The local chat fixture notification was not recognized as a chat target.")
         }
-        testForegroundChatIndicator = indicator
     }
 
     private func openTestChatIndicator() {
-        guard let indicator = testForegroundChatIndicator else { return }
-        _ = NativeNotificationRouter.shared.consumeForegroundChatIndicator(id: indicator.id)
+        guard let indicator = NativeNotificationRouter.shared.foregroundChatIndicator,
+              let consumed = NativeNotificationRouter.shared.consumeForegroundChatIndicator(id: indicator.id) else {
+            return
+        }
         let serial = (testNotificationNavigation?.serial ?? 0) &+ 1
         testNotificationNavigation = NativeInboxNavigation(
-            serial: serial, request: indicator.request, opensChat: true)
-        testForegroundChatIndicator = nil
+            serial: serial, request: consumed.request, opensChat: true)
+    }
+
+    private func testChatSheetDidAppear() {
+        guard ProcessInfo.processInfo.arguments.contains(
+                "--harklight-test-foreground-chat-indicator-over-chat"),
+              !didInjectReplyWhileChatWasOpen else { return }
+        didInjectReplyWhileChatWasOpen = true
+        receiveTestChatReply(for: "sample-information-0")
     }
 
     private func consumeTestChatRoute(_ serial: UInt64) {

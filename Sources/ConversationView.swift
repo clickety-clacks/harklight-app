@@ -36,6 +36,9 @@ struct ConversationPanel: View {
     let key: RequestKey
     let sender: String
     let title: String
+    var testNotificationRouter: NativeNotificationRouter? = nil
+    var testOpenForegroundChatIndicator: (() -> Void)? = nil
+    var testConversationSheetDidAppear: (() -> Void)? = nil
     @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
     @State private var inspectedFileRevision: UInt64?
@@ -160,6 +163,7 @@ struct ConversationPanel: View {
         .onAppear {
             if selectedRevision == nil { selectedRevision = thread?.currentRevision }
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
+            testConversationSheetDidAppear?()
         }
         .onDisappear { NativeNotificationRouter.shared.conversationBecameHidden(key) }
         .onChange(of: key) { oldKey, newKey in
@@ -206,6 +210,8 @@ struct ConversationPanel: View {
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { inspectedFile = nil } } }
                 .quickLookPreview($previewURL)
             }
+            .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                             testOpen: testOpenForegroundChatIndicator)
         }
     }
 

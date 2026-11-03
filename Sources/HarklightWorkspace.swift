@@ -368,6 +368,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var showsLocalExamples = false
     var notificationNavigation: NativeInboxNavigation? = nil
     var notificationChatRouteDidOpen: (UInt64) -> Void = { _ in }
+    var testNotificationRouter: NativeNotificationRouter? = nil
+    var testOpenForegroundChatIndicator: (() -> Void)? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -792,7 +794,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .uiDiagnostics("inbox-ui-diagnostics", diagnosticSummary(landscape: landscape))
         }
-        .sheet(isPresented: $settings, content: settingsContent)
+        .sheet(isPresented: $settings) {
+            settingsContent()
+                .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                                 testOpen: testOpenForegroundChatIndicator)
+        }
         .alert("The message changed", isPresented: staleAnswerPresentation,
                presenting: conversationStore?.staleAnswerDialog) { dialog in
             Button("Review message") {

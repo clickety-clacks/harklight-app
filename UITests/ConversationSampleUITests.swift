@@ -22,6 +22,35 @@ final class ConversationSampleUITests: XCTestCase {
         capture("foreground-chat-indicator-opened-matching-chat", app)
     }
 
+    func testForegroundChatIndicatorAppearsOverOpenChatAndOpensOtherConversation() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples",
+                               "--harklight-test-foreground-chat-indicator-over-chat"]
+        app.launch()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts[
+            "This local file demonstrates distinct transfer and use facts."
+        ].waitForExistence(timeout: 5), "Chat A must be visible before chat B alerts.\n\(app.debugDescription)")
+
+        let indicator = app.buttons["foreground-chat-notification"]
+        XCTAssertTrue(indicator.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(indicator.isHittable,
+                      "The chat B indicator must appear above the open chat A sheet.\n\(app.debugDescription)")
+        capture("foreground-chat-indicator-over-open-chat-a", app)
+        indicator.tap()
+
+        let reply = app.staticTexts[
+            "Agent example: the shorter path is faster, while the longer path is easier to revise."
+        ]
+        XCTAssertTrue(reply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(reply.isHittable,
+                      "Tapping the indicator must bring chat B above the already-open chat A.\n\(app.debugDescription)")
+        capture("foreground-chat-indicator-opened-other-chat", app)
+    }
+
     func testSendButtonAndReturnClearAcceptedLocalDiscussion() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
