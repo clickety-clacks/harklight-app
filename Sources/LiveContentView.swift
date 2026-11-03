@@ -571,8 +571,6 @@ struct LiveContentView: View {
                 settingsContent: { LiveInboxSettings(store: store, launch: launch,
                                                       archiveDeparture: archiveDeparture,
                                                       connectionStatus: connectionStatus) },
-                testNotificationRouter: testNotificationRouter,
-                testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
                 warnings: [launch?.notificationNavigationMessage, connectionWarning,
                            store.observationError, store.notificationWarning,
                            store.pushRegistrationWarning, store.unresolvedSendWarning,
@@ -593,7 +591,9 @@ struct LiveContentView: View {
                     } else {
                         launch?.notificationChatRouteWasOpened(serial: serial)
                     }
-                })
+                },
+                testNotificationRouter: testNotificationRouter,
+                testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
             .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                              testOpen: testOpenForegroundChatIndicator)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
