@@ -1272,8 +1272,24 @@ struct LiveRequestDetail: View {
     }
 
     private var showsNotAcceptedConfirmation: Bool {
-        !isSupersedesReadOnly && storePresentationSnapshot.isRetracted &&
-            request.receiptFacts?.ownOutcome == .refused
+        Self.shouldShowNotAcceptedConfirmation(
+            isRetracted: storePresentationSnapshot.isRetracted,
+            isSupersedesReadOnly: isSupersedesReadOnly,
+            ownOutcome: request.receiptFacts?.ownOutcome,
+            relayOutcome: request.intentReceipt?.relayOutcome,
+            attemptedAnswerText: attemptedAnswerText)
+    }
+
+    static func shouldShowNotAcceptedConfirmation(isRetracted: Bool,
+                                                  isSupersedesReadOnly: Bool,
+                                                  ownOutcome: OwnOutcome?,
+                                                  relayOutcome: RelayOutcome?,
+                                                  attemptedAnswerText: String?) -> Bool {
+        guard isRetracted, !isSupersedesReadOnly,
+              let attemptedAnswerText, !attemptedAnswerText.isEmpty else { return false }
+        if ownOutcome == .refused { return true }
+        if let relayOutcome, case .refusedByRetraction = relayOutcome { return true }
+        return false
     }
 
     private var confirmedAnswerText: String? {

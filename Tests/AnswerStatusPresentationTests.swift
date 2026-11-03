@@ -21,6 +21,34 @@ final class AnswerStatusPresentationTests: XCTestCase {
         }
     }
 
+    func testNotAcceptedRequiresRetractionRefusalAndActualAttemptedAnswer() {
+        let refused = RelayOutcome.refusedByRetraction(retractedAtMilliseconds: 1)
+        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: true, isSupersedesReadOnly: false, ownOutcome: nil,
+            relayOutcome: refused, attemptedAnswerText: "Keep original choice"),
+            "A retained refusedByRetraction receipt can drive the card without receiptFacts.")
+        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: true, isSupersedesReadOnly: false, ownOutcome: .refused,
+            relayOutcome: nil, attemptedAnswerText: "Keep original choice"),
+            "A refused terminal receipt still drives the same card.")
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: true, isSupersedesReadOnly: false, ownOutcome: nil,
+            relayOutcome: refused, attemptedAnswerText: nil),
+            "A retraction without a retained answer is not relabeled as Not accepted.")
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: true, isSupersedesReadOnly: false, ownOutcome: nil,
+            relayOutcome: refused, attemptedAnswerText: ""))
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: false, isSupersedesReadOnly: false, ownOutcome: nil,
+            relayOutcome: refused, attemptedAnswerText: "Keep original choice"))
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: true, isSupersedesReadOnly: true, ownOutcome: nil,
+            relayOutcome: refused, attemptedAnswerText: "Keep original choice"))
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: true, isSupersedesReadOnly: false, ownOutcome: nil,
+            relayOutcome: .accepted(sequence: nil), attemptedAnswerText: "Keep original choice"))
+    }
+
     func testUndeliveredAnswerIsNeverAnsweredEvenWhenRequestClosed() {
         for status in [AppLifecycleStatus.pending, .answered, .cleared] {
             XCTAssertFalse(LiveRequestDetail.answerStatusIsComplete(

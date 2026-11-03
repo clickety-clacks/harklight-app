@@ -197,6 +197,18 @@ final class RetractionPresentationTests: XCTestCase {
         let shown = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(shown.lifecycleStatus, .cleared)
         XCTAssertEqual(shown.receiptFacts?.ownOutcome, .refused)
+        XCTAssertEqual(shown.intentReceipt?.relayOutcome,
+                       .refusedByRetraction(retractedAtMilliseconds: Self.retractedAt))
+        let attemptedAnswerText = AnswerConfirmationText.formatted(
+            accountAnswerOutcome: nil, submittedAnswer: shown.submittedAnswer,
+            projection: shown.projection)
+        XCTAssertEqual(attemptedAnswerText, "Keep original choice",
+                       "Only the durable submitted answer supplies the Not accepted card text.")
+        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: live.isRetracted(key), isSupersedesReadOnly: false,
+            ownOutcome: nil, relayOutcome: shown.intentReceipt?.relayOutcome,
+            attemptedAnswerText: attemptedAnswerText),
+            "The actual refused receipt remains visible even without receiptFacts.")
         XCTAssertTrue(live.isRetracted(key))
         XCTAssertEqual(live.retractionDate(key)?.timeIntervalSince1970 ?? 0, Self.retractedAtSeconds, accuracy: 0.000_5)
         XCTAssertFalse(live.openRequests.contains { $0.key == key }, "A refused answer no longer needs attention")
