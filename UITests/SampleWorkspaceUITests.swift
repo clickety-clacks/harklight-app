@@ -640,6 +640,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         if listVisibleAlongsideDetail {
             XCTAssertTrue(detail.waitForExistence(timeout: 5),
                           "When the list and detail are both visible, confirmed Seen keeps the detail selected.")
+            XCTAssertTrue(app.descendants(matching: .any)["request-seen-confirmation"]
+                .waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertFalse(app.buttons["request-seen-action"].exists)
+            XCTAssertFalse(app.buttons["request-finish-seen"].exists)
         } else {
             XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
                           "In a single-pane presentation, confirmed Seen returns to the list.")

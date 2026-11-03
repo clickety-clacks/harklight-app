@@ -143,9 +143,10 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         if listVisibleAlongsideDetail {
             XCTAssertTrue(card.waitForExistence(timeout: 5),
                           "When the list and detail are both visible, confirmed Seen keeps the detail selected.")
-            XCTAssertTrue(app.staticTexts["Seen selected locally · nothing sent"]
-                .waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertFalse(check.isEnabled, "The Seen action must not repeat after completion.")
+            let confirmation = app.descendants(matching: .any)["request-seen-confirmation"]
+            XCTAssertTrue(confirmation.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(confirmation.value as? String, "Completed")
+            XCTAssertFalse(check.exists, "The toolbar action disappears after Seen is confirmed.")
             XCTAssertEqual(counter.label, initialPosition,
                            "Moving a Seen message to Replied must not reset its card position.")
             attachScreenshot("native-toolbar-check-after-seen")

@@ -172,6 +172,57 @@ final class RetractionPresentationTests: XCTestCase {
                                                           operationID: operationID))
     }
 
+    func testDisconnectedStoreShowsNotAcceptedForRetainedRefusedAttempt() throws {
+        let context = profile()
+        let domain = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("fixture-sender"), messageID: ExactText("not-accepted-retained"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Archive sketches","body":"Choose what to do with the earlier sketches.","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1,
+                sessionHandle: ExactText("local-not-accepted-session"), eventID: ExactText("1"))),
+            context: context)
+
+        let binding = ConversationBinding(request: key, revision: 1)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("local-not-accepted-session"), payload: payload)),
+            context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .availability(sessionHandle: ExactText("local-not-accepted-session"), .listening)),
+            context: context)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding,
+            text: ExactText("Please keep this unsent note.")), context: context)
+
+        let port = AttentionDomainPort(store: domain)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("keep"))]))
+        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .retraction(turn: ExactText("not-accepted-retracted"), terminalSequence: 1),
+            retractedAtMilliseconds: Self.retractedAt), context: context)
+        try domain.recordAnswerRefusedByRetraction(receipt.intentID, operationID: receipt.opID,
+            retractedAtMilliseconds: Self.retractedAt, context: context)
+
+        let disconnected = try LivePresentationStore(disconnectedStore: domain, context: context)
+        let shown = try XCTUnwrap(disconnected.request(for: key))
+        XCTAssertTrue(disconnected.isRetracted(key))
+        XCTAssertNil(shown.receiptFacts, "The disconnected account-terminal view keeps the existing receipt boundary.")
+        XCTAssertNil(shown.intentReceipt, "The card does not require exposing the full intent receipt.")
+        XCTAssertTrue(shown.ownAnswerWasRefusedByRetraction)
+
+        let attemptedAnswer = AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
+            submittedAnswer: shown.submittedAnswer, projection: shown.projection)
+        XCTAssertEqual(attemptedAnswer, "Keep original choice")
+        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: disconnected.isRetracted(key), isSupersedesReadOnly: false,
+            ownOutcome: shown.receiptFacts?.ownOutcome,
+            relayOutcome: shown.intentReceipt?.relayOutcome,
+            attemptedAnswerText: attemptedAnswer,
+            ownAnswerWasRefusedByRetraction: shown.ownAnswerWasRefusedByRetraction))
+    }
+
     func testRefusedQueuedAnswerIsKeptAsRefusedAndShownRetracted() async throws {
         let context = profile()
         let persistence = MemoryAttentionStatePersistence()
@@ -197,6 +248,18 @@ final class RetractionPresentationTests: XCTestCase {
         let shown = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(shown.lifecycleStatus, .cleared)
         XCTAssertEqual(shown.receiptFacts?.ownOutcome, .refused)
+        XCTAssertEqual(shown.intentReceipt?.relayOutcome,
+                       .refusedByRetraction(retractedAtMilliseconds: Self.retractedAt))
+        let attemptedAnswerText = AnswerConfirmationText.formatted(
+            accountAnswerOutcome: nil, submittedAnswer: shown.submittedAnswer,
+            projection: shown.projection)
+        XCTAssertEqual(attemptedAnswerText, "Keep original choice",
+                       "Only the durable submitted answer supplies the Not accepted card text.")
+        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: live.isRetracted(key), isSupersedesReadOnly: false,
+            ownOutcome: nil, relayOutcome: shown.intentReceipt?.relayOutcome,
+            attemptedAnswerText: attemptedAnswerText),
+            "The actual refused receipt remains visible even without receiptFacts.")
         XCTAssertTrue(live.isRetracted(key))
         XCTAssertEqual(live.retractionDate(key)?.timeIntervalSince1970 ?? 0, Self.retractedAtSeconds, accuracy: 0.000_5)
         XCTAssertFalse(live.openRequests.contains { $0.key == key }, "A refused answer no longer needs attention")
@@ -218,7 +281,8 @@ final class RetractionPresentationTests: XCTestCase {
                        Self.retractedAt)
         let settled = try LivePresentationStore(store: domain, context: context)
         XCTAssertEqual(settled.request(for: key)?.lifecycleStatus, .cleared)
-        XCTAssertEqual(settled.request(for: key)?.receiptFacts?.ownOutcome, .refused)
+        XCTAssertNil(settled.request(for: key)?.receiptFacts?.ownOutcome,
+                     "The later lifecycle projection does not report an own receipt outcome.")
         XCTAssertTrue(settled.isRetracted(key))
     }
 
