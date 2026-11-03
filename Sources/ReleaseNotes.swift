@@ -686,6 +686,7 @@ enum ReleaseNotesLifecycle {
         entries: [HarklightReleaseNote] = HarklightReleaseNotes.entries,
         updateEntries: [HarklightReleaseNote] = HarklightReleaseNotes.updateEntries,
         seenUpdateIdentifiers: Set<String> = [],
+        seenBuildIdentifiers: Set<Int> = [],
         lastSeenBuildIdentifier: Int?,
         hasPriorAppState: Bool
     ) -> [HarklightReleaseNote] {
@@ -707,7 +708,10 @@ enum ReleaseNotesLifecycle {
                 return build > lastHistoricalBuildIdentifier && build == currentBuild
             }
         }
-        return unseenUpdates + released.filter { ($0.buildIdentifier ?? 0) > lastSeenBuildIdentifier }
+        return unseenUpdates + released.filter {
+            guard let build = $0.buildIdentifier else { return false }
+            return build > lastSeenBuildIdentifier && !seenBuildIdentifiers.contains(build)
+        }
     }
 }
 
@@ -730,6 +734,9 @@ final class ReleaseNotesPresentation {
         let lastSeenBuildIdentifier = ReleaseNotesLifecycle.lastSeenBuildIdentifier(defaults: defaults)
         let seenUpdateIdentifiers = Set(defaults.stringArray(
             forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey) ?? [])
+        let seenBuildIdentifiers = Set((defaults.stringArray(
+            forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey) ?? [])
+            .compactMap(Int.init))
         let visibleUpdates = HarklightReleaseNotes.visibleUpdateEntries(
             currentBuildIdentifier: currentBuildIdentifier)
         let released = HarklightReleaseNotes.releasedEntries(
@@ -739,6 +746,7 @@ final class ReleaseNotesPresentation {
             currentBuildIdentifier: currentBuildIdentifier,
             entries: entries,
             seenUpdateIdentifiers: seenUpdateIdentifiers,
+            seenBuildIdentifiers: seenBuildIdentifiers,
             lastSeenBuildIdentifier: lastSeenBuildIdentifier,
             hasPriorAppState: hasPriorAppState)
 

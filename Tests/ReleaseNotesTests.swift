@@ -531,6 +531,23 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertFalse(nextLaunch.isShowingCurrentRelease)
     }
 
+    @MainActor
+    func testSeenBuildDoesNotReopenWhenOlderHighWatermarkRemains() throws {
+        let suite = "ReleaseNotesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(118, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
+        defaults.set(["119"], forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey)
+        defaults.set(HarklightReleaseNotes.updateEntries.map(\.id),
+                     forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey)
+
+        let launch = ReleaseNotesPresentation(
+            currentBuildIdentifier: "119", hasPriorAppState: true, defaults: defaults)
+        XCTAssertFalse(launch.isShowingCurrentRelease)
+        XCTAssertEqual(defaults.integer(forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey),
+                       119)
+    }
+
     func testLegacyUpgradeShowsNewestReleasedNoteOnly() {
         let notes = [releaseNote(1), releaseNote(3), releaseNote(2), releaseNote(4)]
 
