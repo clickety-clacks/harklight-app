@@ -1922,8 +1922,7 @@ struct LiveRequestDetail: View {
                     }
                 }
             }
-            .foregroundChatNotificationLayer(includeAppLaunch: false,
-                                             testRouter: testNotificationRouter,
+            .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                              testOpen: testOpenForegroundChatIndicator)
         }
         .sheet(isPresented: $chatPresented) {
