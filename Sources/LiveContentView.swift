@@ -594,7 +594,8 @@ struct LiveContentView: View {
                 },
                 testNotificationRouter: testNotificationRouter,
                 testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
-            .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+            .foregroundChatNotificationLayer(includeAppLaunch: false,
+                                             testRouter: testNotificationRouter,
                                              testOpen: testOpenForegroundChatIndicator)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
