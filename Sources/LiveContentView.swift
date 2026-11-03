@@ -319,6 +319,25 @@ struct LiveContentView: View {
         #endif
     }
 
+    private var inboxRefreshAction: (@MainActor () async -> Void)? {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-list-refresh") {
+            return { await refreshListForTesting() }
+        }
+        #endif
+        guard let launch, !store.isReadOnly, !store.isLocalExample else { return nil }
+        return { await launch.refreshLive() }
+    }
+
+    #if DEBUG
+    private func refreshListForTesting() async {
+        store.beginRefresh()
+        defer { store.endRefresh() }
+        try? await Task.sleep(for: .seconds(4))
+        store.connectionWarning = "The approved server could not be reached."
+    }
+    #endif
+
     var body: some View {
         let progress = launch?.foregroundConnectProgress
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
@@ -368,6 +387,7 @@ struct LiveContentView: View {
                 isRefreshing: store.isRefreshing,
                 conversationStore: store,
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
+                refreshInbox: inboxRefreshAction,
                 showsLocalExamples: showsSampleMessages && !store.isReadOnly,
                 notificationNavigation: launch?.notificationNavigation)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
