@@ -653,6 +653,9 @@ enum HarklightReleaseNotes {
 }
 
 enum ReleaseNotesLifecycle {
+    // Earlier numbered notes predate first-install release announcements.
+    // Keep their existing first-install behavior when a person installs an old build.
+    private static let lastHistoricalBuildIdentifier = 79
     static let seenBuildIdentifiersDefaultsKey = "release-notes.seen-build-identifiers"
     static let lastSeenBuildIdentifierDefaultsKey = "release-notes.last-seen-build-identifier"
     static let seenUpdateIdentifiersDefaultsKey = "release-notes.seen-update-identifiers"
@@ -681,7 +684,16 @@ enum ReleaseNotesLifecycle {
             currentBuildIdentifier: currentBuildIdentifier,
             entries: updateEntries).filter { !seenUpdateIdentifiers.contains($0.id) }
         guard let lastSeenBuildIdentifier else {
-            return hasPriorAppState ? unseenUpdates + Array(released.prefix(1)) : []
+            if hasPriorAppState {
+                return unseenUpdates + Array(released.prefix(1))
+            }
+            // A new installation should see notes written for its own current
+            // release, while older history remains available from Settings.
+            guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
+            return released.filter {
+                guard let build = $0.buildIdentifier else { return false }
+                return build > lastHistoricalBuildIdentifier && build == currentBuild
+            }
         }
         return unseenUpdates + released.filter { ($0.buildIdentifier ?? 0) > lastSeenBuildIdentifier }
     }
