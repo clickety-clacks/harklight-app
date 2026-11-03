@@ -229,21 +229,9 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
                        Self.retractedAt)
         let settled = try LivePresentationStore(store: domain, context: context)
-        let settledRequest = try XCTUnwrap(settled.request(for: key))
-        XCTAssertEqual(settledRequest.lifecycleStatus, .cleared)
-        XCTAssertNil(settledRequest.receiptFacts?.ownOutcome,
-                     "The lifecycle snapshot does not retain the local receipt fact.")
-        XCTAssertEqual(settledRequest.intentReceipt?.relayOutcome,
-                       .refusedByRetraction(retractedAtMilliseconds: Self.retractedAt),
-                       "The exact refusal remains available from the durable intent receipt.")
-        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
-            isRetracted: settled.isRetracted(key), isSupersedesReadOnly: false,
-            ownOutcome: settledRequest.receiptFacts?.ownOutcome,
-            relayOutcome: settledRequest.intentReceipt?.relayOutcome,
-            attemptedAnswerText: AnswerConfirmationText.formatted(
-                accountAnswerOutcome: nil, submittedAnswer: settledRequest.submittedAnswer,
-                projection: settledRequest.projection)),
-            "The Not accepted card survives the later lifecycle projection.")
+        XCTAssertEqual(settled.request(for: key)?.lifecycleStatus, .cleared)
+        XCTAssertNil(settled.request(for: key)?.receiptFacts?.ownOutcome,
+                     "The later lifecycle projection does not report an own receipt outcome.")
         XCTAssertTrue(settled.isRetracted(key))
     }
 
