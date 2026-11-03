@@ -1277,16 +1277,19 @@ struct LiveRequestDetail: View {
             isSupersedesReadOnly: isSupersedesReadOnly,
             ownOutcome: request.receiptFacts?.ownOutcome,
             relayOutcome: request.intentReceipt?.relayOutcome,
-            attemptedAnswerText: attemptedAnswerText)
+            attemptedAnswerText: attemptedAnswerText,
+            ownAnswerWasRefusedByRetraction: request.ownAnswerWasRefusedByRetraction)
     }
 
     static func shouldShowNotAcceptedConfirmation(isRetracted: Bool,
                                                   isSupersedesReadOnly: Bool,
                                                   ownOutcome: OwnOutcome?,
                                                   relayOutcome: RelayOutcome?,
-                                                  attemptedAnswerText: String?) -> Bool {
+                                                  attemptedAnswerText: String?,
+                                                  ownAnswerWasRefusedByRetraction: Bool = false) -> Bool {
         guard isRetracted, !isSupersedesReadOnly,
               let attemptedAnswerText, !attemptedAnswerText.isEmpty else { return false }
+        if ownAnswerWasRefusedByRetraction { return true }
         if ownOutcome == .refused { return true }
         if let relayOutcome, case .refusedByRetraction = relayOutcome { return true }
         return false

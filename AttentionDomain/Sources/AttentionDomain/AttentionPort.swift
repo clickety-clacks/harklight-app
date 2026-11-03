@@ -306,6 +306,10 @@ public struct PresentedRequest: Equatable, Sendable {
     /// The submitted answer projected from its durable intent, not from
     /// editable draft storage.
     public let submittedAnswer: RequestDraft?
+    /// Whether this device's retained answer attempt was definitively refused
+    /// after the sender retracted the request. This narrow presentation fact
+    /// survives account-terminal projections that hide the full local receipt.
+    public let ownAnswerWasRefusedByRetraction: Bool
     public let lifecycleStatus: AppLifecycleStatus
     public let receiptFacts: ReceiptPresentationFacts?
     public let intentReceipt: IntentReceipt?
@@ -362,6 +366,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 selector: BoundDocumentSelector?,
                 draft: RequestDraft,
                 submittedAnswer: RequestDraft? = nil,
+                ownAnswerWasRefusedByRetraction: Bool = false,
                 lifecycleStatus: AppLifecycleStatus,
                 receiptFacts: ReceiptPresentationFacts?,
                 intentReceipt: IntentReceipt?,
@@ -397,6 +402,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.selector = selector
         self.draft = draft
         self.submittedAnswer = submittedAnswer
+        self.ownAnswerWasRefusedByRetraction = ownAnswerWasRefusedByRetraction
         self.lifecycleStatus = lifecycleStatus
         self.receiptFacts = receiptFacts
         self.intentReceipt = intentReceipt
@@ -1156,6 +1162,12 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
         let projection: AdmittedRequestProjection
         let hasAccountTerminal = remote?.state != nil
+        let ownAnswerWasRefusedByRetraction: Bool
+        if let submission, case .refusedByRetraction = submission.disposition {
+            ownAnswerWasRefusedByRetraction = true
+        } else {
+            ownAnswerWasRefusedByRetraction = false
+        }
         let interface = request.interface(deliveredFileNames: Set(deliveredFiles.map(\.name)))
         switch interface {
         case let .sender(document):
@@ -1247,6 +1259,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 draft: draft,
                                 submittedAnswer: submittedAnswer(for: submission,
                                                                  interface: interface),
+                                ownAnswerWasRefusedByRetraction: ownAnswerWasRefusedByRetraction,
                                 lifecycleStatus: status,
                                 receiptFacts: hasAccountTerminal ? nil : receiptFacts,
                                 intentReceipt: hasAccountTerminal ? nil : submission.map { receipt($0, context: context) },

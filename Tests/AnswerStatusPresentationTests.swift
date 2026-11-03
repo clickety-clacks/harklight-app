@@ -28,6 +28,11 @@ final class AnswerStatusPresentationTests: XCTestCase {
             relayOutcome: refused, attemptedAnswerText: "Keep original choice"),
             "A retained refusedByRetraction receipt can drive the card without receiptFacts.")
         XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: true, isSupersedesReadOnly: false, ownOutcome: nil,
+            relayOutcome: nil, attemptedAnswerText: "Keep original choice",
+            ownAnswerWasRefusedByRetraction: true),
+            "An account-terminal projection can retain the local refusal fact without exposing its full receipt.")
+        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
             isRetracted: true, isSupersedesReadOnly: false, ownOutcome: .refused,
             relayOutcome: nil, attemptedAnswerText: "Keep original choice"),
             "A refused terminal receipt still drives the same card.")
