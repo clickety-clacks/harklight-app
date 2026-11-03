@@ -1533,8 +1533,7 @@ struct LiveRequestDetail: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("request-heading")
                 .accessibilityHint("Open request details")
-                if let priority = request.inboxPriority,
-                   let priorityLabel = InboxPriorityDisplay.label(for: priority) {
+                if let priorityLabel = InboxPriorityDisplay.forScore(request.inboxScore) {
                     Label {
                         Text(priorityLabel.title)
                     } icon: {
