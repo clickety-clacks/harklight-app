@@ -8,8 +8,11 @@ final class ConversationSampleUITests: XCTestCase {
         app.launchArguments = ["--harklight-samples", "--harklight-test-foreground-chat-indicator"]
         app.launch()
 
-        let indicator = app.buttons["foreground-chat-notification"]
-        XCTAssertTrue(indicator.waitForExistence(timeout: 10), app.debugDescription)
+        let indicators = app.buttons.matching(identifier: "foreground-chat-notification")
+        XCTAssertTrue(indicators.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertEqual(indicators.count, 1,
+                       "With no sheet open, the app root should show exactly one chat indicator.\n\(app.debugDescription)")
+        let indicator = indicators.firstMatch
         XCTAssertTrue(indicator.label.contains("Agent reply"), app.debugDescription)
         capture("foreground-chat-indicator", app)
         indicator.tap()

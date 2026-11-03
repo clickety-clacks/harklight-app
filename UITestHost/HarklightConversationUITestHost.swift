@@ -58,6 +58,9 @@ struct HarklightConversationUITestHost: App {
                     ContentUnavailableView("Local test model unavailable", systemImage: "questionmark.folder")
                 }
             }
+            .foregroundChatNotificationLayer(includeAppLaunch: false,
+                                             testRouter: .shared,
+                                             testOpen: openTestChatIndicator)
             .task {
                 if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }
                 prepareTestChatIndicatorIfRequested()
