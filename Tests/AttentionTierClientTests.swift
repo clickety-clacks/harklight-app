@@ -164,7 +164,7 @@ final class AttentionTierClientTests: XCTestCase {
         let request = try JSONValue.parse(wire.viewGet(knownRevision: ExactText("view-1"), ref: "get"))
         XCTAssertEqual(request.uniqueValue(named: "type"), .string(ExactText("view_get")))
         XCTAssertEqual(request.uniqueValue(named: "known_view_rev"), .string(ExactText("view-1")))
-        let response = data(#"{"v":1,"type":"ok","ref":"get","view_rev":"view-2","entries":[{"sender_id":"sender","message_id":"malformed-optionals","priority":"urgent","score":"0.99","thread":4,"due_at":"tomorrow","reason":false,"new_field":true},{"sender_id":"sender","message_id":"valid","priority":"now","score":0.93,"thread":"release","due_at":1793300000000,"reason":"deadline","new_field":"ignored"},{"sender_id":"sender","message_id":"legacy-no-score","priority":"now"},{"sender_id":"sender","message_id":"out-of-range-score","priority":"now","score":1.01}]}"#)
+        let response = data(#"{"v":1,"type":"ok","ref":"get","view_rev":"view-2","entries":[{"sender_id":"sender","message_id":"malformed-optionals","score":"0.99","thread":4,"due_at":"tomorrow","reason":false,"new_field":true},{"sender_id":"sender","message_id":"valid","score":0.93,"thread":"release","due_at":1793300000000,"reason":"deadline","new_field":"ignored"},{"sender_id":"sender","message_id":"legacy-no-score","priority":"now"},{"sender_id":"sender","message_id":"out-of-range-score","score":1.01}]}"#)
         guard case let .updated(view) = wire.decodeViewGet(response, ref: "get") else {
             return XCTFail("Invalid optional entry fields must not discard the view.")
         }
@@ -175,7 +175,7 @@ final class AttentionTierClientTests: XCTestCase {
         XCTAssertNil(view.entries[0].thread)
         XCTAssertNil(view.entries[0].dueAtMilliseconds)
         XCTAssertNil(view.entries[0].reason)
-        XCTAssertEqual(view.entries[1].priority, .now)
+        XCTAssertNil(view.entries[1].priority, "R4 score entries do not include a categorical priority.")
         XCTAssertEqual(view.entries[1].score, 0.93)
         XCTAssertEqual(view.entries[1].thread, ExactText("release"))
         XCTAssertEqual(view.entries[1].dueAtMilliseconds, 1_793_300_000_000)

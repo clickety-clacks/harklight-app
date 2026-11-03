@@ -906,7 +906,6 @@ final class NativeRelayCoreTests: XCTestCase {
             .object([
                 JSONMember("sender_id", .string(ExactText("sender"))),
                 JSONMember("message_id", .string(ExactText("viewed"))),
-                JSONMember("priority", .string(ExactText("low"))),
                 JSONMember("score", .number(JSONNumber(lexeme: "0.93"))),
                 JSONMember("thread", .string(ExactText("release"))),
                 JSONMember("due_at", .number(JSONNumber(lexeme: "1793300000000"))),
@@ -920,13 +919,11 @@ final class NativeRelayCoreTests: XCTestCase {
             .object([
                 JSONMember("sender_id", .string(ExactText("sender"))),
                 JSONMember("message_id", .string(ExactText("string-score"))),
-                JSONMember("priority", .string(ExactText("now"))),
                 JSONMember("score", .string(ExactText("0.99")))
             ]),
             .object([
                 JSONMember("sender_id", .string(ExactText("sender"))),
                 JSONMember("message_id", .string(ExactText("out-of-range-score"))),
-                JSONMember("priority", .string(ExactText("now"))),
                 JSONMember("score", .number(JSONNumber(lexeme: "1.01")))
             ])
         ]
@@ -940,7 +937,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let entries = try XCTUnwrap(snapshot.inboxView?.entries)
         XCTAssertEqual(entries.map { $0.key.messageID.rawValue },
                        ["viewed", "legacy-no-score", "string-score", "out-of-range-score"])
-        XCTAssertEqual(entries[0].priority, .low)
+        XCTAssertNil(entries[0].priority, "R4 score entries do not include a categorical priority.")
         XCTAssertEqual(entries[0].score, 0.93)
         XCTAssertEqual(entries[0].thread, ExactText("release"))
         XCTAssertEqual(entries[0].dueAtMilliseconds, 1_793_300_000_000)
