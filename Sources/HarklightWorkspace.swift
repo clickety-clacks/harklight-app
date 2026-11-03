@@ -372,7 +372,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection: InboxSelection?
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
-    @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var isWarningPresented = false
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
@@ -466,7 +465,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
         }
         selection = next
-        preferredCompactColumn = next == nil ? .sidebar : .detail
         // Keep departure cleanup bound to the explicit identity transition;
         // split-view adaptation changes columns without leaving this message.
         selectionDidChange(from: previous, to: next)
@@ -556,7 +554,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return [
             "selection=\(UIDiagnostics.describe(selection)) tab=\(selectedTab.rawValue) entryTab=\(listTabOnMessageEntry?.rawValue ?? "nil") lastViewed=\(UIDiagnostics.describe(lastViewedSelection))",
             "betweenMessages=\(navigatedBetweenMessages) restoreOnReturn=\(restoreLastViewedOnReturn)",
-            "compactColumn=\(preferredCompactColumn) sizeClass=\(horizontalSizeClass.map { "\($0)" } ?? "nil") landscape=\(landscape)",
+            "sizeClass=\(horizontalSizeClass.map { "\($0)" } ?? "nil") landscape=\(landscape)",
             "samples.selected=\(samples.selectedID ?? "nil") samples.lastViewed=\(samples.lastViewedID ?? "nil") loadError=\(samples.loadError ?? "nil")",
             "rows=\(rowSummary)",
             UIDiagnostics.shared.eventSummary,
@@ -566,7 +564,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private var navigationSelection: Binding<InboxSelection?> {
         Binding(get: { selection }, set: { next in
             navigate(to: next)
-            if next != nil { preferredCompactColumn = .detail }
         })
     }
 
@@ -635,7 +632,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
-        let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
+        let splitView = NavigationSplitView {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   refreshInbox: refreshInbox,
@@ -732,7 +729,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 selectedTab = destination.selectedTab
                 search = destination.search
                 selection = destination.selection
-                preferredCompactColumn = selection == nil ? .sidebar : .detail
                 if let key = route.request {
                     conversationStore?.newMessageAreaStore?.open(key)
                     lastViewedSelection = .request(key)
@@ -779,7 +775,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 guard showsLocalExamples, selection == nil,
                       let id = samples.selectedID, samples.responses[id] != nil else { return }
                 selection = .sample(id)
-                preferredCompactColumn = .detail
                 lastViewedSelection = .sample(id)
             }
             .uiDiagnostics("inbox-ui-diagnostics", diagnosticSummary(landscape: landscape))

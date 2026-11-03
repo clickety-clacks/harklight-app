@@ -37,6 +37,83 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachScreenshot("portrait-master-after-native-back")
     }
 
+    func testSelectingAnotherMessageFromPortraitOverlayUpdatesDetailAndDismissesIt() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics"]
+        app.launch()
+
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
+        let review = app.descendants(matching: .any)["request-row-review-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        facilities.tap()
+
+        let card = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(card.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        let back = workspaceBackButton(in: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(review.isHittable, app.debugDescription)
+        attachScreenshot("portrait-overlay-before-second-selection")
+
+        review.tap()
+
+        XCTAssertTrue(card.staticTexts["Studio review"].waitForExistence(timeout: 5),
+                      "The second row must replace the selected detail. \(app.debugDescription)")
+        XCTAssertFalse(review.isHittable,
+                       "Selecting from the reopened portrait list must dismiss it. \(app.debugDescription)")
+        attachScreenshot("portrait-detail-after-second-selection")
+        attachHierarchy("portrait-second-selection-hierarchy", app: app)
+    }
+
+    func testLandscapeSelectionKeepsListAndDetailVisibleAcrossMessages() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics"]
+        app.launch()
+
+        let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        XCTAssertTrue(diagnostic.waitForExistence(timeout: 10),
+                      "The side-by-side test requires UI layout diagnostics. \(app.debugDescription)")
+        XCTAssertTrue(diagnostic.label.contains("sizeClass=regular"),
+                      "The test requires a regular-width side-by-side layout before selecting. \(diagnostic.label)")
+        XCTAssertTrue(diagnostic.label.contains("landscape=true"),
+                      "The test requires landscape before selecting. \(diagnostic.label)")
+
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
+        let review = app.descendants(matching: .any)["request-row-review-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("landscape-list-and-empty-detail-before-selection")
+        facilities.tap()
+
+        let card = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(card.staticTexts["Facilities desk"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.searchFields.firstMatch.isHittable,
+                      "The inbox list must remain beside the selected Facilities detail. \(app.debugDescription)")
+        XCTAssertTrue(facilities.isHittable,
+                      "The Facilities row must remain visible beside its detail. \(app.debugDescription)")
+        attachScreenshot("landscape-facilities-detail-with-list")
+
+        review.tap()
+
+        XCTAssertTrue(card.staticTexts["Studio review"].waitForExistence(timeout: 5),
+                      "Selecting the second row must replace the detail with Studio review. \(app.debugDescription)")
+        XCTAssertTrue(app.searchFields.firstMatch.isHittable,
+                      "The inbox list must remain beside the second selected detail. \(app.debugDescription)")
+        XCTAssertTrue(review.isHittable,
+                      "The Studio review row must remain visible beside its detail. \(app.debugDescription)")
+        attachScreenshot("landscape-studio-review-detail-with-list")
+        attachHierarchy("landscape-second-selection-hierarchy", app: app)
+    }
+
     func testSeenReturnsToListOnlyWhenNoListPaneIsVisible() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
@@ -100,5 +177,12 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         screenshot.name = name
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    private func attachHierarchy(_ name: String, app: XCUIApplication) {
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = name
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
     }
 }
