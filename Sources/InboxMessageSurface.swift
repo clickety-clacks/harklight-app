@@ -19,6 +19,8 @@ struct InboxCardContext {
     let hasNext: Bool
     var inlineChat = false
     var isSupersedesTarget = false
+    var notificationChatRouteSerial: UInt64? = nil
+    var notificationChatRouteDidOpen: (() -> Void)? = nil
     var dismissToList: (() -> Void)? = nil
     var messageType: HarklightMessageType = .request
     let move: (Int) -> Void

@@ -74,6 +74,36 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         }
     }
 
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping @Sendable (UNNotificationPresentationOptions) -> Void) {
+        let content = notification.request.content
+        let payload = Self.notificationNavigationPayload(
+            actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: content.userInfo)
+        guard let payload, NativeNotificationLocator(payload)?.target == "chat" else {
+            // Foreground notifications were previously silent. Keep that behavior
+            // for request and all other notification kinds.
+            completionHandler([])
+            return
+        }
+        let title = content.title
+        let body = content.body
+
+        Task { @MainActor in
+            let handled = NativeNotificationRouter.shared.receiveForegroundNotification(
+                payload, title: title, body: body)
+            // Chat replies use the in-app indicator when another screen is open;
+            // the matching visible chat needs no separate notification at all.
+            completionHandler([])
+            if handled {
+                // The alert is only a wake hint; the authenticated relay supplies
+                // the reply text to an already-visible conversation.
+                Task { _ = await NativeRelayLifecycle.shared.refreshFromTrustedRelay() }
+            }
+        }
+    }
+
     /// Keep the system response handoff testable without constructing a
     /// device-owned UNNotificationResponse.
     nonisolated static func notificationNavigationPayload(actionIdentifier: String,

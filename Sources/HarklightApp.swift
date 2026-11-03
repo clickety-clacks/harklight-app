@@ -122,6 +122,14 @@ struct HarklightApp: App {
                 }
             }
             .modifier(AcceptanceReduceMotionOverride(isEnabled: acceptanceReduceMotionOverride))
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if scenePhase == .active,
+                   let indicator = launch.notificationRouter.foregroundChatIndicator {
+                    ForegroundChatNotificationIndicatorView(indicator: indicator) {
+                        Task { await launch.openForegroundChatIndicator(id: indicator.id) }
+                    }
+                }
+            }
             .task {
                 if loadsSampleMessages { samples.populate() }
             }

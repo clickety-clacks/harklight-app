@@ -2,6 +2,26 @@ import XCTest
 
 @MainActor
 final class ConversationSampleUITests: XCTestCase {
+    func testForegroundChatIndicatorOpensTheMatchingConversation() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples", "--harklight-test-foreground-chat-indicator"]
+        app.launch()
+
+        let indicator = app.buttons["foreground-chat-notification"]
+        XCTAssertTrue(indicator.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(indicator.label.contains("Agent reply"), app.debugDescription)
+        capture("foreground-chat-indicator", app)
+        indicator.tap()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts[
+            "Agent example: the shorter path is faster, while the longer path is easier to revise."
+        ].waitForExistence(timeout: 5), app.debugDescription)
+        capture("foreground-chat-indicator-opened-matching-chat", app)
+    }
+
     func testSendButtonAndReturnClearAcceptedLocalDiscussion() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

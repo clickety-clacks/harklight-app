@@ -826,7 +826,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                     "device_id": "saved-device-id",
                     "sender_id": "sender",
                     "message_id": "target",
-                    "acceptance_seq": 1
+                    "acceptance_seq": 1,
+                    "target": "chat"
                 ]
             ]
         ]
@@ -866,12 +867,17 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         XCTAssertEqual(pageFetches, 1)
         XCTAssertEqual(app.notificationNavigation?.request, target)
+        XCTAssertTrue(app.notificationNavigation?.opensChat == true,
+                      "A chat-target tap resolves the same request identity and then opens its conversation.")
         XCTAssertEqual(live.selectedRequestKey, target)
         XCTAssertEqual(live.request(for: target)?.lifecycleStatus, .superseded)
         XCTAssertEqual(live.inboxRows.map(\.key), [replacement],
                        "The notification follows normal routing for the superseded identity instead of redirecting to its replacement.")
         XCTAssertNil(app.notificationNavigationMessage)
         XCTAssertNil(coldRouter.intent)
+        app.notificationChatRouteWasOpened(serial: try XCTUnwrap(app.notificationNavigation?.serial))
+        XCTAssertFalse(app.notificationNavigation?.opensChat == true,
+                       "The detail consumes the one-shot chat opening so returning to it does not reopen the sheet.")
     }
 
     func testNotificationRecoveryKeepsRetainedRowsWithoutMarkingThemSeen() async throws {
