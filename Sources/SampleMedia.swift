@@ -196,6 +196,7 @@ struct SampleAnnotationEditor: View {
         }
         .sheet(isPresented: $enlarged) {
             SampleIllustrationViewer(illustration: illustration, point: point)
+                .foregroundChatNotificationLayer()
         }
     }
 

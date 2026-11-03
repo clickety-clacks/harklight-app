@@ -36,6 +36,9 @@ struct ConversationPanel: View {
     let key: RequestKey
     let sender: String
     let title: String
+    var testNotificationRouter: NativeNotificationRouter? = nil
+    var testOpenForegroundChatIndicator: (() -> Void)? = nil
+    var testConversationSheetDidAppear: (() -> Void)? = nil
     @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
     @State private var inspectedFileRevision: UInt64?
@@ -43,6 +46,7 @@ struct ConversationPanel: View {
     @State private var openingFile = false
     @State private var fileError: String?
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
 
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var revision: UInt64 { selectedRevision ?? thread?.currentRevision ?? 1 }
@@ -156,7 +160,23 @@ struct ConversationPanel: View {
                 }
             }
         }
-        .onAppear { if selectedRevision == nil { selectedRevision = thread?.currentRevision } }
+        .onAppear {
+            if selectedRevision == nil { selectedRevision = thread?.currentRevision }
+            if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
+            testConversationSheetDidAppear?()
+        }
+        .onDisappear { NativeNotificationRouter.shared.conversationBecameHidden(key) }
+        .onChange(of: key) { oldKey, newKey in
+            NativeNotificationRouter.shared.conversationBecameHidden(oldKey)
+            if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(newKey) }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                NativeNotificationRouter.shared.conversationBecameVisible(key)
+            } else {
+                NativeNotificationRouter.shared.conversationBecameHidden(key)
+            }
+        }
         .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
         .sheet(item: $inspectedFile) { file in
             NavigationStack {
@@ -190,6 +210,8 @@ struct ConversationPanel: View {
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { inspectedFile = nil } } }
                 .quickLookPreview($previewURL)
             }
+            .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                             testOpen: testOpenForegroundChatIndicator)
         }
     }
 

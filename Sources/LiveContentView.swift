@@ -462,6 +462,11 @@ struct LiveContentView: View {
     let launch: NativeAppLaunch?
     let archiveDeparture: NativeAccountDeparture?
     let fixtureStore: PrototypeStore?
+    var testNotificationNavigation: NativeInboxNavigation? = nil
+    var testNotificationRouter: NativeNotificationRouter? = nil
+    var testOpenForegroundChatIndicator: (() -> Void)? = nil
+    var testConversationSheetDidAppear: (() -> Void)? = nil
+    var testNotificationChatRouteDidOpen: ((UInt64) -> Void)? = nil
     @State private var replyEditorFocused = false
 #if DEBUG
     @State private var didApplyPresentationTestFixture = false
@@ -471,12 +476,22 @@ struct LiveContentView: View {
          samples: SampleLibrary,
          launch: NativeAppLaunch? = nil,
          archiveDeparture: NativeAccountDeparture? = nil,
-         fixtureStore: PrototypeStore? = nil) {
+         fixtureStore: PrototypeStore? = nil,
+         testNotificationNavigation: NativeInboxNavigation? = nil,
+         testNotificationRouter: NativeNotificationRouter? = nil,
+         testOpenForegroundChatIndicator: (() -> Void)? = nil,
+         testConversationSheetDidAppear: (() -> Void)? = nil,
+         testNotificationChatRouteDidOpen: ((UInt64) -> Void)? = nil) {
         self.store = store
         self.samples = samples
         self.launch = launch
         self.archiveDeparture = archiveDeparture
         self.fixtureStore = fixtureStore
+        self.testNotificationNavigation = testNotificationNavigation
+        self.testNotificationRouter = testNotificationRouter
+        self.testOpenForegroundChatIndicator = testOpenForegroundChatIndicator
+        self.testConversationSheetDidAppear = testConversationSheetDidAppear
+        self.testNotificationChatRouteDidOpen = testNotificationChatRouteDidOpen
     }
 
 #if DEBUG
@@ -545,7 +560,10 @@ struct LiveContentView: View {
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
                         LiveRequestDetail(request: request, store: store, context: context,
-                                          fixtureStore: fixtureStore)
+                            fixtureStore: fixtureStore,
+                            testNotificationRouter: testNotificationRouter,
+                            testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
+                            testConversationSheetDidAppear: testConversationSheetDidAppear)
                     } else {
                         ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
                     }
@@ -566,7 +584,16 @@ struct LiveContentView: View {
                 fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
                 refreshInbox: inboxRefreshAction,
                 showsLocalExamples: showsSampleMessages && !store.isReadOnly,
-                notificationNavigation: launch?.notificationNavigation)
+                notificationNavigation: testNotificationNavigation ?? launch?.notificationNavigation,
+                notificationChatRouteDidOpen: { serial in
+                    if let testNotificationChatRouteDidOpen {
+                        testNotificationChatRouteDidOpen(serial)
+                    } else {
+                        launch?.notificationChatRouteWasOpened(serial: serial)
+                    }
+                },
+                testNotificationRouter: testNotificationRouter,
+                testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
                 Button("Copy details") {
@@ -938,6 +965,9 @@ struct LiveRequestDetail: View {
     var localExample: SampleResponse? = nil
     var fixtureStore: PrototypeStore? = nil
     var noCommentUnavailableOverride: Bool? = nil
+    var testNotificationRouter: NativeNotificationRouter? = nil
+    var testOpenForegroundChatIndicator: (() -> Void)? = nil
+    var testConversationSheetDidAppear: (() -> Void)? = nil
     private var showsNoCommentUnavailable: Bool {
         noCommentUnavailableOverride ?? request.noCommentUnavailable
     }
@@ -966,13 +996,19 @@ struct LiveRequestDetail: View {
          context: InboxCardContext = .standalone,
          localExample: SampleResponse? = nil,
          fixtureStore: PrototypeStore? = nil,
-         noCommentUnavailableOverride: Bool? = nil) {
+         noCommentUnavailableOverride: Bool? = nil,
+         testNotificationRouter: NativeNotificationRouter? = nil,
+         testOpenForegroundChatIndicator: (() -> Void)? = nil,
+         testConversationSheetDidAppear: (() -> Void)? = nil) {
         self.request = request
         self.store = store
         self.context = context
         self.localExample = localExample
         self.fixtureStore = fixtureStore
         self.noCommentUnavailableOverride = noCommentUnavailableOverride
+        self.testNotificationRouter = testNotificationRouter
+        self.testOpenForegroundChatIndicator = testOpenForegroundChatIndicator
+        self.testConversationSheetDidAppear = testConversationSheetDidAppear
         _storePresentationSnapshot = State(initialValue: Self.storePresentationSnapshot(
             request: request, store: store))
         let canSubmit = localExample == nil &&
@@ -1851,39 +1887,54 @@ struct LiveRequestDetail: View {
         }
         .sheet(item: $enlargedPicture) { picture in
             SamplePictureViewer(initialPicture: picture)
+                .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                                 testOpen: testOpenForegroundChatIndicator)
         }
         .sheet(isPresented: $requestDetailsPresented) {
             requestDetailsSheet
+                .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                                 testOpen: testOpenForegroundChatIndicator)
         }
         .sheet(item: $warningDialog) { dialogKind in
-            switch dialogKind {
-            case .failedResponse:
-                if let warning = failedResponseWarning {
-                    FailedResponseDialog(title: "Response delivery",
-                        summary: warning.summary,
-                        detail: .localized(warning.detail),
-                        canRetry: store.canRetryFailedResponse(for: request.key),
-                        onRetry: { _ = store.retryFailedResponse(for: request.key) },
-                        onCopy: { UIPasteboard.general.string = $0 })
-                }
-            case .skippedMessage:
-                if let warning = skippedMessageWarning {
-                    FailedResponseDialog(title: "Message not loaded",
-                        summary: "The message could not be loaded and was skipped.",
-                        detail: .plain(store.skippedMessageDiagnosticText(for: warning) ??
-                            "The safe diagnostic details are no longer retained."),
-                        accessibilityPrefix: "message-load-warning",
-                        canRetry: false,
-                        onRetry: nil,
-                        onCopy: { UIPasteboard.general.string = $0 })
+            Group {
+                switch dialogKind {
+                case .failedResponse:
+                    if let warning = failedResponseWarning {
+                        FailedResponseDialog(title: "Response delivery",
+                            summary: warning.summary,
+                            detail: .localized(warning.detail),
+                            canRetry: store.canRetryFailedResponse(for: request.key),
+                            onRetry: { _ = store.retryFailedResponse(for: request.key) },
+                            onCopy: { UIPasteboard.general.string = $0 })
+                    }
+                case .skippedMessage:
+                    if let warning = skippedMessageWarning {
+                        FailedResponseDialog(title: "Message not loaded",
+                            summary: "The message could not be loaded and was skipped.",
+                            detail: .plain(store.skippedMessageDiagnosticText(for: warning) ??
+                                "The safe diagnostic details are no longer retained."),
+                            accessibilityPrefix: "message-load-warning",
+                            canRetry: false,
+                            onRetry: nil,
+                            onCopy: { UIPasteboard.general.string = $0 })
+                    }
                 }
             }
+            .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                             testOpen: testOpenForegroundChatIndicator)
         }
         .sheet(isPresented: $chatPresented) {
             conversationPanel
+                .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                                 testOpen: testOpenForegroundChatIndicator)
         }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
+        }
+        .onChange(of: context.notificationChatRouteSerial, initial: true) { _, serial in
+            guard serial != nil else { return }
+            if !context.inlineChat { chatPresented = true }
+            context.notificationChatRouteDidOpen?()
         }
         .onChange(of: request) { _, _ in
             refreshStorePresentationSnapshot()
@@ -2091,7 +2142,10 @@ struct LiveRequestDetail: View {
 
     private var conversationPanel: some View {
         ConversationPanel(store: store, key: request.key,
-            sender: detailSenderLabel, title: request.title?.rawValue ?? "")
+            sender: detailSenderLabel, title: request.title?.rawValue ?? "",
+            testNotificationRouter: testNotificationRouter,
+            testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
+            testConversationSheetDidAppear: testConversationSheetDidAppear)
     }
 
     static func informationalSeenText(_ status: InformationalSeenStatus) -> String {

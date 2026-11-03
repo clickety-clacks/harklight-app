@@ -122,6 +122,7 @@ struct HarklightApp: App {
                 }
             }
             .modifier(AcceptanceReduceMotionOverride(isEnabled: acceptanceReduceMotionOverride))
+            .foregroundChatNotificationLayer()
             .task {
                 if loadsSampleMessages { samples.populate() }
             }
@@ -155,8 +156,10 @@ struct HarklightApp: App {
             .sheet(isPresented: $releaseNotes.isShowingCurrentRelease) {
                 if !releaseNotes.notesToShow.isEmpty {
                     ReleaseNotesSheet(notes: releaseNotes.notesToShow)
+                        .foregroundChatNotificationLayer()
                 }
             }
+            .environment(launch)
         }
     }
 }

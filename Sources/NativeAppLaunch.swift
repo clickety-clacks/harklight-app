@@ -993,6 +993,18 @@ final class NativeAppLaunch {
         return shouldCheck
     }
 
+    func openForegroundChatIndicator(id: UUID) async {
+        guard let indicator = notificationRouter.consumeForegroundChatIndicator(id: id) else { return }
+        notificationRouter.receive(indicator.payload, opened: true)
+        await handleNotification()
+    }
+
+    func notificationChatRouteWasOpened(serial: UInt64) {
+        guard let route = notificationNavigation, route.serial == serial, route.opensChat,
+              let request = route.request else { return }
+        notificationNavigation = NativeInboxNavigation(serial: route.serial, request: request)
+    }
+
     func handleNotification() async {
         guard didFinishRestoring, let intent = notificationRouter.intent,
               handledNotificationSerial != intent.serial else { return }
@@ -1044,7 +1056,9 @@ final class NativeAppLaunch {
             context: presentation.notificationContext, requests: presentation.presentation.requests,
             synchronized: notificationSynchronized) {
             presentation.selectRequest(key)
-            notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key)
+            let opensChat = notificationRouter.intent?.locator?.target == "chat"
+            notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key,
+                                                            opensChat: opensChat)
             notificationNavigationMessage = nil
             notificationRouter.consumed()
             return
@@ -1090,7 +1104,9 @@ final class NativeAppLaunch {
                 context: presentation.notificationContext,
                 requests: presentation.presentation.requests, synchronized: true) {
                 presentation.selectRequest(key)
-                notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key)
+                let opensChat = notificationRouter.intent?.locator?.target == "chat"
+                notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key,
+                                                                opensChat: opensChat)
                 notificationNavigationMessage = nil
                 notificationRouter.consumed()
                 return

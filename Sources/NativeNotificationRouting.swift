@@ -41,6 +41,7 @@ struct NativeNotificationLocator: Codable, Equatable {
     let deviceID: ExactText
     let request: RequestKey
     let acceptanceSequence: UInt64
+    let target: String?
 
     init?(_ payload: JSONValue) {
         guard let attention = payload.uniqueValue(named: "attention"),
@@ -60,6 +61,7 @@ struct NativeNotificationLocator: Codable, Equatable {
         deviceID = device
         request = RequestKey(accountScope: person, senderID: sender, messageID: message)
         acceptanceSequence = sequence
+        target = locator.uniqueValue(named: "target")?.stringValue?.rawValue
     }
 
     func profile(in records: [NativeEnrollmentRecord]) -> NativeNotificationProfile? {
@@ -82,6 +84,21 @@ struct NativeNotificationIntent: Codable, Equatable {
 struct NativeInboxNavigation: Equatable {
     let serial: UInt64
     let request: RequestKey?
+    var opensChat = false
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        // Consuming the one-shot chat presentation must not replay workspace
+        // selection or its existing Seen/unread-related presentation effects.
+        lhs.serial == rhs.serial && lhs.request == rhs.request
+    }
+}
+
+struct NativeForegroundChatIndicator: Identifiable {
+    let id: UUID
+    let request: RequestKey
+    let title: String
+    let body: String
+    let payload: JSONValue
 }
 
 struct NativeMessageDeepLink: Equatable {
@@ -119,9 +136,11 @@ struct NativeMessageDeepLink: Equatable {
 final class NativeNotificationRouter {
     static let shared = NativeNotificationRouter()
     private(set) var intent: NativeNotificationIntent?
+    private(set) var foregroundChatIndicator: NativeForegroundChatIndicator?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let key = "harklight.notification.navigation"
     @ObservationIgnored private var liveGeneration: UUID?
+    @ObservationIgnored private var visibleConversationKey: RequestKey?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -132,9 +151,43 @@ final class NativeNotificationRouter {
         guard opened else { return }
         let serial = UInt64(defaults.string(forKey: key + ".serial") ?? "0") ?? 0
         intent = NativeNotificationIntent(serial: serial &+ 1, locator: NativeNotificationLocator(payload))
+        foregroundChatIndicator = nil
         liveGeneration = nil
         defaults.set(String(serial &+ 1), forKey: key + ".serial")
         persist()
+    }
+
+    /// A chat alert delivered while the app is active is kept only as
+    /// presentation state until the person taps it. The navigation intent is
+    /// persisted through the existing tap path, never from foreground receipt.
+    @discardableResult
+    func receiveForegroundNotification(_ payload: JSONValue, title: String,
+                                       body: String) -> Bool {
+        guard let locator = NativeNotificationLocator(payload), locator.target == "chat" else {
+            return false
+        }
+        guard visibleConversationKey != locator.request else {
+            foregroundChatIndicator = nil
+            return true
+        }
+        foregroundChatIndicator = NativeForegroundChatIndicator(
+            id: UUID(), request: locator.request, title: title, body: body, payload: payload)
+        return true
+    }
+
+    func consumeForegroundChatIndicator(id: UUID) -> NativeForegroundChatIndicator? {
+        guard let indicator = foregroundChatIndicator, indicator.id == id else { return nil }
+        foregroundChatIndicator = nil
+        return indicator
+    }
+
+    func conversationBecameVisible(_ key: RequestKey) {
+        visibleConversationKey = key
+        if foregroundChatIndicator?.request == key { foregroundChatIndicator = nil }
+    }
+
+    func conversationBecameHidden(_ key: RequestKey) {
+        if visibleConversationKey == key { visibleConversationKey = nil }
     }
 
     /// Resolve only within already selected authenticated profiles. The caller
