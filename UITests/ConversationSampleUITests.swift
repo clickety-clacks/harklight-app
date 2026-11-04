@@ -56,6 +56,95 @@ final class ConversationSampleUITests: XCTestCase {
         capture("foreground-chat-indicator-opened-other-chat", app)
     }
 
+    func testSentChatStatusLightShowsDeliveredAndKeepsReplyAsNextChatTurn() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples", "--harklight-test-chat-status-light"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Local example · status is simulated; nothing was sent."].exists,
+                      app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Delivered"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Agent example: the shorter path is faster, while the longer path is easier to revise."].exists,
+                      app.debugDescription)
+        XCTAssertFalse(app.staticTexts["The agent marked this handled."].exists,
+                       "Action folds into Delivered; an actual reply remains a chat turn.")
+        XCTAssertFalse(app.staticTexts["Nothing's listening right now"].exists,
+                       "A listening report does not add a composer warning.")
+        capture("sent-chat-status-listening-light", app)
+    }
+
+    func testSentChatStatusDarkHighlightsUnreachableAndAgedWaitingWithoutClaimingFailure() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples", "--harklight-test-chat-status-dark"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        history.swipeUp()
+        let delayed = app.staticTexts["Not delivered yet"]
+        XCTAssertTrue(delayed.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(delayed.isHittable, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Nothing's listening right now"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Local example · status is simulated; nothing was sent."].exists,
+                      app.debugDescription)
+        XCTAssertFalse(app.staticTexts["No one will get this"].exists,
+                       "A delayed message is not presented as definitively undeliverable.")
+        capture("sent-chat-status-not-listening-dark", app)
+    }
+
+    func testUnsupportedLatestReportShowsRedComposerNoticeWithoutRelabelingDeliveredMessage() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples", "--harklight-test-chat-status-dark",
+                              "--harklight-test-chat-status-unsupported"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        history.swipeUp()
+        let latestMessage = app.staticTexts["Could you check whether this message reached anyone?"]
+        XCTAssertTrue(latestMessage.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(latestMessage.isHittable, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Delivered"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Not delivered yet"].exists, app.debugDescription)
+        let sent = app.staticTexts["Sent"]
+        XCTAssertTrue(sent.exists, app.debugDescription)
+        XCTAssertTrue(sent.isHittable, app.debugDescription)
+        let noOneWillGetThis = app.staticTexts["No one will get this"]
+        XCTAssertTrue(noOneWillGetThis.exists, app.debugDescription)
+        XCTAssertTrue(noOneWillGetThis.isHittable, app.debugDescription)
+        XCTAssertTrue(app.textViews["sample-chat-composer"].isHittable, app.debugDescription)
+        XCTAssertEqual(app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "No one will get this")).count, 1,
+                       "The latest thread report belongs above the composer; it does not rewrite an earlier turn's receipt facts.")
+        capture("sent-chat-status-unsupported-composer-dark", app)
+    }
+
     func testSendButtonAndReturnClearAcceptedLocalDiscussion() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

@@ -131,7 +131,16 @@ final class ConversationSubmissionTests: XCTestCase {
         session.failReplay = true
         _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
         let operation = try XCTUnwrap(session.sent.first?.1)
+        let acceptedAt = try XCTUnwrap(domain.conversationSnapshot(context: context)
+            .threads[binding.request]?.facts[ExactText("2")]?.acceptedAtMilliseconds)
+        try domain.markDiscussionAccepted(binding, operation: operation, turn: ExactText("2"),
+            context: context, acceptanceObservedAtMilliseconds: acceptedAt + 60_000)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context)
+            .threads[binding.request]?.facts[ExactText("2")]?.acceptedAtMilliseconds, acceptedAt,
+            "A repeated acceptance readback must not reset the age of the unpicked message.")
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        XCTAssertEqual(try restored.conversationSnapshot(context: context)
+            .threads[binding.request]?.facts[ExactText("2")]?.acceptedAtMilliseconds, acceptedAt)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.disposition,
             .acceptedPendingReplay(operation: operation, turn: ExactText("2")))
         XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 0)

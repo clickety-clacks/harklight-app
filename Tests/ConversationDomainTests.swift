@@ -1,5 +1,6 @@
 import AttentionDomain
 import CryptoKit
+import Foundation
 import XCTest
 
 private final class SeededAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
@@ -379,7 +380,28 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertEqual(after.drafts, before.drafts)
         XCTAssertEqual(after.intents, before.intents)
         XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[first.request]?.sessionHandle, ExactText("session"))
+        let thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[first.request])
+        XCTAssertEqual(thread.sessionHandle, ExactText("session"))
+        XCTAssertNil(thread.availabilityAtAcceptance)
+        XCTAssertNil(thread.latestAvailabilityObservation,
+                     "The legacy unsupported default is not evidence that the Server reported unsupported.")
+
+        var encodedThread = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(thread)) as? [String: Any])
+        encodedThread.removeValue(forKey: "availabilityAtAcceptance")
+        encodedThread.removeValue(forKey: "latestAvailabilityObservation")
+        let priorThreadData = try JSONSerialization.data(withJSONObject: encodedThread)
+        let priorThread = try JSONDecoder().decode(ConversationThread.self, from: priorThreadData)
+        XCTAssertNil(priorThread.availabilityAtAcceptance)
+        XCTAssertNil(priorThread.latestAvailabilityObservation)
+        XCTAssertNil(priorThread.latestReportedAvailabilityObservation,
+                     "A legacy unsupported default is still unknown, not a Server report.")
+
+        var encodedFacts = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(ConversationTurnFacts())) as? [String: Any])
+        encodedFacts.removeValue(forKey: "acceptedAtMilliseconds")
+        let priorFactsData = try JSONSerialization.data(withJSONObject: encodedFacts)
+        XCTAssertNil(try JSONDecoder().decode(ConversationTurnFacts.self,
+            from: priorFactsData).acceptedAtMilliseconds)
     }
 
     func testAcceptedFilesMatchOriginalBytesRatherThanLocalCopyIdentity() throws {
@@ -438,7 +460,19 @@ final class ConversationDomainTests: XCTestCase {
             fact: .availability(sessionHandle: ExactText("session"), .gone)), context: context)
         var thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[binding.request])
         XCTAssertNil(thread.terminal, "Gone is not authoritative closure")
+        XCTAssertEqual(thread.latestReportedAvailabilityObservation,
+            ConversationAvailabilityObservation(state: .gone, source: .conversationEvent,
+                conversationSequence: 3))
         XCTAssertFalse(try XCTUnwrap(thread.facts[turn.id]).delivered)
+
+        var legacyThreadObject = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(thread)) as? [String: Any])
+        legacyThreadObject.removeValue(forKey: "latestAvailabilityObservation")
+        let legacyThread = try JSONDecoder().decode(ConversationThread.self,
+            from: JSONSerialization.data(withJSONObject: legacyThreadObject))
+        XCTAssertEqual(legacyThread.latestReportedAvailabilityObservation,
+            ConversationAvailabilityObservation(state: .gone, source: .legacyThreadValue),
+            "An older saved non-default thread value remains a latest report without pretending it has feed provenance.")
         try store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
             fact: .fileTransfer(turn: turn.id, file: file.id, .transferred)), context: context)
         thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[binding.request])
