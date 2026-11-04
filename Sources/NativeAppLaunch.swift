@@ -1826,7 +1826,7 @@ final class LivePresentationStore {
             inboxScore: request.inboxScore,
             thread: request.inboxThread,
             hasInboxViewEntry: request.hasInboxViewEntry,
-            duePhrase: request.inboxDueAtMilliseconds.map { InboxDuePhrase.label(for: $0) },
+            duePhrase: request.inboxDueAtMilliseconds.map { InboxDuePhrase.presentation(for: $0) },
             orderingReason: request.inboxReason?.rawValue,
             defaultAnswerStatus: request.defaultAnswerStatusText)
         return row

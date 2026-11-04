@@ -241,7 +241,7 @@ struct InboxRequestRow: Identifiable {
     var inboxScore: Double? = nil
     var thread: ExactText? = nil
     var hasInboxViewEntry = false
-    var duePhrase: String? = nil
+    var duePhrase: InboxDuePhrase.Presentation? = nil
     var orderingReason: String? = nil
     var defaultAnswerStatus: String? = nil
     var id: RequestKey { key }
@@ -917,7 +917,8 @@ struct InboxList: View {
 
     @ViewBuilder
     private func newMessageAreaRow(_ item: NewMessageAreaListRow,
-                                  in tab: InboxWorkspaceTab) -> some View {
+                                  in tab: InboxWorkspaceTab,
+                                  selected isSelected: Bool) -> some View {
         NavigationLink(value: InboxSelection.request(item.row.key)) {
             NewMessageAreaRowContent(
                 key: item.row.key,
@@ -927,10 +928,13 @@ struct InboxList: View {
                 createdAt: item.row.createdAt,
                 receivedAt: item.entry.receivedAt,
                 inboxScore: item.row.inboxScore,
-                store: newMessageAreaStore)
+                store: newMessageAreaStore,
+                selected: isSelected)
         }
         .buttonStyle(.plain)
+        .tint(.clear)
         .navigationLinkIndicatorVisibility(.hidden)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .tag(InboxSelection.request(item.row.key))
         .id(InboxListRowScrollTarget(tab: tab,
                                      selection: .request(item.row.key),
@@ -941,7 +945,7 @@ struct InboxList: View {
         .accessibilityIdentifier("new-message-area-\(InboxItem.request(item.row).accessibilityID)")
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
+        .listRowBackground(designPalette.neutral.backgroundColor)
     }
 
     private var tabMembershipIDs: Set<InboxSelection> {
@@ -1094,19 +1098,27 @@ struct InboxList: View {
         switch row {
         case let .request(request):
             NavigationLink(value: row.id) {
-                InboxRowContent(row: request, selected: isSelected)
+                inboxRowLabel(request, selected: isSelected)
             }
             .buttonStyle(.plain)
+            .tint(.clear)
             .navigationLinkIndicatorVisibility(.hidden)
         case let .example(_, response):
             if let request = response.inboxRow {
                 NavigationLink(value: row.id) {
-                    InboxRowContent(row: request, selected: isSelected)
+                    inboxRowLabel(request, selected: isSelected)
                 }
                 .buttonStyle(.plain)
+                .tint(.clear)
                 .navigationLinkIndicatorVisibility(.hidden)
             }
         }
+    }
+
+    private func inboxRowLabel(_ request: InboxRequestRow, selected: Bool) -> some View {
+        InboxRowContent(row: request, selected: selected)
+            // Extend the wash and bar to the List cell; content padding stays in InboxRowContent.
+            .padding(.horizontal, -16)
     }
 
     @ViewBuilder
@@ -1203,6 +1215,17 @@ struct InboxList: View {
         .accessibilityLabel(String(localized: "\(members.count) messages from \(sender), in one thread"))
     }
 
+    private func newMessageAreaGap(_ height: CGFloat) -> some View {
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+    }
+
     @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
@@ -1211,19 +1234,41 @@ struct InboxList: View {
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
             if !areaRows.isEmpty {
+                newMessageAreaGap(8)
                 Section {
                     ForEach(shownAreaRows) { item in
-                        newMessageAreaRow(item, in: tab)
+                        let selection = InboxSelection.request(item.row.key)
+                        newMessageAreaRow(item, in: tab,
+                                          selected: selected == selection || lastViewedSelection == selection)
                     }
                     if areaRows.count > 5 {
                         Button(isNewMessageAreaExpanded ? "Less" : "More…") {
                             isNewMessageAreaExpanded.toggle()
                         }
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 16)
+                        .padding(.top, 9)
+                        .padding(.bottom, 10)
+                        .listRowBackground(designPalette.neutral.rowTopColor)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        .listRowSeparator(.hidden)
                         .accessibilityIdentifier("new-message-area-more")
                     }
                 } header: {
-                    Text("New messages")
+                    Text(String(localized: "New · \(shownAreaRows.count) of \(areaRows.count)"))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(NewMessageAreaSurface.forScheme(colorScheme).quietTitleColor)
+                        .textCase(nil)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .padding(.bottom, 2)
+                        .background(designPalette.neutral.rowTopColor)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        .accessibilityIdentifier("new-message-area-header")
                 }
+                newMessageAreaGap(12)
             }
             if tab == .inbox && showsBasicOrderMarker {
                 Text("Basic order")
@@ -1384,20 +1429,12 @@ struct InboxPriorityRowTreatment: Equatable {
     let bottomHex: String
     let primaryTextHex: String
     let secondaryTextHex: String
-    let leadingBandHex: String?
 
     var topColor: Color { Color(harklightToken: topHex) }
     var primaryTextColor: Color { Color(harklightToken: primaryTextHex) }
     var secondaryTextColor: Color { Color(harklightToken: secondaryTextHex) }
-    var capsuleFillHex: String { primaryTextHex }
-    var capsuleTextHex: String { topHex }
-    var capsuleFillColor: Color { Color(harklightToken: capsuleFillHex) }
-    var capsuleTextColor: Color { Color(harklightToken: capsuleTextHex) }
     var initialsFillOpacity: Double { 0.18 }
     var initialsFillColor: Color { Color.white.opacity(initialsFillOpacity) }
-    var leadingBandColor: Color? {
-        leadingBandHex.map { Color(harklightToken: $0) }
-    }
     var backgroundStyle: AnyShapeStyle {
         AnyShapeStyle(LinearGradient(
             colors: [topColor, Color(harklightToken: bottomHex)],
@@ -1409,25 +1446,86 @@ struct InboxPriorityRowTreatment: Equatable {
         -> InboxPriorityRowTreatment? {
         guard let level else { return nil }
 
-        let values: (String, String, String, String, String?)
+        let values: (String, String, String, String)
         switch (level, colorScheme) {
         case (.high, .light):
-            values = ("#73592A", "#5E4720", "#F6F1E7", "#E3DCCF", nil)
+            values = ("#73592A", "#5E4720", "#F6F1E7", "#E3DCCF")
         case (.urgent, .light):
-            values = ("#A63A2A", "#8A2C1E", "#F6F1E7", "#E3DCCF", "#5A1A10")
+            values = ("#A63A2A", "#8A2C1E", "#F6F1E7", "#E3DCCF")
         case (.high, .dark):
-            values = ("#3A3119", "#2B2516", "#E6D9B8", "#AEA283", nil)
+            values = ("#3A3119", "#2B2516", "#E6D9B8", "#AEA283")
         case (.urgent, .dark):
-            values = ("#5A2219", "#3A1A14", "#F2C9BE", "#C0948A", "#EE8B75")
+            values = ("#5A2219", "#3A1A14", "#F2C9BE", "#C0948A")
         default:
             return nil
         }
 
         return InboxPriorityRowTreatment(topHex: values.0, bottomHex: values.1,
                                          primaryTextHex: values.2,
-                                         secondaryTextHex: values.3,
-                                         leadingBandHex: values.4)
+                                         secondaryTextHex: values.3)
     }
+}
+
+struct InboxRowSelectionDecoration: Equatable {
+    static let barWidth: CGFloat = 8
+    static let contentInset: CGFloat = 16
+
+    let barHex: String
+
+    static func forLevel(_ level: InboxPriorityDisplay?, colorScheme: ColorScheme) -> Self {
+        let barHex: String
+        switch (level, colorScheme) {
+        case (.high, .light): barHex = "#C29747"
+        case (.high, .dark): barHex = "#917A3B"
+        case (.urgent, .light): barHex = "#D86B5A"
+        case (.urgent, .dark): barHex = "#B94331"
+        case (_, .light): barHex = "#B3A389"
+        case (_, .dark): barHex = "#756B61"
+        default: barHex = "#B3A389"
+        }
+        return Self(barHex: barHex)
+    }
+
+    var barColor: Color { Color(harklightToken: barHex) }
+}
+
+struct NewMessageAreaPriorityTreatment: Equatable {
+    let capsuleFillHex: String
+    let capsuleTextHex: String
+
+    var capsuleFillColor: Color { Color(harklightToken: capsuleFillHex) }
+    var capsuleTextColor: Color { Color(harklightToken: capsuleTextHex) }
+
+    static func forLevel(_ level: InboxPriorityDisplay?, colorScheme: ColorScheme) -> Self? {
+        let fill: String
+        switch (level, colorScheme) {
+        case (.high, .light): fill = "#73592A"
+        case (.high, .dark): fill = "#7B6832"
+        case (.urgent, .light): fill = "#A63A2A"
+        case (.urgent, .dark): fill = "#B94331"
+        default: return nil
+        }
+        return Self(capsuleFillHex: fill, capsuleTextHex: "#F6F1E7")
+    }
+}
+
+struct NewMessageAreaSurface: Equatable {
+    let quietTitleHex: String
+    let separatorHex: String
+
+    static func forScheme(_ colorScheme: ColorScheme) -> Self {
+        switch colorScheme {
+        case .light:
+            Self(quietTitleHex: "#8A847A", separatorHex: "rgba(49,48,45,0.08)")
+        case .dark:
+            Self(quietTitleHex: "#726E67", separatorHex: "rgba(221,217,209,0.08)")
+        @unknown default:
+            Self(quietTitleHex: "#8A847A", separatorHex: "rgba(49,48,45,0.08)")
+        }
+    }
+
+    var quietTitleColor: Color { Color(harklightToken: quietTitleHex) }
+    var separatorColor: Color { Color(harklightToken: separatorHex) }
 }
 
 private struct NewMessageAreaRowContent: View {
@@ -1439,6 +1537,7 @@ private struct NewMessageAreaRowContent: View {
     let receivedAt: Date
     let inboxScore: Double?
     let store: NewMessageAreaStore?
+    let selected: Bool
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1447,15 +1546,17 @@ private struct NewMessageAreaRowContent: View {
     }
 
     private var scoreBadge: InboxPriorityDisplay? {
-        InboxPriorityDisplay.forScore(inboxScore)
+        guard let level = InboxPriorityDisplay.forScore(inboxScore),
+              level == .high || level == .urgent else { return nil }
+        return level
     }
 
-    private var priorityTreatment: InboxPriorityRowTreatment? {
+    private var badgeTreatment: NewMessageAreaPriorityTreatment? {
         .forLevel(scoreBadge, colorScheme: colorScheme)
     }
 
-    private var rowBackgroundStyle: AnyShapeStyle {
-        priorityTreatment?.backgroundStyle ?? AnyShapeStyle(palette.neutral.backgroundColor)
+    private var selectionDecoration: InboxRowSelectionDecoration {
+        .forLevel(nil, colorScheme: colorScheme)
     }
 
     private var summaryInput: String {
@@ -1474,41 +1575,50 @@ private struct NewMessageAreaRowContent: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(store?.summary(for: key, revision: requestRevision) ?? fallbackText)
                 .font(.subheadline)
-                .foregroundStyle(priorityTreatment?.primaryTextColor ?? palette.neutral.textColor)
+                .foregroundStyle(palette.neutral.textColor)
                 .lineLimit(2)
                 .truncationMode(.tail)
 
-            HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(InboxFriendlyDate.label(for: createdAt ?? receivedAt))
                     .font(.caption)
-                    .foregroundStyle(priorityTreatment?.secondaryTextColor
-                                     ?? palette.neutral.secondaryTextColor)
+                    .foregroundStyle(palette.neutral.secondaryTextColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 4)
                 if let scoreBadge {
                     Text(scoreBadge.title)
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(priorityTreatment?.capsuleTextColor ?? priorityColor(for: scoreBadge))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(priorityTreatment?.capsuleFillColor
-                                    ?? priorityColor(for: scoreBadge).opacity(0.14), in: Capsule())
+                        .foregroundStyle(badgeTreatment?.capsuleTextColor ?? .white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(badgeTreatment?.capsuleFillColor ?? .clear, in: Capsule())
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .accessibilityLabel(Text(scoreBadge.title))
+                        .accessibilityIdentifier("new-message-area-priority-\(scoreBadge.rawValue)")
                 }
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.leading, 16 + (selected ? InboxRowSelectionDecoration.contentInset : 0))
+        .padding(.trailing, 16)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowBackgroundStyle)
+        .background(palette.neutral.backgroundColor)
         .overlay(alignment: .leading) {
+            if selected {
+                Rectangle()
+                    .fill(selectionDecoration.barColor)
+                    .frame(width: InboxRowSelectionDecoration.barWidth)
+                    .frame(maxHeight: .infinity)
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(priorityTreatment?.leadingBandColor ?? .clear)
-                .frame(width: priorityTreatment?.leadingBandColor == nil ? 0 : 5)
-                .frame(maxHeight: .infinity)
+                .fill(NewMessageAreaSurface.forScheme(colorScheme).separatorColor)
+                .frame(height: 0.5)
                 .accessibilityHidden(true)
                 .allowsHitTesting(false)
         }
@@ -1521,21 +1631,12 @@ private struct NewMessageAreaRowContent: View {
         }
     }
 
-    private func priorityColor(for level: InboxPriorityDisplay) -> Color {
-        switch level {
-        case .low: palette.neutral.secondaryTextColor
-        case .high: .orange
-        case .urgent: .red
-        }
-    }
 }
 
 struct InboxRowContent: View {
     let row: InboxRequestRow
     var selected = false
     @Environment(\.colorScheme) private var colorScheme
-
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private var palette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
@@ -1549,6 +1650,12 @@ struct InboxRowContent: View {
         .forLevel(InboxPriorityDisplay.forScore(row.inboxScore), colorScheme: colorScheme)
     }
 
+    private var priorityMarkerLevel: InboxPriorityDisplay? {
+        guard let level = InboxPriorityDisplay.forScore(row.inboxScore),
+              level == .high || level == .urgent else { return nil }
+        return level
+    }
+
     private var secondaryRowTextColor: Color {
         priorityTreatment?.secondaryTextColor ?? palette.neutral.secondaryTextColor
     }
@@ -1557,13 +1664,109 @@ struct InboxRowContent: View {
         priorityTreatment?.backgroundStyle ?? AnyShapeStyle(palette.neutral.backgroundColor)
     }
 
-    private var cameBackBarWidth: CGFloat {
-        horizontalSizeClass == .regular ? 10 : 6
+    private var selectionDecoration: InboxRowSelectionDecoration {
+        .forLevel(InboxPriorityDisplay.forScore(row.inboxScore), colorScheme: colorScheme)
     }
 
-    private var cameBackBarRadius: CGFloat {
-        horizontalSizeClass == .regular ? 8 : 6
+    private var leadingTitleAccessories: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            if row.isRetracted {
+                Text("Retracted")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(priorityTreatment?.primaryTextColor ?? palette.neutral.textColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(palette.neutral.separatorColor, in: Capsule())
+                    .accessibilityIdentifier("inbox-retracted-pill")
+            }
+            Image(systemName: row.symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(priorityTreatment?.primaryTextColor ?? typeTokens.listIconColor)
+                .accessibilityHidden(true)
+            if row.hasDeliveryWarning {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(priorityTreatment?.primaryTextColor ?? .red)
+                    .accessibilityLabel("Response not delivered")
+                    .accessibilityIdentifier("inbox-response-delivery-warning")
+            }
+            if row.hasMessageLoadWarning {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(priorityTreatment?.primaryTextColor ?? .red)
+                    .accessibilityLabel("Message could not be loaded and was skipped")
+                    .accessibilityIdentifier("inbox-message-load-warning")
+            }
+        }
+    }
 
+    @ViewBuilder
+    private var titleTrailingStatus: some View {
+        if let chatUnread = row.chatUnread {
+            Image(systemName: chatUnread
+                  ? "bubble.left.and.bubble.right.fill"
+                  : "bubble.left.and.bubble.right")
+                .font(.caption)
+                .foregroundStyle(chatUnread
+                                 ? (priorityTreatment?.primaryTextColor ?? palette.accent.color)
+                                 : secondaryRowTextColor)
+                .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
+        }
+        if row.localSeenSelected || row.informationalSeenStatus == .confirmed {
+            Image(systemName: "checkmark")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(secondaryRowTextColor)
+                .accessibilityLabel("Seen")
+        }
+    }
+
+    @ViewBuilder
+    private var priorityAndDueLine: some View {
+        if priorityMarkerLevel != nil || row.duePhrase != nil {
+            HStack(alignment: .top, spacing: 4) {
+                if let level = priorityMarkerLevel {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Image(systemName: "flag.fill")
+                            .accessibilityHidden(true)
+                        Text(level.title)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(titleColor)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text(level.title))
+                    .accessibilityIdentifier("inbox-priority-\(level.rawValue)")
+                    .layoutPriority(1)
+                }
+                Spacer(minLength: 0)
+                if let duePhrase = row.duePhrase {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text(duePhrase.dayLine)
+                                .lineLimit(1)
+                            Text(duePhrase.timeLine)
+                                .lineLimit(1)
+                        }
+                        // Keep this candidate at natural width so compact rows use the stacked fallback.
+                        .fixedSize(horizontal: true, vertical: false)
+                        VStack(alignment: .trailing, spacing: 0) {
+                            Text(duePhrase.dayLine)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            Text(duePhrase.timeLine)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(secondaryRowTextColor)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text(duePhrase.accessibilityLabel))
+                    .accessibilityIdentifier("inbox-due-phrase")
+                }
+            }
+        }
     }
 
     var body: some View {
@@ -1585,115 +1788,64 @@ struct InboxRowContent: View {
             }
             .font(.caption)
             .foregroundStyle(secondaryRowTextColor)
+
             HStack(alignment: .firstTextBaseline, spacing: 7) {
-                if row.isRetracted {
-                    Text("Retracted")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(priorityTreatment?.primaryTextColor
-                                         ?? palette.neutral.textColor)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(palette.neutral.separatorColor, in: Capsule())
-                        .accessibilityIdentifier("inbox-retracted-pill")
+                leadingTitleAccessories
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] }
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        Text(row.title)
+                            .font(titleFont)
+                            .foregroundStyle(titleColor)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        titleTrailingStatus
+                    }
+                    priorityAndDueLine
+                    if row.declaredMessageType != nil || row.declaredMessageKind != nil {
+                        MessageMetadataBadges(messageType: row.declaredMessageType,
+                                              messageKind: row.declaredMessageKind)
+                    }
+                    if let bodyText = row.bodyText, !bodyText.isEmpty {
+                        Text(bodyText)
+                            .font(.subheadline)
+                            .foregroundStyle(secondaryRowTextColor)
+                            .lineLimit(row.tier.bodyLineLimit)
+                            .truncationMode(.tail)
+                    }
+                    if let reason = row.orderingReason {
+                        Text(reason)
+                            .font(.caption2)
+                            .foregroundStyle(secondaryRowTextColor)
+                            .accessibilityIdentifier("inbox-ordering-reason")
+                    }
+                    if let defaultAnswerStatus = row.defaultAnswerStatus {
+                        Text(defaultAnswerStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
+                            .accessibilityIdentifier("inbox-default-answer-status")
+                    } else if !row.isResolved && !row.visibleStatus.isEmpty {
+                        Text(row.visibleStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
+                    }
+                    if let localStatus = row.localStatus {
+                        Text(localStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
+                    }
                 }
-                Image(systemName: row.symbol)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(priorityTreatment?.primaryTextColor
-                                     ?? typeTokens.listIconColor)
-                    .accessibilityHidden(true)
-                if row.hasDeliveryWarning {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(priorityTreatment?.primaryTextColor ?? .red)
-                        .accessibilityLabel("Response not delivered")
-                        .accessibilityIdentifier("inbox-response-delivery-warning")
-                }
-                if row.hasMessageLoadWarning {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(priorityTreatment?.primaryTextColor ?? .red)
-                        .accessibilityLabel("Message could not be loaded and was skipped")
-                        .accessibilityIdentifier("inbox-message-load-warning")
-                }
-                Text(row.title)
-                    .font(titleFont)
-                    .foregroundStyle(titleColor)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if let level = InboxPriorityDisplay.forScore(row.inboxScore) {
-                    Text(level.title)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(priorityTreatment?.capsuleTextColor
-                                         ?? priorityColor(for: level))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(priorityTreatment?.capsuleFillColor
-                                    ?? priorityColor(for: level).opacity(0.14), in: Capsule())
-                        .accessibilityLabel(Text(level.title))
-                        .accessibilityIdentifier("inbox-priority-\(level.rawValue)")
-                }
-                if let chatUnread = row.chatUnread {
-                    Image(systemName: chatUnread
-                          ? "bubble.left.and.bubble.right.fill"
-                          : "bubble.left.and.bubble.right")
-                        .font(.caption)
-                        .foregroundStyle(chatUnread
-                                         ? (priorityTreatment?.primaryTextColor ?? palette.accent.color)
-                                         : secondaryRowTextColor)
-                        .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
-                }
-                if row.localSeenSelected || row.informationalSeenStatus == .confirmed {
-                    Image(systemName: "checkmark")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(secondaryRowTextColor)
-                        .accessibilityLabel("Seen")
-                }
-            }
-            if row.declaredMessageType != nil || row.declaredMessageKind != nil {
-                MessageMetadataBadges(messageType: row.declaredMessageType,
-                                      messageKind: row.declaredMessageKind)
-            }
-            if let bodyText = row.bodyText, !bodyText.isEmpty {
-                Text(bodyText)
-                    .font(.subheadline)
-                    .foregroundStyle(secondaryRowTextColor)
-                    .lineLimit(row.tier.bodyLineLimit)
-                    .truncationMode(.tail)
-            }
-            if let duePhrase = row.duePhrase {
-                Text(duePhrase)
-                    .font(.caption2)
-                    .foregroundStyle(secondaryRowTextColor)
-                    .accessibilityIdentifier("inbox-due-phrase")
-            }
-            if let reason = row.orderingReason {
-                Text(reason)
-                    .font(.caption2)
-                    .foregroundStyle(secondaryRowTextColor)
-                    .accessibilityIdentifier("inbox-ordering-reason")
-            }
-            if let defaultAnswerStatus = row.defaultAnswerStatus {
-                Text(defaultAnswerStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
-                    .accessibilityIdentifier("inbox-default-answer-status")
-            } else if !row.isResolved && !row.visibleStatus.isEmpty {
-                Text(row.visibleStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
-            }
-            if let localStatus = row.localStatus {
-                Text(localStatus).font(.caption2).foregroundStyle(secondaryRowTextColor)
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.leading, 16 + (selected ? InboxRowSelectionDecoration.contentInset : 0))
+        .padding(.trailing, 16)
         .padding(.vertical, row.tier == .top ? 18 : 13)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackgroundStyle)
         .foregroundStyle(priorityTreatment?.primaryTextColor
                          ?? (row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor))
         .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(priorityTreatment?.leadingBandColor ?? .clear)
-                .frame(width: priorityTreatment?.leadingBandColor == nil ? 0 : 5)
-                .frame(maxHeight: .infinity)
-                .accessibilityHidden(true)
-                .allowsHitTesting(false)
+            if selected {
+                Rectangle()
+                    .fill(selectionDecoration.barColor)
+                    .frame(width: InboxRowSelectionDecoration.barWidth)
+                    .frame(maxHeight: .infinity)
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+            }
         }
         .overlay(alignment: .bottom) {
             Rectangle()
@@ -1701,18 +1853,6 @@ struct InboxRowContent: View {
                 .frame(height: 0.5)
                 .accessibilityHidden(true)
                 .allowsHitTesting(false)
-        }
-        .overlay(alignment: .trailing) {
-            if selected {
-                UnevenRoundedRectangle(cornerRadii: RectangleCornerRadii(
-                    topLeading: cameBackBarRadius, bottomLeading: cameBackBarRadius,
-                    bottomTrailing: 0, topTrailing: 0))
-                    .fill(typeTokens.cameBackBarColor)
-                    .frame(width: cameBackBarWidth)
-                    .frame(maxHeight: .infinity)
-                    .accessibilityHidden(true)
-                    .allowsHitTesting(false)
-            }
         }
         .accessibilityElement(children: .combine)
     }
@@ -1728,14 +1868,6 @@ struct InboxRowContent: View {
     private var titleColor: Color {
         priorityTreatment?.primaryTextColor
             ?? (row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor)
-    }
-
-    private func priorityColor(for level: InboxPriorityDisplay) -> Color {
-        switch level {
-        case .low: palette.neutral.secondaryTextColor
-        case .high: .orange
-        case .urgent: .red
-        }
     }
 
     private var displayInitials: String {
@@ -1778,7 +1910,7 @@ struct InboxTierReferenceScreen: View {
             sender: "Release assistant",
             status: "",
             tier: .middle,
-            duePhrase: InboxDuePhrase.label(for: deadline),
+            duePhrase: InboxDuePhrase.presentation(for: deadline),
             orderingReason: "Waiting on the scheduled handoff")
         return [
             ("Deadline and server reason", dueAndReason),
