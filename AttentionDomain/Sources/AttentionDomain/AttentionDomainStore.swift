@@ -1141,7 +1141,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
                 thread = ConversationThread(request: request.key, sessionHandle: handle,
                     revision: 1, payload: request.originalPayload)
-                if let availability = metadata.availability { thread.availability = availability }
+                if let availability = metadata.availability {
+                    thread.availability = availability
+                    thread.latestAvailabilityObservation = ConversationAvailabilityObservation(state: availability)
+                }
                 thread.listeningSupport = metadata.listeningSupport
                 thread.terminal = next.remoteStates[request.key]?.state
                 // The paired page terminal proves this receipt target before
@@ -3036,7 +3039,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try commit(next)
     }
 
-    public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws {
+    public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext,
+                                        simulatedAcceptanceObservedAtMilliseconds: UInt64? = nil) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -3053,6 +3057,12 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let turn = ConversationTurn(id: ExactText(UUID().uuidString.lowercased()), binding: binding,
             author: .person, sessionHandle: thread.sessionHandle, text: draft.text, files: draft.files)
         try conversation.apply(ConversationEvent(sequence: conversation.cursor + 1, binding: binding, fact: .turn(turn)))
+        if let simulatedAcceptanceObservedAtMilliseconds,
+           var acceptedThread = conversation.threads[binding.request] {
+            acceptedThread.facts[turn.id, default: ConversationTurnFacts()].acceptedAtMilliseconds =
+                simulatedAcceptanceObservedAtMilliseconds
+            conversation.threads[binding.request] = acceptedThread
+        }
         conversation.threads[binding.request]?.drafts.removeValue(forKey: binding.revision)
         next.conversation = conversation
         try commit(next)
@@ -3269,7 +3279,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func markDiscussionAccepted(_ binding: ConversationBinding, operation: UUID, turn: ExactText,
-                                        context suppliedContext: ProfileContext) throws {
+                                        context suppliedContext: ProfileContext,
+                                        acceptanceObservedAtMilliseconds: UInt64? = nil) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -3286,6 +3297,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
             guard id == operation, priorTurn == turn else { throw ConversationError.conflict }
         default: throw ConversationError.conflict
         }
+        var facts = thread.facts[turn] ?? ConversationTurnFacts()
+        if facts.acceptedAtMilliseconds == nil {
+            let observedAt = acceptanceObservedAtMilliseconds ??
+                UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
+            facts.acceptedAtMilliseconds = observedAt
+        }
+        thread.facts[turn] = facts
         draft.disposition = .acceptedPendingReplay(operation: operation, turn: turn)
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread

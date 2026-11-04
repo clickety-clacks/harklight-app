@@ -75,6 +75,11 @@ struct ConversationPanel: View {
                             ForEach(thread.turns) { turn in
                                 ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
                                     sender: sender, local: store.isLocalExample,
+                                    availability: thread.latestReportedAvailabilityObservation,
+                                    hasReply: thread.turns.contains {
+                                        $0.author != .person && $0.inReplyTo == turn.id &&
+                                            ($0.kind == nil || $0.kind == .reply)
+                                    },
                                     replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue },
                                     retracted: thread.isRetracted && thread.terminalTurn == turn.id,
                                     inspect: { file, fileRevision in
@@ -118,6 +123,9 @@ struct ConversationPanel: View {
                     }
                         .padding(verticalSizeClass == .compact ? 4 : 12)
                 } else {
+                    ConversationAvailabilityNotice(
+                        observation: thread.latestReportedAvailabilityObservation)
+                        .padding(.horizontal)
                     ConversationComposer(store: store, key: key, revision: revision,
                         inspect: { file, fileRevision in
                             fileError = nil
@@ -531,11 +539,152 @@ private struct ConversationDraftStatus: View {
             case .outcomeUnknown:
                 Text("Submission unconfirmed · saved draft retained").font(.caption).foregroundStyle(.secondary)
             case .acceptedPendingReplay:
-                Text("Accepted · awaiting synchronized history").font(.caption).foregroundStyle(.secondary)
+                Text("Sent · syncing chat history").font(.caption).foregroundStyle(.secondary)
             case let .rejected(reason):
                 Text(reason.rawValue).font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+enum ConversationSentChatStatusPresentation {
+    static let unpickedDelayMilliseconds: UInt64 = 120_000
+
+    enum Delivery: Equatable {
+        case sent
+        case notDeliveredYet
+        case noOneWillGetThis
+        case delivered
+    }
+
+    static func delivery(for facts: ConversationTurnFacts,
+                         availability: ConversationAvailabilityObservation? = nil, hasReply: Bool,
+                         nowMilliseconds: UInt64) -> Delivery {
+        // Receipt, action, and an actual reply all establish delivery. They
+        // remain separate stored facts; this is only their shared presentation.
+        if facts.delivered || facts.actedBy != nil || hasReply { return .delivered }
+        if let availability {
+            switch availability.state {
+            case .notListening: return .notDeliveredYet
+            case .unsupported, .gone: return .noOneWillGetThis
+            case .listening: break
+            }
+        }
+        guard let acceptedAt = facts.acceptedAtMilliseconds,
+              nowMilliseconds >= acceptedAt,
+              nowMilliseconds - acceptedAt >= unpickedDelayMilliseconds else {
+            return .sent
+        }
+        return .notDeliveredYet
+    }
+}
+
+enum ConversationAvailabilityNoticePresentation: Equatable {
+    case none
+    case nothingListening
+    case noOneWillGetThis
+
+    static func notice(for observation: ConversationAvailabilityObservation?) -> Self {
+        guard let observation else { return .none }
+        switch observation.state {
+        case .listening: return .none
+        case .notListening: return .nothingListening
+        case .unsupported, .gone: return .noOneWillGetThis
+        }
+    }
+}
+
+private struct ConversationAvailabilityNotice: View {
+    let observation: ConversationAvailabilityObservation?
+
+    var body: some View {
+        Group {
+            switch ConversationAvailabilityNoticePresentation.notice(for: observation) {
+            case .none:
+                EmptyView()
+            case .nothingListening:
+                Label("Nothing's listening right now", systemImage: "exclamationmark.circle.fill")
+                    .foregroundStyle(.orange)
+            case .noOneWillGetThis:
+                Label("No one will get this", systemImage: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+            }
+        }
+        .font(.caption.weight(.semibold))
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityHint("Based on the latest availability reported for this chat.")
+        .accessibilityIdentifier("conversation-availability-notice")
+    }
+}
+
+private struct ConversationSentChatStatus: View {
+    let facts: ConversationTurnFacts
+    let availability: ConversationAvailabilityObservation?
+    let hasReply: Bool
+    let local: Bool
+
+    // Unreceived turns use the latest reported conversation availability.
+    // Receipt, action, and reply facts take precedence and remain independent.
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if local {
+                Text("Local example · status is simulated; nothing was sent.")
+                    .foregroundStyle(.secondary)
+            }
+            deliveryStatus
+        }
+        .font(.caption2)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityIdentifier("conversation-sent-chat-status")
+    }
+
+    @ViewBuilder
+    private var deliveryStatus: some View {
+        if shouldAgeDelivery {
+            TimelineView(.periodic(from: .now, by: 15)) { timeline in
+                deliveryLabel(ConversationSentChatStatusPresentation.delivery(
+                    for: facts, availability: availability, hasReply: hasReply,
+                    nowMilliseconds: Self.milliseconds(timeline.date)))
+            }
+        } else {
+            deliveryLabel(ConversationSentChatStatusPresentation.delivery(
+                for: facts, availability: availability, hasReply: hasReply,
+                nowMilliseconds: Self.milliseconds(.now)))
+        }
+    }
+
+    private var shouldAgeDelivery: Bool {
+        guard facts.acceptedAtMilliseconds != nil,
+              !facts.delivered, facts.actedBy == nil, !hasReply else { return false }
+        switch availability?.state {
+        case .notListening?, .unsupported?, .gone?: return false
+        case .listening?, nil: return true
+        }
+    }
+
+    @ViewBuilder
+    private func deliveryLabel(_ delivery: ConversationSentChatStatusPresentation.Delivery) -> some View {
+        switch delivery {
+        case .sent:
+            Text("Sent")
+                .foregroundStyle(.secondary)
+        case .notDeliveredYet:
+            Text("Not delivered yet")
+                .fontWeight(.semibold)
+                .foregroundStyle(.orange)
+        case .noOneWillGetThis:
+            Label("No one will get this", systemImage: "xmark.circle.fill")
+                .fontWeight(.semibold)
+                .foregroundStyle(.red)
+        case .delivered:
+            Text("Delivered")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private static func milliseconds(_ date: Date) -> UInt64 {
+        let value = date.timeIntervalSince1970 * 1_000
+        return value > 0 ? UInt64(value) : 0
     }
 }
 
@@ -544,6 +693,8 @@ private struct ConversationTurnView: View {
     let facts: ConversationTurnFacts
     let sender: String
     let local: Bool
+    let availability: ConversationAvailabilityObservation?
+    let hasReply: Bool
     let replyContext: String?
     let retracted: Bool
     let inspect: (ConversationFile, UInt64) -> Void
@@ -577,8 +728,8 @@ private struct ConversationTurnView: View {
                 }
             }
             if turn.author == .person {
-                Text(local ? "Local example · nothing sent" : facts.actedBy != nil ? "Agent acted" : facts.delivered ? "Delivered to originating session" : "Accepted · queued for originating session")
-                    .font(.caption2).foregroundStyle(.secondary)
+                ConversationSentChatStatus(facts: facts, availability: availability,
+                    hasReply: hasReply, local: local)
             }
         }
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)

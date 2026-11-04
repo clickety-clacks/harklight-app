@@ -22,6 +22,16 @@ public enum ConversationAvailability: Equatable, Codable, Sendable {
     case gone
 }
 
+/// A Server-reported availability value. Keeping this optional distinguishes an
+/// actual report from ConversationThread's unsupported default.
+public struct ConversationAvailabilityObservation: Equatable, Codable, Sendable {
+    public let state: ConversationAvailability
+
+    public init(state: ConversationAvailability) {
+        self.state = state
+    }
+}
+
 public enum ConversationFileTransfer: Equatable, Codable, Sendable {
     case unknown
     case transferred
@@ -225,10 +235,15 @@ struct ConversationValidationRejectionError: Error, Sendable {
 public struct ConversationTurnFacts: Equatable, Codable, Sendable {
     public var delivered = false
     public var actedBy: ExactText?
+    /// Client time when the Server's accepted response was observed. Older
+    /// saved turns and imported history have no timestamp and are not aged.
+    public var acceptedAtMilliseconds: UInt64?
     public var fileTransfers: [ExactText: ConversationFileTransfer] = [:]
     public var fileUses: [ExactText: ConversationFileUse] = [:]
 
-    public init() {}
+    public init(acceptedAtMilliseconds: UInt64? = nil) {
+        self.acceptedAtMilliseconds = acceptedAtMilliseconds
+    }
 }
 
 public struct ConversationDraft: Equatable, Codable, Sendable {
@@ -388,6 +403,9 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var drafts: [UInt64: ConversationDraft] = [:]
     public var answerDrafts: [UInt64: RequestDraft]?
     public var availability: ConversationAvailability = .unsupported(reason: ExactText("No listening support recorded"))
+    /// The latest availability report, when one exists. Nil keeps the default
+    /// unsupported placeholder from being presented as a Server report.
+    public var latestAvailabilityObservation: ConversationAvailabilityObservation?
     public var terminal: TerminalState?
     public var terminalTurn: ExactText?
     public var listeningSupport: JSONValue?
@@ -403,6 +421,21 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// Account-wide cursor when this server has supplied the read-position map.
     /// nil preserves the legacy local turn marker on older servers.
     public var accountReadThroughConversationSequence: UInt64?
+
+    mutating func recordAvailabilityUpdate(_ state: ConversationAvailability) {
+        availability = state
+        latestAvailabilityObservation = ConversationAvailabilityObservation(state: state)
+    }
+
+    /// Older saved threads retain the current value even when the optional
+    /// report wrapper is absent. The model's default unsupported value is not a report.
+    public var latestReportedAvailabilityObservation: ConversationAvailabilityObservation? {
+        if let latestAvailabilityObservation { return latestAvailabilityObservation }
+        let unreportedDefault = ConversationAvailability.unsupported(
+            reason: ExactText("No listening support recorded"))
+        guard availability != unreportedDefault else { return nil }
+        return ConversationAvailabilityObservation(state: availability)
+    }
 
     public var latestAgentReply: ConversationTurn? {
         turns.last { $0.kind == .reply && $0.author != .person }
@@ -1157,7 +1190,7 @@ struct ConversationState: Codable, Equatable {
                         sessionHandlePresent: !handle.rawValue.isEmpty,
                         sessionHandleMatchesThread: handle == thread.sessionHandle))
             }
-            thread.availability = availability
+            thread.recordAvailabilityUpdate(availability)
         case let .availabilityRecord(handle, availability, support):
             guard handle == thread.sessionHandle else {
                 throw conversationValidationRejection(.availabilityRecordSessionHandle,
@@ -1166,7 +1199,7 @@ struct ConversationState: Codable, Equatable {
                         sessionHandlePresent: !handle.rawValue.isEmpty,
                         sessionHandleMatchesThread: handle == thread.sessionHandle))
             }
-            thread.availability = availability
+            thread.recordAvailabilityUpdate(availability)
             thread.listeningSupport = support
         case let .terminal(turn, author, state):
             if let terminal = thread.terminal {
