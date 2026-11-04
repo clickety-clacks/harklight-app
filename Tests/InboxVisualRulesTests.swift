@@ -46,14 +46,13 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(AttentionTier.low.inboxRowStyleTier, .low)
     }
 
-    func testWashedScoreBadgesUseModeSpecificColorsAndEmphasizeUrgent() throws {
+    func testWashedPriorityRowsRetainModeSpecificColors() throws {
         let lightHigh = try XCTUnwrap(
             InboxPriorityRowTreatment.forLevel(.high, colorScheme: .light))
         XCTAssertEqual(lightHigh.topHex, "#73592A")
         XCTAssertEqual(lightHigh.bottomHex, "#5E4720")
         XCTAssertEqual(lightHigh.primaryTextHex, "#F6F1E7")
         XCTAssertEqual(lightHigh.secondaryTextHex, "#E3DCCF")
-        XCTAssertNil(lightHigh.leadingBandHex)
 
         let lightNow = try XCTUnwrap(
             InboxPriorityRowTreatment.forLevel(.urgent, colorScheme: .light))
@@ -61,7 +60,6 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(lightNow.bottomHex, "#8A2C1E")
         XCTAssertEqual(lightNow.primaryTextHex, "#F6F1E7")
         XCTAssertEqual(lightNow.secondaryTextHex, "#E3DCCF")
-        XCTAssertEqual(lightNow.leadingBandHex, "#5A1A10")
 
         let darkHigh = try XCTUnwrap(
             InboxPriorityRowTreatment.forLevel(.high, colorScheme: .dark))
@@ -69,7 +67,6 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(darkHigh.bottomHex, "#2B2516")
         XCTAssertEqual(darkHigh.primaryTextHex, "#E6D9B8")
         XCTAssertEqual(darkHigh.secondaryTextHex, "#AEA283")
-        XCTAssertNil(darkHigh.leadingBandHex)
 
         let darkNow = try XCTUnwrap(
             InboxPriorityRowTreatment.forLevel(.urgent, colorScheme: .dark))
@@ -77,15 +74,73 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(darkNow.bottomHex, "#3A1A14")
         XCTAssertEqual(darkNow.primaryTextHex, "#F2C9BE")
         XCTAssertEqual(darkNow.secondaryTextHex, "#C0948A")
-        XCTAssertEqual(darkNow.leadingBandHex, "#EE8B75")
 
         for treatment in [lightHigh, lightNow, darkHigh, darkNow] {
-            XCTAssertEqual(treatment.capsuleFillHex, treatment.primaryTextHex)
-            XCTAssertEqual(treatment.capsuleTextHex, treatment.topHex)
             XCTAssertEqual(treatment.initialsFillOpacity, 0.18)
         }
         XCTAssertNil(InboxPriorityRowTreatment.forLevel(nil, colorScheme: .light))
         XCTAssertNil(InboxPriorityRowTreatment.forLevel(.low, colorScheme: .dark))
+    }
+
+    func testSelectedRowBarUsesPickedSizeAndBrighterRowColorsInBothAppearances() {
+        XCTAssertEqual(InboxRowSelectionDecoration.barWidth, 8)
+        XCTAssertEqual(InboxRowSelectionDecoration.contentInset, 16)
+
+        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(nil, colorScheme: .light).barHex,
+                       "#B3A389")
+        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(.high, colorScheme: .light).barHex,
+                       "#C29747")
+        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(.urgent, colorScheme: .light).barHex,
+                       "#D86B5A")
+
+        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(nil, colorScheme: .dark).barHex,
+                       "#756B61")
+        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(.high, colorScheme: .dark).barHex,
+                       "#917A3B")
+        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(.urgent, colorScheme: .dark).barHex,
+                       "#B94331")
+    }
+
+    func testNewMessageAreaUsesQuietBlockAndSolidHighOrUrgentPills() {
+        XCTAssertEqual(NewMessageAreaSurface.forScheme(.light).quietTitleHex, "#8A847A")
+        XCTAssertEqual(NewMessageAreaSurface.forScheme(.light).separatorHex,
+                       "rgba(49,48,45,0.08)")
+        XCTAssertEqual(NewMessageAreaSurface.forScheme(.dark).quietTitleHex, "#726E67")
+        XCTAssertEqual(NewMessageAreaSurface.forScheme(.dark).separatorHex,
+                       "rgba(221,217,209,0.08)")
+
+        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.high, colorScheme: .light),
+                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#73592A",
+                                                       capsuleTextHex: "#F6F1E7"))
+        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.urgent, colorScheme: .light),
+                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#A63A2A",
+                                                       capsuleTextHex: "#F6F1E7"))
+        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.high, colorScheme: .dark),
+                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#7B6832",
+                                                       capsuleTextHex: "#F6F1E7"))
+        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.urgent, colorScheme: .dark),
+                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#B94331",
+                                                       capsuleTextHex: "#F6F1E7"))
+        XCTAssertNil(NewMessageAreaPriorityTreatment.forLevel(.low, colorScheme: .light))
+        XCTAssertNil(NewMessageAreaPriorityTreatment.forLevel(nil, colorScheme: .dark))
+    }
+
+    func testDuePhrasePresentationSplitsBetweenDayAndTimeButKeepsOneAccessiblePhrase() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let locale = Locale(identifier: "en_US_POSIX")
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 19,
+                                                    hour: 14, minute: 0))!
+        let tomorrow = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20,
+                                                         hour: 9, minute: 0))!
+
+        let presentation = InboxDuePhrase.presentation(
+            for: Int(tomorrow.timeIntervalSince1970 * 1_000),
+            now: now, calendar: calendar, locale: locale)
+
+        XCTAssertEqual(presentation.dayLine, "Due tomorrow")
+        XCTAssertEqual(presentation.timeLine, "at 9:00 AM")
+        XCTAssertEqual(presentation.accessibilityLabel, "Due tomorrow at 9:00 AM")
     }
 
     func testSenderLabelUsesLastKindAndAgentSegment() {

@@ -2,10 +2,16 @@ import AttentionDomain
 import Foundation
 
 enum InboxDuePhrase {
-    static func label(for milliseconds: Int,
-                      now: Date = .now,
-                      calendar: Calendar = .current,
-                      locale: Locale = .current) -> String {
+    struct Presentation: Equatable {
+        let dayLine: String
+        let timeLine: String
+        let accessibilityLabel: String
+    }
+
+    static func presentation(for milliseconds: Int,
+                             now: Date = .now,
+                             calendar: Calendar = .current,
+                             locale: Locale = .current) -> Presentation {
         let dueAt = Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
         let today = calendar.startOfDay(for: now)
         let dueDay = calendar.startOfDay(for: dueAt)
@@ -17,14 +23,22 @@ enum InboxDuePhrase {
         timeFormatter.timeStyle = .short
         let time = timeFormatter.string(from: dueAt)
         let pastPrefix = dueAt < now ? "Was due" : "Due"
+        let timeLine = String(localized: "at \(time)")
 
         switch dayOffset {
         case 0:
-            return String(localized: "\(pastPrefix) today at \(time)")
+            return Presentation(
+                dayLine: String(localized: "\(pastPrefix) today"),
+                timeLine: timeLine,
+                accessibilityLabel: String(localized: "\(pastPrefix) today at \(time)"))
         case 1:
-            return String(localized: "Due tomorrow at \(time)")
+            return Presentation(dayLine: String(localized: "Due tomorrow"),
+                                timeLine: timeLine,
+                                accessibilityLabel: String(localized: "Due tomorrow at \(time)"))
         case -1:
-            return String(localized: "Was due yesterday at \(time)")
+            return Presentation(dayLine: String(localized: "Was due yesterday"),
+                                timeLine: timeLine,
+                                accessibilityLabel: String(localized: "Was due yesterday at \(time)"))
         default:
             let dateFormatter = DateFormatter()
             dateFormatter.locale = locale
@@ -33,8 +47,18 @@ enum InboxDuePhrase {
             let sameYear = calendar.component(.year, from: dueAt) == calendar.component(.year, from: now)
             dateFormatter.setLocalizedDateFormatFromTemplate(sameYear ? "MMMd" : "yMMMd")
             let date = dateFormatter.string(from: dueAt)
-            return String(localized: "\(pastPrefix) \(date) at \(time)")
+            return Presentation(dayLine: String(localized: "\(pastPrefix) \(date)"),
+                                timeLine: timeLine,
+                                accessibilityLabel: String(localized: "\(pastPrefix) \(date) at \(time)"))
         }
+    }
+
+    static func label(for milliseconds: Int,
+                      now: Date = .now,
+                      calendar: Calendar = .current,
+                      locale: Locale = .current) -> String {
+        presentation(for: milliseconds, now: now, calendar: calendar, locale: locale)
+            .accessibilityLabel
     }
 }
 

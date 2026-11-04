@@ -29,6 +29,7 @@ struct HarklightDesignSource: Decodable, Sendable {
 
     struct Neutral: Decodable, Sendable {
         let bg: String
+        let rowTop: String
         let text: String
         let text2: String
         let separator: String
@@ -38,6 +39,7 @@ struct HarklightDesignSource: Decodable, Sendable {
         let tabOn: String
 
         var backgroundColor: Color { Color(harklightToken: bg) }
+        var rowTopColor: Color { Color(harklightToken: rowTop) }
         var textColor: Color { Color(harklightToken: text) }
         var secondaryTextColor: Color { Color(harklightToken: text2) }
         var separatorColor: Color { Color(harklightToken: separator) }
