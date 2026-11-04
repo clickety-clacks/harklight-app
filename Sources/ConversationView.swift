@@ -52,6 +52,24 @@ struct ConversationPanel: View {
     private var revision: UInt64 { selectedRevision ?? thread?.currentRevision ?? 1 }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
 
+    private var hasNotAcceptedCardForRetainedAnswer: Bool {
+        guard thread?.isRetracted == true,
+              let request = store.request(for: key),
+              request.lifecycleStatus != .superseded,
+              request.supersededByMessageKeys.isEmpty else { return false }
+        let attemptedAnswer = AnswerConfirmationText.formatted(
+            accountAnswerOutcome: nil,
+            submittedAnswer: request.submittedAnswer,
+            projection: request.projection)
+        return LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+            isRetracted: true,
+            isSupersedesReadOnly: false,
+            ownOutcome: request.receiptFacts?.ownOutcome,
+            relayOutcome: request.intentReceipt?.relayOutcome,
+            attemptedAnswerText: attemptedAnswer,
+            ownAnswerWasRefusedByRetraction: request.ownAnswerWasRefusedByRetraction)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let thread {
@@ -67,7 +85,8 @@ struct ConversationPanel: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
-                            if let earlier = store.historicalAnswerDraft(for: key, revision: revision) {
+                            if let earlier = store.historicalAnswerDraft(for: key, revision: revision),
+                               !hasNotAcceptedCardForRetainedAnswer {
                                 DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
                                     HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
                                 }.accessibilityIdentifier("conversation-earlier-answer")

@@ -167,7 +167,6 @@ private struct AnswerConfirmationCard: View {
     let accessibilityValue: LocalizedStringResource
     let symbolName: String?
     var answerIdentifier: String? = nil
-    var isMuted = false
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
@@ -189,7 +188,7 @@ private struct AnswerConfirmationCard: View {
                 }
                 Text(title).font(.headline.weight(.semibold))
             }
-            .foregroundStyle(isMuted ? messageColors.secondaryTextColor : messageColors.textColor)
+            .foregroundStyle(messageColors.textColor)
 
             if let answer, !answer.isEmpty {
                 Text(answer)
@@ -210,8 +209,7 @@ private struct AnswerConfirmationCard: View {
         }
         .overlay {
             RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(messageColors.textColor.opacity(isMuted ? 0.3 : 1),
-                              lineWidth: 1.5)
+                .strokeBorder(messageColors.textColor, lineWidth: 1.5)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(identifier)
@@ -1284,12 +1282,11 @@ struct LiveRequestDetail: View {
     }
 
     private var showsAnsweredConfirmation: Bool {
-        answerIsComplete && !isSupersedesReadOnly && confirmedAnswerText != nil
+        answerIsComplete && !isSupersedesReadOnly
     }
 
-    private var pinsAnsweredStatusInWidePhoneToolbar: Bool {
-        answerIsComplete && !showsAnsweredConfirmation &&
-            UIDevice.current.userInterfaceIdiom == .phone && horizontalSizeClass == .regular
+    static func answeredConfirmationTitle(isDefaultAnswered: Bool) -> LocalizedStringResource {
+        isDefaultAnswered ? "Answered by default" : "Answered"
     }
 
     private var showsNoCommentConfirmation: Bool {
@@ -1349,34 +1346,6 @@ struct LiveRequestDetail: View {
         AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
             submittedAnswer: request.submittedAnswer,
             projection: request.projection)
-    }
-
-    private var answeredStatusButton: some View {
-        Button(action: {}) {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark")
-                Text(Self.answeredStatusTitle(accountAnswerOutcome: request.accountAnswerOutcome,
-                                              isLiveRequest: localExample == nil && fixtureStore == nil))
-            }
-                .padding(.horizontal, 6)
-        }
-        .tint(nil)
-        .disabled(true)
-        .accessibilityLabel(Self.answeredStatusTitle(accountAnswerOutcome: request.accountAnswerOutcome,
-                                                       isLiveRequest: localExample == nil && fixtureStore == nil))
-        .accessibilityValue("Completed")
-        .accessibilityIdentifier("request-answered")
-    }
-
-    static func answeredStatusTitle(accountAnswerOutcome: AccountAnswerOutcome?,
-                                    isLiveRequest: Bool) -> String {
-        switch accountAnswerOutcome {
-        case .some(.seen): "Seen"
-        case .some(.reply(_)): "Replied"
-        case .some(.noComment): "No comment"
-        case .some(.defaultAnswer(_, _)): "Answered by default"
-        case .none: isLiveRequest ? "Answered" : "Replied"
-        }
     }
 
     /// A pending or refused send never counts as Answered; only a request the
@@ -1661,7 +1630,7 @@ struct LiveRequestDetail: View {
                 }
                 if showsAnsweredConfirmation {
                     AnswerConfirmationCard(
-                        title: request.isDefaultAnswered ? "Answered by default" : "Answered",
+                        title: Self.answeredConfirmationTitle(isDefaultAnswered: request.isDefaultAnswered),
                         answer: confirmedAnswerText,
                         identifier: "request-answered",
                         accessibilityValue: "Completed",
@@ -1676,12 +1645,12 @@ struct LiveRequestDetail: View {
                     AnswerConfirmationCard(title: "Pending", answer: pendingAnswerText,
                         identifier: "request-pending-answer-status",
                         accessibilityValue: "Pending", symbolName: "clock",
-                        answerIdentifier: "request-pending-answer", isMuted: true)
+                        answerIdentifier: "request-pending-answer")
                 } else if showsNotAcceptedConfirmation {
                     AnswerConfirmationCard(title: "Not accepted", answer: attemptedAnswerText,
                         identifier: "request-not-accepted-status",
                         accessibilityValue: "Not accepted", symbolName: "xmark",
-                        answerIdentifier: "request-not-accepted-answer", isMuted: true)
+                        answerIdentifier: "request-not-accepted-answer")
                 } else {
                     switch request.projection {
                     case let .sender(sender):
@@ -1848,38 +1817,30 @@ struct LiveRequestDetail: View {
                     Spacer()
                     chatButton
                 }
-                if pinsAnsweredStatusInWidePhoneToolbar {
-                    ToolbarItem(placement: .topBarPinnedTrailing) {
-                        answeredStatusButton
-                    }
-                } else {
-                    ToolbarItem(placement: .confirmationAction) {
-                        if request.informationalSeenStatus != nil {
-                            if seenActionIsComplete { EmptyView() } else { finishSeenButton }
-                        } else if let localExample {
-                            if localExample.localSeenSelected {
-                                EmptyView()
-                            } else {
-                                Button("Finish locally", systemImage: "checkmark") {
-                                    closeReplyEditor()
-                                    localExample.finishLocally()
-                                }
-                                .labelStyle(.iconOnly)
-                                .disabled(!localExample.canFinishLocally || localExample.finished)
-                                .accessibilityIdentifier("sample-finish")
-                            }
-                        } else if failedResponseWarning != nil {
-                            failedResponseWarningButton
-                        } else if isEditingLocalReply {
-                            submitReplyButton
-                        } else if showsAnsweredConfirmation || showsNoCommentConfirmation ||
-                                    showsNotAcceptedConfirmation {
+                ToolbarItem(placement: .confirmationAction) {
+                    if request.informationalSeenStatus != nil {
+                        if seenActionIsComplete { EmptyView() } else { finishSeenButton }
+                    } else if let localExample {
+                        if localExample.localSeenSelected {
                             EmptyView()
-                        } else if answerIsComplete {
-                            answeredStatusButton
                         } else {
-                            submitReplyButton
+                            Button("Finish locally", systemImage: "checkmark") {
+                                closeReplyEditor()
+                                localExample.finishLocally()
+                            }
+                            .labelStyle(.iconOnly)
+                            .disabled(!localExample.canFinishLocally || localExample.finished)
+                            .accessibilityIdentifier("sample-finish")
                         }
+                    } else if failedResponseWarning != nil {
+                        failedResponseWarningButton
+                    } else if isEditingLocalReply {
+                        submitReplyButton
+                    } else if showsAnsweredConfirmation || showsNoCommentConfirmation ||
+                                showsNotAcceptedConfirmation {
+                        EmptyView()
+                    } else {
+                        submitReplyButton
                     }
                 }
             }

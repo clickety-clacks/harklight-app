@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 @testable import Harklight
 
-/// The ruled behavior for the Answered control: a pending or refused send must
+/// The ruled behavior for the Answered confirmation: a pending or refused send must
 /// never present as Answered; only an answered request or an accepted
 /// submission completes the state.
 @MainActor

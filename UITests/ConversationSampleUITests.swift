@@ -505,6 +505,8 @@ final class ConversationSampleUITests: XCTestCase {
         row.tap()
         XCTAssertTrue(app.staticTexts["Retracted"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent."].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["request-not-accepted-status"].exists,
+                        "An unsent saved draft is not presented as a refused answer.")
         capture("sender-retracted-retained-request", app)
         app.buttons["Chat"].tap()
         let composer = app.textViews["sample-chat-composer"]
@@ -512,7 +514,10 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "Please keep this unsent note.")
         XCTAssertFalse(composer.isEnabled)
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
-        app.buttons["conversation-earlier-answer"].tap()
+        let savedDraft = app.buttons["conversation-earlier-answer"]
+        XCTAssertTrue(savedDraft.waitForExistence(timeout: 5),
+                      "The unrelated unsent draft remains available when no answer was refused.")
+        savedDraft.tap()
         XCTAssertTrue(app.staticTexts["Saved answer · request retracted. Its original wording and choices are retained."].waitForExistence(timeout: 5))
         let savedChoice = app.buttons.matching(NSPredicate(format: "label == %@", "Archive")).firstMatch
         XCTAssertTrue(savedChoice.exists)
