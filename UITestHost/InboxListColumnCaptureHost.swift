@@ -68,8 +68,8 @@ struct InboxListColumnCaptureHost: View {
     private var selectionProbeValue: String {
         guard let selected else { return "none" }
         switch selected {
-        case let .request(key): key.messageID.rawValue
-        case let .sample(id): "sample:\(id)"
+        case let .request(key): return key.messageID.rawValue
+        case let .sample(id): return "sample:\(id)"
         }
     }
 
