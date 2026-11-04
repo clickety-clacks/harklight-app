@@ -146,6 +146,94 @@ final class ConversationPresentationTests: XCTestCase {
         }
     }
 
+    func testTwoAckStatusUsesReportedStageAndRerouteFactsWithoutChangingLegacyOrAnswerCaptions() {
+        let request = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                 messageID: ExactText("request"))
+        let binding = ConversationBinding(request: request, revision: 1)
+        let chat = ConversationTurn(id: ExactText("person-turn"), binding: binding,
+            author: .person, sessionHandle: ExactText("conversation-agent"), text: ExactText("Question"),
+            kind: .discussion, deliveryAcks: true)
+        let listening = ConversationAvailabilityObservation(state: .listening)
+        let notListening = ConversationAvailabilityObservation(state: .notListening(lastDetachedAt: nil))
+        let gone = ConversationAvailabilityObservation(state: .gone)
+        func status(_ facts: ConversationTurnFacts,
+                    availability: ConversationAvailabilityObservation? = nil,
+                    hasReply: Bool = false, now: UInt64) -> ConversationSentChatStatusPresentation.Delivery {
+            ConversationSentChatStatusPresentation.delivery(for: chat, facts: facts,
+                availability: availability, hasReply: hasReply, conversationAgentName: "Studio",
+                nowMilliseconds: now)
+        }
+
+        let unacknowledged = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
+        XCTAssertEqual(status(unacknowledged, availability: listening, now: 159_999), .sending)
+        XCTAssertEqual(status(unacknowledged, availability: listening, now: 160_000), .noListenerPickedThisUp)
+        XCTAssertEqual(status(unacknowledged, availability: notListening, now: 40_001), .noListenerPickedThisUp)
+
+        var waiting = unacknowledged
+        waiting.deliveryAck1 = .listenerReceived(atMilliseconds: 40_000, ack2Expected: true,
+            acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)
+        XCTAssertEqual(status(waiting, availability: notListening, now: 159_999), .sending)
+        XCTAssertEqual(status(waiting, availability: notListening, now: 160_000), .waitingFor("Studio"),
+                       "An ACK1-to-ACK2 wait stays quiet, even if availability is now not-listening.")
+        XCTAssertEqual(status(waiting, availability: gone, now: 160_000), .noOneWillGetThis)
+
+        var incapable = waiting
+        incapable.deliveryAck1 = .listenerReceived(atMilliseconds: 40_000, ack2Expected: false,
+            acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)
+        XCTAssertEqual(status(incapable, availability: gone, now: 9_000_000), .deliveredAck,
+                       "ACK1 is final when the listener declared that ACK2 is unsupported.")
+
+        var handed = unacknowledged
+        handed.deliveryAck2 = .handed(atMilliseconds: 50_000, rerouted: false,
+            acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: ExactText("Release"))
+        XCTAssertEqual(status(handed, availability: gone, now: 60_000), .deliveredAck,
+                       "rerouted is authoritative; the Client never compares agent names.")
+        handed.deliveryAck2 = .handed(atMilliseconds: 50_000, rerouted: true,
+            acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: ExactText("Release"))
+        XCTAssertEqual(status(handed, availability: gone, now: 60_000), .deliveredTo("Release"))
+        handed.deliveryAck2 = .handed(atMilliseconds: 50_000, rerouted: true,
+            acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)
+        XCTAssertEqual(status(handed, availability: listening, now: 60_000), .deliveredAck,
+                       "A rerouted ACK without an agent name keeps the plain Delivered caption.")
+
+        var notHanded = unacknowledged
+        notHanded.deliveryAck2 = .notHanded(atMilliseconds: 50_000,
+            reason: ExactText("Receiving system could not hand off the message."),
+            acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)
+        XCTAssertEqual(status(notHanded, availability: listening, now: 60_000),
+                       .notDelivered("Receiving system could not hand off the message."))
+        XCTAssertEqual(status(notHanded, availability: gone, now: 60_000), .noOneWillGetThis)
+        notHanded.delivered = true
+        XCTAssertEqual(status(notHanded, availability: gone, now: 60_000), .deliveredAck,
+                       "A Seen receipt outranks the delivery-ack and availability captions.")
+        notHanded.delivered = false
+        notHanded.actedBy = ExactText("action")
+        XCTAssertEqual(status(notHanded, availability: listening, now: 60_000), .deliveredAck)
+        notHanded.actedBy = nil
+        XCTAssertEqual(status(notHanded, availability: listening, hasReply: true, now: 60_000), .deliveredAck)
+
+        let legacyTurn = ConversationTurn(id: chat.id, binding: binding, author: .person,
+            sessionHandle: chat.sessionHandle, text: chat.text, kind: .discussion)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: legacyTurn,
+            facts: unacknowledged, availability: listening, hasReply: false,
+            conversationAgentName: "Studio", nowMilliseconds: 160_000), .notDeliveredYet,
+            "An older Server keeps its current caption instead of showing a missing-ACK1 stall.")
+        var markerlessButAcknowledged = unacknowledged
+        markerlessButAcknowledged.deliveryAck1 = .listenerReceived(atMilliseconds: 155_000,
+            ack2Expected: true, acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: legacyTurn,
+            facts: markerlessButAcknowledged, availability: listening, hasReply: false,
+            conversationAgentName: "Studio", nowMilliseconds: 159_999), .sending,
+            "An explicit ACK fact is usable even if a historical discussion lacks the marker.")
+        let noComment = ConversationTurn(id: ExactText("no-comment"), binding: binding,
+            author: .person, sessionHandle: chat.sessionHandle, text: ExactText("No comment"),
+            kind: .terminal, deliveryAcks: true)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: noComment,
+            facts: unacknowledged, availability: listening, hasReply: false,
+            conversationAgentName: "Studio", nowMilliseconds: 160_000), .notDeliveredYet,
+            "Answers and No comment keep the existing presentation regardless of ack facts.")
+    }
+
     func testComposerNoticeUsesOnlyActuallyReportedLatestAvailability() {
         XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for: nil), .none,
                        "Missing legacy availability stays unknown.")

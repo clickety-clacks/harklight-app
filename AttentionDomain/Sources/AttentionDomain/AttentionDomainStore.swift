@@ -3585,7 +3585,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
             sessionHandle: turn.sessionHandle, text: turn.text, inReplyTo: turn.inReplyTo,
             operationID: turn.operationID,
             files: try turn.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
-            contentRedacted: turn.contentRedacted, kind: turn.kind, resultStatus: turn.resultStatus)
+            contentRedacted: turn.contentRedacted, kind: turn.kind, resultStatus: turn.resultStatus,
+            deliveryAcks: turn.deliveryAcks)
     }
 
     private static func externalizingConversationFiles(in draft: ConversationDraft,

@@ -574,6 +574,12 @@ enum ConversationSentChatStatusPresentation {
         case notDeliveredYet
         case noOneWillGetThis
         case delivered
+        case sending
+        case noListenerPickedThisUp
+        case waitingFor(String)
+        case notDelivered(String)
+        case deliveredAck
+        case deliveredTo(String)
     }
 
     static func delivery(for facts: ConversationTurnFacts,
@@ -595,6 +601,57 @@ enum ConversationSentChatStatusPresentation {
             return .sent
         }
         return .notDeliveredYet
+    }
+
+    static func delivery(for turn: ConversationTurn, facts: ConversationTurnFacts,
+                         availability: ConversationAvailabilityObservation? = nil, hasReply: Bool,
+                         conversationAgentName: String, nowMilliseconds: UInt64) -> Delivery {
+        guard usesDeliveryAckPresentation(turn: turn, facts: facts) else {
+            return delivery(for: facts, availability: availability, hasReply: hasReply,
+                            nowMilliseconds: nowMilliseconds)
+        }
+
+        // Existing Seen, acted and reply facts outrank every delivery-ack state.
+        if facts.delivered || facts.actedBy != nil || hasReply { return .deliveredAck }
+
+        if case let .handed(_, rerouted, _, agent)? = facts.deliveryAck2 {
+            return rerouted ? (agent.map { .deliveredTo($0.rawValue) } ?? .deliveredAck) : .deliveredAck
+        }
+        if case .listenerReceived(_, false, _, _)? = facts.deliveryAck1 { return .deliveredAck }
+
+        if let availability {
+            switch availability.state {
+            case .unsupported, .gone:
+                return .noOneWillGetThis
+            case .listening, .notListening:
+                break
+            }
+        }
+
+        if case let .notHanded(_, reason, _, _)? = facts.deliveryAck2 {
+            return .notDelivered(reason.rawValue)
+        }
+        if case let .listenerReceived(atMilliseconds, true, _, _)? = facts.deliveryAck1 {
+            guard nowMilliseconds >= atMilliseconds,
+                  nowMilliseconds - atMilliseconds >= unpickedDelayMilliseconds else {
+                return .sending
+            }
+            return .waitingFor(conversationAgentName)
+        }
+
+        if case .notListening? = availability?.state { return .noListenerPickedThisUp }
+        guard let acceptedAt = facts.acceptedAtMilliseconds,
+              nowMilliseconds >= acceptedAt,
+              nowMilliseconds - acceptedAt >= unpickedDelayMilliseconds else {
+            return .sending
+        }
+        return .noListenerPickedThisUp
+    }
+
+    static func usesDeliveryAckPresentation(turn: ConversationTurn,
+                                            facts: ConversationTurnFacts) -> Bool {
+        turn.author == .person && turn.kind == .discussion &&
+            (turn.deliveryAcks == true || facts.deliveryAck1 != nil || facts.deliveryAck2 != nil)
     }
 }
 
@@ -637,9 +694,11 @@ private struct ConversationAvailabilityNotice: View {
 }
 
 private struct ConversationSentChatStatus: View {
+    let turn: ConversationTurn
     let facts: ConversationTurnFacts
     let availability: ConversationAvailabilityObservation?
     let hasReply: Bool
+    let conversationAgentName: String
     let local: Bool
 
     // Unreceived turns use the latest reported conversation availability.
@@ -662,19 +721,31 @@ private struct ConversationSentChatStatus: View {
         if shouldAgeDelivery {
             TimelineView(.periodic(from: .now, by: 15)) { timeline in
                 deliveryLabel(ConversationSentChatStatusPresentation.delivery(
-                    for: facts, availability: availability, hasReply: hasReply,
+                    for: turn, facts: facts, availability: availability, hasReply: hasReply,
+                    conversationAgentName: conversationAgentName,
                     nowMilliseconds: Self.milliseconds(timeline.date)))
             }
         } else {
             deliveryLabel(ConversationSentChatStatusPresentation.delivery(
-                for: facts, availability: availability, hasReply: hasReply,
+                for: turn, facts: facts, availability: availability, hasReply: hasReply,
+                conversationAgentName: conversationAgentName,
                 nowMilliseconds: Self.milliseconds(.now)))
         }
     }
 
     private var shouldAgeDelivery: Bool {
-        guard facts.acceptedAtMilliseconds != nil,
-              !facts.delivered, facts.actedBy == nil, !hasReply else { return false }
+        guard !facts.delivered, facts.actedBy == nil, !hasReply else { return false }
+        if ConversationSentChatStatusPresentation.usesDeliveryAckPresentation(turn: turn, facts: facts) {
+            if case .handed? = facts.deliveryAck2 { return false }
+            if case .notHanded? = facts.deliveryAck2 { return false }
+            if case .listenerReceived(_, false, _, _)? = facts.deliveryAck1 { return false }
+            if case .unsupported? = availability?.state { return false }
+            if case .gone? = availability?.state { return false }
+            if case .listenerReceived(_, true, _, _)? = facts.deliveryAck1 { return true }
+            if case .notListening? = availability?.state { return false }
+            return facts.acceptedAtMilliseconds != nil
+        }
+        guard facts.acceptedAtMilliseconds != nil else { return false }
         switch availability?.state {
         case .notListening?, .unsupported?, .gone?: return false
         case .listening?, nil: return true
@@ -697,6 +768,26 @@ private struct ConversationSentChatStatus: View {
                 .foregroundStyle(.red)
         case .delivered:
             Text("Delivered")
+                .foregroundStyle(.secondary)
+        case .sending:
+            Text("Sending…")
+                .foregroundStyle(.secondary)
+        case .noListenerPickedThisUp:
+            Text("No listener has picked this up")
+                .fontWeight(.semibold)
+                .foregroundStyle(.orange)
+        case let .waitingFor(agent):
+            Text("Waiting for \(agent)")
+                .foregroundStyle(.secondary)
+        case let .notDelivered(reason):
+            Text("Not delivered: \(reason)")
+                .fontWeight(.semibold)
+                .foregroundStyle(.red)
+        case .deliveredAck:
+            Label("Delivered", systemImage: "checkmark")
+                .foregroundStyle(.secondary)
+        case let .deliveredTo(agent):
+            Label("Delivered to \(agent)", systemImage: "checkmark")
                 .foregroundStyle(.secondary)
         }
     }
@@ -747,8 +838,8 @@ private struct ConversationTurnView: View {
                 }
             }
             if turn.author == .person {
-                ConversationSentChatStatus(facts: facts, availability: availability,
-                    hasReply: hasReply, local: local)
+                ConversationSentChatStatus(turn: turn, facts: facts, availability: availability,
+                    hasReply: hasReply, conversationAgentName: sender, local: local)
             }
         }
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)
