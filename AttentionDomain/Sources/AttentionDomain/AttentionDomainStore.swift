@@ -1133,9 +1133,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     throw ConversationError.conflict
                 }
                 thread = prior
-                if let availability = metadata.availability {
-                    try thread.recordAcceptanceAvailability(availability)
-                }
             } else {
                 for prior in conversation.events.values where prior.binding.request == request.key {
                     guard case let .attentionTier(_, _, _, priorSessionHandle) = prior.fact,
@@ -1145,7 +1142,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 thread = ConversationThread(request: request.key, sessionHandle: handle,
                     revision: 1, payload: request.originalPayload)
                 if let availability = metadata.availability {
-                    try thread.recordAcceptanceAvailability(availability)
+                    thread.availability = availability
+                    thread.latestAvailabilityObservation = ConversationAvailabilityObservation(state: availability)
                 }
                 thread.listeningSupport = metadata.listeningSupport
                 thread.terminal = next.remoteStates[request.key]?.state

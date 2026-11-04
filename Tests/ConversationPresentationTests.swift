@@ -77,7 +77,7 @@ final class ConversationPresentationTests: XCTestCase {
     func testSentChatAgesToNotDeliveredYetAtTwoMinutesWithoutDeclaringFailure() {
         var facts = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
         let listening = ConversationAvailabilityObservation(
-            state: .listening, source: .conversationEvent, conversationSequence: 3)
+            state: .listening)
 
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
             hasReply: false, nowMilliseconds: 39_999), .sent,
@@ -103,7 +103,7 @@ final class ConversationPresentationTests: XCTestCase {
     func testSentChatFoldsActionAndReplyIntoDeliveredWithoutChangingStoredFacts() {
         var facts = ConversationTurnFacts()
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
-            availability: ConversationAvailabilityObservation(state: .gone, source: .conversationEvent),
+            availability: ConversationAvailabilityObservation(state: .gone),
             hasReply: true, nowMilliseconds: 0), .delivered,
             "An actual reply is visible as the next turn and establishes delivery.")
         XCTAssertNil(facts.actedBy, "A reply does not manufacture an acted fact.")
@@ -112,7 +112,7 @@ final class ConversationPresentationTests: XCTestCase {
         facts.actedBy = ExactText("action")
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
             availability: ConversationAvailabilityObservation(
-                state: .unsupported(reason: ExactText("retired route")), source: .conversationEvent),
+                state: .unsupported(reason: ExactText("retired route"))),
             hasReply: false, nowMilliseconds: 0), .delivered,
             "An acted event folds into Delivered without inventing a reply.")
         XCTAssertEqual(facts.actedBy, ExactText("action"))
@@ -123,12 +123,11 @@ final class ConversationPresentationTests: XCTestCase {
     func testUnreceivedSentChatUsesLatestAvailabilityAndReceiptStaysDelivered() {
         let facts = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
         let notListening = ConversationAvailabilityObservation(
-            state: .notListening(lastDetachedAt: nil), source: .conversationEvent, conversationSequence: 4)
+            state: .notListening(lastDetachedAt: nil))
         let unsupported = ConversationAvailabilityObservation(
-            state: .unsupported(reason: ExactText("unsupported")), source: .conversationEvent,
-            conversationSequence: 5)
+            state: .unsupported(reason: ExactText("unsupported")))
         let gone = ConversationAvailabilityObservation(
-            state: .gone, source: .conversationEvent, conversationSequence: 6)
+            state: .gone)
 
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
             availability: notListening, hasReply: false, nowMilliseconds: 40_001), .notDeliveredYet,
@@ -151,15 +150,15 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for: nil), .none,
                        "Missing legacy availability stays unknown.")
         XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
-            ConversationAvailabilityObservation(state: .listening, source: .conversationEvent)), .none)
+            ConversationAvailabilityObservation(state: .listening)), .none)
         XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
-            ConversationAvailabilityObservation(state: .notListening(lastDetachedAt: nil), source: .conversationEvent)),
+            ConversationAvailabilityObservation(state: .notListening(lastDetachedAt: nil))),
             .nothingListening)
         XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
-            ConversationAvailabilityObservation(state: .unsupported(reason: ExactText("Unsupported")),
-                source: .conversationEvent)), .noOneWillGetThis)
+            ConversationAvailabilityObservation(state: .unsupported(reason: ExactText("Unsupported")))),
+            .noOneWillGetThis)
         XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
-            ConversationAvailabilityObservation(state: .gone, source: .conversationEvent)), .noOneWillGetThis)
+            ConversationAvailabilityObservation(state: .gone)), .noOneWillGetThis)
     }
 
     func testConversationAvailabilityMustBeConfirmedBeforeShowingNoChatState() {

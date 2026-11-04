@@ -747,11 +747,9 @@ final class ConversationRelayTests: XCTestCase {
         let threads = try restored.conversationSnapshot(context: context).threads
         let thread = try XCTUnwrap(threads[earlier])
         XCTAssertEqual(thread.availability, .listening)
-        XCTAssertEqual(thread.availabilityAtAcceptance, .notListening(lastDetachedAt: nil),
-                       "The acceptance snapshot remains separate from later availability updates.")
         XCTAssertEqual(thread.latestAvailabilityObservation,
-            ConversationAvailabilityObservation(state: .listening, source: .conversationEvent,
-                conversationSequence: 1))
+            ConversationAvailabilityObservation(state: .listening),
+            "The replayed current availability remains after the duplicate delivery is ignored.")
         XCTAssertEqual(thread.turns.first { $0.id == ExactText("5") }?.text, ExactText("Hi there"))
         XCTAssertEqual(thread.facts[ExactText("5")]?.delivered, true)
         XCTAssertEqual(thread.facts[ExactText("5")]?.actedBy, ExactText("6"))
