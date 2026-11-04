@@ -69,6 +69,8 @@ final class SampleFixtureDomain {
                         try apply(.availability(sessionHandle: handle,
                             .notListening(lastDetachedAt: nil)))
                         let now = UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
+                        let ack1FinalOnly = ProcessInfo.processInfo.arguments.contains(
+                            "--harklight-test-chat-status-ack1-final-only")
                         func appendStatusExample(_ suffix: String, _ text: String) throws -> ConversationTurn {
                             let turn = ConversationTurn(id: ExactText("two-ack-" + suffix), binding: binding,
                                 author: .person, sessionHandle: handle, text: ExactText(text),
@@ -76,39 +78,43 @@ final class SampleFixtureDomain {
                             try apply(.turn(turn))
                             return turn
                         }
-                        let sending = try appendStatusExample("sending", "Agent not given yet.")
-                        try apply(.deliveryAck(turn: sending.id, acknowledgement: .listenerReceived(
-                            atMilliseconds: now - 30_000, ack2Expected: true,
-                            acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)))
+                        if !ack1FinalOnly {
+                            let sending = try appendStatusExample("sending", "Agent not given yet.")
+                            try apply(.deliveryAck(turn: sending.id, acknowledgement: .listenerReceived(
+                                atMilliseconds: now - 30_000, ack2Expected: true,
+                                acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)))
 
-                        let waiting = try appendStatusExample("waiting", "First acknowledgement received.")
-                        try apply(.deliveryAck(turn: waiting.id, acknowledgement: .listenerReceived(
-                            atMilliseconds: now - 180_000, ack2Expected: true,
-                            acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)))
+                            let waiting = try appendStatusExample("waiting", "First acknowledgement received.")
+                            try apply(.deliveryAck(turn: waiting.id, acknowledgement: .listenerReceived(
+                                atMilliseconds: now - 180_000, ack2Expected: true,
+                                acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)))
+                        }
 
                         let incapable = try appendStatusExample("ack1-final", "This listener cannot send ACK2.")
                         try apply(.deliveryAck(turn: incapable.id, acknowledgement: .listenerReceived(
                             atMilliseconds: now, ack2Expected: false,
                             acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)))
 
-                        _ = try appendStatusExample("no-listener", "No first acknowledgement.")
+                        if !ack1FinalOnly {
+                            _ = try appendStatusExample("no-listener", "No first acknowledgement.")
 
-                        let delivered = try appendStatusExample("handed", "Handed to an agent.")
-                        try apply(.deliveryAck(turn: delivered.id, acknowledgement: .handed(
-                            atMilliseconds: now, rerouted: false,
-                            acknowledgerSystem: ExactText("Tightbeam"),
-                            acknowledgerAgent: ExactText("Release orchestrator"))))
+                            let delivered = try appendStatusExample("handed", "Handed to an agent.")
+                            try apply(.deliveryAck(turn: delivered.id, acknowledgement: .handed(
+                                atMilliseconds: now, rerouted: false,
+                                acknowledgerSystem: ExactText("Tightbeam"),
+                                acknowledgerAgent: ExactText("Release orchestrator"))))
 
-                        let deliveredTo = try appendStatusExample("rerouted", "Handed to a follower.")
-                        try apply(.deliveryAck(turn: deliveredTo.id, acknowledgement: .handed(
-                            atMilliseconds: now, rerouted: true,
-                            acknowledgerSystem: ExactText("Tightbeam"),
-                            acknowledgerAgent: ExactText("Release orchestrator"))))
+                            let deliveredTo = try appendStatusExample("rerouted", "Handed to a follower.")
+                            try apply(.deliveryAck(turn: deliveredTo.id, acknowledgement: .handed(
+                                atMilliseconds: now, rerouted: true,
+                                acknowledgerSystem: ExactText("Tightbeam"),
+                                acknowledgerAgent: ExactText("Release orchestrator"))))
 
-                        let notHanded = try appendStatusExample("not-handed", "Handoff unavailable.")
-                        try apply(.deliveryAck(turn: notHanded.id, acknowledgement: .notHanded(
-                            atMilliseconds: now, reason: ExactText("The receiving system is unavailable."),
-                            acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)))
+                            let notHanded = try appendStatusExample("not-handed", "Handoff unavailable.")
+                            try apply(.deliveryAck(turn: notHanded.id, acknowledgement: .notHanded(
+                                atMilliseconds: now, reason: ExactText("The receiving system is unavailable."),
+                                acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)))
+                        }
 
                     }
                 }
