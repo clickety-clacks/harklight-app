@@ -1721,10 +1721,11 @@ struct InboxRowContent: View {
                         Image(systemName: "flag.fill")
                             .accessibilityHidden(true)
                         Text(level.title)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(titleColor)
-                    .fixedSize(horizontal: true, vertical: false)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(Text(level.title))
                     .accessibilityIdentifier("inbox-priority-\(level.rawValue)")
@@ -1733,12 +1734,20 @@ struct InboxRowContent: View {
                 if let duePhrase = row.duePhrase {
                     ViewThatFits(in: .horizontal) {
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
-                            Text(duePhrase.dayLine).fixedSize(horizontal: true, vertical: false)
-                            Text(duePhrase.timeLine).fixedSize(horizontal: true, vertical: false)
+                            Text(duePhrase.dayLine)
+                                .lineLimit(1)
+                            Text(duePhrase.timeLine)
+                                .lineLimit(1)
                         }
+                        // Keep this candidate at natural width so compact rows use the stacked fallback.
+                        .fixedSize(horizontal: true, vertical: false)
                         VStack(alignment: .trailing, spacing: 0) {
-                            Text(duePhrase.dayLine).fixedSize(horizontal: true, vertical: false)
-                            Text(duePhrase.timeLine).fixedSize(horizontal: true, vertical: false)
+                            Text(duePhrase.dayLine)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            Text(duePhrase.timeLine)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
                         }
                     }
                     .font(.caption2)
