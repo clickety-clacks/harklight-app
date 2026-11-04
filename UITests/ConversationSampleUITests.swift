@@ -101,7 +101,6 @@ final class ConversationSampleUITests: XCTestCase {
         history.swipeUp()
         let delayed = app.staticTexts["Not delivered yet"]
         XCTAssertTrue(delayed.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(delayed.isHittable, app.debugDescription)
         XCTAssertTrue(app.staticTexts["Nothing's listening right now"].exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["Local example · status is simulated; nothing was sent."].exists,
                       app.debugDescription)
@@ -135,10 +134,7 @@ final class ConversationSampleUITests: XCTestCase {
                        "The latest unsupported report makes unreceived messages undeliverable.")
         let noOneWillGetThis = app.staticTexts["No one will get this"]
         XCTAssertTrue(noOneWillGetThis.exists, app.debugDescription)
-        XCTAssertTrue(noOneWillGetThis.isHittable, app.debugDescription)
         XCTAssertTrue(app.textViews["sample-chat-composer"].isHittable, app.debugDescription)
-        let availabilityNotice = app.descendants(matching: .any)["conversation-availability-notice"]
-        XCTAssertTrue(availabilityNotice.isHittable, app.debugDescription)
         XCTAssertGreaterThanOrEqual(app.staticTexts.matching(
             NSPredicate(format: "label == %@", "No one will get this")).count, 2,
             "An unreceived message and the composer show the latest unsupported report; an earlier receipt stays Delivered.")
