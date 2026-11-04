@@ -125,7 +125,7 @@ final class ConversationDomainTests: XCTestCase {
             acknowledgerAgent: ExactText("Release orchestrator")))
         XCTAssertFalse(thread.facts[turn.id]?.delivered ?? true,
                        "A system ACK2 remains distinct from the existing agent Seen receipt.")
-        XCTAssertEqual(restored.conversationSnapshot(context: context).cursor, 5)
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 5)
     }
 
     func testLegacySavedTurnsAndFactsDecodeWithoutOptionalTwoAckFields() throws {
