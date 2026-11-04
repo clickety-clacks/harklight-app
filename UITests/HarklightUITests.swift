@@ -327,9 +327,12 @@ final class HarklightUITests: XCTestCase {
 
         applyFixtureOutcome("answerOutcomeUnconfirmed", in: app)
 
-        let answeredControl = app.buttons["request-answered"]
-        XCTAssertTrue(answeredControl.waitForExistence(timeout: 5),
-                      "An answer with an unconfirmed outcome keeps the existing generic status.")
+        let answeredCard = app.descendants(matching: .any)["request-answered"]
+        XCTAssertTrue(answeredCard.waitForExistence(timeout: 5),
+                      "A server-answered request shows the full Answered confirmation card even when its accepted answer is unknown.")
+        XCTAssertEqual(answeredCard.value as? String, "Completed")
+        XCTAssertFalse(app.buttons["request-answered"].exists,
+                       "Answered is presented in the detail card, not as an extra toolbar pill.")
         XCTAssertFalse(app.staticTexts["request-account-answer"].exists,
                        "The attempted local answer is not presented as the unknown accepted answer.")
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,

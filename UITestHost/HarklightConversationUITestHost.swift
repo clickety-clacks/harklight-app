@@ -58,6 +58,7 @@ struct HarklightConversationUITestHost: App {
                     ContentUnavailableView("Local test model unavailable", systemImage: "questionmark.folder")
                 }
             }
+            .preferredColorScheme(testColorScheme)
             .foregroundChatNotificationLayer(includeAppLaunch: false,
                                              testRouter: .shared,
                                              testOpen: openTestChatIndicator)
@@ -66,6 +67,13 @@ struct HarklightConversationUITestHost: App {
                 prepareTestChatIndicatorIfRequested()
             }
         }
+    }
+
+    private var testColorScheme: ColorScheme? {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--harklight-test-chat-status-dark") { return .dark }
+        if arguments.contains("--harklight-test-chat-status-light") { return .light }
+        return nil
     }
 
     private func prepareTestChatIndicatorIfRequested() {

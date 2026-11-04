@@ -34,9 +34,16 @@ final class SampleFixtureDomain {
             }
             guard let request = requests[key] else { throw ConversationError.missingRequest }
             try apply(.request(sessionHandle: handle, payload: request.originalPayload))
-            let availability: ConversationAvailability = message.id.hasSuffix("-1")
-                ? .unsupported(reason: ExactText("Fictional route without a listener"))
-                : message.id.hasSuffix("-2") ? .notListening(lastDetachedAt: nil) : .listening
+            let showUnsupportedChatNotice = message.id == "sample-information-2" &&
+                ProcessInfo.processInfo.arguments.contains("--harklight-test-chat-status-unsupported")
+            let availability: ConversationAvailability
+            if showUnsupportedChatNotice || message.id.hasSuffix("-1") {
+                availability = .unsupported(reason: ExactText("Fictional route without a listener"))
+            } else if message.id.hasSuffix("-2") {
+                availability = .notListening(lastDetachedAt: nil)
+            } else {
+                availability = .listening
+            }
             try apply(.availability(sessionHandle: handle, availability))
             if message.hasChat {
                 let personID = message.id == "sample-information-0" ? "30" : message.id + "-question"
@@ -82,6 +89,12 @@ final class SampleFixtureDomain {
                 try apply(.turn(turn))
                 try apply(.fileTransfer(turn: turn.id, file: file.id, .transferred))
                 try apply(.fileUse(turn: turn.id, file: file.id, .unusable(reason: ExactText("Fictional unsupported format"))))
+                let simulatedAcceptedAt = UInt64(max(0, Date().timeIntervalSince1970 * 1_000 - 180_000))
+                try domain.saveConversationDraft(ConversationDraft(binding: binding,
+                    text: ExactText("Could you check whether this message reached anyone?")), context: context)
+                try domain.appendFixtureDiscussion(binding, context: context,
+                    simulatedAcceptanceObservedAtMilliseconds: simulatedAcceptedAt)
+                sequence += 1
             }
             if message.id == "sample-completed-2" {
                 try apply(.availability(sessionHandle: handle, .gone))

@@ -528,8 +528,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(request.defaultAnswerWords, "Hold for now",
                        "Display words come from the shared outcome, not the duplicate action label.")
         XCTAssertEqual(request.defaultAnswerStatusText, "Answered by default: Hold for now")
-        XCTAssertEqual(LiveRequestDetail.answeredStatusTitle(
-            accountAnswerOutcome: request.accountAnswerOutcome, isLiveRequest: true), "Answered by default")
+        XCTAssertEqual(String(localized: LiveRequestDetail.answeredConfirmationTitle(
+            isDefaultAnswered: request.isDefaultAnswered)), "Answered by default")
         XCTAssertEqual(request.byWhenMilliseconds, 1_793_300_000_000)
         XCTAssertEqual(request.stakeText, ExactText("The review deadline slips."))
         let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
@@ -607,8 +607,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(request.intentReceipt)
         XCTAssertNil(request.receiptFacts)
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).status.contains("Answered"))
-        XCTAssertEqual(LiveRequestDetail.answeredStatusTitle(
-            accountAnswerOutcome: request.accountAnswerOutcome, isLiveRequest: true), "Answered",
+        XCTAssertEqual(String(localized: LiveRequestDetail.answeredConfirmationTitle(
+            isDefaultAnswered: request.isDefaultAnswered)), "Answered",
             "An older server's terminal stays generic instead of claiming Replied or Seen.")
     }
 

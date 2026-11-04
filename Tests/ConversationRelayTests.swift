@@ -710,14 +710,17 @@ final class ConversationRelayTests: XCTestCase {
             event("reply", sequence: 4,
                 fields: #""author":"origin","event_id":"6","in_reply_to":"5","op_id":"7d76be3a-c45d-4cef-87c7-248982fe3b0d","text":"Hello""#,
                 messageID: "earlier", sessionHandle: "earlier-handle"),
-            event("discussion", sequence: 5,
+            event("acted", sequence: 5,
+                fields: #""author":"origin","event_id":"5","acting_event_id":"6""#,
+                messageID: "earlier", sessionHandle: "earlier-handle"),
+            event("discussion", sequence: 6,
                 fields: #""author":"person","event_id":"7","text":"Current request still works""#),
-            event("receipt", sequence: 6, fields: #""author":"origin","event_id":"7","delivered":true"#),
-            event("reply", sequence: 7,
+            event("receipt", sequence: 7, fields: #""author":"origin","event_id":"7","delivered":true"#),
+            event("reply", sequence: 8,
                 fields: #""author":"origin","event_id":"8","in_reply_to":"7","text":"Current reply""#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":7}"#)]
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":8}"#)]
         session.onConversationACK = {
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 7)
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 8)
             XCTAssertNil(try store.conversationSnapshot(context: context).threads[earlier])
             let current = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
             XCTAssertEqual(current.facts[ExactText("7")]?.delivered, true)
@@ -726,7 +729,7 @@ final class ConversationRelayTests: XCTestCase {
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":7,"ref":"native-conversation-ack"}"# + "\n")])
+        XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":8,"ref":"native-conversation-ack"}"# + "\n")])
         await core.deactivate()
 
         // The held events survive a store restart, then apply when inbox paging
@@ -737,18 +740,22 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"earlier","origin":"origin","as":"message","message":{"title":"Earlier request"},"session_handle":"earlier-handle","request_revision":1,"availability":"not_listening","last_detached_at":null}"#),
             data(#"{"v":1,"type":"resynced","seq":2}"#)]
         later.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":7}"#)]
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":8}"#)]
         let resumed = try NativeRelayCore(store: restored, context: context, session: later)
         _ = try await resumed.resyncAndDrainOutbox()
 
         let threads = try restored.conversationSnapshot(context: context).threads
         let thread = try XCTUnwrap(threads[earlier])
         XCTAssertEqual(thread.availability, .listening)
+        XCTAssertEqual(thread.latestAvailabilityObservation,
+            ConversationAvailabilityObservation(state: .listening),
+            "The replayed current availability remains after the duplicate delivery is ignored.")
         XCTAssertEqual(thread.turns.first { $0.id == ExactText("5") }?.text, ExactText("Hi there"))
         XCTAssertEqual(thread.facts[ExactText("5")]?.delivered, true)
+        XCTAssertEqual(thread.facts[ExactText("5")]?.actedBy, ExactText("6"))
         XCTAssertEqual(thread.turns.first { $0.id == ExactText("6") }?.text, ExactText("Hello"))
-        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 7)
-        XCTAssertEqual(later.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":7,"ref":"native-conversation-ack"}"# + "\n")])
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 8)
+        XCTAssertEqual(later.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":8,"ref":"native-conversation-ack"}"# + "\n")])
         await resumed.deactivate()
     }
     func testUnboundTierFactStaysInternalAndIsNotPresentedWhenDeliveryArrives() async throws {

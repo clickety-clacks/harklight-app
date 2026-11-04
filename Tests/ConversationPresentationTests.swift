@@ -74,6 +74,93 @@ final class ConversationPresentationTests: XCTestCase {
             current: "A later edit", currentEdit: 4), "A later edit")
     }
 
+    func testSentChatAgesToNotDeliveredYetAtTwoMinutesWithoutDeclaringFailure() {
+        var facts = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
+        let listening = ConversationAvailabilityObservation(
+            state: .listening)
+
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            hasReply: false, nowMilliseconds: 39_999), .sent,
+            "A future local clock observation cannot age the message into a failure state.")
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            availability: listening, hasReply: false, nowMilliseconds: 159_999), .sent)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            availability: listening, hasReply: false, nowMilliseconds: 160_000), .notDeliveredYet)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            hasReply: false, nowMilliseconds: 160_000), .notDeliveredYet,
+            "Unknown current availability still ages an unacknowledged message.")
+
+        facts.acceptedAtMilliseconds = nil
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            hasReply: false, nowMilliseconds: 9_000_000), .sent,
+            "Legacy history without an acceptance time does not receive a fabricated age.")
+        facts.delivered = true
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            hasReply: false, nowMilliseconds: 9_000_000), .delivered,
+            "A later delivery ACK replaces the waiting presentation.")
+    }
+
+    func testSentChatFoldsActionAndReplyIntoDeliveredWithoutChangingStoredFacts() {
+        var facts = ConversationTurnFacts()
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            availability: ConversationAvailabilityObservation(state: .gone),
+            hasReply: true, nowMilliseconds: 0), .delivered,
+            "An actual reply is visible as the next turn and establishes delivery.")
+        XCTAssertNil(facts.actedBy, "A reply does not manufacture an acted fact.")
+        XCTAssertFalse(facts.delivered, "A reply does not manufacture a receipt ACK fact.")
+
+        facts.actedBy = ExactText("action")
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            availability: ConversationAvailabilityObservation(
+                state: .unsupported(reason: ExactText("retired route"))),
+            hasReply: false, nowMilliseconds: 0), .delivered,
+            "An acted event folds into Delivered without inventing a reply.")
+        XCTAssertEqual(facts.actedBy, ExactText("action"))
+        XCTAssertFalse(facts.delivered,
+                       "The status label does not overwrite the independent receipt fact.")
+    }
+
+    func testUnreceivedSentChatUsesLatestAvailabilityAndReceiptStaysDelivered() {
+        let facts = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
+        let notListening = ConversationAvailabilityObservation(
+            state: .notListening(lastDetachedAt: nil))
+        let unsupported = ConversationAvailabilityObservation(
+            state: .unsupported(reason: ExactText("unsupported")))
+        let gone = ConversationAvailabilityObservation(
+            state: .gone)
+
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            availability: notListening, hasReply: false, nowMilliseconds: 40_001), .notDeliveredYet,
+            "The latest not-listening report makes an unreceived message visibly delayed immediately.")
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            availability: unsupported, hasReply: false, nowMilliseconds: 40_001), .noOneWillGetThis)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
+            availability: gone, hasReply: false, nowMilliseconds: 40_001), .noOneWillGetThis)
+
+        var received = facts
+        received.delivered = true
+        for availability in [notListening, unsupported, gone] {
+            XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: received,
+                availability: availability, hasReply: false, nowMilliseconds: 40_001), .delivered,
+                "A receipt keeps its Delivered outcome when later availability changes.")
+        }
+    }
+
+    func testComposerNoticeUsesOnlyActuallyReportedLatestAvailability() {
+        XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for: nil), .none,
+                       "Missing legacy availability stays unknown.")
+        XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
+            ConversationAvailabilityObservation(state: .listening)), .none)
+        XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
+            ConversationAvailabilityObservation(state: .notListening(lastDetachedAt: nil))),
+            .nothingListening)
+        XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
+            ConversationAvailabilityObservation(state: .unsupported(reason: ExactText("Unsupported")))),
+            .noOneWillGetThis)
+        XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
+            ConversationAvailabilityObservation(state: .gone)), .noOneWillGetThis)
+    }
+
     func testConversationAvailabilityMustBeConfirmedBeforeShowingNoChatState() {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),
