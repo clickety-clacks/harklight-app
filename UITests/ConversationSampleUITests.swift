@@ -253,11 +253,15 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Not delivered: The receiving system is unavailable."].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["No listener has picked this up"].exists, app.debugDescription)
-        XCTAssertGreaterThanOrEqual(app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "Delivered")).count, 3,
-            "A plain ACK2 handoff and an ACK1-final incapable listener stay Delivered.")
         XCTAssertTrue(app.staticTexts["Nothing's listening right now"].exists, app.debugDescription)
         capture("sent-chat-two-ack-light", app)
+
+        history.swipeDown()
+        let incapableListener = app.staticTexts["This listener cannot send ACK2."]
+        XCTAssertTrue(incapableListener.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(incapableListener.isHittable, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Delivered"].exists, app.debugDescription)
+        capture("sent-chat-two-ack-light-ack1-final", app)
     }
 
     func testTwoAckStatusDarkKeepsWaitingQuietAndDeliveredCaptionStable() {
