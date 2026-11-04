@@ -75,6 +75,7 @@ struct ConversationPanel: View {
                             ForEach(thread.turns) { turn in
                                 ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
                                     sender: sender, local: store.isLocalExample,
+                                    availability: thread.latestReportedAvailabilityObservation,
                                     hasReply: thread.turns.contains {
                                         $0.author != .person && $0.inReplyTo == turn.id &&
                                             ($0.kind == nil || $0.kind == .reply)
@@ -552,14 +553,23 @@ enum ConversationSentChatStatusPresentation {
     enum Delivery: Equatable {
         case sent
         case notDeliveredYet
+        case noOneWillGetThis
         case delivered
     }
 
-    static func delivery(for facts: ConversationTurnFacts, hasReply: Bool,
+    static func delivery(for facts: ConversationTurnFacts,
+                         availability: ConversationAvailabilityObservation? = nil, hasReply: Bool,
                          nowMilliseconds: UInt64) -> Delivery {
         // Receipt, action, and an actual reply all establish delivery. They
         // remain separate stored facts; this is only their shared presentation.
         if facts.delivered || facts.actedBy != nil || hasReply { return .delivered }
+        if let availability {
+            switch availability.state {
+            case .notListening: return .notDeliveredYet
+            case .unsupported, .gone: return .noOneWillGetThis
+            case .listening: break
+            }
+        }
         guard let acceptedAt = facts.acceptedAtMilliseconds,
               nowMilliseconds >= acceptedAt,
               nowMilliseconds - acceptedAt >= unpickedDelayMilliseconds else {
@@ -609,11 +619,12 @@ private struct ConversationAvailabilityNotice: View {
 
 private struct ConversationSentChatStatus: View {
     let facts: ConversationTurnFacts
+    let availability: ConversationAvailabilityObservation?
     let hasReply: Bool
     let local: Bool
 
-    // Discussion acceptance returns a turn ID, not an availability snapshot.
-    // Keep later thread availability in the composer notice, never on this turn.
+    // Unreceived turns use the latest reported conversation availability.
+    // Receipt, action, and reply facts take precedence and remain independent.
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             if local {
@@ -632,17 +643,23 @@ private struct ConversationSentChatStatus: View {
         if shouldAgeDelivery {
             TimelineView(.periodic(from: .now, by: 15)) { timeline in
                 deliveryLabel(ConversationSentChatStatusPresentation.delivery(
-                    for: facts, hasReply: hasReply,
+                    for: facts, availability: availability, hasReply: hasReply,
                     nowMilliseconds: Self.milliseconds(timeline.date)))
             }
         } else {
             deliveryLabel(ConversationSentChatStatusPresentation.delivery(
-                for: facts, hasReply: hasReply, nowMilliseconds: Self.milliseconds(.now)))
+                for: facts, availability: availability, hasReply: hasReply,
+                nowMilliseconds: Self.milliseconds(.now)))
         }
     }
 
     private var shouldAgeDelivery: Bool {
-        facts.acceptedAtMilliseconds != nil && !facts.delivered && facts.actedBy == nil && !hasReply
+        guard facts.acceptedAtMilliseconds != nil,
+              !facts.delivered, facts.actedBy == nil, !hasReply else { return false }
+        switch availability?.state {
+        case .notListening?, .unsupported?, .gone?: return false
+        case .listening?, nil: return true
+        }
     }
 
     @ViewBuilder
@@ -655,6 +672,10 @@ private struct ConversationSentChatStatus: View {
             Text("Not delivered yet")
                 .fontWeight(.semibold)
                 .foregroundStyle(.orange)
+        case .noOneWillGetThis:
+            Label("No one will get this", systemImage: "xmark.circle.fill")
+                .fontWeight(.semibold)
+                .foregroundStyle(.red)
         case .delivered:
             Text("Delivered")
                 .foregroundStyle(.secondary)
@@ -672,6 +693,7 @@ private struct ConversationTurnView: View {
     let facts: ConversationTurnFacts
     let sender: String
     let local: Bool
+    let availability: ConversationAvailabilityObservation?
     let hasReply: Bool
     let replyContext: String?
     let retracted: Bool
@@ -706,7 +728,8 @@ private struct ConversationTurnView: View {
                 }
             }
             if turn.author == .person {
-                ConversationSentChatStatus(facts: facts, hasReply: hasReply, local: local)
+                ConversationSentChatStatus(facts: facts, availability: availability,
+                    hasReply: hasReply, local: local)
             }
         }
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)

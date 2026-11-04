@@ -131,17 +131,17 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(latestMessage.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(latestMessage.isHittable, app.debugDescription)
         XCTAssertTrue(app.staticTexts["Delivered"].exists, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Not delivered yet"].exists, app.debugDescription)
-        let sent = app.staticTexts["Sent"]
-        XCTAssertTrue(sent.exists, app.debugDescription)
-        XCTAssertTrue(sent.isHittable, app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Not delivered yet"].exists,
+                       "The latest unsupported report makes unreceived messages undeliverable.")
         let noOneWillGetThis = app.staticTexts["No one will get this"]
         XCTAssertTrue(noOneWillGetThis.exists, app.debugDescription)
         XCTAssertTrue(noOneWillGetThis.isHittable, app.debugDescription)
         XCTAssertTrue(app.textViews["sample-chat-composer"].isHittable, app.debugDescription)
-        XCTAssertEqual(app.staticTexts.matching(
-            NSPredicate(format: "label == %@", "No one will get this")).count, 1,
-                       "The latest thread report belongs above the composer; it does not rewrite an earlier turn's receipt facts.")
+        let availabilityNotice = app.descendants(matching: .any)["conversation-availability-notice"]
+        XCTAssertTrue(availabilityNotice.isHittable, app.debugDescription)
+        XCTAssertGreaterThanOrEqual(app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "No one will get this")).count, 2,
+            "An unreceived message and the composer show the latest unsupported report; an earlier receipt stays Delivered.")
         capture("sent-chat-status-unsupported-composer-dark", app)
     }
 
