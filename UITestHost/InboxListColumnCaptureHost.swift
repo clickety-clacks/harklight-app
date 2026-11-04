@@ -6,6 +6,7 @@ import AttentionDomain
 /// host; the shipped app keeps its normal adaptive column sizing.
 @MainActor
 struct InboxListColumnCaptureHost: View {
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isWarningPresented = false
     @State private var selected: InboxSelection?
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
@@ -48,6 +49,11 @@ struct InboxListColumnCaptureHost: View {
                 NavigationStack {
                     Text("Select a message")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background {
+                            HarklightDesignSystem.palette(for: colorScheme)
+                                .messageType(.request).backgroundColor
+                                .ignoresSafeArea()
+                        }
                 }
             }
             .navigationSplitViewStyle(.balanced)

@@ -1094,14 +1094,13 @@ struct InboxList: View {
 
     @ViewBuilder
     private func rowContent(for row: InboxItem) -> some View {
-        let isSelected = selected == row.id || lastViewedSelection == row.id
+        let isSelected = selected == row.id
         switch row {
         case let .request(request):
             NavigationLink(value: row.id) {
                 inboxRowLabel(request, selected: isSelected)
             }
             .buttonStyle(.plain)
-            .tint(.clear)
             .navigationLinkIndicatorVisibility(.hidden)
         case let .example(_, response):
             if let request = response.inboxRow {
@@ -1109,7 +1108,6 @@ struct InboxList: View {
                     inboxRowLabel(request, selected: isSelected)
                 }
                 .buttonStyle(.plain)
-                .tint(.clear)
                 .navigationLinkIndicatorVisibility(.hidden)
             }
         }
@@ -1117,8 +1115,6 @@ struct InboxList: View {
 
     private func inboxRowLabel(_ request: InboxRequestRow, selected: Bool) -> some View {
         InboxRowContent(row: request, selected: selected)
-            // Extend the wash and bar to the List cell; content padding stays in InboxRowContent.
-            .padding(.horizontal, -16)
     }
 
     @ViewBuilder
@@ -1172,7 +1168,6 @@ struct InboxList: View {
             .accessibilityIdentifier(row.accessibilityID)
             .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
             .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
             .onScrollVisibilityChange(threshold: 0.001) { isVisible in
                 guard case let .request(request) = row else { return }
                 updateVisibility(.init(key: request.key, placement: .normalList),
@@ -1647,7 +1642,8 @@ struct InboxRowContent: View {
     }
 
     private var priorityTreatment: InboxPriorityRowTreatment? {
-        .forLevel(InboxPriorityDisplay.forScore(row.inboxScore), colorScheme: colorScheme)
+        guard !selected else { return nil }
+        return .forLevel(InboxPriorityDisplay.forScore(row.inboxScore), colorScheme: colorScheme)
     }
 
     private var priorityMarkerLevel: InboxPriorityDisplay? {
@@ -1662,10 +1658,6 @@ struct InboxRowContent: View {
 
     private var rowBackgroundStyle: AnyShapeStyle {
         priorityTreatment?.backgroundStyle ?? AnyShapeStyle(palette.neutral.backgroundColor)
-    }
-
-    private var selectionDecoration: InboxRowSelectionDecoration {
-        .forLevel(InboxPriorityDisplay.forScore(row.inboxScore), colorScheme: colorScheme)
     }
 
     private var leadingTitleAccessories: some View {
@@ -1830,23 +1822,17 @@ struct InboxRowContent: View {
                 }
             }
         }
-        .padding(.leading, 16 + (selected ? InboxRowSelectionDecoration.contentInset : 0))
+        .padding(.leading, 16)
         .padding(.trailing, 16)
         .padding(.vertical, row.tier == .top ? 18 : 13)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowBackgroundStyle)
-        .foregroundStyle(priorityTreatment?.primaryTextColor
-                         ?? (row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor))
-        .overlay(alignment: .leading) {
-            if selected {
-                Rectangle()
-                    .fill(selectionDecoration.barColor)
-                    .frame(width: InboxRowSelectionDecoration.barWidth)
-                    .frame(maxHeight: .infinity)
-                    .accessibilityHidden(true)
-                    .allowsHitTesting(false)
+        .background {
+            if !selected {
+                Rectangle().fill(rowBackgroundStyle)
             }
         }
+        .foregroundStyle(priorityTreatment?.primaryTextColor
+                         ?? (row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor))
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(palette.neutral.separatorColor)
