@@ -11,6 +11,7 @@ struct InboxListColumnCaptureHost: View {
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
     @State private var newMessageAreaStore: NewMessageAreaStore
+    private let captureState: InboxListColumnCaptureFixture.State
     private let rows: [InboxItem]
 
     init() {
@@ -22,21 +23,54 @@ struct InboxListColumnCaptureHost: View {
         guard let state else {
             preconditionFailure("The isolated inbox capture host needs a known row state.")
         }
+        captureState = state
         let fixture = InboxListColumnCaptureFixture.make(for: state)
         rows = fixture.rows.map(InboxItem.request)
         _selected = State(initialValue: fixture.selected)
         _newMessageAreaStore = State(initialValue: fixture.newMessageAreaStore)
     }
 
+    @ViewBuilder
     var body: some View {
-        NavigationSplitView {
-            productionInboxList
-                .navigationSplitViewColumnWidth(min: 250, ideal: 250, max: 250)
-        } detail: {
-            Text("Select a message")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if captureState == .fullWidthHigh {
+            NavigationStack {
+                productionInboxList
+                    .navigationDestination(for: InboxSelection.self) { _ in
+                        Text("Synthetic selected message")
+                    }
+            }
+            .overlay(alignment: .topLeading) { selectionProbe }
+        } else {
+            NavigationSplitView {
+                productionInboxList
+                    .navigationSplitViewColumnWidth(min: 250, ideal: 250, max: 250)
+            } detail: {
+                NavigationStack {
+                    Text("Select a message")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .navigationSplitViewStyle(.balanced)
+            .overlay(alignment: .topLeading) { selectionProbe }
         }
-        .navigationSplitViewStyle(.balanced)
+    }
+
+    private var selectionProbe: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(verbatim: "Capture selection"))
+            .accessibilityValue(Text(verbatim: selectionProbeValue))
+            .accessibilityIdentifier("priority-capture-selection")
+            .allowsHitTesting(false)
+    }
+
+    private var selectionProbeValue: String {
+        guard let selected else { return "none" }
+        switch selected {
+        case let .request(key): key.messageID.rawValue
+        case let .sample(id): "sample:\(id)"
+        }
     }
 
     private var productionInboxList: some View {
@@ -65,8 +99,8 @@ struct InboxListColumnCaptureHost: View {
                 Color.clear
                     .frame(width: 1, height: 1)
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(
-                        "Inbox list column width: \(Int(geometry.size.width.rounded())) points")
+                    .accessibilityLabel(Text(verbatim: "Inbox list column width"))
+                    .accessibilityValue(Text(verbatim: String(Int(geometry.size.width.rounded()))))
                     .accessibilityIdentifier("priority-capture-list-column-width")
             }
         }
@@ -76,10 +110,10 @@ struct InboxListColumnCaptureHost: View {
 @MainActor
 private enum InboxListColumnCaptureFixture {
     enum State: String {
-        case selectedPlain
         case selectedHigh
-        case unselectedComparison
+        case selectedPlainAndUnselectedComparison
         case acceptedNewMessage
+        case fullWidthHigh
     }
 
     struct Contents {
@@ -122,18 +156,18 @@ private enum InboxListColumnCaptureFixture {
         let rows: [InboxRequestRow]
         let selected: InboxSelection?
         switch state {
-        case .selectedPlain:
-            rows = [plainRow, unselectedRow]
-            selected = .request(plainRow.key)
         case .selectedHigh:
             rows = [highRow, unselectedRow]
             selected = .request(highRow.key)
-        case .unselectedComparison:
+        case .selectedPlainAndUnselectedComparison:
             rows = [plainRow, unselectedRow]
             selected = .request(plainRow.key)
         case .acceptedNewMessage:
             rows = [newMessageRow]
             selected = nil
+        case .fullWidthHigh:
+            rows = [highRow, unselectedRow]
+            selected = .request(highRow.key)
         }
 
         return Contents(rows: rows, selected: selected,

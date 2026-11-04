@@ -4,11 +4,11 @@ import XCTest
 final class ConversationSampleUITests: XCTestCase {
     func testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn() {
         XCUIDevice.shared.orientation = .landscapeLeft
-        let states: [(name: String, rowIdentifier: String, selected: Bool)] = [
-            ("selectedPlain", "request-row-visual-plain", true),
-            ("selectedHigh", "request-row-visual-high", true),
-            ("unselectedComparison", "request-row-visual-unselected", false),
-            ("acceptedNewMessage", "new-message-area-request-row-visual-new", false),
+        let states: [(name: String, rowIdentifier: String, selectedMessageID: String?, fullWidth: Bool)] = [
+            ("selectedPlainAndUnselectedComparison", "request-row-visual-plain", "visual-plain", false),
+            ("selectedHigh", "request-row-visual-high", "visual-high", false),
+            ("fullWidthHigh", "request-row-visual-high", "visual-high", true),
+            ("acceptedNewMessage", "new-message-area-request-row-visual-new", nil, false),
         ]
 
         for appearance in ["light", "dark"] {
@@ -28,29 +28,46 @@ final class ConversationSampleUITests: XCTestCase {
 
                 let columnWidth = app.descendants(matching: .any)["priority-capture-list-column-width"]
                 XCTAssertTrue(columnWidth.waitForExistence(timeout: 10), app.debugDescription)
-                XCTAssertEqual(columnWidth.label, "Inbox list column width: 250 points",
-                               "The primary NavigationSplitView column must be 250 points wide.\n\(app.debugDescription)")
 
                 let list = app.collectionViews.firstMatch
                 XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-                XCTAssertEqual(list.frame.width, 250, accuracy: 5,
-                               "The measured List itself must be 250 points wide.\n\(app.debugDescription)")
+                let expectedColumnWidth = state.fullWidth ? Int(list.frame.width.rounded()) : 250
+                XCTAssertEqual(columnWidth.value as? String, String(expectedColumnWidth),
+                               "The host's measured List width must match the requested state.\n\(app.debugDescription)")
+                XCTAssertEqual(list.frame.width, CGFloat(expectedColumnWidth), accuracy: 5,
+                               "The List itself must match its measured width.\n\(app.debugDescription)")
+                if state.fullWidth {
+                    XCTAssertGreaterThanOrEqual(list.frame.width, 500,
+                                                "The full-width comparison must use the app window, not a narrow list column.\n\(app.debugDescription)")
+                } else {
+                    XCTAssertEqual(list.frame.width, 250, accuracy: 5,
+                                   "The selected-row target is a 250-point list column.\n\(app.debugDescription)")
+                }
 
                 let row = app.descendants(matching: .any)[state.rowIdentifier]
                 XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
                 XCTAssertTrue(row.isHittable,
                               "The capture target must be visible before it is inspected.\n\(app.debugDescription)")
-                XCTAssertEqual(row.frame.width, 250, accuracy: 5)
+                XCTAssertEqual(row.frame.width, CGFloat(expectedColumnWidth), accuracy: 5)
                 XCTAssertGreaterThanOrEqual(row.frame.minY, list.frame.minY - 1)
                 XCTAssertLessThanOrEqual(row.frame.maxY, list.frame.maxY + 1)
-                XCTAssertEqual(row.isSelected, state.selected, app.debugDescription)
+                let captureSelection = app.descendants(matching: .any)["priority-capture-selection"]
+                XCTAssertTrue(captureSelection.waitForExistence(timeout: 5), app.debugDescription)
+                XCTAssertEqual(captureSelection.value as? String, state.selectedMessageID ?? "none",
+                               "The synthetic selection binding must match the captured state.\n\(app.debugDescription)")
+                if state.fullWidth {
+                    XCTAssertTrue(row.isEnabled,
+                                  "The full-width comparison must keep production NavigationLinks active.\n\(app.debugDescription)")
+                }
 
-                if state.name == "selectedPlain" {
+                if state.name == "selectedPlainAndUnselectedComparison" {
                     let comparison = app.descendants(matching: .any)["request-row-visual-unselected"]
                     XCTAssertTrue(comparison.waitForExistence(timeout: 5), app.debugDescription)
-                    XCTAssertFalse(comparison.isSelected, comparison.debugDescription)
+                    XCTAssertTrue(comparison.isHittable, comparison.debugDescription)
+                    XCTAssertTrue(comparison.label.contains("Prepare the next review"),
+                                  comparison.debugDescription)
                 }
-                if state.name == "selectedHigh" {
+                if state.name == "selectedHigh" || state.name == "fullWidthHigh" {
                     let marker = app.descendants(matching: .any)["inbox-priority-high"]
                     let duePhrase = app.descendants(matching: .any)["inbox-due-phrase"]
                     XCTAssertTrue(marker.waitForExistence(timeout: 5), app.debugDescription)

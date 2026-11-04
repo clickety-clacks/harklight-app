@@ -1098,7 +1098,7 @@ struct InboxList: View {
         switch row {
         case let .request(request):
             NavigationLink(value: row.id) {
-                InboxRowContent(row: request, selected: isSelected)
+                inboxRowLabel(request, selected: isSelected)
             }
             .buttonStyle(.plain)
             .tint(.clear)
@@ -1106,13 +1106,19 @@ struct InboxList: View {
         case let .example(_, response):
             if let request = response.inboxRow {
                 NavigationLink(value: row.id) {
-                    InboxRowContent(row: request, selected: isSelected)
+                    inboxRowLabel(request, selected: isSelected)
                 }
                 .buttonStyle(.plain)
                 .tint(.clear)
                 .navigationLinkIndicatorVisibility(.hidden)
             }
         }
+    }
+
+    private func inboxRowLabel(_ request: InboxRequestRow, selected: Bool) -> some View {
+        InboxRowContent(row: request, selected: selected)
+            // Extend the wash and bar to the List cell; content padding stays in InboxRowContent.
+            .padding(.horizontal, -16)
     }
 
     @ViewBuilder
