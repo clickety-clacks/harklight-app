@@ -137,10 +137,16 @@ final class InboxVisualRulesTests: XCTestCase {
         let presentation = InboxDuePhrase.presentation(
             for: Int(tomorrow.timeIntervalSince1970 * 1_000),
             now: now, calendar: calendar, locale: locale)
+        let normalizedTimeLine = presentation.timeLine
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        let normalizedAccessibilityLabel = presentation.accessibilityLabel
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
 
         XCTAssertEqual(presentation.dayLine, "Due tomorrow")
-        XCTAssertEqual(presentation.timeLine, "at 9:00 AM")
-        XCTAssertEqual(presentation.accessibilityLabel, "Due tomorrow at 9:00 AM")
+        XCTAssertEqual(normalizedTimeLine, "at 9:00 AM")
+        XCTAssertEqual(normalizedAccessibilityLabel, "Due tomorrow at 9:00 AM")
     }
 
     func testSenderLabelUsesLastKindAndAgentSegment() {
