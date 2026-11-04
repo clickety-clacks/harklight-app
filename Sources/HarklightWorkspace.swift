@@ -1101,6 +1101,7 @@ struct InboxList: View {
                 InboxRowContent(row: request, selected: isSelected)
             }
             .buttonStyle(.plain)
+            .tint(.clear)
             .navigationLinkIndicatorVisibility(.hidden)
         case let .example(_, response):
             if let request = response.inboxRow {
@@ -1108,6 +1109,7 @@ struct InboxList: View {
                     InboxRowContent(row: request, selected: isSelected)
                 }
                 .buttonStyle(.plain)
+                .tint(.clear)
                 .navigationLinkIndicatorVisibility(.hidden)
             }
         }
@@ -1715,7 +1717,7 @@ struct InboxRowContent: View {
     @ViewBuilder
     private var priorityAndDueLine: some View {
         if priorityMarkerLevel != nil || row.duePhrase != nil {
-            HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .top, spacing: 4) {
                 if let level = priorityMarkerLevel {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Image(systemName: "flag.fill")
@@ -1729,8 +1731,9 @@ struct InboxRowContent: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(Text(level.title))
                     .accessibilityIdentifier("inbox-priority-\(level.rawValue)")
+                    .layoutPriority(1)
                 }
-                Spacer(minLength: 4)
+                Spacer(minLength: 0)
                 if let duePhrase = row.duePhrase {
                     ViewThatFits(in: .horizontal) {
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
@@ -1752,7 +1755,6 @@ struct InboxRowContent: View {
                     }
                     .font(.caption2)
                     .foregroundStyle(secondaryRowTextColor)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(Text(duePhrase.accessibilityLabel))
                     .accessibilityIdentifier("inbox-due-phrase")

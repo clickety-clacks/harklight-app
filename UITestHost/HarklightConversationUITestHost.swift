@@ -15,7 +15,10 @@ struct HarklightConversationUITestHost: App {
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("--attention-fixture") || arguments.contains("--reset-attention-fixture") {
+        if arguments.contains("--harklight-test-inbox-list-column") {
+            _prototypeFixture = State(initialValue: nil)
+            _conversationFixture = State(initialValue: nil)
+        } else if arguments.contains("--attention-fixture") || arguments.contains("--reset-attention-fixture") {
             _prototypeFixture = State(initialValue: PrototypeStore.loadFromBundle())
             _conversationFixture = State(initialValue: nil)
         } else {
@@ -33,7 +36,9 @@ struct HarklightConversationUITestHost: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if let conversationFixture {
+                if ProcessInfo.processInfo.arguments.contains("--harklight-test-inbox-list-column") {
+                    InboxListColumnCaptureHost()
+                } else if let conversationFixture {
                     LiveContentView(store: conversationFixture.viewModel, samples: samples,
                                     testNotificationNavigation: testNotificationNavigation,
                                     testNotificationRouter: .shared,
@@ -71,6 +76,8 @@ struct HarklightConversationUITestHost: App {
 
     private var testColorScheme: ColorScheme? {
         let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--harklight-test-inbox-list-dark") { return .dark }
+        if arguments.contains("--harklight-test-inbox-list-light") { return .light }
         if arguments.contains("--harklight-test-chat-status-dark") { return .dark }
         if arguments.contains("--harklight-test-chat-status-light") { return .light }
         return nil

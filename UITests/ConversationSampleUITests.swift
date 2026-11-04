@@ -2,6 +2,74 @@ import XCTest
 
 @MainActor
 final class ConversationSampleUITests: XCTestCase {
+    func testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let states: [(name: String, rowIdentifier: String, selected: Bool)] = [
+            ("selectedPlain", "request-row-visual-plain", true),
+            ("selectedHigh", "request-row-visual-high", true),
+            ("unselectedComparison", "request-row-visual-unselected", false),
+            ("acceptedNewMessage", "new-message-area-request-row-visual-new", false),
+        ]
+
+        for appearance in ["light", "dark"] {
+            for state in states {
+                let app = XCUIApplication()
+                app.launchArguments = [
+                    "--harklight-test-inbox-list-column",
+                    "--harklight-test-inbox-list-\(appearance)",
+                    "--harklight-test-inbox-list-state=\(state.name)"
+                ]
+                app.launch()
+
+                let appWindow = app.windows.firstMatch
+                XCTAssertTrue(appWindow.waitForExistence(timeout: 10), app.debugDescription)
+                XCTAssertGreaterThan(appWindow.frame.width, 500,
+                                     "Only the NavigationSplitView sidebar may be constrained to 250 points.\n\(app.debugDescription)")
+
+                let columnWidth = app.descendants(matching: .any)["priority-capture-list-column-width"]
+                XCTAssertTrue(columnWidth.waitForExistence(timeout: 10), app.debugDescription)
+                XCTAssertEqual(columnWidth.label, "Inbox list column width: 250 points",
+                               "The primary NavigationSplitView column must be 250 points wide.\n\(app.debugDescription)")
+
+                let list = app.collectionViews.firstMatch
+                XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+                XCTAssertEqual(list.frame.width, 250, accuracy: 5,
+                               "The measured List itself must be 250 points wide.\n\(app.debugDescription)")
+
+                let row = app.descendants(matching: .any)[state.rowIdentifier]
+                XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+                XCTAssertTrue(row.isHittable,
+                              "The capture target must be visible before it is inspected.\n\(app.debugDescription)")
+                XCTAssertEqual(row.frame.width, 250, accuracy: 5)
+                XCTAssertGreaterThanOrEqual(row.frame.minY, list.frame.minY - 1)
+                XCTAssertLessThanOrEqual(row.frame.maxY, list.frame.maxY + 1)
+                XCTAssertEqual(row.isSelected, state.selected, app.debugDescription)
+
+                if state.name == "selectedPlain" {
+                    let comparison = app.descendants(matching: .any)["request-row-visual-unselected"]
+                    XCTAssertTrue(comparison.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertFalse(comparison.isSelected, comparison.debugDescription)
+                }
+                if state.name == "selectedHigh" {
+                    let marker = app.descendants(matching: .any)["inbox-priority-high"]
+                    let duePhrase = app.descendants(matching: .any)["inbox-due-phrase"]
+                    XCTAssertTrue(marker.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertEqual(marker.label, "High priority", marker.debugDescription)
+                    XCTAssertTrue(duePhrase.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertEqual(duePhrase.label, "Due tomorrow at 9:00 AM", duePhrase.debugDescription)
+                }
+                if state.name == "acceptedNewMessage" {
+                    let header = app.descendants(matching: .any)["new-message-area-header"]
+                    XCTAssertTrue(header.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(header.isHittable, app.debugDescription)
+                }
+
+                captureInboxColumnState("inbox-250-\(appearance)-\(state.name)", app)
+                app.terminate()
+            }
+        }
+    }
+
     func testForegroundChatIndicatorOpensTheMatchingConversation() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -654,6 +722,18 @@ final class ConversationSampleUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func captureInboxColumnState(_ name: String, _ app: XCUIApplication) {
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "\(name)-accessibility-hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
     }
 
     private func dismissChatSheet(_ app: XCUIApplication) {
