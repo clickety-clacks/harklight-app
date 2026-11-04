@@ -32,6 +32,17 @@ public struct ConversationAvailabilityObservation: Equatable, Codable, Sendable 
     }
 }
 
+/// The Server's existing two-stage delivery facts. These are reported inputs,
+/// not a derived delivery state; the UI selects a caption from them.
+public enum ConversationDeliveryAcknowledgement: Equatable, Codable, Sendable {
+    case listenerReceived(atMilliseconds: UInt64, ack2Expected: Bool,
+                          acknowledgerSystem: ExactText?, acknowledgerAgent: ExactText?)
+    case handed(atMilliseconds: UInt64, rerouted: Bool,
+                acknowledgerSystem: ExactText?, acknowledgerAgent: ExactText?)
+    case notHanded(atMilliseconds: UInt64, reason: ExactText,
+                   acknowledgerSystem: ExactText?, acknowledgerAgent: ExactText?)
+}
+
 public enum ConversationFileTransfer: Equatable, Codable, Sendable {
     case unknown
     case transferred
@@ -91,6 +102,9 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
     /// The per-account conversation feed sequence that delivered this turn.
     /// Older saved turns are reconstructed from the event journal on load.
     public var conversationSequence: UInt64?
+    /// True only when the Server says this discussion entry records ACK1.
+    /// Nil preserves the behavior of entries from older Servers.
+    public var deliveryAcks: Bool?
 
     public enum Kind: String, Codable, Sendable { case discussion, reply, revision, result, terminal }
 
@@ -98,7 +112,7 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
                 sessionHandle: ExactText, text: ExactText, inReplyTo: ExactText? = nil,
                 operationID: UUID? = nil, files: [ConversationFile] = [],
                 contentRedacted: Bool? = nil, kind: Kind? = nil, resultStatus: ExactText? = nil,
-                conversationSequence: UInt64? = nil) {
+                conversationSequence: UInt64? = nil, deliveryAcks: Bool? = nil) {
         self.id = id
         self.binding = binding
         self.author = author
@@ -111,6 +125,7 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
         self.kind = kind
         self.resultStatus = resultStatus
         self.conversationSequence = conversationSequence
+        self.deliveryAcks = deliveryAcks
     }
 }
 
@@ -123,6 +138,7 @@ public enum ConversationValidationEventKind: String, Codable, Sendable {
     case revision
     case result
     case receipt
+    case deliveryAck = "delivery_ack"
     case acted
     case availability
     case fileTransfer = "file_transfer"
@@ -238,6 +254,8 @@ public struct ConversationTurnFacts: Equatable, Codable, Sendable {
     /// Client time when the Server's accepted response was observed. Older
     /// saved turns and imported history have no timestamp and are not aged.
     public var acceptedAtMilliseconds: UInt64?
+    public var deliveryAck1: ConversationDeliveryAcknowledgement?
+    public var deliveryAck2: ConversationDeliveryAcknowledgement?
     public var fileTransfers: [ExactText: ConversationFileTransfer] = [:]
     public var fileUses: [ExactText: ConversationFileUse] = [:]
 
@@ -318,6 +336,7 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         case redactedRevision(ConversationTurn)
         case turn(ConversationTurn)
         case delivered(turn: ExactText)
+        case deliveryAck(turn: ExactText, acknowledgement: ConversationDeliveryAcknowledgement)
         case acted(turn: ExactText, by: ExactText)
         case availability(sessionHandle: ExactText, ConversationAvailability)
         case availabilityRecord(sessionHandle: ExactText, state: ConversationAvailability, support: JSONValue?)
@@ -371,6 +390,7 @@ extension ConversationEvent.Fact {
             case nil: .turn
             }
         case .delivered: .receipt
+        case .deliveryAck: .deliveryAck
         case .acted: .acted
         case .availability: .availability
         case .availabilityRecord: .availability
@@ -1224,6 +1244,31 @@ struct ConversationState: Codable, Equatable {
         case let .delivered(turn):
             try requireTurn(turn, binding: binding, event: event, in: thread)
             thread.facts[turn, default: ConversationTurnFacts()].delivered = true
+        case let .deliveryAck(turn, acknowledgement):
+            // ACKs can be replayed before their person entry has been merged,
+            // and Server also reports them for answers/No comment. Retain the
+            // reported fact by entry ID; only ack-recording discussion turns
+            // use it for presentation.
+            var facts = thread.facts[turn] ?? ConversationTurnFacts()
+            switch acknowledgement {
+            case .listenerReceived:
+                if let recorded = facts.deliveryAck1, recorded != acknowledgement {
+                    throw ConversationError.conflict
+                }
+                facts.deliveryAck1 = acknowledgement
+            case .handed:
+                // The first handed outcome is final. It may replace a prior
+                // not_handed outcome, matching the Server's append-only facts.
+                if case .some(.handed) = facts.deliveryAck2 {
+                    break
+                }
+                facts.deliveryAck2 = acknowledgement
+            case .notHanded:
+                if facts.deliveryAck2 == nil {
+                    facts.deliveryAck2 = acknowledgement
+                }
+            }
+            thread.facts[turn] = facts
         case let .acted(turn, by):
             try requireTurn(turn, binding: binding, event: event, in: thread)
             guard !by.rawValue.isEmpty else {

@@ -226,6 +226,88 @@ final class ConversationSampleUITests: XCTestCase {
         capture("sent-chat-status-unsupported-composer-dark", app)
     }
 
+    func testTwoAckStatusLightShowsSendingWaitingRerouteAndNegativeReason() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples", "--harklight-test-chat-status-light",
+                               "--harklight-test-chat-status-two-ack"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        history.swipeUp()
+        XCTAssertTrue(app.staticTexts["Local example · status is simulated; nothing was sent."].exists,
+                      "These rows are synthetic display fixtures, not Server acceptance evidence.\n\(app.debugDescription)")
+        XCTAssertTrue(app.staticTexts["Sending…"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Waiting for Calendar assistant"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Delivered to Release orchestrator")).firstMatch.exists,
+            app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Delivered"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Not delivered: The receiving system is unavailable."].exists,
+                      app.debugDescription)
+        XCTAssertTrue(app.staticTexts["No listener has picked this up"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Nothing's listening right now"].exists, app.debugDescription)
+        capture("sent-chat-two-ack-light", app)
+    }
+
+    func testTwoAckIncapableListenerAck1IsFinalDeliveredLight() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples", "--harklight-test-chat-status-light",
+                               "--harklight-test-chat-status-two-ack",
+                               "--harklight-test-chat-status-ack1-final-only"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        let incapableListener = app.staticTexts["This listener cannot send ACK2."]
+        XCTAssertTrue(incapableListener.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Delivered"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Local example · status is simulated; nothing was sent."].exists,
+                      app.debugDescription)
+        capture("sent-chat-two-ack-ack1-final-light", app)
+    }
+
+    func testTwoAckStatusDarkKeepsWaitingQuietAndDeliveredCaptionStable() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples", "--harklight-test-chat-status-dark",
+                               "--harklight-test-chat-status-two-ack"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
+        enterSearch("Thursday", in: app)
+        let row = app.descendants(matching: .any)["request-row-sample-information-0"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        app.buttons["Chat"].tap()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+        history.swipeUp()
+        XCTAssertTrue(app.staticTexts["Waiting for Calendar assistant"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Delivered to Release orchestrator")).firstMatch.exists,
+            app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Nothing's listening right now"].exists, app.debugDescription)
+        capture("sent-chat-two-ack-dark", app)
+    }
+
     func testSendButtonAndReturnClearAcceptedLocalDiscussion() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

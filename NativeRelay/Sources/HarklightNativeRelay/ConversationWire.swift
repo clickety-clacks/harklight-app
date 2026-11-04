@@ -251,7 +251,7 @@ public struct ConversationWire: Sendable {
         let kind = try text(value, "kind")
         let knownKinds: Set<String> = [
             "attention_tier", "discussion", "reply", "revision", "result", "receipt", "acted",
-            "file_transfer", "file_use", "availability", "retraction", "read_position"
+            "delivery_ack", "file_transfer", "file_use", "availability", "retraction", "read_position"
         ]
         guard knownKinds.contains(kind) else { return .ignored(sequence: sequence) }
         return .event(try decodeKnownEvent(value))
@@ -343,6 +343,12 @@ public struct ConversationWire: Sendable {
             let eventID = ExactText(try text(value, "event_id"))
             let content: ExactText
             let resultStatus: ExactText?
+            let deliveryAcks: Bool?
+            if kind == "discussion", author == .person {
+                deliveryAcks = try optionalBoolean(value, "delivery_acks")
+            } else {
+                deliveryAcks = nil
+            }
             if kind == "result" {
                 // A source result is a status-only origin-feed entry. Its own
                 // event ID identifies this fact; in_reply_to names the answer
@@ -369,7 +375,8 @@ public struct ConversationWire: Sendable {
                 author: author, sessionHandle: handle, text: content, inReplyTo: inReplyTo,
                 operationID: operation, files: try files(value),
                 contentRedacted: kind == "result" ? nil : redacted ? true : nil,
-                kind: turnKind, resultStatus: resultStatus, conversationSequence: sequence)
+                kind: turnKind, resultStatus: resultStatus, conversationSequence: sequence,
+                deliveryAcks: deliveryAcks)
             if kind == "revision" {
                 if redacted { fact = .redactedRevision(turn) }
                 else {
@@ -380,6 +387,45 @@ public struct ConversationWire: Sendable {
         case "receipt":
             guard value.uniqueValue(named: "delivered") == .bool(true) else { throw RelayWireError.invalidFrame }
             fact = .delivered(turn: ExactText(try text(value, "event_id")))
+        case "delivery_ack":
+            guard let rawAcknowledger = value.uniqueValue(named: "acknowledger"),
+                  case .object = rawAcknowledger else { throw RelayWireError.invalidFrame }
+            let acknowledgerSystem = try optionalName(rawAcknowledger, "system")
+            let acknowledgerAgent = try optionalName(rawAcknowledger, "agent")
+            let atMilliseconds = try integer(value, "at_ms")
+            let acknowledgement: ConversationDeliveryAcknowledgement
+            switch try text(value, "stage") {
+            case "ack1":
+                guard let ack2Expected = try optionalBoolean(value, "ack2_expected") else {
+                    throw RelayWireError.invalidFrame
+                }
+                acknowledgement = .listenerReceived(atMilliseconds: atMilliseconds,
+                    ack2Expected: ack2Expected, acknowledgerSystem: acknowledgerSystem,
+                    acknowledgerAgent: acknowledgerAgent)
+            case "ack2":
+                switch try text(value, "outcome") {
+                case "handed":
+                    guard let rerouted = try optionalBoolean(value, "rerouted") else {
+                        throw RelayWireError.invalidFrame
+                    }
+                    acknowledgement = .handed(atMilliseconds: atMilliseconds, rerouted: rerouted,
+                        acknowledgerSystem: acknowledgerSystem, acknowledgerAgent: acknowledgerAgent)
+                case "not_handed":
+                    let reason = ExactText(try text(value, "reason"))
+                    guard !reason.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw RelayWireError.invalidFrame
+                    }
+                    acknowledgement = .notHanded(atMilliseconds: atMilliseconds,
+                        reason: reason,
+                        acknowledgerSystem: acknowledgerSystem, acknowledgerAgent: acknowledgerAgent)
+                default:
+                    throw RelayWireError.invalidFrame
+                }
+            default:
+                throw RelayWireError.invalidFrame
+            }
+            fact = .deliveryAck(turn: ExactText(try text(value, "event_id")),
+                acknowledgement: acknowledgement)
         case "acted": fact = .acted(turn: ExactText(try text(value, "event_id")), by: ExactText(try text(value, "acting_event_id")))
         case "file_transfer":
             let outcome: ConversationFileTransfer
@@ -503,6 +549,18 @@ public struct ConversationWire: Sendable {
         if let string = field.stringValue { return string }
         if key == "last_detached_at", case let .number(number) = field { return ExactText(number.lexeme) }
         throw RelayWireError.invalidFrame
+    }
+    private func optionalName(_ value: JSONValue, _ key: String) throws -> ExactText? {
+        guard let name = try optionalText(value, key) else { return nil }
+        guard !name.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw RelayWireError.invalidFrame
+        }
+        return name
+    }
+    private func optionalBoolean(_ value: JSONValue, _ key: String) throws -> Bool? {
+        guard let field = value.uniqueValue(named: key) else { return nil }
+        guard case let .bool(flag) = field else { throw RelayWireError.invalidFrame }
+        return flag
     }
     private func integer(_ value: JSONValue, _ key: String) throws -> UInt64 {
         guard case let .number(number)? = value.uniqueValue(named: key), let result = UInt64(number.lexeme) else { throw RelayWireError.invalidFrame }

@@ -1073,6 +1073,58 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertThrowsError(try wire.decodeEvent(event("discussion", sequence: 1,
             fields: fields.replacingOccurrences(of: digest, with: String(repeating: "0", count: 64)))))
     }
+
+    func testDeliveryAckFramesDecodeTheContractMarkerStagesAndRerouteBit() throws {
+        let (context, _, _, _) = try setup()
+        let wire = try ConversationWire(profile: context)
+        let discussion = try wire.decodeEvent(event("discussion", sequence: 1,
+            fields: #""author":"person","event_id":"812","text":"Check the build","delivery_acks":true"#))
+        guard case let .turn(turn) = discussion.fact else { return XCTFail("Expected discussion turn") }
+        XCTAssertEqual(turn.deliveryAcks, true)
+
+        let legacy = try wire.decodeEvent(event("discussion", sequence: 2,
+            fields: #""author":"person","event_id":"813","text":"Older Server message""#))
+        guard case let .turn(legacyTurn) = legacy.fact else { return XCTFail("Expected legacy discussion turn") }
+        XCTAssertNil(legacyTurn.deliveryAcks)
+
+        let ack1 = try wire.decodeEvent(event("delivery_ack", sequence: 3,
+            fields: #""stage":"ack1","event_id":"812","at_ms":40000,"acknowledger":{},"ack2_expected":true"#))
+        guard case let .deliveryAck(ack1Turn, .listenerReceived(at, expected, system, agent)) = ack1.fact else {
+            return XCTFail("Expected ACK1 fact")
+        }
+        XCTAssertEqual(ack1Turn, turn.id)
+        XCTAssertEqual(at, 40_000)
+        XCTAssertTrue(expected)
+        XCTAssertNil(system, "r5 permits the receiving system name to be absent.")
+        XCTAssertNil(agent)
+
+        let incapableAck1 = try wire.decodeEvent(event("delivery_ack", sequence: 4,
+            fields: #""stage":"ack1","event_id":"812","at_ms":45000,"acknowledger":{},"ack2_expected":false"#))
+        guard case let .deliveryAck(_, .listenerReceived(_, ack2Expected, _, _)) = incapableAck1.fact else {
+            return XCTFail("Expected ACK1 final for an incapable listener")
+        }
+        XCTAssertFalse(ack2Expected)
+
+        let ack2 = try wire.decodeEvent(event("delivery_ack", sequence: 5,
+            fields: #""stage":"ack2","event_id":"812","at_ms":50000,"acknowledger":{"system":"Tightbeam","agent":"Release orchestrator"},"outcome":"handed","rerouted":true"#))
+        guard case let .deliveryAck(_, .handed(ack2At, rerouted, _, routedAgent)) = ack2.fact else {
+            return XCTFail("Expected handed ACK2 fact")
+        }
+        XCTAssertEqual(ack2At, 50_000)
+        XCTAssertTrue(rerouted)
+        XCTAssertEqual(routedAgent, ExactText("Release orchestrator"))
+
+        let negative = try wire.decodeEvent(event("delivery_ack", sequence: 6,
+            fields: #""stage":"ack2","event_id":"812","at_ms":60000,"acknowledger":{},"outcome":"not_handed","reason":"The receiving system could not hand it off.""#))
+        guard case let .deliveryAck(_, .notHanded(negativeAt, reason, system, agent)) = negative.fact else {
+            return XCTFail("Expected negative ACK2 fact")
+        }
+        XCTAssertEqual(negativeAt, 60_000)
+        XCTAssertEqual(reason, ExactText("The receiving system could not hand it off."))
+        XCTAssertNil(system)
+        XCTAssertNil(agent)
+    }
+
     func testSupportProvenanceAndOriginRedactionAreExplicitAndClosureIsNotConversation() throws {
         let (context, _, _, _) = try setup()
         let wire = try ConversationWire(profile: context)

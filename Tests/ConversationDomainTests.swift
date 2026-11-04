@@ -87,6 +87,76 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertEqual(thread.drafts[1], draft)
     }
 
+    func testDeliveryAckFactsPersistWithoutBecomingExistingReceiptFacts() throws {
+        let context = context()
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let binding = binding(context)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        let turn = ConversationTurn(id: ExactText("person-chat"), binding: binding,
+            author: .person, sessionHandle: ExactText("session"), text: ExactText("Question"),
+            kind: .discussion, deliveryAcks: true)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(turn)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .deliveryAck(turn: turn.id, acknowledgement: .listenerReceived(
+                atMilliseconds: 40_000, ack2Expected: true,
+                acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil))), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
+            fact: .deliveryAck(turn: turn.id, acknowledgement: .notHanded(
+                atMilliseconds: 50_000, reason: ExactText("Not ready"),
+                acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil))), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 5, binding: binding,
+            fact: .deliveryAck(turn: turn.id, acknowledgement: .handed(
+                atMilliseconds: 60_000, rerouted: true,
+                acknowledgerSystem: ExactText("Tightbeam"),
+                acknowledgerAgent: ExactText("Release orchestrator")))), context: context)
+
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.turns.first?.deliveryAcks, true)
+        XCTAssertEqual(thread.facts[turn.id]?.deliveryAck1, .listenerReceived(
+            atMilliseconds: 40_000, ack2Expected: true,
+            acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil))
+        XCTAssertEqual(thread.facts[turn.id]?.deliveryAck2, .handed(
+            atMilliseconds: 60_000, rerouted: true,
+            acknowledgerSystem: ExactText("Tightbeam"),
+            acknowledgerAgent: ExactText("Release orchestrator")))
+        XCTAssertFalse(thread.facts[turn.id]?.delivered ?? true,
+                       "A system ACK2 remains distinct from the existing agent Seen receipt.")
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 5)
+    }
+
+    func testLegacySavedTurnsAndFactsDecodeWithoutOptionalTwoAckFields() throws {
+        let context = context()
+        let binding = binding(context)
+        let turn = ConversationTurn(id: ExactText("legacy-turn"), binding: binding,
+            author: .person, sessionHandle: ExactText("session"), text: ExactText("Question"),
+            kind: .discussion, deliveryAcks: true)
+        var encodedTurn = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(turn)) as? [String: Any])
+        encodedTurn.removeValue(forKey: "deliveryAcks")
+        let restoredTurn = try JSONDecoder().decode(ConversationTurn.self,
+            from: JSONSerialization.data(withJSONObject: encodedTurn))
+        XCTAssertNil(restoredTurn.deliveryAcks)
+
+        var facts = ConversationTurnFacts(acceptedAtMilliseconds: 25_000)
+        facts.deliveryAck1 = .listenerReceived(atMilliseconds: 30_000, ack2Expected: true,
+            acknowledgerSystem: nil, acknowledgerAgent: nil)
+        facts.deliveryAck2 = .handed(atMilliseconds: 35_000, rerouted: false,
+            acknowledgerSystem: nil, acknowledgerAgent: nil)
+        var encodedFacts = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(facts)) as? [String: Any])
+        encodedFacts.removeValue(forKey: "deliveryAck1")
+        encodedFacts.removeValue(forKey: "deliveryAck2")
+        let restoredFacts = try JSONDecoder().decode(ConversationTurnFacts.self,
+            from: JSONSerialization.data(withJSONObject: encodedFacts))
+        XCTAssertEqual(restoredFacts.acceptedAtMilliseconds, 25_000)
+        XCTAssertNil(restoredFacts.deliveryAck1)
+        XCTAssertNil(restoredFacts.deliveryAck2)
+    }
+
     func testConversationTurnOrderFollowsProjectionSequenceAndPreservesReplyFacts() throws {
         let context = context()
         let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
