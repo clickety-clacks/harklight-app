@@ -902,14 +902,31 @@ final class NativeRelayCoreTests: XCTestCase {
         session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
         let acceptance = try JSONValue.parse(data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"viewed","origin":"source","as":"message","message":{"title":"View row"}}"#))
         session.initialItems = [.object([JSONMember("acceptance", acceptance)])]
-        session.inboxViewEntries = [.object([
-            JSONMember("sender_id", .string(ExactText("sender"))),
-            JSONMember("message_id", .string(ExactText("viewed"))),
-            JSONMember("priority", .string(ExactText("now"))),
-            JSONMember("thread", .string(ExactText("release"))),
-            JSONMember("due_at", .number(JSONNumber(lexeme: "1793300000000"))),
-            JSONMember("future", .bool(true))
-        ])]
+        session.inboxViewEntries = [
+            .object([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("viewed"))),
+                JSONMember("score", .number(JSONNumber(lexeme: "0.93"))),
+                JSONMember("thread", .string(ExactText("release"))),
+                JSONMember("due_at", .number(JSONNumber(lexeme: "1793300000000"))),
+                JSONMember("future", .bool(true))
+            ]),
+            .object([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("legacy-no-score"))),
+                JSONMember("priority", .string(ExactText("now")))
+            ]),
+            .object([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("string-score"))),
+                JSONMember("score", .string(ExactText("0.99")))
+            ]),
+            .object([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("out-of-range-score"))),
+                JSONMember("score", .number(JSONNumber(lexeme: "1.01")))
+            ])
+        ]
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
@@ -917,9 +934,17 @@ final class NativeRelayCoreTests: XCTestCase {
         let snapshot = try store.snapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 1, "The unsequenced view does not move the relay cursor.")
         XCTAssertEqual(snapshot.inboxView?.revision, ExactText("view-test"))
-        XCTAssertEqual(snapshot.inboxView?.entries.first?.priority, .now)
-        XCTAssertEqual(snapshot.inboxView?.entries.first?.thread, ExactText("release"))
-        XCTAssertEqual(snapshot.inboxView?.entries.first?.dueAtMilliseconds, 1_793_300_000_000)
+        let entries = try XCTUnwrap(snapshot.inboxView?.entries)
+        XCTAssertEqual(entries.map { $0.key.messageID.rawValue },
+                       ["viewed", "legacy-no-score", "string-score", "out-of-range-score"])
+        XCTAssertNil(entries[0].priority, "R4 score entries do not include a categorical priority.")
+        XCTAssertEqual(entries[0].score, 0.93)
+        XCTAssertEqual(entries[0].thread, ExactText("release"))
+        XCTAssertEqual(entries[0].dueAtMilliseconds, 1_793_300_000_000)
+        XCTAssertEqual(entries[1].priority, .now)
+        XCTAssertNil(entries[1].score, "An older categorical entry has no numeric score.")
+        XCTAssertNil(entries[2].score, "String-valued scores are unusable.")
+        XCTAssertNil(entries[3].score, "Scores outside the agreed range are unusable.")
         let request = try XCTUnwrap(try session.requests.map(JSONValue.parse).first {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue == "view_get"
         })

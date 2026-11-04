@@ -1823,7 +1823,7 @@ final class LivePresentationStore {
             isRetracted: retracted,
             chatUnread: listChatUnread(request.key),
             tier: .middle,
-            priority: request.inboxPriority,
+            inboxScore: request.inboxScore,
             thread: request.inboxThread,
             hasInboxViewEntry: request.hasInboxViewEntry,
             duePhrase: request.inboxDueAtMilliseconds.map { InboxDuePhrase.label(for: $0) },

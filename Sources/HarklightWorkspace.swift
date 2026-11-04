@@ -2,8 +2,8 @@ import SwiftUI
 import UIKit
 import AttentionDomain
 
-enum InboxPriorityDisplay: Equatable {
-    case urgent
+enum InboxPriorityDisplay: String, Equatable {
+    case urgent = "now"
     case high
     case low
 
@@ -15,12 +15,13 @@ enum InboxPriorityDisplay: Equatable {
         }
     }
 
-    static func label(for priority: InboxMessagePriority) -> Self? {
-        switch priority {
-        case .now: .urgent
-        case .high: .high
-        case .low: .low
-        case .normal: nil
+    static func forScore(_ score: Double?) -> Self? {
+        guard let score, score.isFinite, (0.0...1.0).contains(score) else { return nil }
+        return switch score {
+        case ..<0.25: .low
+        case ..<0.70: nil
+        case ..<0.90: .high
+        default: .urgent
         }
     }
 }
@@ -237,7 +238,7 @@ struct InboxRequestRow: Identifiable {
     var emphasis: InboxRowEmphasis = .standard
     var messageType: HarklightMessageType? = nil
     var tier: InboxAttentionTier = .middle
-    var priority: InboxMessagePriority? = nil
+    var inboxScore: Double? = nil
     var thread: ExactText? = nil
     var hasInboxViewEntry = false
     var duePhrase: String? = nil
@@ -925,7 +926,7 @@ struct InboxList: View {
                 requestRevision: item.row.requestRevision,
                 createdAt: item.row.createdAt,
                 receivedAt: item.entry.receivedAt,
-                priority: item.row.priority,
+                inboxScore: item.row.inboxScore,
                 store: newMessageAreaStore)
         }
         .buttonStyle(.plain)
@@ -1404,19 +1405,19 @@ struct InboxPriorityRowTreatment: Equatable {
             endPoint: .bottom))
     }
 
-    static func forPriority(_ priority: InboxMessagePriority?, colorScheme: ColorScheme)
+    static func forLevel(_ level: InboxPriorityDisplay?, colorScheme: ColorScheme)
         -> InboxPriorityRowTreatment? {
-        guard let priority else { return nil }
+        guard let level else { return nil }
 
         let values: (String, String, String, String, String?)
-        switch (priority, colorScheme) {
+        switch (level, colorScheme) {
         case (.high, .light):
             values = ("#73592A", "#5E4720", "#F6F1E7", "#E3DCCF", nil)
-        case (.now, .light):
+        case (.urgent, .light):
             values = ("#A63A2A", "#8A2C1E", "#F6F1E7", "#E3DCCF", "#5A1A10")
         case (.high, .dark):
             values = ("#3A3119", "#2B2516", "#E6D9B8", "#AEA283", nil)
-        case (.now, .dark):
+        case (.urgent, .dark):
             values = ("#5A2219", "#3A1A14", "#F2C9BE", "#C0948A", "#EE8B75")
         default:
             return nil
@@ -1436,7 +1437,7 @@ private struct NewMessageAreaRowContent: View {
     let requestRevision: UInt64
     let createdAt: Date?
     let receivedAt: Date
-    let priority: InboxMessagePriority?
+    let inboxScore: Double?
     let store: NewMessageAreaStore?
 
     @Environment(\.colorScheme) private var colorScheme
@@ -1445,8 +1446,12 @@ private struct NewMessageAreaRowContent: View {
         HarklightDesignSystem.palette(for: colorScheme)
     }
 
+    private var scoreBadge: InboxPriorityDisplay? {
+        InboxPriorityDisplay.forScore(inboxScore)
+    }
+
     private var priorityTreatment: InboxPriorityRowTreatment? {
-        .forPriority(priority, colorScheme: colorScheme)
+        .forLevel(scoreBadge, colorScheme: colorScheme)
     }
 
     private var rowBackgroundStyle: AnyShapeStyle {
@@ -1481,19 +1486,17 @@ private struct NewMessageAreaRowContent: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 4)
-                if let priority,
-                   let priorityLabel = InboxPriorityDisplay.label(for: priority) {
-                    Text(priorityLabel.title)
+                if let scoreBadge {
+                    Text(scoreBadge.title)
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(priorityTreatment?.capsuleTextColor
-                                         ?? priorityColor(for: priority))
+                        .foregroundStyle(priorityTreatment?.capsuleTextColor ?? priorityColor(for: scoreBadge))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(priorityTreatment?.capsuleFillColor
-                                    ?? priorityColor(for: priority).opacity(0.14), in: Capsule())
+                                    ?? priorityColor(for: scoreBadge).opacity(0.14), in: Capsule())
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
-                        .accessibilityLabel(Text(priorityLabel.title))
+                        .accessibilityLabel(Text(scoreBadge.title))
                 }
             }
         }
@@ -1518,12 +1521,11 @@ private struct NewMessageAreaRowContent: View {
         }
     }
 
-    private func priorityColor(for priority: InboxMessagePriority) -> Color {
-        switch priority {
+    private func priorityColor(for level: InboxPriorityDisplay) -> Color {
+        switch level {
         case .low: palette.neutral.secondaryTextColor
-        case .normal: palette.accent.color
         case .high: .orange
-        case .now: .red
+        case .urgent: .red
         }
     }
 }
@@ -1544,7 +1546,7 @@ struct InboxRowContent: View {
     }
 
     private var priorityTreatment: InboxPriorityRowTreatment? {
-        .forPriority(row.priority, colorScheme: colorScheme)
+        .forLevel(InboxPriorityDisplay.forScore(row.inboxScore), colorScheme: colorScheme)
     }
 
     private var secondaryRowTextColor: Color {
@@ -1617,18 +1619,17 @@ struct InboxRowContent: View {
                     .font(titleFont)
                     .foregroundStyle(titleColor)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if let priority = row.priority,
-                   let priorityLabel = InboxPriorityDisplay.label(for: priority) {
-                    Text(priorityLabel.title)
+                if let level = InboxPriorityDisplay.forScore(row.inboxScore) {
+                    Text(level.title)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(priorityTreatment?.capsuleTextColor
-                                         ?? priorityColor(for: priority))
+                                         ?? priorityColor(for: level))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(priorityTreatment?.capsuleFillColor
-                                    ?? priorityColor(for: priority).opacity(0.14), in: Capsule())
-                        .accessibilityLabel(Text(priorityLabel.title))
-                        .accessibilityIdentifier("inbox-priority-\(priority.rawValue)")
+                                    ?? priorityColor(for: level).opacity(0.14), in: Capsule())
+                        .accessibilityLabel(Text(level.title))
+                        .accessibilityIdentifier("inbox-priority-\(level.rawValue)")
                 }
                 if let chatUnread = row.chatUnread {
                     Image(systemName: chatUnread
@@ -1729,12 +1730,11 @@ struct InboxRowContent: View {
             ?? (row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor)
     }
 
-    private func priorityColor(for priority: InboxMessagePriority) -> Color {
-        switch priority {
+    private func priorityColor(for level: InboxPriorityDisplay) -> Color {
+        switch level {
         case .low: palette.neutral.secondaryTextColor
-        case .normal: palette.accent.color
         case .high: .orange
-        case .now: .red
+        case .urgent: .red
         }
     }
 

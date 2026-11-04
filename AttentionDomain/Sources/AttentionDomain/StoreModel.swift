@@ -273,17 +273,20 @@ public enum MessageChoiceStyle: String, Equatable, Codable, Sendable {
 public struct InboxViewEntry: Equatable, Codable, Sendable {
     public let key: RequestKey
     public let priority: InboxMessagePriority?
+    public let score: Double?
     public let thread: ExactText?
     public let dueAtMilliseconds: Int?
     public let reason: ExactText?
 
     public init(key: RequestKey,
                 priority: InboxMessagePriority? = nil,
+                score: Double? = nil,
                 thread: ExactText? = nil,
                 dueAtMilliseconds: Int? = nil,
                 reason: ExactText? = nil) {
         self.key = key
         self.priority = priority
+        self.score = score
         self.thread = thread
         self.dueAtMilliseconds = dueAtMilliseconds
         self.reason = reason

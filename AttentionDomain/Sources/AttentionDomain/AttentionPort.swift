@@ -328,6 +328,7 @@ public struct PresentedRequest: Equatable, Sendable {
     /// Current fields from the server's account inbox view. Absence means the
     /// server has not supplied a usable entry for this row.
     public let inboxPriority: InboxMessagePriority?
+    public let inboxScore: Double?
     public let inboxThread: ExactText?
     public let inboxDueAtMilliseconds: Int?
     public let inboxReason: ExactText?
@@ -378,6 +379,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 defaultAnswerAction: ProjectedActionReference? = nil,
                 attentionTier: AttentionTier = .middle,
                 inboxPriority: InboxMessagePriority? = nil,
+                inboxScore: Double? = nil,
                 inboxThread: ExactText? = nil,
                 inboxDueAtMilliseconds: Int? = nil,
                 inboxReason: ExactText? = nil,
@@ -414,6 +416,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.defaultAnswerAction = defaultAnswerAction
         self.attentionTier = attentionTier
         self.inboxPriority = inboxPriority
+        self.inboxScore = inboxScore
         self.inboxThread = inboxThread
         self.inboxDueAtMilliseconds = inboxDueAtMilliseconds
         self.inboxReason = inboxReason
@@ -526,6 +529,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         } ?? nil
         let inboxViewEntry: InboxViewEntry? = if let viewSlot, viewSlot.isInherited {
             InboxViewEntry(key: key, priority: viewSlot.entry.priority,
+                           score: viewSlot.entry.score,
                            thread: viewSlot.entry.thread,
                            dueAtMilliseconds: currentRequest.byWhenMilliseconds)
         } else {
@@ -902,6 +906,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             let inboxViewEntry: InboxViewEntry? = if let viewSlot, viewSlot.isInherited {
                 InboxViewEntry(key: item.request.key,
                                priority: viewSlot.entry.priority,
+                               score: viewSlot.entry.score,
                                thread: viewSlot.entry.thread,
                                dueAtMilliseconds: currentRevisionRequest.byWhenMilliseconds)
             } else {
@@ -1051,7 +1056,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
             if let slot = resolve(key, visited: []) {
                 let inherited = slot.entry.key != key
                 let entry = inherited
-                    ? InboxViewEntry(key: key, priority: slot.entry.priority, thread: slot.entry.thread)
+                    ? InboxViewEntry(key: key, priority: slot.entry.priority,
+                                     score: slot.entry.score, thread: slot.entry.thread)
                     : slot.entry
                 result[key] = (slot.rank, entry, inherited)
             }
@@ -1273,6 +1279,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 attentionTier: .middle,
                                 inboxPriority: status == .open || status == .pending
                                     ? inboxViewEntry?.priority : nil,
+                                inboxScore: status == .open || status == .pending
+                                    ? inboxViewEntry?.score : nil,
                                 inboxThread: status == .open || status == .pending
                                     ? inboxViewEntry?.thread : nil,
                                 inboxDueAtMilliseconds: status == .open || status == .pending

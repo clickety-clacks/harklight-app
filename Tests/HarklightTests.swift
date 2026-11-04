@@ -109,7 +109,8 @@ final class HarklightTests: XCTestCase {
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         try store.setInboxView(InboxView(revision: ExactText("view-1"),
             algorithm: ExactText("jev-set"), basis: ExactText("fallback"), entries: [
-            InboxViewEntry(key: key, priority: .normal, thread: ExactText("review"),
+            InboxViewEntry(key: key, priority: .normal, score: 0.75,
+                           thread: ExactText("review"),
                            dueAtMilliseconds: 1793300000000, reason: ExactText("server order"))
         ]), context: context)
 
@@ -123,6 +124,8 @@ final class HarklightTests: XCTestCase {
         let request = try XCTUnwrap(presentation.requests.first)
         XCTAssertEqual(request.inboxPriority, .normal,
                        "The visible level comes from the post-attenuation view, not urgency.")
+        XCTAssertEqual(request.inboxScore, 0.75)
+        XCTAssertEqual(InboxPriorityDisplay.forScore(request.inboxScore), .high)
         XCTAssertEqual(request.inboxThread, ExactText("review"))
         XCTAssertEqual(request.inboxDueAtMilliseconds, 1_793_300_000_000)
         XCTAssertEqual(request.inboxReason, ExactText("server order"))
@@ -137,7 +140,12 @@ final class HarklightTests: XCTestCase {
 
         try store.setInboxView(InboxView(revision: ExactText("view-2"),
             algorithm: ExactText("jev-set"), basis: ExactText("selected"),
-            entries: [InboxViewEntry(key: key, priority: .normal)]), context: context)
+            entries: [InboxViewEntry(key: key, priority: .now)]), context: context)
+        let legacyRequest = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        XCTAssertEqual(legacyRequest.inboxPriority, .now)
+        XCTAssertNil(legacyRequest.inboxScore)
+        XCTAssertNil(InboxPriorityDisplay.forScore(legacyRequest.inboxScore),
+                     "A legacy categorical priority does not substitute for an absent score.")
         XCTAssertFalse(try port.observe(context: port.context).showsBasicOrderMarker,
                        "Selected basis must not show the fallback-only marker.")
 

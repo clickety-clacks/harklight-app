@@ -131,11 +131,12 @@ public struct InboxPagingWire: Sendable {
             guard seen.insert(key).inserted else { continue }
             let priority = raw.uniqueValue(named: "priority")?.stringValue
                 .flatMap { InboxMessagePriority(rawValue: $0.rawValue) }
+            let score = usableScore(raw.uniqueValue(named: "score"))
             let thread = raw.uniqueValue(named: "thread")?.stringValue
                 .flatMap { $0.rawValue.isEmpty ? nil : $0 }
             let dueAt = raw.uniqueValue(named: "due_at")?.integerValue
             let reason = raw.uniqueValue(named: "reason")?.stringValue
-            entries.append(InboxViewEntry(key: key, priority: priority,
+            entries.append(InboxViewEntry(key: key, priority: priority, score: score,
                                           thread: thread, dueAtMilliseconds: dueAt,
                                           reason: reason))
         }
@@ -488,6 +489,13 @@ public struct InboxPagingWire: Sendable {
     private func uint64(_ value: JSONValue?) -> UInt64? {
         guard let value, case let .number(number) = value else { return nil }
         return UInt64(number.lexeme)
+    }
+
+    private func usableScore(_ value: JSONValue?) -> Double? {
+        guard let value, case let .number(number) = value,
+              let score = Double(number.lexeme), score.isFinite,
+              (0.0...1.0).contains(score) else { return nil }
+        return score
     }
 
     private static func key(_ body: RelayEventBody) -> RequestKey {

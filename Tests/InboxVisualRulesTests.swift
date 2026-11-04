@@ -5,16 +5,33 @@ import AttentionDomain
 import SwiftUI
 
 final class InboxVisualRulesTests: XCTestCase {
-    func testServerPriorityUsesPlainLanguageLabelsAndOmitsNormal() {
-        func renderedLabel(for priority: InboxMessagePriority) -> String? {
-            guard let display = InboxPriorityDisplay.label(for: priority) else { return nil }
+    func testAbsoluteScoreUsesExistingPlainLanguageLabelsAndOmitsNormal() {
+        func renderedLabel(for score: Double?) -> String? {
+            guard let display = InboxPriorityDisplay.forScore(score) else { return nil }
             return String(localized: display.title)
         }
 
-        XCTAssertEqual(renderedLabel(for: .now), "Urgent")
-        XCTAssertEqual(renderedLabel(for: .high), "High priority")
-        XCTAssertEqual(renderedLabel(for: .low), "Low priority")
-        XCTAssertNil(renderedLabel(for: .normal))
+        XCTAssertEqual(renderedLabel(for: 0.10), "Low priority")
+        XCTAssertNil(renderedLabel(for: 0.50))
+        XCTAssertEqual(renderedLabel(for: 0.75), "High priority")
+        XCTAssertEqual(renderedLabel(for: 0.95), "Urgent")
+    }
+
+    func testAbsoluteScoreMappingUsesExactThresholdsAndRejectsUnusableValues() {
+        XCTAssertEqual(InboxPriorityDisplay.forScore(0.0), .low)
+        XCTAssertEqual(InboxPriorityDisplay.forScore(0.249_999), .low)
+        XCTAssertNil(InboxPriorityDisplay.forScore(0.25))
+        XCTAssertNil(InboxPriorityDisplay.forScore(0.699_999))
+        XCTAssertEqual(InboxPriorityDisplay.forScore(0.70), .high)
+        XCTAssertEqual(InboxPriorityDisplay.forScore(0.899_999), .high)
+        XCTAssertEqual(InboxPriorityDisplay.forScore(0.90), .urgent)
+        XCTAssertEqual(InboxPriorityDisplay.forScore(1.0), .urgent)
+
+        XCTAssertNil(InboxPriorityDisplay.forScore(nil))
+        XCTAssertNil(InboxPriorityDisplay.forScore(-0.001))
+        XCTAssertNil(InboxPriorityDisplay.forScore(1.001))
+        XCTAssertNil(InboxPriorityDisplay.forScore(.nan))
+        XCTAssertNil(InboxPriorityDisplay.forScore(.infinity))
     }
 
     func testExplicitTiersCapBodyAtEightFourAndTwoLines() {
@@ -29,9 +46,9 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(AttentionTier.low.inboxRowStyleTier, .low)
     }
 
-    func testWashedPriorityRowsUseModeSpecificColorsAndEmphasizeNow() throws {
+    func testWashedScoreBadgesUseModeSpecificColorsAndEmphasizeUrgent() throws {
         let lightHigh = try XCTUnwrap(
-            InboxPriorityRowTreatment.forPriority(.high, colorScheme: .light))
+            InboxPriorityRowTreatment.forLevel(.high, colorScheme: .light))
         XCTAssertEqual(lightHigh.topHex, "#73592A")
         XCTAssertEqual(lightHigh.bottomHex, "#5E4720")
         XCTAssertEqual(lightHigh.primaryTextHex, "#F6F1E7")
@@ -39,7 +56,7 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertNil(lightHigh.leadingBandHex)
 
         let lightNow = try XCTUnwrap(
-            InboxPriorityRowTreatment.forPriority(.now, colorScheme: .light))
+            InboxPriorityRowTreatment.forLevel(.urgent, colorScheme: .light))
         XCTAssertEqual(lightNow.topHex, "#A63A2A")
         XCTAssertEqual(lightNow.bottomHex, "#8A2C1E")
         XCTAssertEqual(lightNow.primaryTextHex, "#F6F1E7")
@@ -47,7 +64,7 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(lightNow.leadingBandHex, "#5A1A10")
 
         let darkHigh = try XCTUnwrap(
-            InboxPriorityRowTreatment.forPriority(.high, colorScheme: .dark))
+            InboxPriorityRowTreatment.forLevel(.high, colorScheme: .dark))
         XCTAssertEqual(darkHigh.topHex, "#3A3119")
         XCTAssertEqual(darkHigh.bottomHex, "#2B2516")
         XCTAssertEqual(darkHigh.primaryTextHex, "#E6D9B8")
@@ -55,7 +72,7 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertNil(darkHigh.leadingBandHex)
 
         let darkNow = try XCTUnwrap(
-            InboxPriorityRowTreatment.forPriority(.now, colorScheme: .dark))
+            InboxPriorityRowTreatment.forLevel(.urgent, colorScheme: .dark))
         XCTAssertEqual(darkNow.topHex, "#5A2219")
         XCTAssertEqual(darkNow.bottomHex, "#3A1A14")
         XCTAssertEqual(darkNow.primaryTextHex, "#F2C9BE")
@@ -67,8 +84,8 @@ final class InboxVisualRulesTests: XCTestCase {
             XCTAssertEqual(treatment.capsuleTextHex, treatment.topHex)
             XCTAssertEqual(treatment.initialsFillOpacity, 0.18)
         }
-        XCTAssertNil(InboxPriorityRowTreatment.forPriority(.normal, colorScheme: .light))
-        XCTAssertNil(InboxPriorityRowTreatment.forPriority(.low, colorScheme: .dark))
+        XCTAssertNil(InboxPriorityRowTreatment.forLevel(nil, colorScheme: .light))
+        XCTAssertNil(InboxPriorityRowTreatment.forLevel(.low, colorScheme: .dark))
     }
 
     func testSenderLabelUsesLastKindAndAgentSegment() {
