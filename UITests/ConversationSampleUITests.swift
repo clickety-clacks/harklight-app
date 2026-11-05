@@ -68,6 +68,8 @@ final class ConversationSampleUITests: XCTestCase {
                         object: captureSelection)
                     XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
                                    "A real row press must update the List selection.\n\(app.debugDescription)")
+                    XCTAssertTrue(row.isSelected,
+                                  "The pressed product row must expose the native selected state.\n\(app.debugDescription)")
                     let detailHeading = app.buttons["request-heading"]
                     XCTAssertTrue(detailHeading.waitForExistence(timeout: 5), app.debugDescription)
                     XCTAssertTrue(detailHeading.isHittable, app.debugDescription)
@@ -87,6 +89,8 @@ final class ConversationSampleUITests: XCTestCase {
                     let comparison = app.descendants(matching: .any)[comparisonIdentifier]
                     XCTAssertTrue(comparison.waitForExistence(timeout: 5), app.debugDescription)
                     XCTAssertTrue(comparison.isHittable, comparison.debugDescription)
+                    XCTAssertFalse(comparison.isSelected,
+                                   "The comparison row must remain unselected.\n\(comparison.debugDescription)")
                     XCTAssertTrue(comparison.label.contains("Which approach for the studio?"),
                                   comparison.debugDescription)
                 }
