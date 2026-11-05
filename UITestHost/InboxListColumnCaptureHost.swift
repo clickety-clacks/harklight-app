@@ -40,6 +40,7 @@ struct InboxListColumnCaptureHost: View {
                         Text("Synthetic selected message")
                     }
             }
+            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
             .overlay(alignment: .topLeading) { selectionProbe }
         } else {
             NavigationSplitView {
@@ -57,6 +58,7 @@ struct InboxListColumnCaptureHost: View {
                 }
             }
             .navigationSplitViewStyle(.balanced)
+            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
             .overlay(alignment: .topLeading) { selectionProbe }
         }
     }
