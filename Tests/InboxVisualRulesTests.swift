@@ -82,6 +82,18 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertNil(InboxPriorityRowTreatment.forLevel(.low, colorScheme: .dark))
     }
 
+    func testLightSelectedRowColorsAppearOnlyOverTheProminentSelectionFill() {
+        XCTAssertTrue(InboxSelectedRowTextRule.usesSelectionFillColors(
+            selected: true, backgroundProminence: .increased))
+        XCTAssertFalse(InboxSelectedRowTextRule.usesSelectionFillColors(
+            selected: true, backgroundProminence: .standard),
+                       "A selected row without the tinted fill must keep its regular readable colors.")
+        XCTAssertFalse(InboxSelectedRowTextRule.usesSelectionFillColors(
+            selected: false, backgroundProminence: .increased))
+        XCTAssertFalse(InboxSelectedRowTextRule.usesSelectionFillColors(
+            selected: false, backgroundProminence: .standard))
+    }
+
     func testSelectedRowBarUsesPickedSizeAndBrighterRowColorsInBothAppearances() {
         XCTAssertEqual(InboxRowSelectionDecoration.barWidth, 8)
         XCTAssertEqual(InboxRowSelectionDecoration.contentInset, 16)
