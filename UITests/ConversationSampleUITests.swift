@@ -4,11 +4,16 @@ import XCTest
 final class ConversationSampleUITests: XCTestCase {
     func testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn() {
         XCUIDevice.shared.orientation = .landscapeLeft
-        let states: [(name: String, rowIdentifier: String, selectedMessageID: String?, fullWidth: Bool)] = [
-            ("selectedPlainAndUnselectedComparison", "request-row-visual-plain", "visual-plain", false),
-            ("selectedHigh", "request-row-visual-high", "visual-high", false),
-            ("fullWidthHigh", "request-row-visual-high", "visual-high", true),
-            ("acceptedNewMessage", "new-message-area-request-row-visual-new", nil, false),
+        let states: [(name: String, rowIdentifier: String, selectedMessageID: String?,
+                      selectedTitle: String?, comparisonIdentifier: String?, fullWidth: Bool)] = [
+            ("selectedPlainAndUnselectedComparison", "request-row-sample-approval-0",
+             "sample-approval-0", "Archive the old studio sketches?",
+             "request-row-sample-textChoice-0", false),
+            ("selectedHigh", "request-row-sample-approval-0", "sample-approval-0",
+             "Archive the old studio sketches?", nil, false),
+            ("fullWidthHigh", "request-row-sample-approval-0", nil, nil, nil, true),
+            ("acceptedNewMessage", "new-message-area-request-row-sample-information-0",
+             nil, nil, nil, false),
         ]
 
         for appearance in ["light", "dark"] {
@@ -53,18 +58,40 @@ final class ConversationSampleUITests: XCTestCase {
                 XCTAssertLessThanOrEqual(row.frame.maxY, list.frame.maxY + 1)
                 let captureSelection = app.descendants(matching: .any)["priority-capture-selection"]
                 XCTAssertTrue(captureSelection.waitForExistence(timeout: 5), app.debugDescription)
-                XCTAssertEqual(captureSelection.value as? String, state.selectedMessageID ?? "none",
-                               "The synthetic selection binding must match the captured state.\n\(app.debugDescription)")
+                XCTAssertEqual(captureSelection.value as? String, "none",
+                               "The test host must begin with no preselected row.\n\(app.debugDescription)")
+                if let selectedMessageID = state.selectedMessageID,
+                   let selectedTitle = state.selectedTitle {
+                    row.tap()
+                    let selected = XCTNSPredicateExpectation(
+                        predicate: NSPredicate(format: "value == %@", selectedMessageID),
+                        object: captureSelection)
+                    XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
+                                   "A real row press must update the List selection.\n\(app.debugDescription)")
+                    XCTAssertTrue(row.isSelected,
+                                  "The pressed product row must expose the native selected state.\n\(app.debugDescription)")
+                    let detailHeading = app.buttons["request-heading"]
+                    XCTAssertTrue(detailHeading.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(detailHeading.isHittable, app.debugDescription)
+                    XCTAssertTrue(detailHeading.label.contains(selectedTitle),
+                                  "The detail must show the same selected request.\n\(app.debugDescription)")
+                }
                 if state.fullWidth {
                     XCTAssertTrue(row.isEnabled,
                                   "The full-width comparison must keep production NavigationLinks active.\n\(app.debugDescription)")
                 }
 
                 if state.name == "selectedPlainAndUnselectedComparison" {
-                    let comparison = app.descendants(matching: .any)["request-row-visual-unselected"]
+                    guard let comparisonIdentifier = state.comparisonIdentifier else {
+                        XCTFail("The selected Plain comparison needs an unselected request row.")
+                        return
+                    }
+                    let comparison = app.descendants(matching: .any)[comparisonIdentifier]
                     XCTAssertTrue(comparison.waitForExistence(timeout: 5), app.debugDescription)
                     XCTAssertTrue(comparison.isHittable, comparison.debugDescription)
-                    XCTAssertTrue(comparison.label.contains("Prepare the next review"),
+                    XCTAssertFalse(comparison.isSelected,
+                                   "The comparison row must remain unselected.\n\(comparison.debugDescription)")
+                    XCTAssertTrue(comparison.label.contains("Which approach for the studio?"),
                                   comparison.debugDescription)
                 }
                 if state.name == "selectedHigh" || state.name == "fullWidthHigh" {
