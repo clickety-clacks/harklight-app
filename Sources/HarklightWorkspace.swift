@@ -1493,6 +1493,17 @@ struct InboxRowSelectionDecoration: Equatable {
     var barColor: Color { Color(harklightToken: barHex) }
 }
 
+/// The platform draws the tinted selection fill only while the selection is
+/// emphasized (prominent background); an unfocused list or inactive scene gets
+/// a pale fill instead, where the light selected-text colors would be
+/// unreadable. Light text may appear only over the tinted fill.
+enum InboxSelectedRowTextRule {
+    static func usesSelectionFillColors(selected: Bool,
+                                        backgroundProminence: BackgroundProminence) -> Bool {
+        selected && backgroundProminence == .increased
+    }
+}
+
 struct NewMessageAreaPriorityTreatment: Equatable {
     let capsuleFillHex: String
     let capsuleTextHex: String
@@ -1641,6 +1652,7 @@ struct InboxRowContent: View {
     let row: InboxRequestRow
     var selected = false
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.backgroundProminence) private var backgroundProminence
 
     private var palette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
@@ -1648,6 +1660,11 @@ struct InboxRowContent: View {
 
     private var typeTokens: HarklightDesignSource.MessageType {
         palette.messageType(row.resolvedMessageType)
+    }
+
+    private var showsSelectionFill: Bool {
+        InboxSelectedRowTextRule.usesSelectionFillColors(
+            selected: selected, backgroundProminence: backgroundProminence)
     }
 
     private var priorityTreatment: InboxPriorityRowTreatment? {
@@ -1662,13 +1679,13 @@ struct InboxRowContent: View {
     }
 
     private var primaryRowTextColor: Color {
-        if selected { return typeTokens.textColor }
+        if showsSelectionFill { return typeTokens.textColor }
         return priorityTreatment?.primaryTextColor
             ?? (row.isResolved ? palette.neutral.secondaryTextColor : palette.neutral.textColor)
     }
 
     private var secondaryRowTextColor: Color {
-        if selected { return typeTokens.secondaryTextColor }
+        if showsSelectionFill { return typeTokens.secondaryTextColor }
         return priorityTreatment?.secondaryTextColor ?? palette.neutral.secondaryTextColor
     }
 
@@ -1685,13 +1702,13 @@ struct InboxRowContent: View {
             }
             Image(systemName: row.symbol)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(selected ? typeTokens.textColor
+                .foregroundStyle(showsSelectionFill ? typeTokens.textColor
                                  : priorityTreatment?.primaryTextColor ?? typeTokens.listIconColor)
                 .accessibilityHidden(true)
             if row.hasDeliveryWarning {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(selected ? typeTokens.textColor
+                    .foregroundStyle(showsSelectionFill ? typeTokens.textColor
                                      : priorityTreatment?.primaryTextColor ?? .red)
                     .accessibilityLabel("Response not delivered")
                     .accessibilityIdentifier("inbox-response-delivery-warning")
@@ -1699,7 +1716,7 @@ struct InboxRowContent: View {
             if row.hasMessageLoadWarning {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(selected ? typeTokens.textColor
+                    .foregroundStyle(showsSelectionFill ? typeTokens.textColor
                                      : priorityTreatment?.primaryTextColor ?? .red)
                     .accessibilityLabel("Message could not be loaded and was skipped")
                     .accessibilityIdentifier("inbox-message-load-warning")
@@ -1715,7 +1732,7 @@ struct InboxRowContent: View {
                   : "bubble.left.and.bubble.right")
                 .font(.caption)
                 .foregroundStyle(chatUnread
-                                 ? (selected ? typeTokens.textColor
+                                 ? (showsSelectionFill ? typeTokens.textColor
                                     : priorityTreatment?.primaryTextColor ?? palette.accent.color)
                                  : secondaryRowTextColor)
                 .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
@@ -1783,7 +1800,7 @@ struct InboxRowContent: View {
                 Text(displayInitials)
                     .font(.caption2.bold())
                     .frame(width: 24, height: 24)
-                    .foregroundStyle(selected ? typeTokens.textColor
+                    .foregroundStyle(showsSelectionFill ? typeTokens.textColor
                                      : priorityTreatment?.primaryTextColor
                                         ?? palette.neutral.secondaryTextColor)
                     .background(priorityTreatment?.initialsFillColor
