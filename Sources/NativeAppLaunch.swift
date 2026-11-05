@@ -1271,6 +1271,7 @@ final class LivePresentationStore {
     @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
+    @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
     // Reply edits remain local until submission, but must outlive a detail view
@@ -1302,10 +1303,11 @@ final class LivePresentationStore {
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
-    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext) throws {
+    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext,
+                     newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false,
-                      diagnostics: nil)
+                      diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
     convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext,
@@ -1324,6 +1326,8 @@ final class LivePresentationStore {
         self.clearedRetractionDefaults = clearedRetractionDefaults
         let areaStore = newMessageAreaDefaults.map { NewMessageAreaStore(defaults: $0) }
         self.messageAreaStore = areaStore
+        let replyStore = newMessageAreaDefaults.map { ReplyItemAreaStore(defaults: $0) }
+        self.replyAreaStore = replyStore
         self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
@@ -1339,6 +1343,7 @@ final class LivePresentationStore {
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
         reconcileNewMessageArea(snapshot.requests, using: areaStore)
+        reconcileReplyItemArea(using: replyStore)
         if let data = clearedRetractionDefaults.data(forKey: Self.clearedRetractionsDefaultsKey),
            let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
             clearedRetractions = cleared
@@ -1415,6 +1420,7 @@ final class LivePresentationStore {
         do {
             let pending = try port.markConversationRead(key, context: port.context)
             conversationThreads = try port.conversations(context: port.context).threads
+            reconcileReplyItemArea()
             if permitsDelivery, pending != nil {
                 let expected = profileContext
                 Task {
@@ -1725,6 +1731,8 @@ final class LivePresentationStore {
 
     var newMessageAreaStore: NewMessageAreaStore? { messageAreaStore }
 
+    var replyItemAreaStore: ReplyItemAreaStore? { replyAreaStore }
+
     private func reconcileNewMessageArea(_ requests: [PresentedRequest],
                                          using store: NewMessageAreaStore? = nil) {
         guard let store = store ?? messageAreaStore else { return }
@@ -1736,6 +1744,34 @@ final class LivePresentationStore {
         let revisions = Dictionary(uniqueKeysWithValues: requests.map { ($0.key, $0.requestRevision) })
         store.reconcile(messages, revisions: revisions,
                         accountScopes: [profileContext.identity.personID])
+    }
+
+    private func reconcileReplyItemArea(using store: ReplyItemAreaStore? = nil) {
+        guard let store = store ?? replyAreaStore else { return }
+        var observations: [ReplyItemObservation] = []
+        for (key, thread) in conversationThreads {
+            let legacyReadIndex = thread.readThroughTurn.flatMap { readTurn in
+                thread.turns.firstIndex { $0.id == readTurn }
+            }
+            for (index, turn) in thread.turns.enumerated()
+                where turn.kind == .reply && turn.author == .origin {
+                let isSeen: Bool
+                if let cursor = thread.accountReadThroughConversationSequence,
+                   let sequence = turn.conversationSequence {
+                    isSeen = sequence <= cursor
+                } else if let legacyReadIndex {
+                    isSeen = index <= legacyReadIndex
+                } else {
+                    isSeen = false
+                }
+                observations.append(ReplyItemObservation(parent: key,
+                                                         turnID: turn.id,
+                                                         conversationSequence: turn.conversationSequence,
+                                                         isSeen: isSeen,
+                                                         text: turn.text.rawValue))
+            }
+        }
+        store.reconcile(observations, accountScopes: [profileContext.identity.personID])
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
@@ -1824,6 +1860,7 @@ final class LivePresentationStore {
             chatUnread: listChatUnread(request.key),
             tier: .middle,
             inboxScore: request.inboxScore,
+            inboxReplyScores: request.inboxReplyScores,
             thread: request.inboxThread,
             hasInboxViewEntry: request.hasInboxViewEntry,
             duePhrase: request.inboxDueAtMilliseconds.map { InboxDuePhrase.presentation(for: $0) },
@@ -2667,6 +2704,7 @@ final class LivePresentationStore {
         }
         presentation = snapshot
         reconcileNewMessageArea(snapshot.requests)
+        reconcileReplyItemArea()
         refreshFailedResponseWarnings(for: snapshot.requests)
         recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)

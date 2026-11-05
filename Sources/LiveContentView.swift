@@ -972,6 +972,7 @@ struct LiveRequestDetail: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @State private var chatPresented = false
+    @State private var pendingChatScrollTarget: ExactText?
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
@@ -1883,7 +1884,7 @@ struct LiveRequestDetail: View {
             .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                              testOpen: testOpenForegroundChatIndicator)
         }
-        .sheet(isPresented: $chatPresented) {
+        .sheet(isPresented: $chatPresented, onDismiss: { pendingChatScrollTarget = nil }) {
             conversationPanel
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
@@ -1893,6 +1894,8 @@ struct LiveRequestDetail: View {
         }
         .onChange(of: context.notificationChatRouteSerial, initial: true) { _, serial in
             guard serial != nil else { return }
+            // Capture the scroll target before didOpen, which may clear the route.
+            pendingChatScrollTarget = context.chatScrollTargetTurnID
             if !context.inlineChat { chatPresented = true }
             context.notificationChatRouteDidOpen?()
         }
@@ -2103,6 +2106,7 @@ struct LiveRequestDetail: View {
     private var conversationPanel: some View {
         ConversationPanel(store: store, key: request.key,
             sender: detailSenderLabel, title: request.title?.rawValue ?? "",
+            initialScrollTurnID: pendingChatScrollTarget,
             testNotificationRouter: testNotificationRouter,
             testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
             testConversationSheetDidAppear: testConversationSheetDidAppear)

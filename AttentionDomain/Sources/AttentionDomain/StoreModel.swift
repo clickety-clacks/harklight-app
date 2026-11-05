@@ -293,6 +293,20 @@ public struct InboxViewEntry: Equatable, Codable, Sendable {
     }
 }
 
+/// One reply reference from the server's current view: which conversation
+/// event it is and the score applied to it, when one was.
+public struct InboxViewReply: Equatable, Codable, Sendable {
+    public let key: RequestKey
+    public let conversationSequence: UInt64
+    public let score: Double?
+
+    public init(key: RequestKey, conversationSequence: UInt64, score: Double? = nil) {
+        self.key = key
+        self.conversationSequence = conversationSequence
+        self.score = score
+    }
+}
+
 /// The latest fetched server ordering and its opaque revision. It is retained
 /// with the account state so a reconnect can send the revision it already holds.
 public struct InboxView: Equatable, Codable, Sendable {
@@ -300,15 +314,20 @@ public struct InboxView: Equatable, Codable, Sendable {
     public let algorithm: ExactText?
     public let basis: ExactText?
     public let entries: [InboxViewEntry]
+    /// Absent on servers that do not report replies; an optional stored field
+    /// keeps previously persisted views decodable.
+    public let replies: [InboxViewReply]?
 
     public init(revision: ExactText,
                 algorithm: ExactText? = nil,
                 basis: ExactText? = nil,
-                entries: [InboxViewEntry]) {
+                entries: [InboxViewEntry],
+                replies: [InboxViewReply]? = nil) {
         self.revision = revision
         self.algorithm = algorithm
         self.basis = basis
         self.entries = entries
+        self.replies = replies
     }
 }
 

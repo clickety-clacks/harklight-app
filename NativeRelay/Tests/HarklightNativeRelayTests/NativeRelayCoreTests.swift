@@ -110,6 +110,7 @@ final class NativeRelayCoreTests: XCTestCase {
         var nextItemCursor: String?
         var olderPages: [String: [JSONValue]] = [:]
         var inboxViewEntries: [JSONValue]?
+        var inboxViewReplies: [JSONValue]?
         var inboxViewRevision = "view-test"
         var checkpointWasAccepted = false
         var reconciliationOverrides: [UUID: JSONValue] = [:]
@@ -197,13 +198,17 @@ final class NativeRelayCoreTests: XCTestCase {
                         ("reason", .string(ExactText("unknown_type")))
                     ])
                 }
-                return response([
+                var viewMembers: [(String, JSONValue)] = [
                     ("v", .number(JSONNumber(lexeme: "1"))),
                     ("type", .string(ExactText("ok"))),
                     ("ref", .string(ExactText(ref))),
                     ("view_rev", .string(ExactText(inboxViewRevision))),
                     ("entries", .array(inboxViewEntries))
-                ])
+                ]
+                if let inboxViewReplies {
+                    viewMembers.append(("replies", .array(inboxViewReplies)))
+                }
+                return response(viewMembers)
             case "inbox_checkpoint_ack":
                 checkpointWasAccepted = true
                 let acceptedHigh = uint64(value.uniqueValue(named: "high_water")) ?? 0
@@ -945,11 +950,97 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertNil(entries[1].score, "An older categorical entry has no numeric score.")
         XCTAssertNil(entries[2].score, "String-valued scores are unusable.")
         XCTAssertNil(entries[3].score, "Scores outside the agreed range are unusable.")
+        XCTAssertNil(snapshot.inboxView?.replies,
+                     "A server that sends no replies member stores no reply references.")
         let request = try XCTUnwrap(try session.requests.map(JSONValue.parse).first {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue == "view_get"
         })
         XCTAssertNil(request.uniqueValue(named: "since"))
         XCTAssertNil(request.uniqueValue(named: "known_view_rev"))
+    }
+
+    func testServerViewRepliesAreDecodedDedupedAndInvalidElementsAreSkipped() async throws {
+        let (context, store, session) = try setup()
+        session.snapshotHighWater = 1
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        let acceptance = try JSONValue.parse(data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"parent","origin":"source","as":"message","message":{"title":"Parent"}}"#))
+        session.initialItems = [.object([JSONMember("acceptance", acceptance)])]
+        session.inboxViewEntries = [
+            .object([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent")))
+            ])
+        ]
+        func replyReference(_ members: [JSONMember]) -> JSONValue { .object(members) }
+        session.inboxViewReplies = [
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "7"))),
+                JSONMember("score", .number(JSONNumber(lexeme: "0.93")))
+            ]),
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "9")))
+            ]),
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "11"))),
+                JSONMember("score", .string(ExactText("0.99")))
+            ]),
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "12"))),
+                JSONMember("score", .number(JSONNumber(lexeme: "1.5")))
+            ]),
+            // A duplicate (message, sequence) reference is dropped.
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "7"))),
+                JSONMember("score", .number(JSONNumber(lexeme: "0.2")))
+            ]),
+            replyReference([
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "13")))
+            ]),
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText(""))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "14")))
+            ]),
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent")))
+            ]),
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "3.5")))
+            ]),
+            replyReference([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "-1")))
+            ]),
+            .string(ExactText("not-an-object"))
+        ]
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let snapshot = try store.snapshot(context: context)
+        let replies = try XCTUnwrap(snapshot.inboxView?.replies)
+        XCTAssertEqual(replies.map(\.conversationSequence), [7, 9, 11, 12],
+                       "Valid references stay in order; malformed ones drop without failing the view.")
+        XCTAssertEqual(replies.map(\.score), [0.93, nil, nil, nil],
+                       "Only finite scores in the agreed range are usable.")
+        XCTAssertTrue(replies.allSatisfy { $0.key.messageID == ExactText("parent") })
+        XCTAssertTrue(replies.allSatisfy { $0.key.accountScope == context.identity.personID },
+                      "Reply references scope to the signed-in account, like view entries.")
     }
 
     func testCheckpointKeepsCachedRowsAnswerableUntilTheirStablePageArrives() async throws {

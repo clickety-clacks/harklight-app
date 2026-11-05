@@ -1,3 +1,4 @@
+import AttentionDomain
 import SwiftUI
 
 extension EnvironmentValues {
@@ -21,6 +22,9 @@ struct InboxCardContext {
     var isSupersedesTarget = false
     var notificationChatRouteSerial: UInt64? = nil
     var notificationChatRouteDidOpen: (() -> Void)? = nil
+    /// Turn the chat should scroll to when the chat route opens it, such as
+    /// the earliest unseen reply of a tapped reply item.
+    var chatScrollTargetTurnID: ExactText? = nil
     var dismissToList: (() -> Void)? = nil
     var messageType: HarklightMessageType = .request
     let move: (Int) -> Void

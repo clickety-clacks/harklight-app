@@ -186,6 +186,7 @@ private struct InboxListRowScrollTarget: Hashable {
 private enum InboxListRowPlacement: Hashable {
     case normal
     case newMessageArea
+    case replyItemArea
 }
 
 private struct NewMessageAreaVisibility: Hashable {
@@ -194,13 +195,30 @@ private struct NewMessageAreaVisibility: Hashable {
         case normalList
     }
 
+    enum Kind: Hashable {
+        case message
+        case replyItem
+    }
+
     let key: RequestKey
     let placement: Placement
+    var kind: Kind = .message
 }
 
 private struct NewMessageAreaExpiryTaskKey: Hashable {
     let scenePhase: String
     let nextExpiry: Date?
+}
+
+/// A tapped reply item: open the parent's chat with the item's earliest
+/// unseen reply in view. Serials share the notification chat route's field
+/// in InboxCardContext, so they start above any notification serial.
+private struct ReplyChatRoute: Equatable {
+    static let serialBase: UInt64 = 1 << 32
+
+    let serial: UInt64
+    let key: RequestKey
+    let targetTurnID: ExactText?
 }
 
 enum InboxResponseReceiptStatus: Equatable {
@@ -239,6 +257,7 @@ struct InboxRequestRow: Identifiable {
     var messageType: HarklightMessageType? = nil
     var tier: InboxAttentionTier = .middle
     var inboxScore: Double? = nil
+    var inboxReplyScores: [UInt64: Double] = [:]
     var thread: ExactText? = nil
     var hasInboxViewEntry = false
     var duePhrase: InboxDuePhrase.Presentation? = nil
@@ -386,6 +405,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
     @State private var restoreLastViewedOnReturn = false
+    @State private var replyChatRoute: ReplyChatRoute?
 
     private var rows: [InboxItem] {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
@@ -430,7 +450,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private var newMessageAreaExpiryTaskKey: NewMessageAreaExpiryTaskKey {
         NewMessageAreaExpiryTaskKey(
             scenePhase: String(describing: scenePhase),
-            nextExpiry: conversationStore?.newMessageAreaStore?.nextExpiry)
+            nextExpiry: nextNewMessageAreaExpiry)
+    }
+    private var nextNewMessageAreaExpiry: Date? {
+        [conversationStore?.newMessageAreaStore?.nextExpiry,
+         conversationStore?.replyItemAreaStore?.nextExpiry].compactMap { $0 }.min()
     }
     private var exposesNotificationTestAction: Bool {
         ProcessInfo.processInfo.arguments.contains("--harklight-test-notification-navigation")
@@ -482,6 +506,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let newRequest: RequestKey? = if case let .request(key) = next { key } else { nil }
         conversationStore?.navigateMessage(from: oldRequest, to: newRequest)
 
+        if let route = replyChatRoute, newRequest != route.key { replyChatRoute = nil }
+
         let oldSampleID: String? = if case let .sample(id) = previous { id }
             else if previous == nil { samples.selectedID }
             else { nil }
@@ -493,6 +519,16 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             selectRequest(newRequest)
         }
         samples.select(newSampleID, departingFrom: oldSampleID)
+    }
+
+    /// Opens a tapped reply item's parent with its chat scrolled to the
+    /// earliest unseen reply. The item itself leaves the new-message area
+    /// only when the read position advances past its replies.
+    private func openReplyItem(_ entry: ReplyItemEntry) {
+        let serial = max(replyChatRoute?.serial ?? 0, ReplyChatRoute.serialBase) &+ 1
+        replyChatRoute = ReplyChatRoute(serial: serial, key: entry.parent,
+                                        targetTurnID: entry.earliestUnseenReply?.turnID)
+        navigate(to: .request(entry.parent))
     }
 
     private func markSeen(_ id: InboxSelection) {
@@ -599,7 +635,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                request.lifecycleStatus != .superseded {
                 Divider()
                 ConversationPanel(store: conversationStore, key: key,
-                    sender: key.senderID.rawValue, title: request.title?.rawValue ?? "")
+                    sender: key.senderID.rawValue, title: request.title?.rawValue ?? "",
+                    initialScrollTurnID: replyChatRoute?.key == key
+                        ? replyChatRoute?.targetTurnID : nil)
                     .frame(width: min(360, geometry.size.width * 0.34))
             }
             if inlineChat, case let .sample(id)? = item,
@@ -641,6 +679,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   refreshInbox: refreshInbox,
                   newMessageAreaStore: conversationStore?.newMessageAreaStore,
+                  replyItemAreaStore: conversationStore?.replyItemAreaStore,
+                  openReplyItem: openReplyItem,
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab, search: $search,
@@ -671,22 +711,31 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let index = ids.firstIndex(of: id)
         let hasPrevious = index.map { $0 > 0 } ?? false
         let hasNext = index.map { $0 + 1 < ids.count } ?? false
-        let notificationChatRouteSerial: UInt64?
+        let chatRouteSerial: UInt64?
+        var chatScrollTargetTurnID: ExactText? = nil
+        var chatRouteDidOpen: (() -> Void)? = nil
         if case let .request(key) = id,
            let route = activeNotificationNavigation,
            route.opensChat, route.request == key {
-            notificationChatRouteSerial = route.serial
+            chatRouteSerial = route.serial
+            chatRouteDidOpen = { [self] in self.notificationChatRouteDidOpen(route.serial) }
+        } else if case let .request(key) = id,
+                  let route = replyChatRoute, route.key == key {
+            chatRouteSerial = route.serial
+            chatScrollTargetTurnID = route.targetTurnID
+            chatRouteDidOpen = { [self] in
+                if self.replyChatRoute?.serial == route.serial { self.replyChatRoute = nil }
+            }
         } else {
-            notificationChatRouteSerial = nil
+            chatRouteSerial = nil
         }
         return InboxCardContext(position: (index ?? 0) + 1, total: ids.count,
             hasPrevious: hasPrevious,
             hasNext: hasNext,
             inlineChat: inlineChat,
-            notificationChatRouteSerial: notificationChatRouteSerial,
-            notificationChatRouteDidOpen: notificationChatRouteSerial.map { serial in
-                { [self] in self.notificationChatRouteDidOpen(serial) }
-            },
+            notificationChatRouteSerial: chatRouteSerial,
+            notificationChatRouteDidOpen: chatRouteDidOpen,
+            chatScrollTargetTurnID: chatScrollTargetTurnID,
             dismissToList: { navigate(to: nil) },
             messageType: rows.first(where: { $0.id == id })?.resolvedMessageType ?? .request) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
@@ -754,12 +803,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: scenePhase) { _, phase in
                 guard phase == .active, UIApplication.shared.isProtectedDataAvailable else { return }
                 conversationStore?.newMessageAreaStore?.removeExpired()
+                conversationStore?.replyItemAreaStore?.removeExpired()
             }
             .task(id: newMessageAreaExpiryTaskKey) {
                 guard scenePhase == .active,
-                      UIApplication.shared.isProtectedDataAvailable,
-                      let areaStore = conversationStore?.newMessageAreaStore else { return }
-                while let expiry = areaStore.nextExpiry {
+                      UIApplication.shared.isProtectedDataAvailable else { return }
+                while let expiry = nextNewMessageAreaExpiry {
                     let delay = max(0, expiry.timeIntervalSinceNow)
                     do {
                         try await Task.sleep(for: .seconds(delay))
@@ -769,7 +818,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     guard !Task.isCancelled,
                           scenePhase == .active,
                           UIApplication.shared.isProtectedDataAvailable else { return }
-                    areaStore.removeExpired()
+                    conversationStore?.newMessageAreaStore?.removeExpired()
+                    conversationStore?.replyItemAreaStore?.removeExpired()
                 }
             }
             .onChange(of: samples.selectedID) { _, id in
@@ -829,6 +879,8 @@ struct InboxList: View {
     var isRefreshing = false
     var refreshInbox: (@MainActor () async -> Void)? = nil
     let newMessageAreaStore: NewMessageAreaStore?
+    let replyItemAreaStore: ReplyItemAreaStore?
+    let openReplyItem: (ReplyItemEntry) -> Void
     @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var workspaceTab: InboxWorkspaceTab
@@ -865,6 +917,37 @@ struct InboxList: View {
         var id: RequestKey { entry.key }
     }
 
+    private struct ReplyItemListRow {
+        let entry: ReplyItemEntry
+        let row: InboxRequestRow
+    }
+
+    /// One parent can hold both a new-message entry and a reply item, so
+    /// the combined ids keep the two kinds distinct.
+    private enum NewMessageAreaCombinedRow: Identifiable {
+        case message(NewMessageAreaListRow)
+        case reply(ReplyItemListRow)
+
+        enum ID: Hashable {
+            case message(RequestKey)
+            case reply(RequestKey)
+        }
+
+        var id: ID {
+            switch self {
+            case let .message(item): .message(item.entry.key)
+            case let .reply(item): .reply(item.entry.parent)
+            }
+        }
+
+        var receivedAt: Date {
+            switch self {
+            case let .message(item): item.entry.receivedAt
+            case let .reply(item): item.entry.receivedAt
+            }
+        }
+    }
+
     private var designPalette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
     }
@@ -896,6 +979,31 @@ struct InboxList: View {
         }
     }
 
+    private var matchingReplyItemRows: [ReplyItemListRow] {
+        guard tab == .inbox, let replyItemAreaStore else { return [] }
+        var requestRows: [RequestKey: InboxRequestRow] = [:]
+        for item in rows {
+            guard case let .request(row) = item else { continue }
+            requestRows[row.key] = row
+        }
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return replyItemAreaStore.entries.compactMap { entry in
+            guard let row = requestRows[entry.parent],
+                  query.isEmpty || InboxItem.request(row).matchesSearch(query) else { return nil }
+            return ReplyItemListRow(entry: entry, row: row)
+        }
+    }
+
+    private var combinedNewMessageAreaRows: [NewMessageAreaCombinedRow] {
+        NewMessageAreaRowOrder.merged(
+            messages: matchingNewMessageAreaRows,
+            replies: matchingReplyItemRows,
+            messageDate: { $0.entry.receivedAt },
+            replyDate: { $0.entry.receivedAt },
+            message: NewMessageAreaCombinedRow.message,
+            reply: NewMessageAreaCombinedRow.reply)
+    }
+
     private func updateVisibility(_ token: NewMessageAreaVisibility, isVisible: Bool) {
         if isVisible {
             guard workspaceTab == tab else {
@@ -904,10 +1012,17 @@ struct InboxList: View {
             }
             visibleMessagePlacements.insert(token)
             if canRecordFirstSeen {
-                newMessageAreaStore?.markFirstSeen(token.key)
+                markFirstSeen(token)
             }
         } else {
             visibleMessagePlacements.remove(token)
+        }
+    }
+
+    private func markFirstSeen(_ token: NewMessageAreaVisibility) {
+        switch token.kind {
+        case .message: newMessageAreaStore?.markFirstSeen(token.key)
+        case .replyItem: replyItemAreaStore?.markFirstSeen(token.key)
         }
     }
 
@@ -919,7 +1034,7 @@ struct InboxList: View {
     private func recordVisibleMessagesAsSeen() {
         guard canRecordFirstSeen else { return }
         for placement in visibleMessagePlacements {
-            newMessageAreaStore?.markFirstSeen(placement.key)
+            markFirstSeen(placement)
         }
     }
 
@@ -951,6 +1066,36 @@ struct InboxList: View {
             updateVisibility(.init(key: item.row.key, placement: .area), isVisible: isVisible)
         }
         .accessibilityIdentifier("new-message-area-\(InboxItem.request(item.row).accessibilityID)")
+        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        .listRowSeparator(.hidden)
+        .listRowBackground(designPalette.neutral.backgroundColor)
+    }
+
+    @ViewBuilder
+    private func replyItemRow(_ item: ReplyItemListRow,
+                              in tab: InboxWorkspaceTab,
+                              selected isSelected: Bool) -> some View {
+        Button {
+            openReplyItem(item.entry)
+        } label: {
+            ReplyItemRowContent(
+                entry: item.entry,
+                parentTitle: item.row.title,
+                senderLabel: item.row.senderLabel,
+                inboxReplyScores: item.row.inboxReplyScores,
+                selected: isSelected)
+        }
+        .buttonStyle(.plain)
+        .tint(.clear)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .id(InboxListRowScrollTarget(tab: tab,
+                                     selection: .request(item.row.key),
+                                     placement: .replyItemArea))
+        .onScrollVisibilityChange(threshold: 0.001) { isVisible in
+            updateVisibility(.init(key: item.row.key, placement: .area, kind: .replyItem),
+                             isVisible: isVisible)
+        }
+        .accessibilityIdentifier("reply-item-\(InboxItem.request(item.row).accessibilityID)")
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(designPalette.neutral.backgroundColor)
@@ -1233,16 +1378,23 @@ struct InboxList: View {
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let visibleEntries = InboxListProjection.visibleEntries(rows, in: tab, search: search)
-        let areaRows = matchingNewMessageAreaRows
+        let areaRows = combinedNewMessageAreaRows
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
             if !areaRows.isEmpty {
                 newMessageAreaGap(8)
                 Section {
-                    ForEach(shownAreaRows) { item in
-                        let selection = InboxSelection.request(item.row.key)
-                        newMessageAreaRow(item, in: tab,
-                                          selected: selected == selection || lastViewedSelection == selection)
+                    ForEach(shownAreaRows) { combined in
+                        switch combined {
+                        case let .message(item):
+                            let selection = InboxSelection.request(item.row.key)
+                            newMessageAreaRow(item, in: tab,
+                                              selected: selected == selection || lastViewedSelection == selection)
+                        case let .reply(item):
+                            let selection = InboxSelection.request(item.row.key)
+                            replyItemRow(item, in: tab,
+                                         selected: selected == selection || lastViewedSelection == selection)
+                        }
                     }
                     if areaRows.count > 5 {
                         Button(isNewMessageAreaExpanded ? "Less" : "More…") {
@@ -1646,6 +1798,117 @@ private struct NewMessageAreaRowContent: View {
         }
     }
 
+}
+
+/// A chat reply in the new-message area: the newest unseen reply quoted
+/// behind a vertical reply bar, with the parent message and sender it
+/// belongs to. Shows the reply's own words, not a summary.
+private struct ReplyItemRowContent: View {
+    let entry: ReplyItemEntry
+    let parentTitle: String
+    let senderLabel: String
+    let inboxReplyScores: [UInt64: Double]
+    let selected: Bool
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: HarklightDesignSource.Appearance {
+        HarklightDesignSystem.palette(for: colorScheme)
+    }
+
+    private var scoreBadge: InboxPriorityDisplay? {
+        guard let sequence = entry.newestUnseenReply?.conversationSequence,
+              let score = inboxReplyScores[sequence],
+              let level = InboxPriorityDisplay.forScore(score),
+              level == .high || level == .urgent else { return nil }
+        return level
+    }
+
+    private var badgeTreatment: NewMessageAreaPriorityTreatment? {
+        .forLevel(scoreBadge, colorScheme: colorScheme)
+    }
+
+    private var selectionDecoration: InboxRowSelectionDecoration {
+        .forLevel(nil, colorScheme: colorScheme)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "arrowshape.turn.up.left")
+                    .font(.caption2.weight(.semibold))
+                    .accessibilityHidden(true)
+                Text(String(localized: "Reply · \(senderLabel) · \(parentTitle)"))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .font(.caption)
+            .foregroundStyle(palette.neutral.secondaryTextColor)
+
+            HStack(alignment: .top, spacing: 8) {
+                Capsule()
+                    .fill(palette.accent.color.opacity(0.55))
+                    .frame(width: 3)
+                    .accessibilityHidden(true)
+                Text(entry.newestUnseenReply?.text ?? "")
+                    .font(.subheadline)
+                    .foregroundStyle(palette.neutral.textColor)
+                    .lineLimit(3)
+                    .truncationMode(.tail)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(InboxFriendlyDate.label(for: entry.receivedAt))
+                    .font(.caption)
+                    .foregroundStyle(palette.neutral.secondaryTextColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                if entry.unseenCount > 1 {
+                    Text(String(localized: "\(entry.unseenCount) new"))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(palette.neutral.secondaryTextColor)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("reply-item-unseen-count")
+                }
+                Spacer(minLength: 4)
+                if let scoreBadge {
+                    Text(scoreBadge.title)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(badgeTreatment?.capsuleTextColor ?? .white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(badgeTreatment?.capsuleFillColor ?? .clear, in: Capsule())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .accessibilityLabel(Text(scoreBadge.title))
+                        .accessibilityIdentifier("reply-item-priority-\(scoreBadge.rawValue)")
+                }
+            }
+        }
+        .padding(.leading, 16 + (selected ? InboxRowSelectionDecoration.contentInset : 0))
+        .padding(.trailing, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.neutral.backgroundColor)
+        .overlay(alignment: .leading) {
+            if selected {
+                Rectangle()
+                    .fill(selectionDecoration.barColor)
+                    .frame(width: InboxRowSelectionDecoration.barWidth)
+                    .frame(maxHeight: .infinity)
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(NewMessageAreaSurface.forScheme(colorScheme).separatorColor)
+                .frame(height: 0.5)
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+        }
+        .accessibilityElement(children: .combine)
+    }
 }
 
 struct InboxRowContent: View {

@@ -143,7 +143,38 @@ public struct InboxPagingWire: Sendable {
         return .updated(InboxView(revision: revision,
                                   algorithm: text(value, "algorithm").map(ExactText.init),
                                   basis: text(value, "basis").map(ExactText.init),
-                                  entries: entries))
+                                  entries: entries,
+                                  replies: decodeViewReplies(value)))
+    }
+
+    /// Reply references are additive view data: a server without them sends no
+    /// `replies` member, and an invalid element is dropped without failing the view.
+    private func decodeViewReplies(_ value: JSONValue) -> [InboxViewReply]? {
+        guard let rawReplies = value.uniqueValue(named: "replies")?.arrayValues else {
+            return nil
+        }
+        var replies: [InboxViewReply] = []
+        var seen = Set<ReplyIdentity>()
+        for raw in rawReplies {
+            guard case .object = raw,
+                  let sender = raw.uniqueValue(named: "sender_id")?.stringValue,
+                  !sender.rawValue.isEmpty,
+                  let message = raw.uniqueValue(named: "message_id")?.stringValue,
+                  !message.rawValue.isEmpty,
+                  let rawSequence = raw.uniqueValue(named: "conversation_seq")?.integerValue,
+                  let sequence = UInt64(exactly: rawSequence) else { continue }
+            let key = RequestKey(accountScope: profile.identity.personID,
+                                 senderID: sender, messageID: message)
+            guard seen.insert(ReplyIdentity(key: key, sequence: sequence)).inserted else { continue }
+            replies.append(InboxViewReply(key: key, conversationSequence: sequence,
+                                          score: usableScore(raw.uniqueValue(named: "score"))))
+        }
+        return replies
+    }
+
+    private struct ReplyIdentity: Hashable {
+        let key: RequestKey
+        let sequence: UInt64
     }
 
     public func inboxReconcile(snapshotID: String,

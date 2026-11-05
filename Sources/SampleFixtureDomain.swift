@@ -15,7 +15,18 @@ final class SampleFixtureDomain {
             personID: ExactText("local-examples"), deviceID: ExactText("local-example-device"))
         context = ProfileContext(identity: identity, transportMode: .fixture)
         domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
-        viewModel = try LivePresentationStore(localFixtureStore: domain, context: context)
+        viewModel = try LivePresentationStore(localFixtureStore: domain, context: context,
+                                              newMessageAreaDefaults: Self.replyItemAreaTestDefaults())
+    }
+
+    /// The reply-item UI test runs the ordinary new-message-area stores
+    /// against a scratch defaults suite; other launches keep them absent.
+    private static func replyItemAreaTestDefaults() -> UserDefaults? {
+        guard ProcessInfo.processInfo.arguments.contains("--harklight-test-reply-item-area") else { return nil }
+        let suiteName = "harklight-examples.reply-item-area.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else { return nil }
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
     }
 
     func populate() throws {
@@ -116,6 +127,25 @@ final class SampleFixtureDomain {
                                 acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)))
                         }
 
+                    }
+
+                    if ProcessInfo.processInfo.arguments.contains("--harklight-test-reply-item-area") {
+                        func appendHistory(_ index: Int) throws {
+                            try apply(.turn(ConversationTurn(id: ExactText("reply-area-history-\(index)"),
+                                binding: binding, author: .person, sessionHandle: handle,
+                                text: ExactText("Earlier local discussion turn \(index) keeps this example history long."),
+                                kind: .discussion)))
+                        }
+                        for index in 1...20 { try appendHistory(index) }
+                        try apply(.turn(ConversationTurn(id: ExactText("reply-area-earliest"), binding: binding,
+                            author: .origin, sessionHandle: handle,
+                            text: ExactText("Earliest unseen chat reply: the middle section of the draft now reads better."),
+                            inReplyTo: person.id, kind: .reply)))
+                        for index in 21...30 { try appendHistory(index) }
+                        try apply(.turn(ConversationTurn(id: ExactText("reply-area-newest"), binding: binding,
+                            author: .origin, sessionHandle: handle,
+                            text: ExactText("Newest unseen chat reply: the revised draft tightens the opening, keeps the middle section's new ordering, and closes with the shorter summary we discussed, so the whole note should now fit on one screen."),
+                            inReplyTo: person.id, kind: .reply)))
                     }
                 }
             }
