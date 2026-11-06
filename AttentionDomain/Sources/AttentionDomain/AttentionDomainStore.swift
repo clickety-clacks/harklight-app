@@ -2208,12 +2208,28 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// the ordinary relay cursor. A failed view fetch clears only this cache.
     public func setInboxView(_ view: InboxView?,
                              context suppliedContext: ProfileContext) throws {
+        try replaceInboxView(view, context: suppliedContext, fixture: false)
+    }
+
+    /// Installs a server-style ordering view in an in-memory local fixture.
+    /// Relay profiles must use `setInboxView` with the fetched Server result.
+    public func setFixtureInboxView(_ view: InboxView?,
+                                    context suppliedContext: ProfileContext) throws {
+        guard persistence is MemoryAttentionStatePersistence else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        try replaceInboxView(view, context: suppliedContext, fixture: true)
+    }
+
+    private func replaceInboxView(_ view: InboxView?,
+                                  context suppliedContext: ProfileContext,
+                                  fixture: Bool) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay else {
+        guard suppliedContext.transportMode == (fixture ? .fixture : .relay) else {
             throw AttentionStoreError.fixtureOnlyOperation
         }
         if let view {

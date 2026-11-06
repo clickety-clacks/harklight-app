@@ -249,7 +249,7 @@ final class SampleFixtureDomain {
                     unseenCount: groupedReplies.count, score: 0.93, scoreKind: .current),
                 InboxViewListItem(kind: .message, key: replyParent)
             ]
-            try domain.setInboxView(InboxView(
+            try domain.setFixtureInboxView(InboxView(
                 revision: ExactText("sample-reply-item-list"),
                 entries: [],
                 replies: groupedReplies.compactMap { turn in
