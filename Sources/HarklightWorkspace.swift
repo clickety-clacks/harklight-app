@@ -2035,9 +2035,16 @@ private struct NewMessageAreaRowContent: View {
         NewMessageAreaSummaryText.fallback(summaryInput)
     }
 
+    private var displayedSummary: AttributedString {
+        MessageMarkdown.compactPreview(
+            authored: summaryInput,
+            generatedSummary: store?.summary(for: key, revision: requestRevision) ?? fallbackText,
+            characterLimit: 320)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(store?.summary(for: key, revision: requestRevision) ?? fallbackText)
+            Text(displayedSummary)
                 .font(.subheadline)
                 .foregroundStyle(palette.neutral.textColor)
                 .lineLimit(2)
@@ -2088,7 +2095,7 @@ private struct NewMessageAreaRowContent: View {
         }
         .accessibilityElement(children: .combine)
         .task(id: summaryKey) {
-            guard let store else { return }
+            guard let store, !MessageMarkdown.hasFormattingOrLinks(summaryInput) else { return }
             await store.createSummaryIfNeeded(
                 for: NewMessageAreaSummaryInput(key: key,
                     revision: requestRevision, text: summaryInput))
@@ -2134,7 +2141,9 @@ private struct ReplyItemRowContent: View {
                 Image(systemName: "arrowshape.turn.up.left")
                     .font(.caption2.weight(.semibold))
                     .accessibilityHidden(true)
-                Text(String(localized: "Reply · \(senderLabel) · \(parentTitle)"))
+                Text(MessageMarkdown.attributed(
+                    parentTitle,
+                    prefixedBy: String(localized: "Reply · \(senderLabel) · ")))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -2146,7 +2155,8 @@ private struct ReplyItemRowContent: View {
                     .fill(palette.accent.color.opacity(0.55))
                     .frame(width: 3)
                     .accessibilityHidden(true)
-                Text(entry.newestUnseenReply?.text ?? "")
+                Text(MessageMarkdown.preview(entry.newestUnseenReply?.text ?? "",
+                                             characterLimit: 320))
                     .font(.subheadline)
                     .foregroundStyle(palette.neutral.textColor)
                     .lineLimit(1)
@@ -2381,7 +2391,7 @@ struct InboxRowContent: View {
                     .alignmentGuide(.firstTextBaseline) { $0[.bottom] }
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(alignment: .firstTextBaseline, spacing: 7) {
-                        Text(row.title)
+                        Text(MessageMarkdown.attributed(row.title))
                             .font(titleFont)
                             .foregroundStyle(titleColor)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2393,7 +2403,7 @@ struct InboxRowContent: View {
                                               messageKind: row.declaredMessageKind)
                     }
                     if let bodyText = row.bodyText, !bodyText.isEmpty {
-                        Text(bodyText)
+                        Text(MessageMarkdown.attributed(bodyText))
                             .font(.subheadline)
                             .foregroundStyle(secondaryRowTextColor)
                             .lineLimit(row.tier.bodyLineLimit)
@@ -2634,7 +2644,9 @@ private struct ReplyItemNormalRowContent: View {
                 Image(systemName: "arrowshape.turn.up.left")
                     .font(.caption2.weight(.semibold))
                     .accessibilityHidden(true)
-                Text(String(localized: "Reply · \(senderLabel) · \(parentTitle)"))
+                Text(MessageMarkdown.attributed(
+                    parentTitle,
+                    prefixedBy: String(localized: "Reply · \(senderLabel) · ")))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -2647,7 +2659,8 @@ private struct ReplyItemNormalRowContent: View {
                     .frame(width: 3)
                     .accessibilityHidden(true)
                 if let projection {
-                    Text(projection.quotedReply.text.rawValue)
+                    Text(MessageMarkdown.preview(projection.quotedReply.text.rawValue,
+                                                 characterLimit: 480))
                         .font(.subheadline)
                         .foregroundStyle(primaryTextColor)
                         .lineLimit(3)

@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import AttentionDomain
 import ImageIO
+import Foundation
 
 enum MessageTextLinks {
     /// Makes ordinary web URLs tappable with the standard system link
@@ -41,8 +42,246 @@ enum MessageTextLinks {
     }
 }
 
-/// Renders a request body with UIKit's built-in detectors and text interactions.
-/// Keep this separate from `MessageTextLinks`, which ConversationView uses.
+/// Parses sender-authored message text as Markdown while keeping block content
+/// readable in SwiftUI `Text` previews. Foundation retains the inline
+/// formatting and link attributes; visible prefixes stand in for block layout
+/// that `Text` does not provide on its own.
+enum MessageMarkdown {
+    private struct BlockComponent: Hashable {
+        let identity: Int
+        let kind: PresentationIntent.Kind
+    }
+
+    private struct QuoteParagraph: Hashable {
+        let quoteIdentity: Int
+        let paragraphIdentity: Int
+    }
+
+    private final class CachedValue: NSObject, @unchecked Sendable {
+        let attributed: AttributedString
+        let hasFormattingOrLinks: Bool
+
+        init(attributed: AttributedString, hasFormattingOrLinks: Bool) {
+            self.attributed = attributed
+            self.hasFormattingOrLinks = hasFormattingOrLinks
+        }
+    }
+
+    private final class Cache: @unchecked Sendable {
+        private let values: NSCache<NSString, CachedValue> = {
+            let values = NSCache<NSString, CachedValue>()
+            values.countLimit = 192
+            return values
+        }()
+
+        func value(for source: String) -> CachedValue {
+            let key = source as NSString
+            if let cached = values.object(forKey: key) { return cached }
+            let cached = MessageMarkdown.makeValue(source)
+            values.setObject(cached, forKey: key, cost: source.utf8.count)
+            return cached
+        }
+    }
+
+    private static let cache = Cache()
+
+    static func attributed(_ source: String) -> AttributedString {
+        cache.value(for: source).attributed
+    }
+
+    static func attributed(_ source: String, prefixedBy prefix: String) -> AttributedString {
+        var result = AttributedString(prefix)
+        result += attributed(source)
+        return result
+    }
+
+    /// Parses authored text first, then bounds the compact cell preview so
+    /// Markdown attributes and link targets survive truncation.
+    static func preview(_ source: String, characterLimit: Int) -> AttributedString {
+        truncate(attributed(source), characterLimit: characterLimit)
+    }
+
+    /// Keeps generated summaries for plain authored text, but uses the source
+    /// whenever Markdown formatting or a link target would be lost.
+    static func compactPreview(authored source: String,
+                               generatedSummary: String?,
+                               characterLimit: Int) -> AttributedString {
+        let content: AttributedString
+        if hasFormattingOrLinks(source) {
+            content = attributed(source)
+        } else {
+            content = AttributedString(generatedSummary ?? source)
+        }
+        return truncate(content, characterLimit: characterLimit)
+    }
+
+    private static func truncate(_ content: AttributedString,
+                                 characterLimit: Int) -> AttributedString {
+        let limit = max(0, characterLimit)
+        let visible = String(content.characters)
+        guard visible.count > limit else { return content }
+        let visibleEnd = visible.index(visible.startIndex, offsetBy: limit)
+        guard let end = AttributedString.Index(visibleEnd, within: content) else { return content }
+        var result = AttributedString(content[..<end])
+        result += AttributedString("…")
+        return result
+    }
+
+    static func hasFormattingOrLinks(_ source: String) -> Bool {
+        cache.value(for: source).hasFormattingOrLinks
+    }
+
+    private static func makeValue(_ source: String) -> CachedValue {
+        var parsed = parse(source)
+        linkifyPlainWebURLs(in: &parsed)
+        let hasFormattingOrLinks = parsed.runs.contains { run in
+            if run.link != nil { return true }
+            if let inlineIntent = run.inlinePresentationIntent, !inlineIntent.isEmpty {
+                return true
+            }
+            return run.presentationIntent?.components.contains {
+                isNonParagraphBlockComponent($0.kind)
+            } == true
+        }
+
+        var rendered = AttributedString()
+        var previousBlock: [BlockComponent] = []
+        var markedListItems = Set<Int>()
+        var markedQuoteParagraphs = Set<QuoteParagraph>()
+
+        for run in parsed.runs {
+            let components = run.presentationIntent?.components ?? []
+            let block = components.compactMap { component -> BlockComponent? in
+                guard isBlockComponent(component.kind) else { return nil }
+                return BlockComponent(identity: component.identity, kind: component.kind)
+            }
+
+            if !block.isEmpty {
+                if !rendered.characters.isEmpty,
+                   block != previousBlock,
+                   !endsInLineBreak(rendered) {
+                    rendered += AttributedString("\n")
+                }
+                previousBlock = block
+            }
+
+            var prefix = ""
+            for (index, component) in components.enumerated() {
+                switch component.kind {
+                case .blockQuote:
+                    let paragraphIdentity = components.prefix(index).first { parent in
+                        if case .paragraph = parent.kind { return true }
+                        return false
+                    }?.identity ?? component.identity
+                    if markedQuoteParagraphs.insert(QuoteParagraph(
+                        quoteIdentity: component.identity,
+                        paragraphIdentity: paragraphIdentity)).inserted {
+                        prefix += "▏ "
+                    }
+                case let .listItem(ordinal):
+                    if markedListItems.insert(component.identity).inserted {
+                        let parentComponents = components.prefix(index)
+                        let isOrdered = parentComponents.contains { parent in
+                            if case .orderedList = parent.kind { return true }
+                            return false
+                        }
+                        let depth = parentComponents.reduce(into: 0) { count, parent in
+                            if case .listItem(_) = parent.kind { count += 1 }
+                        }
+                        prefix += String(repeating: "\u{00a0}\u{00a0}",
+                                         count: max(0, depth))
+                        prefix += isOrdered ? "\(ordinal). " : "• "
+                    }
+                default:
+                    break
+                }
+            }
+
+            if !prefix.isEmpty {
+                rendered += AttributedString(prefix)
+            }
+
+            var content = AttributedString(parsed[run.range])
+            if components.contains(where: { component in
+                if case .codeBlock(_) = component.kind { return true }
+                return false
+            }) {
+                content.inlinePresentationIntent = [.code]
+            } else if components.contains(where: { component in
+                if case .header(_) = component.kind { return true }
+                return false
+            }) {
+                var inlineIntent = content.inlinePresentationIntent ?? []
+                inlineIntent.insert(.stronglyEmphasized)
+                content.inlinePresentationIntent = inlineIntent
+            }
+            rendered += content
+        }
+
+        return CachedValue(attributed: rendered,
+                           hasFormattingOrLinks: hasFormattingOrLinks)
+    }
+
+    private static func parse(_ source: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .full,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        return (try? AttributedString(markdown: source, options: options))
+            ?? AttributedString(source)
+    }
+
+    private static func isBlockComponent(_ kind: PresentationIntent.Kind) -> Bool {
+        switch kind {
+        case .paragraph:
+            return true
+        case .header(_), .orderedList, .unorderedList, .listItem(_), .blockQuote,
+             .codeBlock(_), .thematicBreak, .table(_), .tableCell(_), .tableHeaderRow,
+             .tableRow(_):
+            return true
+        }
+    }
+
+    private static func isNonParagraphBlockComponent(_ kind: PresentationIntent.Kind) -> Bool {
+        switch kind {
+        case .paragraph:
+            return false
+        default:
+            return true
+        }
+    }
+
+    private static func endsInLineBreak(_ string: AttributedString) -> Bool {
+        guard let last = string.characters.last else { return false }
+        return last == "\n" || last == "\r"
+    }
+
+    private static func linkifyPlainWebURLs(in attributed: inout AttributedString) {
+        let visibleText = String(attributed.characters)
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return
+        }
+
+        let matches = detector.matches(in: visibleText,
+                                      range: NSRange(visibleText.startIndex..., in: visibleText))
+        for match in matches {
+            guard let url = match.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  let stringRange = Range(match.range, in: visibleText),
+                  let lower = AttributedString.Index(stringRange.lowerBound, within: attributed),
+                  let upper = AttributedString.Index(stringRange.upperBound, within: attributed) else {
+                continue
+            }
+            let range = lower..<upper
+            guard attributed[range].link == nil else { continue }
+            attributed[range].link = url
+        }
+    }
+}
+
+/// Renders a request body as selectable attributed text with UIKit's built-in
+/// link interactions and an accessibility-stable text view.
 struct SystemDetectedMessageBody: UIViewRepresentable {
     let text: String
     let foregroundColor: Color
@@ -59,14 +298,15 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
         updateColors(on: textView)
-        textView.text = text
+        textView.attributedText = NSAttributedString(MessageMarkdown.attributed(text))
         textView.accessibilityIdentifier = "request-message-body"
         return textView
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        if textView.text != text {
-            textView.text = text
+        let markdown = NSAttributedString(MessageMarkdown.attributed(text))
+        if !textView.attributedText.isEqual(to: markdown) {
+            textView.attributedText = markdown
         }
         updateColors(on: textView)
     }

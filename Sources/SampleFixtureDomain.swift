@@ -22,7 +22,9 @@ final class SampleFixtureDomain {
     /// The reply-item UI test runs the ordinary new-message-area stores
     /// against a scratch defaults suite; other launches keep them absent.
     private static func replyItemAreaTestDefaults() -> UserDefaults? {
-        guard ProcessInfo.processInfo.arguments.contains("--harklight-test-reply-item-area") else { return nil }
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains("--harklight-test-reply-item-area") ||
+                arguments.contains("--harklight-test-markdown-reply-item") else { return nil }
         let suiteName = "harklight-examples.reply-item-area.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else { return nil }
         defaults.removePersistentDomain(forName: suiteName)
@@ -70,22 +72,41 @@ final class SampleFixtureDomain {
             if message.hasChat {
                 let personID = message.id == "sample-information-0" ? "30" : message.id + "-question"
                 let replyID = message.id == "sample-information-0" ? "20" : message.id + "-reply"
+                let isMarkdownAcceptance = message.id == "sample-markdown-acceptance"
                 let person = ConversationTurn(id: ExactText(personID), binding: binding,
-                    author: .person, sessionHandle: handle, text: ExactText("Could you explain the tradeoff?"))
+                    author: .person, sessionHandle: handle,
+                    text: ExactText(isMarkdownAcceptance
+                        ? "Could you **explain** the [guide](https://example.invalid/turn-guide)?"
+                        : "Could you explain the tradeoff?"))
                 let reply = ConversationTurn(id: ExactText(replyID), binding: binding,
                     author: .origin, sessionHandle: handle,
-                    text: ExactText("The first option favors speed; the second leaves more room to revise. This is an example conversation."),
+                    text: ExactText(isMarkdownAcceptance
+                        ? "The first option favors *speed*; the second leaves more room to revise."
+                        : "The first option favors speed; the second leaves more room to revise. This is an example conversation."),
                     inReplyTo: person.id)
                 try apply(.turn(person))
                 try apply(.delivered(turn: person.id))
                 try apply(.turn(reply))
                 try apply(.acted(turn: person.id, by: reply.id))
-                if message.id == "sample-information-0" {
+                if message.id == "sample-information-0" || isMarkdownAcceptance {
                     let agentReply = ConversationTurn(id: ExactText("10"), binding: binding,
                         author: .agent, sessionHandle: handle,
-                        text: ExactText("Agent example: the shorter path is faster, while the longer path is easier to revise."),
+                        text: ExactText(isMarkdownAcceptance
+                            ? "Agent reply with `inline code`, a **clear** summary, and [Open reply guide](https://example.invalid/reply-guide)."
+                            : "Agent example: the shorter path is faster, while the longer path is easier to revise."),
                         inReplyTo: reply.id, kind: .reply)
                     try apply(.turn(agentReply))
+
+                    if isMarkdownAcceptance && ProcessInfo.processInfo.arguments.contains(
+                        "--harklight-test-markdown-reply-item") {
+                        let markdownReply = ConversationTurn(
+                            id: ExactText("markdown-reply-item"), binding: binding,
+                            author: .origin, sessionHandle: handle,
+                            text: ExactText(
+                                "Open [reply guide](https://example.invalid/reply-guide): an *important* response with `inline code`."),
+                            inReplyTo: reply.id, kind: .reply)
+                        try apply(.turn(markdownReply))
+                    }
 
                     if ProcessInfo.processInfo.arguments.contains("--harklight-test-chat-status-two-ack") {
                         try apply(.availability(sessionHandle: handle,
@@ -161,12 +182,19 @@ final class SampleFixtureDomain {
                 }
             }
             if message.id == "sample-approval-2" {
+                let usesMarkdownHistory = ProcessInfo.processInfo.arguments.contains(
+                    "--harklight-test-markdown-history")
                 var answer = RequestDraft(interface: request.interface)
                 answer.inputs[ExactText("answer")]?.selectedActionID = message.options.first.map { ExactText($0.id) }
                 try domain.saveDraft(answer, selector: domain.selector(for: key, context: context), context: context)
                 let members = request.originalPayload.objectMembers ?? []
+                let revisedBody = usesMarkdownHistory
+                    ? "The new request adds a **review** before archiving."
+                    : message.body + " The local request now asks for a review before archiving."
                 let payload = JSONValue.object(members.map { member in
-                    member.key == ExactText("body") ? JSONMember("body", .string(ExactText(message.body + " The local request now asks for a review before archiving."))) : member
+                    member.key == ExactText("body")
+                        ? JSONMember("body", .string(ExactText(revisedBody)))
+                        : member
                 })
                 let revised = ConversationTurn(id: ExactText(message.id + "-revision"),
                     binding: ConversationBinding(request: key, revision: 2), author: .origin,
@@ -260,6 +288,34 @@ final class SampleFixtureDomain {
                 listItems: listItems), context: context)
             try viewModel.refreshFromDurableStore()
         }
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-markdown-reply-item") {
+            guard let parentMessage = SampleCatalog.messages.first(where: {
+                $0.id == "sample-markdown-acceptance"
+            }) else { throw ConversationError.missingRequest }
+            let replyParent = key(for: parentMessage)
+            guard let thread = viewModel.conversation(for: replyParent),
+                  let markdownReply = thread.turns.first(where: {
+                      $0.id == ExactText("markdown-reply-item") &&
+                          $0.author == .origin && $0.kind == .reply
+                  }),
+                  let replySequence = markdownReply.conversationSequence else {
+                throw ConversationError.missingRequest
+            }
+            try domain.setFixtureInboxView(InboxView(
+                revision: ExactText("sample-markdown-reply-list"),
+                entries: [],
+                replies: [InboxViewReply(key: replyParent,
+                                         conversationSequence: replySequence,
+                                         score: 0.84)],
+                listItems: [
+                    InboxViewListItem(kind: .reply, key: replyParent,
+                        conversationSequence: replySequence,
+                        openAtConversationSequence: replySequence,
+                        unseenCount: 1, score: 0.84, scoreKind: .current),
+                    InboxViewListItem(kind: .message, key: replyParent)
+                ]), context: context)
+            try viewModel.refreshFromDurableStore()
+        }
     }
 
     func key(for message: SampleMessage) -> RequestKey {
@@ -268,6 +324,15 @@ final class SampleFixtureDomain {
     }
 
     private func record(_ message: SampleMessage) throws -> StoredRequest {
+        let usesMarkdownHistory = message.id == "sample-approval-2" &&
+            ProcessInfo.processInfo.arguments.contains("--harklight-test-markdown-history")
+        let authoredTitle = usesMarkdownHistory
+            ? "The **new collection** is ready."
+            : message.title
+        let authoredBody = usesMarkdownHistory
+            ? "Choose what happens to the *earlier sketches*."
+            : message.body
+
         func storedRequest(_ payload: [String: Any]) throws -> StoredRequest {
             var payload = payload
             if let messageType = message.declaredMessageType {
@@ -290,12 +355,12 @@ final class SampleFixtureDomain {
         // this identity-bound fixture fact stable across every Shake/populate.
         let createdAt = message.fixtureCreatedAtMilliseconds
         if message.kind.isNotice {
-            return try storedRequest([
+            var payload: [String: Any] = [
                 "sender_id": message.sender,
                 "message_id": message.id,
                 "created_at": createdAt,
-                "title": message.title,
-                "body": message.body,
+                "title": authoredTitle,
+                "body": authoredBody,
                 "answer_ui": [
                     "schema": "attention-client.actions/1",
                     "actions": [[
@@ -303,15 +368,19 @@ final class SampleFixtureDomain {
                         "value": ["acknowledgment": "seen"]
                     ]]
                 ]
-            ])
+            ]
+            if message.id == "sample-markdown-acceptance" {
+                payload["stake"] = "The **main risk** is losing the link and its context."
+            }
+            return try storedRequest(payload)
         }
         if message.kind == .note {
             return try storedRequest([
                 "sender_id": message.sender,
                 "message_id": message.id,
                 "created_at": createdAt,
-                "title": message.title,
-                "body": message.body,
+                "title": authoredTitle,
+                "body": authoredBody,
                 "answer_ui": [
                     "schema": "attention-client.actions/1",
                     "actions": [["id": "reply", "label": "Reply", "kind": "text"]]
@@ -383,7 +452,7 @@ final class SampleFixtureDomain {
             }]]
         ]
         return try storedRequest(["sender_id": message.sender, "message_id": message.id,
-            "created_at": createdAt, "title": message.title, "body": message.body, "answer_ui": descriptor])
+            "created_at": createdAt, "title": authoredTitle, "body": authoredBody, "answer_ui": descriptor])
     }
 }
 
