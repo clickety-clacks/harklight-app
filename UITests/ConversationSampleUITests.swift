@@ -151,15 +151,31 @@ final class ConversationSampleUITests: XCTestCase {
         let unseenCount = app.descendants(matching: .any)["reply-item-unseen-count"]
         XCTAssertTrue(unseenCount.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(unseenCount.label.contains("2 new"), unseenCount.debugDescription)
+        let inboxList = app.collectionViews.firstMatch
+        XCTAssertTrue(inboxList.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(replyRow.isHittable, app.debugDescription)
+        capture("reply-item-in-samples-inbox", app)
+
         let normalReply = app.descendants(matching: .any)[
             "normal-reply-item-sample-information-0"
         ]
-        XCTAssertTrue(normalReply.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<8 where !normalReply.isHittable {
+            inboxList.swipeUp()
+        }
+        XCTAssertTrue(normalReply.isHittable,
+                      "The server-ordered normal reply row must be reachable below New.\n\(app.debugDescription)")
         XCTAssertTrue(normalReply.label.contains("Newest unseen chat reply"),
                       normalReply.debugDescription)
-        let normalPriority = app.descendants(matching: .any)["normal-reply-item-priority-high"]
+        let normalPriority = app.descendants(matching: .any)["normal-reply-item-priority-now"]
         XCTAssertTrue(normalPriority.waitForExistence(timeout: 5), app.debugDescription)
-        capture("reply-item-in-samples-inbox", app)
+        XCTAssertTrue(normalPriority.label.contains("Urgent"), normalPriority.debugDescription)
+        capture("reply-item-normal-row-in-samples-inbox", app)
+
+        for _ in 0..<8 where !replyRow.isHittable {
+            inboxList.swipeDown()
+        }
+        XCTAssertTrue(replyRow.isHittable,
+                      "The New reply item must remain reachable after viewing its normal row.\n\(app.debugDescription)")
         replyRow.tap()
 
         let history = app.scrollViews["conversation-history-scroll"]
