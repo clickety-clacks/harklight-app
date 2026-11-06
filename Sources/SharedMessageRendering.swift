@@ -315,8 +315,8 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
-        updateColors(on: textView)
         textView.attributedText = NSAttributedString(MessageMarkdown.attributed(text))
+        updateColors(on: textView)
         textView.accessibilityIdentifier = "request-message-body"
         return textView
     }
