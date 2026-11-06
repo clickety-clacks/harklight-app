@@ -911,7 +911,6 @@ final class NativeRelayLifecycle {
                   clientIdentity: SecIdentity,
                   trustedRootDER: Data,
                   diagnostics: NativeClientDiagnosticJournal? = nil) async throws {
-        _ = try store.snapshot(context: context)
         let generation = UUID()
         let transportAttemptID = UUID()
         self.diagnosticJournal = diagnostics
