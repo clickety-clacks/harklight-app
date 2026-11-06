@@ -669,6 +669,29 @@ struct ConversationState: Codable, Equatable {
     var chatReadPositionSupport: Bool? = nil
     var pendingChatReadPositions: [RequestKey: PendingConversationReadPosition]? = nil
 
+    private static func assigningConversationSequence(_ event: ConversationEvent,
+                                                       from sequence: UInt64) -> ConversationEvent {
+        let fact: ConversationEvent.Fact
+        switch event.fact {
+        case let .turn(original):
+            var turn = original
+            turn.conversationSequence = sequence
+            fact = .turn(turn)
+        case let .revision(original, payload):
+            var turn = original
+            turn.conversationSequence = sequence
+            fact = .revision(turn, payload: payload)
+        case let .redactedRevision(original):
+            var turn = original
+            turn.conversationSequence = sequence
+            fact = .redactedRevision(turn)
+        default:
+            return event
+        }
+        return ConversationEvent(sequence: event.sequence, binding: event.binding, fact: fact,
+                                 retractedAtMilliseconds: event.retractedAtMilliseconds)
+    }
+
     /// Reconstruct old persisted turn arrays from the conversation sequence
     /// journal. Turn IDs are identities and are not chronological ordering keys.
     mutating func orderTurnsFromProjectionEvents() {
@@ -677,26 +700,7 @@ struct ConversationState: Codable, Equatable {
         // replaying an already-saved event compares equal to its older copy.
         var normalizedEvents: [UInt64: ConversationEvent] = [:]
         for (sequence, event) in events {
-            let fact: ConversationEvent.Fact
-            switch event.fact {
-            case let .turn(original):
-                var turn = original
-                turn.conversationSequence = sequence
-                fact = .turn(turn)
-            case let .revision(original, payload):
-                var turn = original
-                turn.conversationSequence = sequence
-                fact = .revision(turn, payload: payload)
-            case let .redactedRevision(original):
-                var turn = original
-                turn.conversationSequence = sequence
-                fact = .redactedRevision(turn)
-            default:
-                fact = event.fact
-            }
-            normalizedEvents[sequence] = ConversationEvent(sequence: event.sequence,
-                binding: event.binding, fact: fact,
-                retractedAtMilliseconds: event.retractedAtMilliseconds)
+            normalizedEvents[sequence] = Self.assigningConversationSequence(event, from: sequence)
         }
         events = normalizedEvents
 
@@ -735,7 +739,11 @@ struct ConversationState: Codable, Equatable {
         applySavedReadPositionSupport()
     }
 
-    mutating func apply(_ event: ConversationEvent) throws {
+    mutating func apply(_ incomingEvent: ConversationEvent) throws {
+        // The journal sequence is authoritative for every turn-bearing event.
+        // Normalize before both merge and replay comparison so a replayed turn
+        // matches the copy reconstructed from persisted journal entries.
+        let event = Self.assigningConversationSequence(incomingEvent, from: incomingEvent.sequence)
         let isReadPosition: Bool
         if case .readPosition = event.fact { isReadPosition = true }
         else { isReadPosition = false }

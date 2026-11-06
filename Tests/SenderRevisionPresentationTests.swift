@@ -27,6 +27,8 @@ final class SenderRevisionPresentationTests: XCTestCase {
         let original = try XCTUnwrap(domain.lookupIntent(receipt.intentID, context: context))
         let update = ConversationTurn(id: ExactText("3"), binding: ConversationBinding(request: key, revision: 2),
             author: .origin, sessionHandle: ExactText("handle"), text: ExactText(""), kind: .revision)
+        var expectedUpdate = update
+        expectedUpdate.conversationSequence = 1
         let event = ConversationEvent(sequence: 1, binding: update.binding, fact: .revision(update, payload: newPayload))
         try domain.applyConversation(event, context: context)
         try domain.applyConversation(event, context: context)
@@ -41,7 +43,7 @@ final class SenderRevisionPresentationTests: XCTestCase {
         XCTAssertEqual(earlier.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertNil(earlier.selector)
         let thread = try XCTUnwrap(model.conversation(for: key))
-        XCTAssertEqual(thread.acceptedUpdates, [update], "Replay must not invent another update fact")
+        XCTAssertEqual(thread.acceptedUpdates, [expectedUpdate], "Replay must not invent another update fact")
         XCTAssertEqual(thread.revisions[1], oldPayload)
         XCTAssertEqual(thread.revisions[2], newPayload)
         XCTAssertEqual(thread.turns.map(\.id), [ExactText("1"), ExactText("3")])
@@ -55,8 +57,6 @@ final class SenderRevisionPresentationTests: XCTestCase {
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         XCTAssertThrowsError(try domain.saveDraft(oldDraft, selector: selector, context: context))
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
-        var expectedUpdate = update
-        expectedUpdate.conversationSequence = 1
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.acceptedUpdates,
                        [expectedUpdate])
         XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.operation, original.operation)
