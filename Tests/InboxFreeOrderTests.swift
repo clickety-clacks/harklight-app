@@ -133,6 +133,38 @@ final class InboxFreeOrderTests: XCTestCase {
         XCTAssertEqual(partial.listItems?.map(\.key.messageID.rawValue), ["good"])
     }
 
+    @MainActor
+    func testCapturedServerViewsKeepMixedOrderAcrossSeenRestartAndNewReply() throws {
+        // Actual Relay.session_request_line responses from Server commit
+        // e7752654584f169ca574fe73e8a88e62d0060fac (tree
+        // 5946f41eead8d545c23de10a873f6ef4940f609e), using an isolated
+        // account and store. Legacy/invalid fixtures in this class are synthetic.
+        func bytes(_ name: String) throws -> Data {
+            let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: name, withExtension: "json"))
+            return try Data(contentsOf: url)
+        }
+        let wire = try InboxPagingWire(profile: context)
+        var views: [InboxView] = []
+        for name in ["free-active", "free-history", "free-restored", "free-reactivated"] {
+            guard case let .updated(view) = wire.decodeViewGet(try bytes(name), ref: "free-pair-view") else {
+                return XCTFail("The captured changed view must decode: \(name)")
+            }
+            XCTAssertTrue(supported(view))
+            XCTAssertEqual(rowIDs(projection(view)), view.listItems?.map {
+                $0.kind == .reply ? .reply($0.key) : .message(.row(.request($0.key)))
+            })
+            views.append(view)
+        }
+        XCTAssertEqual(views[0].listItems?.map(\.kind), [.message, .reply, .message])
+        XCTAssertEqual(views[1].listItems?.last?.freeSection?.state, .history)
+        XCTAssertEqual(views[1].listItems?.last?.unseenCount, 0)
+        XCTAssertEqual(views[2].listItems, views[1].listItems)
+        XCTAssertEqual(views[3].listItems?.first?.kind, .reply)
+        XCTAssertEqual(views[3].listItems?.first?.freeSection?.state, .active)
+        XCTAssertEqual(wire.decodeViewGet(try bytes("free-unchanged"), ref: "free-pair-view",
+            knownRevision: views[0].revision), .unchanged(views[0].revision))
+    }
+
     func testSectionTransitionReplacesPersistedViewAndReachesPresentationAtomically() throws {
         let persistence = MemoryAttentionStatePersistence()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
