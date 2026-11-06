@@ -195,31 +195,23 @@ final class ConversationSampleUITests: XCTestCase {
                        "The top of the long history must be off screen when the chat lands on the reply.\n\(app.debugDescription)")
         capture("reply-item-tap-landed-on-earliest-unseen-reply", app)
 
-        let unreadIndicator = app.descendants(matching: .any)["conversation-unread-sample-information-0"]
-        dismissChatSheet(app)
-        XCTAssertTrue(unreadIndicator.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(unreadIndicator.label, "Unread conversation",
-                       "Opening at the first reply must leave the later offscreen reply unread.")
+        let requestHeading = app.buttons["request-heading"]
+        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(requestHeading.label.contains("Unread conversation"), requestHeading.debugDescription)
 
-        for _ in 0..<8 where !normalReply.isHittable {
-            inboxList.swipeUp()
-        }
-        XCTAssertTrue(normalReply.isHittable, app.debugDescription)
-        normalReply.tap()
-        XCTAssertTrue(history.waitForExistence(timeout: 10), app.debugDescription)
         let newestReply = app.staticTexts[
             "Newest unseen chat reply: the revised draft tightens the opening, keeps the middle section's new ordering, and closes with the shorter summary we discussed, so the whole note should now fit on one screen."
         ]
-        XCTAssertTrue(newestReply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(newestReply.isHittable,
+                       "The later reply must remain offscreen when the earliest unseen reply opens.")
         for _ in 0..<12 where !newestReply.isHittable {
             history.swipeUp()
         }
         XCTAssertTrue(newestReply.isHittable,
                       "Scrolling to the later reply must bring it into the chat viewport.\n\(app.debugDescription)")
-        dismissChatSheet(app)
-        XCTAssertTrue(unreadIndicator.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(unreadIndicator.label, "Conversation read",
-                       "The read position advances when the later reply actually enters view.")
+        let readLabel = NSPredicate(format: "label CONTAINS %@", "Conversation read")
+        expectation(for: readLabel, evaluatedWith: requestHeading)
+        waitForExpectations(timeout: 5)
     }
 
     func testForegroundChatIndicatorOpensTheMatchingConversation() {
