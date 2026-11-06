@@ -1670,6 +1670,7 @@ struct InboxList: View {
                         .listRowSeparator(.hidden)
                         .accessibilityIdentifier("new-message-area-header")
                 }
+                .listSectionMargins(.vertical, 0)
                 newMessageAreaGap(12)
             }
             if tab == .inbox && showsBasicOrderMarker {
