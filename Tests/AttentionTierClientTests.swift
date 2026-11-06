@@ -225,7 +225,8 @@ final class AttentionTierClientTests: XCTestCase {
     }
 
     func testStoredInboxViewWithoutListItemsRemainsDecodable() throws {
-        let legacy = Data(#"{"revision":"legacy","entries":[],"replies":[]}"#.utf8)
+        let legacy = try JSONEncoder().encode(InboxView(
+            revision: ExactText("legacy"), entries: []))
         let legacyView = try JSONDecoder().decode(InboxView.self, from: legacy)
         XCTAssertNil(legacyView.listItems)
 

@@ -246,6 +246,8 @@ final class ReplyItemAreaTests: XCTestCase {
         try store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
             fact: .turn(quote)), context: context)
         var thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.turns.map(\.id.rawValue), ["question", "reply-7", "reply-9"])
+        XCTAssertEqual(thread.turns.compactMap(\.conversationSequence), [2, 3, 4])
         thread.facts[quote.id] = ConversationTurnFacts(
             acceptedAtMilliseconds: 1_800_000_123_000)
 

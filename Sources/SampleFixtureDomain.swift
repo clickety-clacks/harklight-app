@@ -40,8 +40,19 @@ final class SampleFixtureDomain {
             let handle = ExactText("local-session-" + message.id)
             func apply(_ fact: ConversationEvent.Fact, revision: UInt64 = 1) throws {
                 sequence += 1
+                let sequencedFact: ConversationEvent.Fact
+                switch fact {
+                case .turn(var turn):
+                    turn.conversationSequence = sequence
+                    sequencedFact = .turn(turn)
+                case .revision(var turn, let payload):
+                    turn.conversationSequence = sequence
+                    sequencedFact = .revision(turn, payload: payload)
+                default:
+                    sequencedFact = fact
+                }
                 try domain.applyConversation(ConversationEvent(sequence: sequence,
-                    binding: ConversationBinding(request: key, revision: revision), fact: fact), context: context)
+                    binding: ConversationBinding(request: key, revision: revision), fact: sequencedFact), context: context)
             }
             guard let request = requests[key] else { throw ConversationError.missingRequest }
             try apply(.request(sessionHandle: handle, payload: request.originalPayload))
