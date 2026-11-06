@@ -2633,7 +2633,13 @@ private struct ReplyItemNormalRowContent: View {
         .padding(.trailing, 16)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.neutral.backgroundColor)
+        .background {
+            if let priorityTreatment {
+                Rectangle().fill(priorityTreatment.backgroundStyle)
+            } else {
+                palette.neutral.backgroundColor
+            }
+        }
         .overlay(alignment: .leading) {
             if selected {
                 Rectangle()
