@@ -189,11 +189,15 @@ enum MessageMarkdown {
                             if case .orderedList = parent.kind { return true }
                             return false
                         }
+                        let hasUnorderedListParent = parentComponents.contains { parent in
+                            if case .unorderedList = parent.kind { return true }
+                            return false
+                        }
                         // Foundation encodes ordered-list position directly on
                         // the list item; the parent chain is not always present
-                        // on iOS 27. Keep that ordinal instead of drawing a
-                        // bullet when the parser omits the list parent.
-                        let isOrdered = hasOrderedListParent || ordinal > 0
+                        // on iOS 27. Keep that ordinal only when no unordered
+                        // parent identifies a bullet list.
+                        let isOrdered = hasOrderedListParent || (ordinal > 0 && !hasUnorderedListParent)
                         let depth = parentComponents.reduce(into: 0) { count, parent in
                             if case .listItem(_) = parent.kind { count += 1 }
                         }

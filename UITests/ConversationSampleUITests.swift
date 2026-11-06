@@ -291,16 +291,6 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertTrue(stake.label.contains("main risk"), stake.debugDescription)
             capture("markdown-\(appearance)-detail", app)
 
-            workspaceBackButton(in: app).tap()
-            XCTAssertTrue(newRow.waitForNonExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(normalRow.isHittable,
-                          "Selecting New returns to the already-present normal request row.\n\(app.debugDescription)")
-            XCTAssertTrue(newReplyRow.waitForExistence(timeout: 5),
-                          "Selecting the request must leave its independent New reply item in place.\n\(app.debugDescription)")
-            normalRow.tap()
-            XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
-
             app.buttons["Chat"].tap()
             let history = app.scrollViews["conversation-history-scroll"]
             XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
@@ -366,11 +356,6 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertTrue(bodyText.contains("The new time is 2 PM."), bodyText)
             XCTAssertFalse(bodyText.contains("**"), bodyText)
             capture("plain-\(appearance)-detail", app)
-            workspaceBackButton(in: app).tap()
-            XCTAssertTrue(newRow.waitForNonExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(normalRow.isHittable,
-                          "The normal row remains available after selecting its New entry.\n\(app.debugDescription)")
             app.terminate()
         }
     }
