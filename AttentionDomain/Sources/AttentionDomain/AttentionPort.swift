@@ -481,6 +481,7 @@ public struct PresentationSnapshot: Equatable, Sendable {
     /// The optional server-owned mixed order for normal message and reply rows.
     /// `nil` means the server does not support this projection; `[]` is empty.
     public let inboxViewListItems: [InboxViewListItem]?
+    public let inboxFreeOrderVersion: Int?
     public let requests: [PresentedRequest]
 
     public var showsBasicOrderMarker: Bool {
@@ -493,6 +494,7 @@ public struct PresentationSnapshot: Equatable, Sendable {
                 repairIssues: [StoreRepairIssue],
                 inboxViewBasis: ExactText? = nil,
                 inboxViewListItems: [InboxViewListItem]? = nil,
+                inboxFreeOrderVersion: Int? = nil,
                 requests: [PresentedRequest]) {
         self.revision = revision
         self.cursor = cursor
@@ -500,6 +502,7 @@ public struct PresentationSnapshot: Equatable, Sendable {
         self.repairIssues = repairIssues
         self.inboxViewBasis = inboxViewBasis
         self.inboxViewListItems = inboxViewListItems
+        self.inboxFreeOrderVersion = inboxFreeOrderVersion
         self.requests = requests
     }
 }
@@ -1056,6 +1059,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     repairIssues: snapshot.repairIssues,
                                     inboxViewBasis: snapshot.inboxView?.basis,
                                     inboxViewListItems: snapshot.inboxView?.listItems,
+                                    inboxFreeOrderVersion: snapshot.inboxView?.freeOrderVersion,
                                     requests: sourceOrderedRequests)
     }
 
@@ -1450,6 +1454,7 @@ private extension PresentationSnapshot {
                              repairIssues: repairIssues,
                              inboxViewBasis: inboxViewBasis,
                              inboxViewListItems: inboxViewListItems,
+                             inboxFreeOrderVersion: inboxFreeOrderVersion,
                              requests: requests.filter { $0.key == key })
     }
 }

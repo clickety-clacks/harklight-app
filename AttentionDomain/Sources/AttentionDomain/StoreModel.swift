@@ -317,6 +317,60 @@ public enum InboxViewScoreKind: String, Equatable, Hashable, Codable, Sendable {
     case historical
 }
 
+/// Server-owned placement within one Free view revision, not an arrival rank.
+public struct InboxFreeSection: Equatable, Hashable, Codable, Sendable {
+    public enum State: String, Codable, Sendable {
+        case active, history
+    }
+
+    public enum Group: String, Codable, Sendable {
+        case common
+        case earlierMessages = "earlier_messages"
+        case earlierChatReplies = "earlier_chat_replies"
+        case earlierChatRepliesUnknown = "earlier_chat_replies_unknown"
+    }
+
+    public let state: State
+    public let group: Group
+
+    public init(state: State, group: Group) {
+        self.state = state
+        self.group = group
+    }
+
+    fileprivate var position: Int {
+        let groupPosition: Int = switch group {
+        case .common: 0
+        case .earlierMessages: 1
+        case .earlierChatReplies: 2
+        case .earlierChatRepliesUnknown: 3
+        }
+        return (state == .active ? 0 : 4) + groupPosition
+    }
+}
+
+public enum InboxFreeOrder {
+    /// Validate the complete projection before using any Free headings. Unknown
+    /// or incomplete metadata leaves the compatible mixed references available.
+    public static func isSupported(version: Int?, items: [InboxViewListItem]?) -> Bool {
+        guard version == 1, let items else { return false }
+        var previousPosition = -1
+        for item in items {
+            guard let section = item.freeSection,
+                  section.position >= previousPosition else { return false }
+            switch section.group {
+            case .common: break
+            case .earlierMessages:
+                guard item.kind == .message else { return false }
+            case .earlierChatReplies, .earlierChatRepliesUnknown:
+                guard item.kind == .reply else { return false }
+            }
+            previousPosition = section.position
+        }
+        return true
+    }
+}
+
 /// One identity in the server-owned mixed order for the normal inbox list.
 /// Reply-only fields stay optional so message references remain small and old
 /// persisted views can be decoded without a migration.
@@ -328,6 +382,7 @@ public struct InboxViewListItem: Equatable, Codable, Sendable {
     public let unseenCount: Int?
     public let score: Double?
     public let scoreKind: InboxViewScoreKind?
+    public let freeSection: InboxFreeSection?
 
     public init(kind: InboxViewListItemKind,
                 key: RequestKey,
@@ -335,7 +390,8 @@ public struct InboxViewListItem: Equatable, Codable, Sendable {
                 openAtConversationSequence: UInt64? = nil,
                 unseenCount: Int? = nil,
                 score: Double? = nil,
-                scoreKind: InboxViewScoreKind? = nil) {
+                scoreKind: InboxViewScoreKind? = nil,
+                freeSection: InboxFreeSection? = nil) {
         self.kind = kind
         self.key = key
         self.conversationSequence = conversationSequence
@@ -343,6 +399,7 @@ public struct InboxViewListItem: Equatable, Codable, Sendable {
         self.unseenCount = unseenCount
         self.score = score
         self.scoreKind = scoreKind
+        self.freeSection = freeSection
     }
 }
 
@@ -358,19 +415,22 @@ public struct InboxView: Equatable, Codable, Sendable {
     public let replies: [InboxViewReply]?
     /// Absent on older servers; an empty array is a supported empty projection.
     public let listItems: [InboxViewListItem]?
+    public let freeOrderVersion: Int?
 
     public init(revision: ExactText,
                 algorithm: ExactText? = nil,
                 basis: ExactText? = nil,
                 entries: [InboxViewEntry],
                 replies: [InboxViewReply]? = nil,
-                listItems: [InboxViewListItem]? = nil) {
+                listItems: [InboxViewListItem]? = nil,
+                freeOrderVersion: Int? = nil) {
         self.revision = revision
         self.algorithm = algorithm
         self.basis = basis
         self.entries = entries
         self.replies = replies
         self.listItems = listItems
+        self.freeOrderVersion = freeOrderVersion
     }
 }
 
