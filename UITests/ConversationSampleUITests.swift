@@ -196,11 +196,7 @@ final class ConversationSampleUITests: XCTestCase {
         capture("reply-item-tap-landed-on-earliest-unseen-reply", app)
 
         let unreadIndicator = app.descendants(matching: .any)["conversation-unread-sample-information-0"]
-        if !unreadIndicator.exists {
-            let backButton = app.navigationBars.buttons.firstMatch
-            XCTAssertTrue(backButton.waitForExistence(timeout: 5), app.debugDescription)
-            backButton.tap()
-        }
+        dismissChatSheet(app)
         XCTAssertTrue(unreadIndicator.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(unreadIndicator.label, "Unread conversation",
                        "Opening at the first reply must leave the later offscreen reply unread.")
@@ -220,11 +216,7 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(newestReply.isHittable,
                       "Scrolling to the later reply must bring it into the chat viewport.\n\(app.debugDescription)")
-        let backButton = app.navigationBars.buttons.firstMatch
-        if !unreadIndicator.exists || unreadIndicator.label != "Conversation read" {
-            XCTAssertTrue(backButton.waitForExistence(timeout: 5), app.debugDescription)
-            backButton.tap()
-        }
+        dismissChatSheet(app)
         XCTAssertTrue(unreadIndicator.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(unreadIndicator.label, "Conversation read",
                        "The read position advances when the later reply actually enters view.")
