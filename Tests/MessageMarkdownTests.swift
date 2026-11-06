@@ -47,6 +47,7 @@ final class MessageMarkdownTests: XCTestCase {
         XCTAssertFalse(MessageMarkdown.hasFormattingOrLinks(source))
     }
 
+    @MainActor
     func testUIKitMessageBodyAppliesThemeColorToPlainAndMarkdownRuns() throws {
         let color = UIColor.white
         let rendered = SystemDetectedMessageBody.attributedMessage(
