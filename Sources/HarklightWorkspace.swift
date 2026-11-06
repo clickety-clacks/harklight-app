@@ -1410,6 +1410,26 @@ struct InboxList: View {
                                   contentFits: extent == 0)
     }
 
+    private func updateScrollMetrics(from oldMetrics: InboxScrollMetrics,
+                                     to newMetrics: InboxScrollMetrics) {
+        let canPageOnDrag = newMetrics.contentFits || newMetrics.distanceToBottom <= 80
+        // Pixel offsets are for this callback only; publishing each one invalidates the list.
+        if canRequestOlderPageOnDrag != canPageOnDrag {
+            canRequestOlderPageOnDrag = canPageOnDrag
+        }
+        guard isUserScrolling,
+              newMetrics.offsetY > oldMetrics.offsetY + 1,
+              newMetrics.distanceToBottom <= 80 else { return }
+        requestOlderPage()
+    }
+
+    private func updateScrollPhase(from oldPhase: ScrollPhase, to newPhase: ScrollPhase) {
+        let scrolling: Bool = newPhase == .interacting || newPhase == .decelerating
+        if scrolling && !isUserScrolling { requestedInGesture = false }
+        if isUserScrolling != scrolling { isUserScrolling = scrolling }
+        if oldPhase == .interacting && !scrolling { requestedInGesture = false }
+    }
+
     private var listSelection: Binding<InboxSelection?>? {
         $selected
     }
@@ -1705,21 +1725,10 @@ struct InboxList: View {
         .onScrollGeometryChange(for: InboxScrollMetrics.self) { geometry in
             inboxScrollMetrics(from: geometry)
         } action: { oldMetrics, newMetrics in
-            let canPageOnDrag = newMetrics.contentFits || newMetrics.distanceToBottom <= 80
-            // Pixel offsets are for this callback only; publishing each one invalidates the list.
-            if canRequestOlderPageOnDrag != canPageOnDrag {
-                canRequestOlderPageOnDrag = canPageOnDrag
-            }
-            guard isUserScrolling,
-                  newMetrics.offsetY > oldMetrics.offsetY + 1,
-                  newMetrics.distanceToBottom <= 80 else { return }
-            requestOlderPage()
+            updateScrollMetrics(from: oldMetrics, to: newMetrics)
         }
         .onScrollPhaseChange { oldPhase, newPhase in
-            let scrolling = newPhase == .interacting || newPhase == .decelerating
-            if scrolling && !isUserScrolling { requestedInGesture = false }
-            if isUserScrolling != scrolling { isUserScrolling = scrolling }
-            if oldPhase == .interacting && !scrolling { requestedInGesture = false }
+            updateScrollPhase(from: oldPhase, to: newPhase)
         }
         .simultaneousGesture(DragGesture(minimumDistance: 10)
             .onChanged { value in
