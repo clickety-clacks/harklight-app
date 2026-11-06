@@ -122,9 +122,17 @@ public struct InboxPagingWire: Sendable {
         var freeOrderVersion = value.uniqueValue(named: "free_order_version")?.integerValue
         if let rawListItems = value.uniqueValue(named: "list_items") {
             guard let array = rawListItems.arrayValues else { return .unavailable }
-            listItems = decodeViewListItems(array)
-            // A partially decoded sequence cannot establish a complete Free view.
-            if listItems?.count != array.count { freeOrderVersion = nil }
+            let decoded = decodeViewListItems(array)
+            if decoded.count != array.count,
+               value.uniqueValue(named: "free_order_version") != nil {
+                // A shortened Free reference list would hide loaded messages
+                // from both tabs. Use the existing message/history fallback;
+                // do not manufacture a mixed order from surviving references.
+                listItems = nil
+                freeOrderVersion = nil
+            } else {
+                listItems = decoded
+            }
         } else {
             listItems = nil
         }

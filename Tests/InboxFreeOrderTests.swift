@@ -130,7 +130,44 @@ final class InboxFreeOrderTests: XCTestCase {
         XCTAssertFalse(supported(try decode([], version: nil)))
         let partial = try decode([reference("good"), reference("unknown", kind: "future")])
         XCTAssertFalse(supported(partial))
-        XCTAssertEqual(partial.listItems?.map(\.key.messageID.rawValue), ["good"])
+        XCTAssertNil(partial.listItems, "A partial Free list cannot remain the authority for compatible row membership.")
+    }
+
+    @MainActor
+    func testPartialFreeReferencesPreserveLoadedMessageAndHistoryAccessAfterRestart() throws {
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        var loadedRows: [InboxItem] = []
+        for (index, id) in ["valid", "omitted-open", "omitted-history"].enumerated() {
+            let key = RequestKey(accountScope: context.identity.personID,
+                senderID: ExactText("agent"), messageID: ExactText(id))
+            let payload = try JSONValue.parse(Data("{\"title\":\"\(id)\"}".utf8))
+            try store.apply(RelayEvent(sequence: UInt64(index + 1),
+                body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+            loadedRows.append(.request(InboxRequestRow(key: key, title: id, sender: "Assistant", status: "",
+                isResolved: id == "omitted-history", hasUserAction: id == "omitted-history")))
+        }
+        var malformedReply = reference("omitted-history", kind: "reply", state: "history")
+        malformedReply.removeValue(forKey: "open_at_conversation_seq")
+        let view = try decode([reference("valid"), reference("omitted-open", kind: "future"), malformedReply])
+        try store.setInboxView(view, context: context)
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let port = AttentionDomainPort(store: restored)
+        let presentation = try port.observe(context: port.context)
+        XCTAssertEqual(presentation.requests.count, 3)
+        XCTAssertNil(presentation.inboxViewListItems)
+        XCTAssertNil(presentation.inboxFreeOrderVersion)
+        for tab in [InboxWorkspaceTab.inbox, .replied] {
+            let visible = InboxNormalListProjection.entries(rows: loadedRows,
+                serverItems: presentation.inboxViewListItems,
+                freeOrderVersion: presentation.inboxFreeOrderVersion, in: tab, search: "")
+            let expected = InboxListProjection.filteredRows(loadedRows, in: tab, search: "")
+            XCTAssertEqual(rowIDs(visible), expected.map { .message(.row($0.id)) })
+            XCTAssertEqual(visible.count, tab == .inbox ? 2 : 1)
+            XCTAssertFalse(visible.contains { if case .heading = $0 { return true }; return false })
+            XCTAssertFalse(visible.contains { if case .reply = $0 { return true }; return false },
+                           "Fallback must not construct a mixed order from the remaining references.")
+        }
     }
 
     @MainActor
