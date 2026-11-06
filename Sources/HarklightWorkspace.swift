@@ -1571,17 +1571,6 @@ struct InboxList: View {
         .accessibilityLabel(String(localized: "\(members.count) messages from \(sender), in one thread"))
     }
 
-    private func newMessageAreaGap(_ height: CGFloat) -> some View {
-        Color.clear
-            .frame(maxWidth: .infinity)
-            .frame(height: height)
-            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-            .accessibilityHidden(true)
-            .allowsHitTesting(false)
-    }
-
     @ViewBuilder
     private func newMessageAreaListRow(_ combined: NewMessageAreaCombinedRow,
                                       in tab: InboxWorkspaceTab,
@@ -1638,7 +1627,6 @@ struct InboxList: View {
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
             if !areaRows.isEmpty {
-                newMessageAreaGap(8)
                 Section {
                     ForEach(shownAreaRows) { combined in
                         newMessageAreaListRow(combined, in: tab, using: proxy)
@@ -1671,7 +1659,6 @@ struct InboxList: View {
                         .accessibilityIdentifier("new-message-area-header")
                 }
                 .listSectionMargins(.vertical, 0)
-                newMessageAreaGap(12)
             }
             if tab == .inbox && showsBasicOrderMarker {
                 Text("Basic order")
