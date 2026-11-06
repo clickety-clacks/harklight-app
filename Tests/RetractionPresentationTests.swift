@@ -110,6 +110,8 @@ final class RetractionPresentationTests: XCTestCase {
             let relaunchedDomain = try AttentionDomainStore(context: context, persistence: persistence)
             let relaunched = try LivePresentationStore(store: relaunchedDomain, context: context)
             XCTAssertFalse(relaunched.inboxRows.contains { $0.key == key }, "An expired timestamp stays hidden after relaunch")
+            XCTAssertEqual(relaunched.expiredRetractionSearchRows.map(\.key), [key],
+                           "The retained request remains discoverable through history search after relaunch.")
             XCTAssertTrue(relaunched.isRetracted(key))
             XCTAssertTrue(relaunched.conversation(for: key)?.isRetracted == true)
             XCTAssertEqual(try relaunchedDomain.snapshot(context: context).requests.count, 1)

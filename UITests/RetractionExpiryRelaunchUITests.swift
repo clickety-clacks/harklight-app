@@ -69,5 +69,21 @@ final class RetractionExpiryRelaunchUITests: XCTestCase {
         XCTAssertEqual(readback.label, "Server retraction persisted: after_process_relaunch")
         XCTAssertFalse(retracted.exists,
                        "The row must remain absent after a real process relaunch past the persisted server retraction deadline.")
+
+        let searchField = workspaceSearchField(in: app)
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.tap()
+        searchField.typeText("Please review the attached file\n")
+        let historyRow = app.descendants(matching: .any)["expired-retraction-history-native-interop"]
+        XCTAssertTrue(historyRow.waitForExistence(timeout: 10), app.debugDescription)
+        historyRow.tap()
+
+        let chatButton = app.buttons["Chat"]
+        XCTAssertTrue(chatButton.waitForExistence(timeout: 5), app.debugDescription)
+        chatButton.tap()
+        let conversation = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(conversation.staticTexts["Retracted"].waitForExistence(timeout: 5),
+                      "The retained conversation exposes the retraction after expiry and process relaunch.")
     }
 }

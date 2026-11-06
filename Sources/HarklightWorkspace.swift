@@ -1004,6 +1004,16 @@ struct InboxList: View {
             search: search)
     }
 
+    private var matchingExpiredRetractionRows: [InboxRequestRow] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, let conversationStore else { return [] }
+        let isRepliedTab = tab.messageTab == .replied
+        return conversationStore.expiredRetractionSearchRows.filter { row in
+            let item = InboxItem.request(row)
+            return item.belongsToReplied == isRepliedTab && item.matchesSearch(query)
+        }
+    }
+
     private func normalReplyProjection(for reference: InboxViewListItem) -> ReplyItemNormalRow? {
         ReplyItemNormalRowProjection.resolve(
             reference, in: conversationStore?.conversation(for: reference.key))
@@ -1515,6 +1525,17 @@ struct InboxList: View {
             }
     }
 
+    private func expiredRetractionHistoryRow(_ row: InboxRequestRow,
+                                             in tab: InboxWorkspaceTab) -> some View {
+        let item = InboxItem.request(row)
+        return rowContent(for: item)
+            .tag(item.id)
+            .id(InboxListRowScrollTarget(tab: tab, selection: item.id))
+            .accessibilityIdentifier("expired-retraction-history-\(row.key.messageID.rawValue)")
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+            .listRowSeparator(.hidden)
+    }
+
     private func threadExpansionBinding(for id: InboxListEntryID) -> Binding<Bool> {
         Binding(
             get: { expandedThreadGroups.contains(id) },
@@ -1612,6 +1633,7 @@ struct InboxList: View {
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let normalEntries = normalListEntries
+        let historyRows = matchingExpiredRetractionRows
         let areaRows = combinedNewMessageAreaRows
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
@@ -1661,7 +1683,21 @@ struct InboxList: View {
             ForEach(normalEntries) { entry in
                 normalListRow(entry, in: tab, using: proxy)
             }
-            if normalEntries.isEmpty, areaRows.isEmpty, let triggerNotification {
+            if !historyRows.isEmpty {
+                Section {
+                    ForEach(historyRows) { row in
+                        expiredRetractionHistoryRow(row, in: tab)
+                    }
+                } header: {
+                    Text("Retracted history")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(designPalette.neutral.secondaryTextColor)
+                        .textCase(nil)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("expired-retraction-history-header")
+                }
+            }
+            if normalEntries.isEmpty, areaRows.isEmpty, historyRows.isEmpty, let triggerNotification {
                 Button("Open notification", action: triggerNotification)
                     .accessibilityIdentifier("harklight-test-notification")
             }

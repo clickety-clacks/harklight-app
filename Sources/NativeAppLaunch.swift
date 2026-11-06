@@ -1806,6 +1806,18 @@ final class LivePresentationStore {
             .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
     }
 
+    var expiredRetractionSearchRows: [InboxRequestRow] {
+        let skippedMessageRequestTags = completedSkippedMessageRequestTags
+        return presentation.requests
+            .filter { $0.lifecycleStatus != .superseded }
+            .filter { request in
+                isRetracted(request.key) &&
+                    Self.isRetractionExpired(
+                        retractionDate: retractionDate(request.key), at: retractionVisibilityTime)
+            }
+            .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
+    }
+
     var nextRetractionExpiry: Date? {
         presentation.requests.compactMap { request -> Date? in
             guard request.lifecycleStatus != .superseded,
