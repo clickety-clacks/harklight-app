@@ -329,6 +329,7 @@ public actor NativeRelayCore {
     private struct ConversationReplayProgress {
         var expected: UInt64
         let durableCursor: UInt64
+        var recordsLiveArrivalTime = false
         var accepted = false
         var high: UInt64?
         var recoveryReceipt: ConversationEvent?
@@ -1460,13 +1461,14 @@ public actor NativeRelayCore {
     }
 
     private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession,
-                                                 drainReadPositions: Bool = true) async throws {
+                                                 drainReadPositions: Bool = true,
+                                                 recordsLiveArrivalTime: Bool = false) async throws {
         guard !conversationsUnavailable else { return }
         diagnose(.conversation, .conversationReplay, .began)
         let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
         do {
             var high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
-                using: transport, wire: wire)
+                using: transport, wire: wire, recordsLiveArrivalTime: recordsLiveArrivalTime)
             do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
             catch InstallationTransportError.acknowledgementBehind {
                 diagnose(.conversation, .acknowledgement, .retrying,
@@ -1477,7 +1479,7 @@ public actor NativeRelayCore {
             if drainReadPositions,
                try await sendPendingConversationReadPositions(using: transport) {
                 high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
-                    using: transport, wire: wire)
+                    using: transport, wire: wire, recordsLiveArrivalTime: recordsLiveArrivalTime)
                 try await transport.acknowledgeConversation(wire.acknowledge(high))
             }
             diagnose(.conversation, .acknowledgement, .completed)
@@ -1591,17 +1593,20 @@ public actor NativeRelayCore {
         defer { releaseBusy() }
         // A failure leaves the durable cursor unchanged; the next live entry,
         // foreground or push resync replays from it.
-        try? await replayConversationAndAcknowledge(using: transport)
+        try? await replayConversationAndAcknowledge(using: transport,
+            recordsLiveArrivalTime: true)
     }
 
     private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,
-                                    wire: ConversationWire) async throws -> UInt64 {
+                                    wire: ConversationWire,
+                                    recordsLiveArrivalTime: Bool = false) async throws -> UInt64 {
         try validate()
         defer { conversationReplay = nil }
         var since = cursor
         while true {
             conversationReplay = ConversationReplayProgress(expected: since,
-                durableCursor: try store.conversationSnapshot(context: context).cursor)
+                durableCursor: try store.conversationSnapshot(context: context).cursor,
+                recordsLiveArrivalTime: recordsLiveArrivalTime)
             try await transport.openConversation(wire.open(since: since)) { frame in
                 try await self.consumeConversationReplay(frame)
             }
@@ -1754,10 +1759,14 @@ public actor NativeRelayCore {
                 }
                 var validationRejection: ConversationValidationRejection?
                 do {
+                    // Startup and catch-up replays are history. Only events
+                    // fetched after a live-stream signal carry a device receipt time.
+                    let locallyReceivedAtMilliseconds = replay.recordsLiveArrivalTime
+                        ? UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
+                        : nil
                     _ = try store.applyConversation(event, context: context,
                         validationRejection: &validationRejection,
-                        locallyReceivedAtMilliseconds: UInt64(max(0,
-                            Date().timeIntervalSince1970 * 1_000)))
+                        locallyReceivedAtMilliseconds: locallyReceivedAtMilliseconds)
                 } catch {
                     guard isUnusableConversationMessage(error) else { throw error }
                     if let validationRejection,

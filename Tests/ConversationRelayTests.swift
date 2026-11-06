@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import HarklightNativeRelay
 import XCTest
+@testable import Harklight
 
 final class ConversationRelayTests: XCTestCase {
     private final class DiagnosticCollector: @unchecked Sendable {
@@ -576,7 +577,7 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertNil(thread.facts[ExactText("2")]?.actedBy)
     }
     func testLiveAgentReplyAfterOpenIsCommittedThenACKedWithoutReconnect() async throws {
-        let (context, _, store, session) = try setup()
+        let (context, persistence, store, session) = try setup()
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             event("discussion", sequence: 1, fields: #""author":"person","event_id":"2","text":"Explain""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
@@ -607,9 +608,89 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(reply.author, .origin)
         XCTAssertEqual(reply.text, ExactText("Here is why"))
         XCTAssertEqual(reply.inReplyTo, ExactText("2"))
+        let liveReceiptTime = try XCTUnwrap(
+            thread.facts[reply.id]?.localLiveArrivalAtMilliseconds,
+            "A reply replayed after a live-stream signal keeps its local receipt time.")
         XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
+        await core.deactivate()
+
+        let restarted = try AttentionDomainStore(context: context, persistence: persistence)
+        XCTAssertEqual(try restarted.conversationSnapshot(context: context)
+            .threads.values.first?.facts[reply.id]?.localLiveArrivalAtMilliseconds,
+            liveReceiptTime, "The genuinely live receipt time survives store restart.")
+    }
+
+    func testStartupReplayOmitsHistoricalReplyReceiptTimeFromBothRows() async throws {
+        let (context, _, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("reply", sequence: 1,
+                fields: #""author":"origin","event_id":"historical-reply","text":"An older reply""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        let reply = try XCTUnwrap(thread.turns.first { $0.id == ExactText("historical-reply") })
+        let replySequence = try XCTUnwrap(reply.conversationSequence)
+        XCTAssertNil(thread.facts[reply.id]?.localLiveArrivalAtMilliseconds,
+                     "Startup/catch-up replay cannot invent a local live-arrival receipt.")
+        XCTAssertNil(ReplyItemLocalReceiptTime.resolve(reply.id, in: thread),
+                     "The compact New row's receipt-time source remains absent for history.")
+
+        let item = InboxViewListItem(kind: .reply, key: key,
+            conversationSequence: replySequence,
+            openAtConversationSequence: replySequence,
+            unseenCount: 1, score: 0.8, scoreKind: .current)
+        XCTAssertNil(ReplyItemNormalRowProjection.resolve(item, in: thread)?.receivedAt,
+                     "The normal reply row also omits a history/replay timestamp.")
+        await core.deactivate()
+    }
+
+    func testMarkingAVisibleReplyDoesNotAdvanceThroughLaterReplies() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0,"chat_read_positions":[]}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let handle = ExactText("handle")
+        let discussion = ConversationTurn(id: ExactText("question"), binding: binding,
+            author: .person, sessionHandle: handle, text: ExactText("Question"), kind: .discussion)
+        let earliest = ConversationTurn(id: ExactText("reply-812"), binding: binding,
+            author: .origin, sessionHandle: handle, text: ExactText("First unseen reply"),
+            inReplyTo: discussion.id, kind: .reply)
+        let later = ConversationTurn(id: ExactText("reply-819"), binding: binding,
+            author: .origin, sessionHandle: handle, text: ExactText("Later offscreen reply"),
+            inReplyTo: discussion.id, kind: .reply)
+        for (sequence, turn) in [(1, discussion), (2, earliest), (3, later)] {
+            try store.applyConversation(ConversationEvent(sequence: UInt64(sequence),
+                binding: binding, fact: .turn(turn)), context: context)
+        }
+        try store.finishConversationReplay(at: 3, chatReadPositions: [], context: context)
+
+        let firstPending = try XCTUnwrap(store.markConversationRead(key, through: earliest.id,
+            context: context))
+        XCTAssertEqual(firstPending.readThroughConversationSequence, 2)
+        var thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 2)
+        XCTAssertEqual(thread.readThroughTurn, earliest.id)
+        XCTAssertTrue(thread.hasUnreadAgentReply,
+                      "The later reply remains unread until its own row is shown.")
+
+        let laterPending = try XCTUnwrap(store.markConversationRead(key, through: later.id,
+            context: context))
+        XCTAssertEqual(laterPending.readThroughConversationSequence, 3)
+        thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 3)
+        XCTAssertFalse(thread.hasUnreadAgentReply)
         await core.deactivate()
     }
     func testRelayRetractionWithoutSessionHandleDoesNotBlockLaterChat() async throws {

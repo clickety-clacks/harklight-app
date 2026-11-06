@@ -109,6 +109,10 @@ struct ConversationPanel: View {
                                         inspectedFileRevision = fileRevision
                                     })
                                     .id(turn.id)
+                                    .onScrollVisibilityChange(threshold: 0.5) { isVisible in
+                                        guard isVisible, turn.kind == .reply, turn.author == .origin else { return }
+                                        store.markConversationRead(key, through: turn.id)
+                                    }
                             }
                         }.padding(.horizontal)
                     }
@@ -121,9 +125,6 @@ struct ConversationPanel: View {
                         guard let target,
                               thread.turns.contains(where: { $0.id == target }) else { return }
                         proxy.scrollTo(target, anchor: .center)
-                    }
-                    .onChange(of: thread.latestAgentReply?.id, initial: true) { _, _ in
-                        store.markConversationRead(key)
                     }
                 }
                 if let terminal = thread.terminal {

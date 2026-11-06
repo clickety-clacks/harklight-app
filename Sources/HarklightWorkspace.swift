@@ -1010,9 +1010,7 @@ struct InboxList: View {
     }
 
     private func localReplyReceiptDate(for parent: RequestKey, replyID: ExactText) -> Date? {
-        guard let milliseconds = conversationStore?.conversation(for: parent)?
-            .facts[replyID]?.localLiveArrivalAtMilliseconds else { return nil }
-        return Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+        ReplyItemLocalReceiptTime.resolve(replyID, in: conversationStore?.conversation(for: parent))
     }
 
     private var matchingNewMessageAreaRows: [NewMessageAreaListRow] {
@@ -2202,6 +2200,7 @@ struct InboxRowContent: View {
                                     : priorityTreatment?.primaryTextColor ?? palette.accent.color)
                                  : secondaryRowTextColor)
                 .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
+                .accessibilityIdentifier("conversation-unread-\(row.key.messageID.rawValue)")
         }
         if row.localSeenSelected || row.informationalSeenStatus == .confirmed {
             Image(systemName: "checkmark")

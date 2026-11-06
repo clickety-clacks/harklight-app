@@ -578,6 +578,14 @@ public final class AttentionDomainPort: @unchecked Sendable {
         return try store.markConversationRead(request, context: profileContext)
     }
 
+    @discardableResult
+    public func markConversationRead(_ request: RequestKey,
+                                     through turnID: ExactText,
+                                     context suppliedContext: PortContext) throws -> PendingConversationReadPosition? {
+        try validate(suppliedContext)
+        return try store.markConversationRead(request, through: turnID, context: profileContext)
+    }
+
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws {
         try validate(suppliedContext)
         try store.appendFixtureDiscussion(binding, context: profileContext)

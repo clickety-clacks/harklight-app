@@ -1413,12 +1413,20 @@ final class LivePresentationStore {
         return thread.hasUnreadAgentReply
     }
 
-    /// Chat calls this while it is on screen. The mark is durable, so a reply
-    /// replayed after a relaunch or background wake stays unread until shown.
     func markConversationRead(_ key: RequestKey) {
-        guard !isReadOnly, conversationThreads[key]?.latestAgentReply != nil else { return }
+        guard !isReadOnly, let latest = conversationThreads[key]?.latestAgentReply else { return }
+        markConversationRead(key, through: latest.id)
+    }
+
+    /// Chat calls this when the reply crosses the visible threshold. The durable
+    /// position stops at that reply, so later offscreen replies stay unread.
+    func markConversationRead(_ key: RequestKey, through turnID: ExactText) {
+        guard !isReadOnly,
+              conversationThreads[key]?.turns.contains(where: {
+                  $0.id == turnID && $0.kind == .reply && $0.author == .origin
+              }) == true else { return }
         do {
-            let pending = try port.markConversationRead(key, context: port.context)
+            let pending = try port.markConversationRead(key, through: turnID, context: port.context)
             conversationThreads = try port.conversations(context: port.context).threads
             reconcileReplyItemArea()
             if permitsDelivery, pending != nil {

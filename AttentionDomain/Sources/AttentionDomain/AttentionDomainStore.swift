@@ -3031,6 +3031,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func markConversationRead(_ request: RequestKey,
                                      context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
+        try markConversationRead(request, through: nil, context: suppliedContext)
+    }
+
+    /// Records that Chat has shown a specific reply, without advancing beyond it.
+    @discardableResult
+    public func markConversationRead(_ request: RequestKey,
+                                     through turnID: ExactText,
+                                     context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
+        try markConversationRead(request, through: Optional(turnID), context: suppliedContext)
+    }
+
+    private func markConversationRead(_ request: RequestKey,
+                                     through requestedTurnID: ExactText?,
+                                     context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -3040,15 +3054,39 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation,
               var thread = conversation.threads[request] else { throw ConversationError.missingRequest }
-        guard let latest = thread.latestAgentReply else { return nil }
-        let shouldCommitLocalRead = thread.readThroughTurn != latest.id
-        thread.readThroughTurn = latest.id
+        let turn: ConversationTurn?
+        if let requestedTurnID {
+            turn = thread.turns.first {
+                $0.id == requestedTurnID && $0.kind == .reply && $0.author == .origin
+            }
+        } else {
+            turn = thread.latestAgentReply
+        }
+        guard let turn else { return nil }
+
+        let targetIndex = thread.turns.firstIndex { $0.id == turn.id }
+        let currentIndex = thread.readThroughTurn.flatMap { readID in
+            thread.turns.firstIndex { $0.id == readID }
+        }
+        let currentPosition = conversation.chatReadPositions?[request] ?? 0
+        let localReadSequence = thread.readThroughTurn.flatMap { readID in
+            thread.turns.first { $0.id == readID }?.conversationSequence
+        } ?? 0
+        let currentReadSequence = max(currentPosition, localReadSequence)
+        let advancesLocalRead: Bool
+        if let sequence = turn.conversationSequence {
+            advancesLocalRead = sequence > currentReadSequence &&
+                targetIndex.map { target in currentIndex.map { target > $0 } ?? true } == true
+        } else {
+            advancesLocalRead = targetIndex.map { target in
+                currentIndex.map { target > $0 } ?? (thread.readThroughTurn != turn.id)
+            } ?? (thread.readThroughTurn != turn.id)
+        }
+        if advancesLocalRead { thread.readThroughTurn = turn.id }
         conversation.threads[request] = thread
         let pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
-            position: latest.conversationSequence ?? 0)
-        if conversation == (state.conversation ?? ConversationState()), !shouldCommitLocalRead {
-            return pending
-        }
+            position: max(turn.conversationSequence ?? 0, currentReadSequence))
+        if conversation == (state.conversation ?? ConversationState()) { return pending }
         next.conversation = conversation
         try commit(next)
         return pending

@@ -257,6 +257,8 @@ final class ReplyItemAreaTests: XCTestCase {
         let activeRow = ReplyItemNormalRowProjection.resolve(active, in: thread)
         XCTAssertEqual(activeRow?.quotedReply.text, ExactText("Newest quote"))
         XCTAssertEqual(activeRow?.openTargetTurnID, ExactText("reply-7"))
+        XCTAssertNil(ReplyItemLocalReceiptTime.resolve(quote.id, in: thread),
+                     "The compact New row omits time when no live-arrival receipt was retained.")
         XCTAssertNil(activeRow?.receivedAt,
                      "A discussion acceptance time is not a receipt time for an agent reply.")
         var liveThread = thread
@@ -265,6 +267,9 @@ final class ReplyItemAreaTests: XCTestCase {
         XCTAssertEqual(ReplyItemNormalRowProjection.resolve(active, in: liveThread)?.receivedAt,
                        Date(timeIntervalSince1970: 1_800_000_456),
                        "The retained local live-arrival fact supplies the reply time.")
+        XCTAssertEqual(ReplyItemLocalReceiptTime.resolve(quote.id, in: liveThread),
+                       Date(timeIntervalSince1970: 1_800_000_456),
+                       "The compact New row uses the same retained local receipt source.")
 
         let historical = InboxViewListItem(kind: .reply, key: key,
             conversationSequence: 4, openAtConversationSequence: 4,

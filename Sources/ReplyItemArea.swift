@@ -48,6 +48,15 @@ struct ReplyItemNormalRow: Equatable, Identifiable {
     var unseenCount: Int { reference.unseenCount ?? 0 }
 }
 
+enum ReplyItemLocalReceiptTime {
+    static func resolve(_ turnID: ExactText, in thread: ConversationThread?) -> Date? {
+        guard let milliseconds = thread?.facts[turnID]?.localLiveArrivalAtMilliseconds else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+    }
+}
+
 enum ReplyItemNormalRowProjection {
     static func resolve(_ reference: InboxViewListItem,
                         in thread: ConversationThread?) -> ReplyItemNormalRow? {
@@ -59,8 +68,7 @@ enum ReplyItemNormalRowProjection {
               let quote = originReply(sequence: quoteSequence, in: thread),
               let target = originReply(sequence: unseenCount > 0 ? openSequence : quoteSequence,
                                        in: thread) else { return nil }
-        let milliseconds = thread.facts[quote.id]?.localLiveArrivalAtMilliseconds
-        let receivedAt = milliseconds.map { Date(timeIntervalSince1970: Double($0) / 1_000) }
+        let receivedAt = ReplyItemLocalReceiptTime.resolve(quote.id, in: thread)
         return ReplyItemNormalRow(reference: reference, quotedReply: quote,
                                   openTargetTurnID: target.id, receivedAt: receivedAt)
     }
