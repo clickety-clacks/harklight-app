@@ -1178,13 +1178,13 @@ struct InboxList: View {
         .tint(.clear)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .id(InboxListRowScrollTarget(tab: tab,
-                                     selection: .request(item.row.key),
+                                     selection: .request(item.entry.parent),
                                      placement: .replyItemArea))
         .onScrollVisibilityChange(threshold: 0.001) { isVisible in
-            updateVisibility(.init(key: item.row.key, placement: .area, kind: .replyItem),
+            updateVisibility(.init(key: item.entry.parent, placement: .area, kind: .replyItem),
                              isVisible: isVisible)
         }
-        .accessibilityIdentifier("reply-item-\(InboxItem.request(item.row).accessibilityID)")
+        .accessibilityIdentifier("reply-item-request-row-\(item.entry.parent.messageID.rawValue)")
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(designPalette.neutral.backgroundColor)

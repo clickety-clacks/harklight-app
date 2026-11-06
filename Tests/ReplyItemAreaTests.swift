@@ -212,7 +212,7 @@ final class ReplyItemAreaTests: XCTestCase {
                       "A selected item stays out of New after process restart and replay.")
     }
 
-    func testNormalReplyProjectionUsesServerQuoteAndOpenTargets() {
+    func testNormalReplyProjectionUsesServerQuoteAndOpenTargets() throws {
         let key = parent("message")
         func turn(_ id: String, sequence: UInt64, text: String) -> ConversationTurn {
             ConversationTurn(id: ExactText(id),
@@ -220,15 +220,37 @@ final class ReplyItemAreaTests: XCTestCase {
                 author: .origin, sessionHandle: ExactText("session"),
                 text: ExactText(text), kind: .reply, conversationSequence: sequence)
         }
-        var thread = ConversationThread(request: key, sessionHandle: ExactText("session"),
-                                         revisions: [:], currentRevision: 1)
-        thread.turns = [turn("reply-7", sequence: 7, text: "Earliest unseen"),
-                        turn("reply-9", sequence: 9, text: "Newest quote")]
-        thread.facts[ExactText("reply-9")] = ConversationTurnFacts(
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: key.accountScope,
+                                       deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        let binding = ConversationBinding(request: key, revision: 1)
+        let session = ExactText("session")
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: session, payload: .null)), context: context)
+        let discussion = ConversationTurn(id: ExactText("question"), binding: binding,
+            author: .person, sessionHandle: session, text: ExactText("Question"),
+            kind: .discussion, conversationSequence: 2)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(discussion)), context: context)
+        let earliest = ConversationTurn(id: ExactText("reply-7"), binding: binding,
+            author: .origin, sessionHandle: session, text: ExactText("Earliest unseen"),
+            inReplyTo: discussion.id, kind: .reply, conversationSequence: 3)
+        let quote = ConversationTurn(id: ExactText("reply-9"), binding: binding,
+            author: .origin, sessionHandle: session, text: ExactText("Newest quote"),
+            inReplyTo: discussion.id, kind: .reply, conversationSequence: 4)
+        try store.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .turn(earliest)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
+            fact: .turn(quote)), context: context)
+        var thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
+        thread.facts[quote.id] = ConversationTurnFacts(
             acceptedAtMilliseconds: 1_800_000_123_000)
 
         let active = InboxViewListItem(kind: .reply, key: key,
-            conversationSequence: 9, openAtConversationSequence: 7,
+            conversationSequence: 4, openAtConversationSequence: 3,
             unseenCount: 2, score: 0.9, scoreKind: .current)
         let activeRow = ReplyItemNormalRowProjection.resolve(active, in: thread)
         XCTAssertEqual(activeRow?.quotedReply.text, ExactText("Newest quote"))
@@ -236,14 +258,14 @@ final class ReplyItemAreaTests: XCTestCase {
         XCTAssertNil(activeRow?.receivedAt,
                      "A discussion acceptance time is not a receipt time for an agent reply.")
         var liveThread = thread
-        liveThread.facts[ExactText("reply-9")] = ConversationTurnFacts(
+        liveThread.facts[quote.id] = ConversationTurnFacts(
             localLiveArrivalAtMilliseconds: 1_800_000_456_000)
         XCTAssertEqual(ReplyItemNormalRowProjection.resolve(active, in: liveThread)?.receivedAt,
                        Date(timeIntervalSince1970: 1_800_000_456),
                        "The retained local live-arrival fact supplies the reply time.")
 
         let historical = InboxViewListItem(kind: .reply, key: key,
-            conversationSequence: 9, openAtConversationSequence: 9,
+            conversationSequence: 4, openAtConversationSequence: 4,
             unseenCount: 0, score: 0.9, scoreKind: .historical)
         let historicalRow = ReplyItemNormalRowProjection.resolve(historical, in: thread)
         XCTAssertEqual(historicalRow?.openTargetTurnID, ExactText("reply-9"),
@@ -387,7 +409,7 @@ final class ReplyItemAreaTests: XCTestCase {
         let snapshot = try port.observe(context: port.context)
         let presented = try XCTUnwrap(snapshot.requests.first)
         XCTAssertEqual(snapshot.inboxViewListItems, listItems)
-        XCTAssertEqual(port.inspect(context: port.context, request: key).inboxViewListItems,
+        XCTAssertEqual(try port.inspect(context: port.context, request: key).inboxViewListItems,
                        listItems, "Detail filtering keeps the account-wide normal order available to its list.")
         XCTAssertEqual(presented.inboxReplyScores, [7: 0.93],
                        "Scores keep their sequence, skip unscored replies and never cross parents.")
