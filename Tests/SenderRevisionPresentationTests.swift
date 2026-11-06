@@ -55,7 +55,10 @@ final class SenderRevisionPresentationTests: XCTestCase {
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         XCTAssertThrowsError(try domain.saveDraft(oldDraft, selector: selector, context: context))
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
-        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.acceptedUpdates, [update])
+        var expectedUpdate = update
+        expectedUpdate.conversationSequence = 1
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.acceptedUpdates,
+                       [expectedUpdate])
         XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.operation, original.operation)
     }
 }
