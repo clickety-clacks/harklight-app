@@ -199,9 +199,9 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(requestHeading.label.contains("Unread conversation"), requestHeading.debugDescription)
 
-        let newestReply = app.staticTexts[
-            "Newest unseen chat reply: the revised draft tightens the opening, keeps the middle section's new ordering, and closes with the shorter summary we discussed, so the whole note should now fit on one screen."
-        ]
+        let newestReply = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply: the revised draft")
+        ).firstMatch
         XCTAssertFalse(newestReply.isHittable,
                        "The later reply must remain offscreen when the earliest unseen reply opens.")
         for _ in 0..<12 where !newestReply.isHittable {
