@@ -2047,6 +2047,7 @@ private struct NewMessageAreaRowContent: View {
             Text(displayedSummary)
                 .font(.subheadline)
                 .foregroundStyle(palette.neutral.textColor)
+                .tint(palette.neutral.textColor)
                 .lineLimit(2)
                 .truncationMode(.tail)
 
@@ -2149,6 +2150,7 @@ private struct ReplyItemRowContent: View {
             }
             .font(.caption)
             .foregroundStyle(palette.neutral.secondaryTextColor)
+            .tint(palette.neutral.secondaryTextColor)
 
             HStack(alignment: .top, spacing: 8) {
                 Capsule()
@@ -2159,6 +2161,7 @@ private struct ReplyItemRowContent: View {
                                              characterLimit: 320))
                     .font(.subheadline)
                     .foregroundStyle(palette.neutral.textColor)
+                    .tint(palette.neutral.textColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -2394,6 +2397,7 @@ struct InboxRowContent: View {
                         Text(MessageMarkdown.attributed(row.title))
                             .font(titleFont)
                             .foregroundStyle(titleColor)
+                            .tint(titleColor)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         titleTrailingStatus
                     }
@@ -2406,6 +2410,7 @@ struct InboxRowContent: View {
                         Text(MessageMarkdown.attributed(bodyText))
                             .font(.subheadline)
                             .foregroundStyle(secondaryRowTextColor)
+                            .tint(secondaryRowTextColor)
                             .lineLimit(row.tier.bodyLineLimit)
                             .truncationMode(.tail)
                     }
@@ -2652,6 +2657,7 @@ private struct ReplyItemNormalRowContent: View {
             }
             .font(.caption)
             .foregroundStyle(secondaryTextColor)
+            .tint(secondaryTextColor)
 
             HStack(alignment: .top, spacing: 8) {
                 Capsule()
@@ -2663,6 +2669,7 @@ private struct ReplyItemNormalRowContent: View {
                                                  characterLimit: 480))
                         .font(.subheadline)
                         .foregroundStyle(primaryTextColor)
+                        .tint(primaryTextColor)
                         .lineLimit(3)
                         .truncationMode(.tail)
                 } else {
