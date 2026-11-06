@@ -239,6 +239,8 @@ enum MessageMarkdown {
              .codeBlock(_), .thematicBreak, .table(_), .tableCell(_), .tableHeaderRow,
              .tableRow(_):
             return true
+        @unknown default:
+            return false
         }
     }
 
