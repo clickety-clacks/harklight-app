@@ -1400,6 +1400,16 @@ struct InboxList: View {
         }
     }
 
+    private func inboxScrollMetrics(from geometry: ScrollGeometry) -> InboxScrollMetrics {
+        let top: CGFloat = geometry.contentOffset.y + geometry.contentInsets.top
+        let extent: CGFloat = max(0, geometry.contentSize.height - geometry.containerSize.height +
+            geometry.contentInsets.top + geometry.contentInsets.bottom)
+        let distanceToBottom: CGFloat = max(0, extent - top)
+        return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
+                                  distanceToBottom: distanceToBottom,
+                                  contentFits: extent == 0)
+    }
+
     private var listSelection: Binding<InboxSelection?>? {
         $selected
     }
@@ -1693,11 +1703,7 @@ struct InboxList: View {
             restoreLastViewed(using: proxy, in: tab)
         }
         .onScrollGeometryChange(for: InboxScrollMetrics.self) { geometry in
-            let top = geometry.contentOffset.y + geometry.contentInsets.top
-            let extent = max(0, geometry.contentSize.height - geometry.containerSize.height +
-                geometry.contentInsets.top + geometry.contentInsets.bottom)
-            return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
-                distanceToBottom: max(0, extent - top), contentFits: extent == 0)
+            inboxScrollMetrics(from: geometry)
         } action: { oldMetrics, newMetrics in
             let canPageOnDrag = newMetrics.contentFits || newMetrics.distanceToBottom <= 80
             // Pixel offsets are for this callback only; publishing each one invalidates the list.
@@ -2493,7 +2499,7 @@ private struct ReplyItemNormalRowContent: View {
     private var priorityLabel: String? {
         guard let priority, priority == .high || priority == .urgent else { return nil }
         guard reference.scoreKind == .historical else { return String(localized: priority.title) }
-        switch priority {
+        return switch priority {
         case .urgent: String(localized: "Previous priority: Urgent")
         case .high: String(localized: "Previous priority: High priority")
         case .low: nil
