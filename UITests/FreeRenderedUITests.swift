@@ -10,7 +10,7 @@ final class FreeRenderedUITests: XCTestCase {
             let list = app.collectionViews.firstMatch
             XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
             let provenance = element("free-rendered-provenance", in: app)
-            XCTAssertTrue(provenance.label.contains("unread"), app.debugDescription)
+            XCTAssertTrue(status(provenance).contains("unread"), app.debugDescription)
             let newMessage = element("new-message-area-request-row-newer", in: app)
             let newReply = element("reply-item-request-row-older", in: app)
             let normalMessage = element("request-row-newer", in: app)
@@ -22,7 +22,7 @@ final class FreeRenderedUITests: XCTestCase {
             reveal(normalReply, in: list)
             XCTAssertTrue(newMessage.exists, "New remains alongside its own normal row.")
             XCTAssertTrue(newReply.exists, "New reply remains alongside its independent normal row.")
-            XCTAssertTrue(provenance.label.contains("unread"), "List visibility must not mark chat Seen.")
+            XCTAssertTrue(status(provenance).contains("unread"), "List visibility must not mark chat Seen.")
             capture("free-\(appearance)-captured-normal", app)
 
             // Select compact New, then return to the same ordinary request row.
@@ -36,7 +36,7 @@ final class FreeRenderedUITests: XCTestCase {
             XCTAssertFalse(newMessage.exists, app.debugDescription)
             XCTAssertTrue(normalMessage.isHittable,
                           "Return must reveal the existing own row after New selection.\n\(app.debugDescription)")
-            XCTAssertTrue(provenance.label.contains("unread"), "Selecting a different parent does not read this chat.")
+            XCTAssertTrue(status(provenance).contains("unread"), "Selecting a different parent does not read this chat.")
             capture("free-\(appearance)-own-row-after-new", app)
 
             // The reply opens its own parent's chat at the retained target.
@@ -46,7 +46,7 @@ final class FreeRenderedUITests: XCTestCase {
             XCTAssertTrue(replyText.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(replyText.isHittable, app.debugDescription)
             XCTAssertTrue(heading.label.contains("Generated older parent"), app.debugDescription)
-            let read = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS 'read=2'"),
+            let read = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS 'read=2'"),
                                                   object: provenance)
             XCTAssertEqual(XCTWaiter.wait(for: [read], timeout: 5), .completed, app.debugDescription)
             capture("free-\(appearance)-chat-read-target", app)
@@ -58,7 +58,7 @@ final class FreeRenderedUITests: XCTestCase {
             reveal(normalReply, in: list)
             XCTAssertTrue(history.exists, app.debugDescription)
             XCTAssertGreaterThan(normalReply.frame.minY, history.frame.minY)
-            XCTAssertTrue(provenance.label.contains("Captured history"), app.debugDescription)
+            XCTAssertTrue(status(provenance).contains("Captured history"), app.debugDescription)
             capture("free-\(appearance)-captured-history", app)
             app.terminate()
         }
@@ -69,7 +69,7 @@ final class FreeRenderedUITests: XCTestCase {
             let app = launch(appearance, legacy: true)
             let list = app.collectionViews.firstMatch
             XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
-            XCTAssertTrue(element("free-rendered-provenance", in: app).label.contains("Generated legacy"))
+            XCTAssertTrue(status(element("free-rendered-provenance", in: app)).contains("Generated legacy"))
             let active = element("request-row-active-common", in: app)
             reveal(active, in: list)
             capture("free-\(appearance)-generated-legacy-active", app)
@@ -89,6 +89,16 @@ final class FreeRenderedUITests: XCTestCase {
             reveal(historical, in: list)
             XCTAssertTrue(app.staticTexts["History"].exists, app.debugDescription)
             capture("free-\(appearance)-generated-subdued-history", app)
+            // This row required an actual list scroll, unlike the small
+            // captured view. Returning must preserve its stable row target.
+            historical.tap()
+            let heading = app.buttons["request-heading"]
+            XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(heading.label.contains("Common historical message"), app.debugDescription)
+            capture("free-\(appearance)-scrolled-history-selected", app)
+            returnToInbox(app)
+            XCTAssertTrue(historical.isHittable, "Return must preserve the scrolled history row.\n\(app.debugDescription)")
+            capture("free-\(appearance)-scrolled-history-return", app)
             let historicalUnknown = element("normal-reply-item-history-unknown", in: app)
             reveal(historicalUnknown, in: list)
             capture("free-\(appearance)-generated-legacy-history", app)
@@ -108,6 +118,10 @@ final class FreeRenderedUITests: XCTestCase {
 
     private func element(_ id: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
+    }
+
+    private func status(_ element: XCUIElement) -> String {
+        element.value as? String ?? ""
     }
 
     private func reveal(_ element: XCUIElement, in list: XCUIElement, downward: Bool = false) {

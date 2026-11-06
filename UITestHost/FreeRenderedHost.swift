@@ -21,14 +21,11 @@ struct FreeRenderedHost: View {
 
     var body: some View {
         LiveContentView(store: fixture.viewModel, samples: samples)
-            .safeAreaInset(edge: .top) {
-                Text(fixture.phase)
-                    .font(.caption2)
-                    .frame(maxWidth: .infinity)
-                    .padding(4)
-                    .background(.thinMaterial)
-                    .accessibilityIdentifier("free-rendered-provenance")
-            }
+            // Test-only status must not obscure or resize the product UI.
+            // Captures and generated message content carry visible provenance.
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("free-rendered-provenance")
+            .accessibilityValue(fixture.phase)
             .onChange(of: fixture.viewModel.conversation(for: fixture.olderKey)?.readThroughTurn) { _, turn in
                 guard turn != nil else { return }
                 do { try fixture.replayHistoryAfterObservedRead() }
