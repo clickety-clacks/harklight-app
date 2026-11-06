@@ -46,6 +46,10 @@ final class MessageMarkdownTests: XCTestCase {
         XCTAssertFalse(MessageMarkdown.hasFormattingOrLinks(source))
     }
 
+    func testVisibleTextForAccessibilityOmitsMarkdownSyntax() {
+        XCTAssertEqual(MessageMarkdown.visibleText("A **Markdown** note"), "A Markdown note")
+    }
+
     func testEveryParagraphInMultiParagraphQuotesKeepsItsQuoteMarker() {
         let source = "> First quoted paragraph\n>\n> Second quoted paragraph"
         let visible = String(MessageMarkdown.attributed(source).characters)

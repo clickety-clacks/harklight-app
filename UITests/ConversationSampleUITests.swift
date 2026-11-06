@@ -228,8 +228,8 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(normalReplyRow.isHittable,
                           "The reply must also retain its normal prioritized row.\n\(app.debugDescription)")
-            XCTAssertTrue(normalReplyRow.label.contains("reply guide"), normalReplyRow.debugDescription)
-            XCTAssertFalse(normalReplyRow.label.contains("[reply guide]"), normalReplyRow.debugDescription)
+            XCTAssertTrue(normalReplyRow.label.contains("A Markdown note"), normalReplyRow.debugDescription)
+            XCTAssertFalse(normalReplyRow.label.contains("**"), normalReplyRow.debugDescription)
             captureInboxColumnState("markdown-\(appearance)-normal-reply-row", app)
 
             let normalReplyGuide = normalReplyRow.links.matching(
@@ -266,18 +266,14 @@ final class ConversationSampleUITests: XCTestCase {
 
             for _ in 0..<8 where !newRow.isHittable { list.swipeDown() }
             XCTAssertTrue(newRow.isHittable, app.debugDescription)
-            newRow.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.22)).tap()
+            // Stay in the button's blank trailing area so this is a row tap,
+            // not a tap on the embedded Markdown link.
+            newRow.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.82)).tap()
             let selected = XCTNSPredicateExpectation(
                 predicate: NSPredicate(format: "value == %@", "sample-markdown-acceptance"),
                 object: selection)
             XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
                            "A non-link tap in New keeps the existing request navigation.\n\(app.debugDescription)")
-            XCTAssertTrue(normalRow.exists,
-                          "Selecting New removes only that entry; its normal row remains.\n\(app.debugDescription)")
-            XCTAssertTrue(newReplyRow.exists,
-                          "Selecting the request must leave its independent New reply item in place.\n\(app.debugDescription)")
-            XCTAssertTrue(newRow.waitForNonExistence(timeout: 5), app.debugDescription)
-
             let heading = app.buttons["request-heading"]
             XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(heading.label.contains("A Markdown note"), heading.debugDescription)
@@ -294,6 +290,16 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertTrue(stake.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(stake.label.contains("main risk"), stake.debugDescription)
             capture("markdown-\(appearance)-detail", app)
+
+            workspaceBackButton(in: app).tap()
+            XCTAssertTrue(newRow.waitForNonExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalRow.isHittable,
+                          "Selecting New returns to the already-present normal request row.\n\(app.debugDescription)")
+            XCTAssertTrue(newReplyRow.waitForExistence(timeout: 5),
+                          "Selecting the request must leave its independent New reply item in place.\n\(app.debugDescription)")
+            normalRow.tap()
+            XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
 
             app.buttons["Chat"].tap()
             let history = app.scrollViews["conversation-history-scroll"]
@@ -354,15 +360,17 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
                            "Plain-text New selection should keep existing navigation.\n\(app.debugDescription)")
             XCTAssertTrue(newRow.waitForNonExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(normalRow.exists,
-                          "The normal row remains after selecting its New entry.\n\(app.debugDescription)")
-
             let body = app.textViews["request-message-body"]
             XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
             let bodyText = body.value as? String ?? body.label
             XCTAssertTrue(bodyText.contains("The new time is 2 PM."), bodyText)
             XCTAssertFalse(bodyText.contains("**"), bodyText)
             capture("plain-\(appearance)-detail", app)
+            workspaceBackButton(in: app).tap()
+            XCTAssertTrue(newRow.waitForNonExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalRow.isHittable,
+                          "The normal row remains available after selecting its New entry.\n\(app.debugDescription)")
             app.terminate()
         }
     }
@@ -935,14 +943,15 @@ final class ConversationSampleUITests: XCTestCase {
         app.buttons["conversation-earlier-answer"].tap()
         XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
         let earlierTitle = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "new collection")
+            NSPredicate(format: "label CONTAINS %@", "Archive the old")
         ).firstMatch
         let earlierBody = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS %@", "earlier sketches")
         ).firstMatch
         XCTAssertTrue(earlierTitle.waitForExistence(timeout: 5), earlierTitle.debugDescription)
-        XCTAssertFalse(earlierTitle.label.contains("**"), earlierTitle.debugDescription)
+        XCTAssertFalse(earlierTitle.label.contains("*"), earlierTitle.debugDescription)
         XCTAssertTrue(earlierBody.waitForExistence(timeout: 5), earlierBody.debugDescription)
+        XCTAssertTrue(earlierBody.label.contains("new collection"), earlierBody.debugDescription)
         XCTAssertFalse(earlierBody.label.contains("*"), earlierBody.debugDescription)
         capture("sender-updated-earlier-question-and-draft", app)
     }

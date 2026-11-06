@@ -89,6 +89,10 @@ enum MessageMarkdown {
         cache.value(for: source).attributed
     }
 
+    static func visibleText(_ source: String) -> String {
+        String(attributed(source).characters)
+    }
+
     static func attributed(_ source: String, prefixedBy prefix: String) -> AttributedString {
         var result = AttributedString(prefix)
         result += attributed(source)
@@ -181,10 +185,15 @@ enum MessageMarkdown {
                 case let .listItem(ordinal):
                     if markedListItems.insert(component.identity).inserted {
                         let parentComponents = components.prefix(index)
-                        let isOrdered = parentComponents.contains { parent in
+                        let hasOrderedListParent = parentComponents.contains { parent in
                             if case .orderedList = parent.kind { return true }
                             return false
                         }
+                        // Foundation encodes ordered-list position directly on
+                        // the list item; the parent chain is not always present
+                        // on iOS 27. Keep that ordinal instead of drawing a
+                        // bullet when the parser omits the list parent.
+                        let isOrdered = hasOrderedListParent || ordinal > 0
                         let depth = parentComponents.reduce(into: 0) { count, parent in
                             if case .listItem(_) = parent.kind { count += 1 }
                         }

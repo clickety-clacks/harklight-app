@@ -2730,6 +2730,6 @@ private struct ReplyItemNormalRowContent: View {
                 .accessibilityHidden(true)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(String(localized: "Chat reply from \(senderLabel) about \(parentTitle)"))
+        .accessibilityLabel(String(localized: "Chat reply from \(senderLabel) about \(MessageMarkdown.visibleText(parentTitle))"))
     }
 }

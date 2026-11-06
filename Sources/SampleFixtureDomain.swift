@@ -326,11 +326,9 @@ final class SampleFixtureDomain {
     private func record(_ message: SampleMessage) throws -> StoredRequest {
         let usesMarkdownHistory = message.id == "sample-approval-2" &&
             ProcessInfo.processInfo.arguments.contains("--harklight-test-markdown-history")
-        let authoredTitle = usesMarkdownHistory
-            ? "The **new collection** is ready."
-            : message.title
+        let authoredTitle = message.title
         let authoredBody = usesMarkdownHistory
-            ? "Choose what happens to the *earlier sketches*."
+            ? "The **new collection** is ready. Choose what happens to the *earlier sketches*."
             : message.body
 
         func storedRequest(_ payload: [String: Any]) throws -> StoredRequest {
