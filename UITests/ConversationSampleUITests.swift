@@ -164,9 +164,12 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(normalReply.isHittable,
                       "The server-ordered normal reply row must be reachable below New.\n\(app.debugDescription)")
-        XCTAssertTrue(normalReply.label.contains("Newest unseen chat reply"),
-                      normalReply.debugDescription)
-        let normalPriority = app.descendants(matching: .any)["normal-reply-item-priority-now"]
+        let normalQuote = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply")
+        ).firstMatch
+        XCTAssertTrue(normalQuote.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(normalQuote.isHittable, normalQuote.debugDescription)
+        let normalPriority = app.staticTexts["normal-reply-item-priority-now"]
         XCTAssertTrue(normalPriority.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(normalPriority.label.contains("Urgent"), normalPriority.debugDescription)
         capture("reply-item-normal-row-in-samples-inbox", app)
