@@ -36,20 +36,26 @@ final class ConversationRelayTests: XCTestCase {
         var conversationOpenError: InstallationTransportError?
         var rejectFirstConversationACK = false
         var onLiveConversationWait: (() -> Void)?
-        private var liveConversation: CheckedContinuation<Void, any Error>?
+        private var liveConversation: CheckedContinuation<LiveConversationSignal, any Error>?
         private let postCheckpointLock = NSLock()
         private var postCheckpointEvents: [Data] = []
         private var postCheckpointWaiters: [CheckedContinuation<Data, any Error>] = []
         private var postCheckpointEventsEnded = false
         init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
-        func nextLiveConversationSignal() async throws {
-            try await withCheckedThrowingContinuation { continuation in
+        func nextLiveConversationSignal() async throws -> LiveConversationSignal {
+            return try await withCheckedThrowingContinuation { continuation in
                 liveConversation = continuation
                 onLiveConversationWait?()
             }
         }
-        func pushLiveConversation() {
-            liveConversation?.resume()
+        func pushLiveConversation(replyEvent: ConversationEvent? = nil,
+                                 receivedAtMilliseconds: UInt64 = 0) {
+            let replyArrivals = replyEvent
+                .flatMap { LiveConversationReplyArrival(event: $0,
+                    receivedAtMilliseconds: receivedAtMilliseconds) }
+                .map { [$0] } ?? []
+            liveConversation?.resume(returning: LiveConversationSignal(
+                replyArrivals: replyArrivals))
             liveConversation = nil
         }
         func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
@@ -590,16 +596,21 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(session.conversationACKs.count, 1)
 
         // The relay pushed the agent's receipt and reply on the open connection.
+        let replyFrame = event("reply", sequence: 3,
+            fields: #""author":"origin","event_id":"4","in_reply_to":"2","text":"Here is why""#)
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             event("receipt", sequence: 2, fields: #""author":"origin","event_id":"2","delivered":true"#),
-            event("reply", sequence: 3, fields: #""author":"origin","event_id":"4","in_reply_to":"2","text":"Here is why""#),
+            replyFrame,
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)]
+        let replyEvent = try ConversationWire(profile: context).decodeEvent(replyFrame)
+        let receivedAtMilliseconds: UInt64 = 1_800_000_456_000
         let acknowledged = expectation(description: "live entries acknowledged")
         session.onConversationACK = {
             XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
             acknowledged.fulfill()
         }
-        session.pushLiveConversation()
+        session.pushLiveConversation(replyEvent: replyEvent,
+                                    receivedAtMilliseconds: receivedAtMilliseconds)
         await fulfillment(of: [acknowledged], timeout: 5)
 
         XCTAssertEqual(session.conversationACKs.count, 2)
@@ -608,9 +619,9 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(reply.author, .origin)
         XCTAssertEqual(reply.text, ExactText("Here is why"))
         XCTAssertEqual(reply.inReplyTo, ExactText("2"))
-        let liveReceiptTime = try XCTUnwrap(
-            thread.facts[reply.id]?.localLiveArrivalAtMilliseconds,
-            "A reply replayed after a live-stream signal keeps its local receipt time.")
+        let liveReceiptTime = try XCTUnwrap(thread.facts[reply.id]?.localLiveArrivalAtMilliseconds)
+        XCTAssertEqual(liveReceiptTime, receivedAtMilliseconds,
+                       "The reply keeps the receive time of its own live frame.")
         XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
@@ -620,6 +631,52 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(try restarted.conversationSnapshot(context: context)
             .threads.values.first?.facts[reply.id]?.localLiveArrivalAtMilliseconds,
             liveReceiptTime, "The genuinely live receipt time survives store restart.")
+    }
+
+    func testFailedLiveReplayDoesNotTimestampOlderReplyFromLaterSignal() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            event("discussion", sequence: 1,
+                  fields: #""author":"person","event_id":"2","text":"Explain""#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+
+        let listening = expectation(description: "listening after initial replay")
+        session.onLiveConversationWait = { listening.fulfill() }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        await fulfillment(of: [listening], timeout: 5)
+
+        session.conversationOpenError = .serverRejected
+        let rearmedAfterFailure = expectation(description: "listener rearmed after failed live replay")
+        session.onLiveConversationWait = { rearmedAfterFailure.fulfill() }
+        session.pushLiveConversation()
+        await fulfillment(of: [rearmedAfterFailure], timeout: 5)
+
+        let olderReplyFrame = event("reply", sequence: 2,
+            fields: #""author":"origin","event_id":"reply-2","in_reply_to":"2","text":"Earlier reply""#)
+        let newerReplyFrame = event("reply", sequence: 3,
+            fields: #""author":"origin","event_id":"reply-3","in_reply_to":"2","text":"Later reply""#)
+        let newerReply = try ConversationWire(profile: context).decodeEvent(newerReplyFrame)
+        let newerArrival: UInt64 = 1_800_000_789_000
+        session.conversationOpenError = nil
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            olderReplyFrame, newerReplyFrame,
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)]
+        let acknowledged = expectation(description: "later live replay committed and acknowledged")
+        session.onConversationACK = {
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+            acknowledged.fulfill()
+        }
+        session.pushLiveConversation(replyEvent: newerReply,
+                                    receivedAtMilliseconds: newerArrival)
+        await fulfillment(of: [acknowledged], timeout: 5)
+
+        let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+        XCTAssertNil(thread.facts[ExactText("reply-2")]?.localLiveArrivalAtMilliseconds,
+                     "An older replayed reply has no later reply's live receive time.")
+        XCTAssertEqual(thread.facts[ExactText("reply-3")]?.localLiveArrivalAtMilliseconds,
+                       newerArrival)
+        await core.deactivate()
     }
 
     func testStartupReplayOmitsHistoricalReplyReceiptTimeFromBothRows() async throws {

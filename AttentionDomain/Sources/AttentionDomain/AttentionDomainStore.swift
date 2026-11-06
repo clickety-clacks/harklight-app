@@ -2790,7 +2790,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
             validationRejection = error.rejection
             throw ConversationError.invalidBinding
         }
-        if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
+        if conversation.cursor == state.conversation?.cursor {
+            return conversation.cursor
+        }
         if let locallyReceivedAtMilliseconds,
            case let .turn(turn) = event.fact,
            turn.kind == .reply, turn.author == .origin,
@@ -2888,6 +2890,40 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.conversation = conversation
         try commit(next)
         return conversation.cursor
+    }
+
+    /// Retains the receive time from a live reply frame when replay already
+    /// committed that reply before the frame's wake was processed.
+    /// Returns false while replay has not reached the signaled sequence yet.
+    @discardableResult
+    public func recordLocalLiveReplyArrival(request: RequestKey,
+                                            turnID: ExactText,
+                                            conversationSequence: UInt64,
+                                            receivedAtMilliseconds: UInt64,
+                                            context suppliedContext: ProfileContext) throws -> Bool {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(request, in: context.identity)
+
+        guard var conversation = state.conversation,
+              conversation.cursor >= conversationSequence else { return false }
+        guard var thread = conversation.threads[request],
+              let turn = thread.turns.first(where: { $0.id == turnID }),
+              turn.kind == .reply, turn.author == .origin,
+              turn.conversationSequence == conversationSequence else { return true }
+
+        var facts = thread.facts[turnID] ?? ConversationTurnFacts()
+        guard facts.localLiveArrivalAtMilliseconds == nil else { return true }
+        facts.localLiveArrivalAtMilliseconds = receivedAtMilliseconds
+        thread.facts[turnID] = facts
+        conversation.threads[request] = thread
+        var next = state
+        next.conversation = conversation
+        try commit(next)
+        return true
     }
 
     /// Persists the conversation sequence for an ignored, well-formed update
