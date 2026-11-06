@@ -118,6 +118,13 @@ public struct InboxPagingWire: Sendable {
         guard let rawEntries = value.uniqueValue(named: "entries")?.arrayValues else {
             return .unavailable
         }
+        let listItems: [InboxViewListItem]?
+        if let rawListItems = value.uniqueValue(named: "list_items") {
+            guard let array = rawListItems.arrayValues else { return .unavailable }
+            listItems = decodeViewListItems(array)
+        } else {
+            listItems = nil
+        }
         var entries: [InboxViewEntry] = []
         var seen = Set<RequestKey>()
         for raw in rawEntries {
@@ -144,7 +151,8 @@ public struct InboxPagingWire: Sendable {
                                   algorithm: text(value, "algorithm").map(ExactText.init),
                                   basis: text(value, "basis").map(ExactText.init),
                                   entries: entries,
-                                  replies: decodeViewReplies(value)))
+                                  replies: decodeViewReplies(value),
+                                  listItems: listItems))
     }
 
     /// Reply references are additive view data: a server without them sends no
@@ -172,9 +180,67 @@ public struct InboxPagingWire: Sendable {
         return replies
     }
 
+    /// A present `list_items` member is the authoritative supported projection,
+    /// including when empty. Bad elements are skipped without falling back to
+    /// client-created ordering or reply history.
+    private func decodeViewListItems(_ rawItems: [JSONValue]) -> [InboxViewListItem] {
+        var items: [InboxViewListItem] = []
+        var seen = Set<ListItemIdentity>()
+        for raw in rawItems {
+            guard case .object = raw,
+                  raw.hasUniqueObjectKeys,
+                  let kindText = raw.uniqueValue(named: "kind")?.stringValue,
+                  let kind = InboxViewListItemKind(rawValue: kindText.rawValue),
+                  let sender = raw.uniqueValue(named: "sender_id")?.stringValue,
+                  !sender.rawValue.isEmpty,
+                  let message = raw.uniqueValue(named: "message_id")?.stringValue,
+                  !message.rawValue.isEmpty else { continue }
+            let key = RequestKey(accountScope: profile.identity.personID,
+                                 senderID: sender, messageID: message)
+            let identity = ListItemIdentity(kind: kind, key: key)
+
+            switch kind {
+            case .message:
+                guard seen.insert(identity).inserted else { continue }
+                items.append(InboxViewListItem(kind: .message, key: key))
+            case .reply:
+                guard let sequenceValue = raw.uniqueValue(named: "conversation_seq")?.integerValue,
+                      let sequence = UInt64(exactly: sequenceValue),
+                      let openValue = raw.uniqueValue(named: "open_at_conversation_seq")?.integerValue,
+                      let openSequence = UInt64(exactly: openValue),
+                      let unseenCountValue = raw.uniqueValue(named: "unseen_count")?.integerValue,
+                      let unseenCount = Int(exactly: unseenCountValue), unseenCount >= 0,
+                      sequence > 0, openSequence > 0,
+                      (unseenCount > 0 ? openSequence <= sequence : openSequence == sequence),
+                      seen.insert(identity).inserted else { continue }
+                let score = usableScore(raw.uniqueValue(named: "score"))
+                let rawScoreKind = raw.uniqueValue(named: "score_kind")?.stringValue
+                    .flatMap { InboxViewScoreKind(rawValue: $0.rawValue) }
+                let scoreKind: InboxViewScoreKind?
+                if score != nil, rawScoreKind == (unseenCount > 0 ? .current : .historical) {
+                    scoreKind = rawScoreKind
+                } else {
+                    scoreKind = nil
+                }
+                items.append(InboxViewListItem(kind: .reply, key: key,
+                    conversationSequence: sequence,
+                    openAtConversationSequence: openSequence,
+                    unseenCount: unseenCount,
+                    score: scoreKind == nil ? nil : score,
+                    scoreKind: scoreKind))
+            }
+        }
+        return items
+    }
+
     private struct ReplyIdentity: Hashable {
         let key: RequestKey
         let sequence: UInt64
+    }
+
+    private struct ListItemIdentity: Hashable {
+        let kind: InboxViewListItemKind
+        let key: RequestKey
     }
 
     public func inboxReconcile(snapshotID: String,

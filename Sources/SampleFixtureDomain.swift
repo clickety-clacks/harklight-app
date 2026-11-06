@@ -213,6 +213,42 @@ final class SampleFixtureDomain {
             }
         }
         try viewModel.refreshFromDurableStore()
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-reply-item-area") {
+            guard let parentMessage = SampleCatalog.messages.first(where: {
+                $0.id == "sample-information-0"
+            }) else { throw ConversationError.missingRequest }
+            let replyParent = key(for: parentMessage)
+            guard let thread = viewModel.conversation(for: replyParent) else {
+                throw ConversationError.missingRequest
+            }
+            let unseenReplies = thread.turns.filter {
+                $0.author == .origin && $0.kind == .reply
+            }.sorted { ($0.conversationSequence ?? 0) < ($1.conversationSequence ?? 0) }
+            let groupedReplies = Array(unseenReplies.suffix(2))
+            guard groupedReplies.count == 2,
+                  let earliestSequence = groupedReplies.first?.conversationSequence,
+                  let newestSequence = groupedReplies.last?.conversationSequence else {
+                throw ConversationError.conflict
+            }
+            let perReplyScores = [earliestSequence: 0.93, newestSequence: 0.4]
+            let listItems = [
+                InboxViewListItem(kind: .reply, key: replyParent,
+                    conversationSequence: newestSequence,
+                    openAtConversationSequence: earliestSequence,
+                    unseenCount: groupedReplies.count, score: 0.93, scoreKind: .current),
+                InboxViewListItem(kind: .message, key: replyParent)
+            ]
+            try domain.setInboxView(InboxView(
+                revision: ExactText("sample-reply-item-list"),
+                entries: [],
+                replies: groupedReplies.compactMap { turn in
+                    guard let sequence = turn.conversationSequence else { return nil }
+                    return InboxViewReply(key: replyParent, conversationSequence: sequence,
+                                          score: perReplyScores[sequence])
+                },
+                listItems: listItems), context: context)
+            try viewModel.refreshFromDurableStore()
+        }
     }
 
     func key(for message: SampleMessage) -> RequestKey {

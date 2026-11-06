@@ -111,6 +111,7 @@ final class NativeRelayCoreTests: XCTestCase {
         var olderPages: [String: [JSONValue]] = [:]
         var inboxViewEntries: [JSONValue]?
         var inboxViewReplies: [JSONValue]?
+        var inboxViewListItems: [JSONValue]?
         var inboxViewRevision = "view-test"
         var checkpointWasAccepted = false
         var reconciliationOverrides: [UUID: JSONValue] = [:]
@@ -207,6 +208,9 @@ final class NativeRelayCoreTests: XCTestCase {
                 ]
                 if let inboxViewReplies {
                     viewMembers.append(("replies", .array(inboxViewReplies)))
+                }
+                if let inboxViewListItems {
+                    viewMembers.append(("list_items", .array(inboxViewListItems)))
                 }
                 return response(viewMembers)
             case "inbox_checkpoint_ack":
@@ -1028,6 +1032,23 @@ final class NativeRelayCoreTests: XCTestCase {
             ]),
             .string(ExactText("not-an-object"))
         ]
+        session.inboxViewListItems = [
+            .object([
+                JSONMember("kind", .string(ExactText("reply"))),
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent"))),
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "9"))),
+                JSONMember("open_at_conversation_seq", .number(JSONNumber(lexeme: "7"))),
+                JSONMember("unseen_count", .number(JSONNumber(lexeme: "2"))),
+                JSONMember("score", .number(JSONNumber(lexeme: "0.93"))),
+                JSONMember("score_kind", .string(ExactText("current")))
+            ]),
+            .object([
+                JSONMember("kind", .string(ExactText("message"))),
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("parent")))
+            ])
+        ]
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
@@ -1041,6 +1062,14 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertTrue(replies.allSatisfy { $0.key.messageID == ExactText("parent") })
         XCTAssertTrue(replies.allSatisfy { $0.key.accountScope == context.identity.personID },
                       "Reply references scope to the signed-in account, like view entries.")
+        let listItems = try XCTUnwrap(snapshot.inboxView?.listItems)
+        XCTAssertEqual(listItems.map(\.kind), [.reply, .message])
+        XCTAssertEqual(listItems.map(\.key.messageID), [ExactText("parent"), ExactText("parent")])
+        XCTAssertEqual(listItems.first?.conversationSequence, 9)
+        XCTAssertEqual(listItems.first?.openAtConversationSequence, 7)
+        XCTAssertEqual(listItems.first?.unseenCount, 2)
+        XCTAssertEqual(listItems.first?.score, 0.93)
+        XCTAssertEqual(listItems.first?.scoreKind, .current)
     }
 
     func testCheckpointKeepsCachedRowsAnswerableUntilTheirStablePageArrives() async throws {

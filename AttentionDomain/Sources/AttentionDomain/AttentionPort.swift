@@ -478,6 +478,9 @@ public struct PresentationSnapshot: Equatable, Sendable {
     public let replayBarrier: UInt64?
     public let repairIssues: [StoreRepairIssue]
     public let inboxViewBasis: ExactText?
+    /// The optional server-owned mixed order for normal message and reply rows.
+    /// `nil` means the server does not support this projection; `[]` is empty.
+    public let inboxViewListItems: [InboxViewListItem]?
     public let requests: [PresentedRequest]
 
     public var showsBasicOrderMarker: Bool {
@@ -489,12 +492,14 @@ public struct PresentationSnapshot: Equatable, Sendable {
                 replayBarrier: UInt64?,
                 repairIssues: [StoreRepairIssue],
                 inboxViewBasis: ExactText? = nil,
+                inboxViewListItems: [InboxViewListItem]? = nil,
                 requests: [PresentedRequest]) {
         self.revision = revision
         self.cursor = cursor
         self.replayBarrier = replayBarrier
         self.repairIssues = repairIssues
         self.inboxViewBasis = inboxViewBasis
+        self.inboxViewListItems = inboxViewListItems
         self.requests = requests
     }
 }
@@ -1042,6 +1047,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     replayBarrier: snapshot.replayBarrier,
                                     repairIssues: snapshot.repairIssues,
                                     inboxViewBasis: snapshot.inboxView?.basis,
+                                    inboxViewListItems: snapshot.inboxView?.listItems,
                                     requests: sourceOrderedRequests)
     }
 
@@ -1435,6 +1441,7 @@ private extension PresentationSnapshot {
                              replayBarrier: replayBarrier,
                              repairIssues: repairIssues,
                              inboxViewBasis: inboxViewBasis,
+                             inboxViewListItems: inboxViewListItems,
                              requests: requests.filter { $0.key == key })
     }
 }

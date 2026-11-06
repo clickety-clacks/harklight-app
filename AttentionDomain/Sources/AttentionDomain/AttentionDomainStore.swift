@@ -2736,10 +2736,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// The conversation cursor commits in the same account transaction as its fact.
     /// Neither it nor its ACK can advance ordinary delivery/lifecycle replay.
     @discardableResult
-    public func applyConversation(_ event: ConversationEvent, context suppliedContext: ProfileContext) throws -> UInt64 {
+    public func applyConversation(_ event: ConversationEvent,
+                                 context suppliedContext: ProfileContext,
+                                 locallyReceivedAtMilliseconds: UInt64? = nil) throws -> UInt64 {
         var validationRejection: ConversationValidationRejection?
         return try applyConversation(event, context: suppliedContext,
-            validationRejection: &validationRejection)
+            validationRejection: &validationRejection,
+            locallyReceivedAtMilliseconds: locallyReceivedAtMilliseconds)
     }
 
     /// The optional output reports which unchanged validation guard rejected
@@ -2747,7 +2750,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func applyConversation(_ event: ConversationEvent,
                                   context suppliedContext: ProfileContext,
-                                  validationRejection: inout ConversationValidationRejection?) throws -> UInt64 {
+                                  validationRejection: inout ConversationValidationRejection?,
+                                  locallyReceivedAtMilliseconds: UInt64? = nil) throws -> UInt64 {
         validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -2771,6 +2775,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw ConversationError.invalidBinding
         }
         if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
+        if let locallyReceivedAtMilliseconds,
+           case let .turn(turn) = event.fact,
+           turn.kind == .reply, turn.author == .origin,
+           var thread = conversation.threads[event.binding.request] {
+            var facts = thread.facts[turn.id] ?? ConversationTurnFacts()
+            if facts.localLiveArrivalAtMilliseconds == nil {
+                facts.localLiveArrivalAtMilliseconds = locallyReceivedAtMilliseconds
+                thread.facts[turn.id] = facts
+                conversation.threads[event.binding.request] = thread
+            }
+        }
         let key = event.binding.request
         if case let .attentionTier(_, origin, tier, sessionHandle) = event.fact {
             if let thread = conversation.threads[key], sessionHandle != thread.sessionHandle {

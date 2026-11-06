@@ -38,6 +38,59 @@ struct ReplyItemEntry: Codable, Equatable, Identifiable, Sendable {
     var unseenCount: Int { unseenReplies.count }
 }
 
+struct ReplyItemNormalRow: Equatable, Identifiable {
+    let reference: InboxViewListItem
+    let quotedReply: ConversationTurn
+    let openTargetTurnID: ExactText
+    let receivedAt: Date?
+
+    var id: RequestKey { reference.key }
+    var unseenCount: Int { reference.unseenCount ?? 0 }
+}
+
+enum ReplyItemNormalRowProjection {
+    static func resolve(_ reference: InboxViewListItem,
+                        in thread: ConversationThread?) -> ReplyItemNormalRow? {
+        guard reference.kind == .reply,
+              let quoteSequence = reference.conversationSequence,
+              let openSequence = reference.openAtConversationSequence,
+              let unseenCount = reference.unseenCount, unseenCount >= 0,
+              let thread,
+              let quote = originReply(sequence: quoteSequence, in: thread),
+              let target = originReply(sequence: unseenCount > 0 ? openSequence : quoteSequence,
+                                       in: thread) else { return nil }
+        let milliseconds = thread.facts[quote.id]?.localLiveArrivalAtMilliseconds
+        let receivedAt = milliseconds.map { Date(timeIntervalSince1970: Double($0) / 1_000) }
+        return ReplyItemNormalRow(reference: reference, quotedReply: quote,
+                                  openTargetTurnID: target.id, receivedAt: receivedAt)
+    }
+
+    private static func originReply(sequence: UInt64,
+                                    in thread: ConversationThread) -> ConversationTurn? {
+        thread.turns.first { turn in
+            turn.conversationSequence == sequence &&
+                turn.kind == .reply && turn.author == .origin
+        }
+    }
+}
+
+enum ReplyItemPriorityProjection {
+    static func score(for entry: ReplyItemEntry,
+                      perReplyScores: [UInt64: Double],
+                      serverListItems: [InboxViewListItem]?) -> Double? {
+        if let serverListItems {
+            guard let group = serverListItems.first(where: {
+                $0.kind == .reply && $0.key == entry.parent
+            }), group.unseenCount.map({ $0 > 0 }) == true,
+                  group.scoreKind == .current else { return nil }
+            return group.score
+        }
+        return entry.unseenReplies.compactMap { reply in
+            reply.conversationSequence.flatMap { perReplyScores[$0] }
+        }.max()
+    }
+}
+
 struct ReplyItemIdentity: Codable, Hashable, Sendable {
     let parent: RequestKey
     let turnID: ExactText
@@ -128,6 +181,11 @@ struct ReplyItemLedger: Codable, Equatable {
     }
 
     @discardableResult
+    mutating func removeForSelection(_ parent: RequestKey) -> Bool {
+        entriesByParent.removeValue(forKey: parent) != nil
+    }
+
+    @discardableResult
     mutating func pruneExpired(now: Date) -> Bool {
         let expiredParents = entriesByParent.values.compactMap { entry -> RequestKey? in
             guard let firstSeenAt = entry.firstSeenAt,
@@ -214,6 +272,11 @@ final class ReplyItemAreaStore {
         let oldEntries = ledger.entriesByParent
         ledger.markFirstSeen(parent, at: date)
         guard oldEntries != ledger.entriesByParent else { return }
+        persist()
+    }
+
+    func removeForSelection(_ parent: RequestKey) {
+        guard ledger.removeForSelection(parent) else { return }
         persist()
     }
 

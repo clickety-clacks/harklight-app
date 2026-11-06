@@ -116,6 +116,25 @@ final class ReplyItemAreaTests: XCTestCase {
                        "A genuinely new reply on the same parent enters as a fresh item.")
     }
 
+    func testSelectionRemovesNewMembershipWithoutTreatingRepliesAsSeen() {
+        var ledger = ReplyItemLedger()
+        ledger.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
+        let first = reply("message", turn: "reply-1", sequence: 1)
+        let second = reply("message", turn: "reply-2", sequence: 2)
+        ledger.reconcile([first, second], now: baselineDate.addingTimeInterval(1))
+
+        XCTAssertTrue(ledger.removeForSelection(parent("message")))
+        XCTAssertTrue(ledger.entries.isEmpty, "Selection alone transfers the group out of New.")
+
+        ledger.reconcile([first, second], now: baselineDate.addingTimeInterval(2))
+        XCTAssertTrue(ledger.entries.isEmpty, "Replay does not restore a selected group.")
+
+        let third = reply("message", turn: "reply-3", sequence: 3)
+        ledger.reconcile([first, second, third], now: baselineDate.addingTimeInterval(3))
+        XCTAssertEqual(ledger.entries.first?.unseenReplies.map(\.turnID), [ExactText("reply-3")],
+                       "A later genuine reply can create a fresh New group.")
+    }
+
     func testFirstSeenPersistsAndExpiresAtOneHourWithoutReentry() throws {
         var ledger = ReplyItemLedger()
         ledger.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
@@ -174,6 +193,144 @@ final class ReplyItemAreaTests: XCTestCase {
         XCTAssertEqual(restored.nextExpiry, firstSeenAt.addingTimeInterval(3_600))
     }
 
+    @MainActor
+    func testSelectionDeparturePersistsLocally() throws {
+        let suite = "ReplyItemAreaSelectionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let store = ReplyItemAreaStore(defaults: defaults)
+        store.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
+        store.reconcile([reply("message", turn: "reply-1", sequence: 1)],
+                        now: baselineDate.addingTimeInterval(1))
+        store.removeForSelection(parent("message"))
+
+        let restored = ReplyItemAreaStore(defaults: defaults)
+        restored.reconcile([reply("message", turn: "reply-1", sequence: 1)],
+                           now: baselineDate.addingTimeInterval(2))
+        XCTAssertTrue(restored.entries.isEmpty,
+                      "A selected item stays out of New after process restart and replay.")
+    }
+
+    func testNormalReplyProjectionUsesServerQuoteAndOpenTargets() {
+        let key = parent("message")
+        func turn(_ id: String, sequence: UInt64, text: String) -> ConversationTurn {
+            ConversationTurn(id: ExactText(id),
+                binding: ConversationBinding(request: key, revision: 1),
+                author: .origin, sessionHandle: ExactText("session"),
+                text: ExactText(text), kind: .reply, conversationSequence: sequence)
+        }
+        var thread = ConversationThread(request: key, sessionHandle: ExactText("session"),
+                                         revisions: [:], currentRevision: 1)
+        thread.turns = [turn("reply-7", sequence: 7, text: "Earliest unseen"),
+                        turn("reply-9", sequence: 9, text: "Newest quote")]
+        thread.facts[ExactText("reply-9")] = ConversationTurnFacts(
+            acceptedAtMilliseconds: 1_800_000_123_000)
+
+        let active = InboxViewListItem(kind: .reply, key: key,
+            conversationSequence: 9, openAtConversationSequence: 7,
+            unseenCount: 2, score: 0.9, scoreKind: .current)
+        let activeRow = ReplyItemNormalRowProjection.resolve(active, in: thread)
+        XCTAssertEqual(activeRow?.quotedReply.text, ExactText("Newest quote"))
+        XCTAssertEqual(activeRow?.openTargetTurnID, ExactText("reply-7"))
+        XCTAssertNil(activeRow?.receivedAt,
+                     "A discussion acceptance time is not a receipt time for an agent reply.")
+        var liveThread = thread
+        liveThread.facts[ExactText("reply-9")] = ConversationTurnFacts(
+            localLiveArrivalAtMilliseconds: 1_800_000_456_000)
+        XCTAssertEqual(ReplyItemNormalRowProjection.resolve(active, in: liveThread)?.receivedAt,
+                       Date(timeIntervalSince1970: 1_800_000_456),
+                       "The retained local live-arrival fact supplies the reply time.")
+
+        let historical = InboxViewListItem(kind: .reply, key: key,
+            conversationSequence: 9, openAtConversationSequence: 9,
+            unseenCount: 0, score: 0.9, scoreKind: .historical)
+        let historicalRow = ReplyItemNormalRowProjection.resolve(historical, in: thread)
+        XCTAssertEqual(historicalRow?.openTargetTurnID, ExactText("reply-9"),
+                       "All-seen groups open at the newest reply they quote.")
+        XCTAssertNil(ReplyItemNormalRowProjection.resolve(active, in: nil),
+                     "The client waits for existing conversation content instead of fabricating a quote.")
+    }
+
+    func testLiveReplyReceiptTimeIsRetainedOnceAndHistoryHasNoTime() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"),
+                                       deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"),
+                             messageID: ExactText("receipt-time"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let session = ExactText("origin-session")
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: session, payload: .null)), context: context)
+
+        let discussion = ConversationTurn(id: ExactText("person-turn"), binding: binding,
+            author: .person, sessionHandle: session, text: ExactText("Question"),
+            kind: .discussion, conversationSequence: 2)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(discussion)), context: context)
+
+        let liveReply = ConversationTurn(id: ExactText("live-reply"), binding: binding,
+            author: .origin, sessionHandle: session, text: ExactText("Answer"),
+            inReplyTo: discussion.id, kind: .reply, conversationSequence: 3)
+        let liveEvent = ConversationEvent(sequence: 3, binding: binding, fact: .turn(liveReply))
+        try store.applyConversation(liveEvent, context: context,
+                                    locallyReceivedAtMilliseconds: 1_800_000_123_000)
+        try store.applyConversation(liveEvent, context: context,
+                                    locallyReceivedAtMilliseconds: 1_800_000_456_000)
+        let liveFacts = try XCTUnwrap(store.conversationSnapshot(context: context)
+            .threads[key]?.facts[liveReply.id])
+        XCTAssertEqual(liveFacts.localLiveArrivalAtMilliseconds, 1_800_000_123_000,
+                       "A duplicate stream event cannot replace the receipt time recorded at first application.")
+
+        let historyReply = ConversationTurn(id: ExactText("history-reply"), binding: binding,
+            author: .origin, sessionHandle: session, text: ExactText("Fetched history"),
+            inReplyTo: discussion.id, kind: .reply, conversationSequence: 4)
+        try store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
+            fact: .turn(historyReply)), context: context)
+        let personTurn = ConversationTurn(id: ExactText("person-turn-5"), binding: binding,
+            author: .person, sessionHandle: session, text: ExactText("Follow-up"),
+            kind: .discussion, conversationSequence: 5)
+        try store.applyConversation(ConversationEvent(sequence: 5, binding: binding,
+            fact: .turn(personTurn)), context: context,
+            locallyReceivedAtMilliseconds: 1_800_000_789_000)
+        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let snapshot = try restored.conversationSnapshot(context: context)
+        XCTAssertEqual(snapshot.threads[key]?.facts[liveReply.id]?.localLiveArrivalAtMilliseconds,
+                       1_800_000_123_000,
+                       "The local reply receipt survives an app-store reload.")
+        XCTAssertNil(snapshot.threads[key]?.facts[historyReply.id]?.localLiveArrivalAtMilliseconds,
+                     "History applied without a live receipt timestamp stays unknown.")
+        XCTAssertNil(snapshot.threads[key]?.facts[personTurn.id]?.localLiveArrivalAtMilliseconds,
+                     "The local reply receipt field is limited to origin replies.")
+    }
+
+    func testNewReplyPriorityUsesServerGroupScoreOrLegacyReplyMaximum() throws {
+        var ledger = ReplyItemLedger()
+        ledger.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
+        let older = reply("message", turn: "reply-1", sequence: 1)
+        let newer = reply("message", turn: "reply-2", sequence: 2)
+        ledger.reconcile([older, newer], now: baselineDate.addingTimeInterval(1))
+        let entry = try XCTUnwrap(ledger.entries.first)
+
+        XCTAssertEqual(ReplyItemPriorityProjection.score(for: entry,
+            perReplyScores: [1: 0.93, 2: 0.4], serverListItems: nil), 0.93,
+            "Legacy fallback uses the highest available unseen score, not the newest reply's score.")
+
+        let reference = InboxViewListItem(kind: .reply, key: entry.parent,
+            conversationSequence: 2, openAtConversationSequence: 1,
+            unseenCount: 2, score: 0.82, scoreKind: .current)
+        XCTAssertEqual(ReplyItemPriorityProjection.score(for: entry,
+            perReplyScores: [1: 0.93, 2: 0.4], serverListItems: [reference]), 0.82,
+            "The server group score is authoritative when list_items is supported.")
+        XCTAssertNil(ReplyItemPriorityProjection.score(for: entry,
+            perReplyScores: [1: 0.93, 2: 0.4], serverListItems: []),
+            "A supported projection with no reply row does not borrow per-reply scores.")
+    }
+
     func testMergedRowsAreNewestFirstWithTiesGoingToTheMessage() {
         func at(_ offset: TimeInterval) -> Date { baselineDate.addingTimeInterval(offset) }
         let messages: [(String, Date)] = [("message-30", at(30)), ("message-10", at(10))]
@@ -212,16 +369,26 @@ final class ReplyItemAreaTests: XCTestCase {
         try store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)),
             context: context)
+        let listItems = [
+            InboxViewListItem(kind: .reply, key: key,
+                conversationSequence: 9, openAtConversationSequence: 7,
+                unseenCount: 2, score: 0.93, scoreKind: .current),
+            InboxViewListItem(kind: .message, key: key)
+        ]
         try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
             InboxViewEntry(key: key, score: 0.4)
         ], replies: [
             InboxViewReply(key: key, conversationSequence: 7, score: 0.93),
             InboxViewReply(key: key, conversationSequence: 9),
             InboxViewReply(key: other, conversationSequence: 7, score: 0.5)
-        ]), context: context)
+        ], listItems: listItems), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let presented = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        let snapshot = try port.observe(context: port.context)
+        let presented = try XCTUnwrap(snapshot.requests.first)
+        XCTAssertEqual(snapshot.inboxViewListItems, listItems)
+        XCTAssertEqual(port.inspect(context: port.context, request: key).inboxViewListItems,
+                       listItems, "Detail filtering keeps the account-wide normal order available to its list.")
         XCTAssertEqual(presented.inboxReplyScores, [7: 0.93],
                        "Scores keep their sequence, skip unscored replies and never cross parents.")
 

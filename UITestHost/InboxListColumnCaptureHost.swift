@@ -121,9 +121,10 @@ struct InboxListColumnCaptureHost: View {
             tab: .inbox,
             rows: rows,
             warnings: [],
+            conversationStore: sampleFixture.viewModel,
             newMessageAreaStore: newMessageAreaStore,
             replyItemAreaStore: replyItemAreaStore,
-            openReplyItem: { _ in },
+            openReplyItem: { _, _, _ in },
             isWarningPresented: $isWarningPresented,
             selected: $selected,
             workspaceTab: $workspaceTab,
@@ -201,7 +202,7 @@ private enum InboxListColumnCaptureFixture {
         var replyItemAreaStore: ReplyItemAreaStore?
         var replyParentRow = plainRow
         if isReplyState {
-            replyParentRow.inboxReplyScores = [6: 0.82]
+            replyParentRow.inboxReplyScores = [5: 0.93, 6: 0.4]
             let replyStore = ReplyItemAreaStore(defaults: defaults,
                                                 defaultsKey: "capture-reply-item-area")
             replyStore.reconcile([], accountScopes: accountScopes, now: now.addingTimeInterval(-120))

@@ -1755,7 +1755,9 @@ public actor NativeRelayCore {
                 var validationRejection: ConversationValidationRejection?
                 do {
                     _ = try store.applyConversation(event, context: context,
-                        validationRejection: &validationRejection)
+                        validationRejection: &validationRejection,
+                        locallyReceivedAtMilliseconds: UInt64(max(0,
+                            Date().timeIntervalSince1970 * 1_000)))
                 } catch {
                     guard isUnusableConversationMessage(error) else { throw error }
                     if let validationRejection,

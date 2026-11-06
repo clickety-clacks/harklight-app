@@ -203,3 +203,96 @@ enum InboxThreadListProjection {
         return ThreadKey(senderID: row.key.senderID, thread: thread)
     }
 }
+
+enum InboxNormalListDisplayEntry: Identifiable {
+    case message(InboxListEntry)
+    case reply(InboxViewListItem)
+
+    enum ID: Hashable {
+        case message(InboxListEntryID)
+        case reply(RequestKey)
+    }
+
+    var id: ID {
+        switch self {
+        case let .message(entry): .message(entry.id)
+        case let .reply(item): .reply(item.key)
+        }
+    }
+}
+
+@MainActor
+enum InboxNormalListProjection {
+    /// Uses the server's mixed sequence when present. The old-server path keeps
+    /// the existing message projection. Normal-list membership is independent
+    /// of local New membership, so an item can retain its server-ranked row
+    /// while it also appears in the compact New area.
+    static func entries(rows: [InboxItem],
+                        serverItems: [InboxViewListItem]?,
+                        in tab: InboxWorkspaceTab,
+                        search: String) -> [InboxNormalListDisplayEntry] {
+        guard let serverItems else {
+            let visibleMessages = InboxListProjection.filteredRows(rows, in: tab, search: search)
+            return InboxThreadListProjection.grouped(visibleMessages).map {
+                .message($0)
+            }
+        }
+
+        var rowsByKey: [RequestKey: InboxRequestRow] = [:]
+        var localExamples: [InboxItem] = []
+        for item in rows {
+            switch item {
+            case let .request(row): rowsByKey[row.key] = row
+            case .example: localExamples.append(item)
+            }
+        }
+
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        var result: [InboxNormalListDisplayEntry] = []
+        var pendingMessages: [InboxItem] = []
+
+        func flushMessages() {
+            guard !pendingMessages.isEmpty else { return }
+            result.append(contentsOf: InboxThreadListProjection.grouped(pendingMessages).map {
+                .message($0)
+            })
+            pendingMessages.removeAll(keepingCapacity: true)
+        }
+
+        for item in serverItems {
+            switch item.kind {
+            case .message:
+                guard let row = rowsByKey[item.key],
+                      row.belongsToReplied == (tab.messageTab == .replied),
+                      query.isEmpty || InboxItem.request(row).matchesSearch(query) else { continue }
+                pendingMessages.append(.request(row))
+            case .reply:
+                flushMessages()
+                guard let unseenCount = item.unseenCount,
+                      (unseenCount == 0 ? tab == .replied : tab == .inbox),
+                      matchesReplySearch(item, query: query, rowsByKey: rowsByKey) else { continue }
+                result.append(.reply(item))
+            }
+        }
+        flushMessages()
+
+        // Local sample rows have no server identity or rank, so keep them after
+        // the account projection in sample/demo mode.
+        if !localExamples.isEmpty {
+            let examples = InboxListProjection.visibleEntries(localExamples, in: tab, search: search)
+            result.append(contentsOf: examples.map { .message($0) })
+        }
+        return result
+    }
+
+    private static func matchesReplySearch(_ item: InboxViewListItem,
+                                           query: String,
+                                           rowsByKey: [RequestKey: InboxRequestRow]) -> Bool {
+        guard !query.isEmpty else { return true }
+        if let row = rowsByKey[item.key] {
+            return InboxItem.request(row).matchesSearch(query)
+        }
+        return item.key.senderID.rawValue.localizedCaseInsensitiveContains(query) ||
+            item.key.messageID.rawValue.localizedCaseInsensitiveContains(query)
+    }
+}

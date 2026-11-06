@@ -254,13 +254,18 @@ public struct ConversationTurnFacts: Equatable, Codable, Sendable {
     /// Client time when the Server's accepted response was observed. Older
     /// saved turns and imported history have no timestamp and are not aged.
     public var acceptedAtMilliseconds: UInt64?
+    /// Local receipt time for an origin reply first applied from the live stream.
+    /// History-only imports leave this absent.
+    public var localLiveArrivalAtMilliseconds: UInt64?
     public var deliveryAck1: ConversationDeliveryAcknowledgement?
     public var deliveryAck2: ConversationDeliveryAcknowledgement?
     public var fileTransfers: [ExactText: ConversationFileTransfer] = [:]
     public var fileUses: [ExactText: ConversationFileUse] = [:]
 
-    public init(acceptedAtMilliseconds: UInt64? = nil) {
+    public init(acceptedAtMilliseconds: UInt64? = nil,
+                localLiveArrivalAtMilliseconds: UInt64? = nil) {
         self.acceptedAtMilliseconds = acceptedAtMilliseconds
+        self.localLiveArrivalAtMilliseconds = localLiveArrivalAtMilliseconds
     }
 }
 

@@ -28,6 +28,9 @@ final class ConversationSampleUITests: XCTestCase {
                     "--harklight-test-inbox-list-\(appearance)",
                     "--harklight-test-inbox-list-state=\(state.name)"
                 ]
+                if state.name == "replyItem" || state.name == "replyItemFullWidth" {
+                    app.launchArguments.append("--harklight-test-reply-item-area")
+                }
                 app.launch()
 
                 let appWindow = app.windows.firstMatch
@@ -117,6 +120,14 @@ final class ConversationSampleUITests: XCTestCase {
                     XCTAssertTrue(unseenCount.label.contains("2 new"), unseenCount.debugDescription)
                     let badge = app.descendants(matching: .any)["reply-item-priority-high"]
                     XCTAssertTrue(badge.waitForExistence(timeout: 5), app.debugDescription)
+                    let normalReply = app.descendants(matching: .any)[
+                        "normal-reply-item-sample-approval-0"
+                    ]
+                    XCTAssertTrue(normalReply.waitForExistence(timeout: 5), app.debugDescription)
+                    let normalPriority = app.descendants(matching: .any)[
+                        "normal-reply-item-priority-high"
+                    ]
+                    XCTAssertTrue(normalPriority.waitForExistence(timeout: 5), app.debugDescription)
                     let acceptedMessage = app.descendants(matching: .any)["new-message-area-request-row-sample-information-0"]
                     XCTAssertTrue(acceptedMessage.waitForExistence(timeout: 5), app.debugDescription)
                     XCTAssertLessThan(row.frame.minY, acceptedMessage.frame.minY,
@@ -140,6 +151,14 @@ final class ConversationSampleUITests: XCTestCase {
         let unseenCount = app.descendants(matching: .any)["reply-item-unseen-count"]
         XCTAssertTrue(unseenCount.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(unseenCount.label.contains("2 new"), unseenCount.debugDescription)
+        let normalReply = app.descendants(matching: .any)[
+            "normal-reply-item-sample-information-0"
+        ]
+        XCTAssertTrue(normalReply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(normalReply.label.contains("Newest unseen chat reply"),
+                      normalReply.debugDescription)
+        let normalPriority = app.descendants(matching: .any)["normal-reply-item-priority-high"]
+        XCTAssertTrue(normalPriority.waitForExistence(timeout: 5), app.debugDescription)
         capture("reply-item-in-samples-inbox", app)
         replyRow.tap()
 
