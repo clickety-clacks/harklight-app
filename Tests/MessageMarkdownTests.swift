@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import Harklight
 
 final class MessageMarkdownTests: XCTestCase {
@@ -44,6 +45,23 @@ final class MessageMarkdownTests: XCTestCase {
 
         XCTAssertEqual(String(MessageMarkdown.attributed(source).characters), source)
         XCTAssertFalse(MessageMarkdown.hasFormattingOrLinks(source))
+    }
+
+    func testUIKitMessageBodyAppliesThemeColorToPlainAndMarkdownRuns() throws {
+        let color = UIColor.white
+        let rendered = SystemDetectedMessageBody.attributedMessage(
+            "A plain **bold** [link](https://example.com)",
+            foregroundColor: color)
+        let linkIndex = (rendered.string as NSString).range(of: "link").location
+
+        XCTAssertGreaterThan(linkIndex, 0)
+        XCTAssertEqual(rendered.attribute(.link, at: linkIndex, effectiveRange: nil) as? URL,
+                       URL(string: "https://example.com"))
+        for index in 0..<rendered.length {
+            let runColor = try XCTUnwrap(
+                rendered.attribute(.foregroundColor, at: index, effectiveRange: nil) as? UIColor)
+            XCTAssertTrue(runColor.isEqual(color), "Unexpected message body color at UTF-16 index \(index)")
+        }
     }
 
     func testVisibleTextForAccessibilityOmitsMarkdownSyntax() {

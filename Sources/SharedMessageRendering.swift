@@ -304,6 +304,18 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     let text: String
     let foregroundColor: Color
 
+    static func attributedMessage(_ text: String,
+                                  foregroundColor: UIColor) -> NSAttributedString {
+        let rendered = NSMutableAttributedString(
+            attributedString: NSAttributedString(MessageMarkdown.attributed(text)))
+        if rendered.length > 0 {
+            rendered.addAttribute(.foregroundColor,
+                                  value: foregroundColor,
+                                  range: NSRange(location: 0, length: rendered.length))
+        }
+        return rendered
+    }
+
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
         textView.isEditable = false
@@ -315,14 +327,15 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
-        textView.attributedText = NSAttributedString(MessageMarkdown.attributed(text))
+        textView.attributedText = Self.attributedMessage(
+            text, foregroundColor: UIColor(foregroundColor))
         updateColors(on: textView)
         textView.accessibilityIdentifier = "request-message-body"
         return textView
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        let markdown = NSAttributedString(MessageMarkdown.attributed(text))
+        let markdown = Self.attributedMessage(text, foregroundColor: UIColor(foregroundColor))
         if !textView.attributedText.isEqual(to: markdown) {
             textView.attributedText = markdown
         }
