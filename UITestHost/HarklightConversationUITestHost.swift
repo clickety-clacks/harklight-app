@@ -15,7 +15,7 @@ struct HarklightConversationUITestHost: App {
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("--harklight-test-inbox-list-column") {
+        if arguments.contains("--harklight-test-inbox-list-column") || arguments.contains("--free-rendered") {
             _prototypeFixture = State(initialValue: nil)
             _conversationFixture = State(initialValue: nil)
         } else if arguments.contains("--attention-fixture") || arguments.contains("--reset-attention-fixture") {
@@ -36,7 +36,9 @@ struct HarklightConversationUITestHost: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if ProcessInfo.processInfo.arguments.contains("--harklight-test-inbox-list-column") {
+                if ProcessInfo.processInfo.arguments.contains("--free-rendered") {
+                    FreeRenderedHost()
+                } else if ProcessInfo.processInfo.arguments.contains("--harklight-test-inbox-list-column") {
                     InboxListColumnCaptureHost()
                 } else if let conversationFixture {
                     LiveContentView(store: conversationFixture.viewModel, samples: samples,
