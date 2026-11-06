@@ -1564,6 +1564,53 @@ struct InboxList: View {
     }
 
     @ViewBuilder
+    private func newMessageAreaListRow(_ combined: NewMessageAreaCombinedRow,
+                                      in tab: InboxWorkspaceTab,
+                                      using proxy: ScrollViewProxy) -> some View {
+        switch combined {
+        case let .message(item):
+            let selection = InboxSelection.request(item.row.key)
+            newMessageAreaRow(item, in: tab,
+                              selected: selected == selection || lastViewedSelection == selection)
+        case let .reply(item):
+            let selection = InboxSelection.request(item.entry.parent)
+            replyItemRow(item, in: tab,
+                         selected: selected == selection || lastViewedSelection == selection,
+                         using: proxy)
+        }
+    }
+
+    @ViewBuilder
+    private func normalListRow(_ entry: InboxNormalListDisplayEntry,
+                               in tab: InboxWorkspaceTab,
+                               using proxy: ScrollViewProxy) -> some View {
+        switch entry {
+        case let .message(messageEntry):
+            switch messageEntry {
+            case let .row(row):
+                listRow(for: row, in: tab)
+            case let .thread(_, members):
+                DisclosureGroup(isExpanded: threadExpansionBinding(for: messageEntry.id)) {
+                    ForEach(members) { row in
+                        listRow(for: row, in: tab)
+                    }
+                } label: {
+                    threadGroupLabel(members: members)
+                }
+                .accessibilityIdentifier("inbox-thread-group-\(members[0].accessibilityID)")
+                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+            }
+        case let .reply(reference):
+            let selection = InboxSelection.request(reference.key)
+            normalReplyItemRow(reference, in: tab,
+                               selected: selected == selection || lastViewedSelection == selection,
+                               using: proxy)
+        }
+    }
+
+    @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let normalEntries = normalListEntries
@@ -1574,17 +1621,7 @@ struct InboxList: View {
                 newMessageAreaGap(8)
                 Section {
                     ForEach(shownAreaRows) { combined in
-                        switch combined {
-                        case let .message(item):
-                            let selection = InboxSelection.request(item.row.key)
-                            newMessageAreaRow(item, in: tab,
-                                              selected: selected == selection || lastViewedSelection == selection)
-                        case let .reply(item):
-                            let selection = InboxSelection.request(item.row.key)
-                            replyItemRow(item, in: tab,
-                                         selected: selected == selection || lastViewedSelection == selection,
-                                         using: proxy)
-                        }
+                        newMessageAreaListRow(combined, in: tab, using: proxy)
                     }
                     if areaRows.count > 5 {
                         Button(isNewMessageAreaExpanded ? "Less" : "More…") {
@@ -1624,30 +1661,7 @@ struct InboxList: View {
                     .accessibilityIdentifier("inbox-basic-order")
             }
             ForEach(normalEntries) { entry in
-                switch entry {
-                case let .message(messageEntry):
-                    switch messageEntry {
-                    case let .row(row):
-                        listRow(for: row, in: tab)
-                    case let .thread(_, members):
-                        DisclosureGroup(isExpanded: threadExpansionBinding(for: messageEntry.id)) {
-                            ForEach(members) { row in
-                                listRow(for: row, in: tab)
-                            }
-                        } label: {
-                            threadGroupLabel(members: members)
-                        }
-                        .accessibilityIdentifier("inbox-thread-group-\(members[0].accessibilityID)")
-                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                    }
-                case let .reply(reference):
-                    let selection = InboxSelection.request(reference.key)
-                    normalReplyItemRow(reference, in: tab,
-                                       selected: selected == selection || lastViewedSelection == selection,
-                                       using: proxy)
-                }
+                normalListRow(entry, in: tab, using: proxy)
             }
             if normalEntries.isEmpty, areaRows.isEmpty, let triggerNotification {
                 Button("Open notification", action: triggerNotification)
