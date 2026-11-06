@@ -14,6 +14,10 @@ final class ConversationSampleUITests: XCTestCase {
             ("fullWidthHigh", "request-row-sample-approval-0", nil, nil, nil, true),
             ("acceptedNewMessage", "new-message-area-request-row-sample-information-0",
              nil, nil, nil, false),
+            ("replyItem", "reply-item-request-row-sample-information-0",
+             nil, nil, nil, false),
+            ("replyItemFullWidth", "reply-item-request-row-sample-information-0",
+             nil, nil, nil, true),
         ]
 
         for appearance in ["light", "dark"] {
@@ -24,6 +28,9 @@ final class ConversationSampleUITests: XCTestCase {
                     "--harklight-test-inbox-list-\(appearance)",
                     "--harklight-test-inbox-list-state=\(state.name)"
                 ]
+                if state.name == "replyItem" || state.name == "replyItemFullWidth" {
+                    app.launchArguments.append("--harklight-test-reply-item-area")
+                }
                 app.launch()
 
                 let appWindow = app.windows.firstMatch
@@ -107,11 +114,104 @@ final class ConversationSampleUITests: XCTestCase {
                     XCTAssertTrue(header.waitForExistence(timeout: 5), app.debugDescription)
                     XCTAssertTrue(header.isHittable, app.debugDescription)
                 }
+                if state.name == "replyItem" || state.name == "replyItemFullWidth" {
+                    let unseenCount = app.descendants(matching: .any)["reply-item-unseen-count"]
+                    XCTAssertTrue(unseenCount.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(unseenCount.label.contains("2 new"), unseenCount.debugDescription)
+                    let badge = app.descendants(matching: .any)["reply-item-priority-now"]
+                    XCTAssertTrue(badge.waitForExistence(timeout: 5), app.debugDescription)
+                    let normalReply = app.descendants(matching: .any)[
+                        "normal-reply-item-sample-information-0"
+                    ]
+                    XCTAssertTrue(normalReply.waitForExistence(timeout: 5), app.debugDescription)
+                    let normalPriority = app.descendants(matching: .any)[
+                        "normal-reply-item-priority-now"
+                    ]
+                    XCTAssertTrue(normalPriority.waitForExistence(timeout: 5), app.debugDescription)
+                    let acceptedMessage = app.descendants(matching: .any)["new-message-area-request-row-sample-information-0"]
+                    XCTAssertTrue(acceptedMessage.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertLessThan(row.frame.minY, acceptedMessage.frame.minY,
+                                      "The newer reply item must sort above the older accepted message.\n\(app.debugDescription)")
+                }
 
                 captureInboxColumnState("inbox-250-\(appearance)-\(state.name)", app)
                 app.terminate()
             }
         }
+    }
+
+    func testReplyItemOpensParentChatScrolledToEarliestUnseenReply() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-samples", "--harklight-test-reply-item-area"]
+        app.launch()
+
+        let replyRow = app.descendants(matching: .any)["reply-item-request-row-sample-information-0"]
+        XCTAssertTrue(replyRow.waitForExistence(timeout: 10), app.debugDescription)
+        let unseenCount = app.descendants(matching: .any)["reply-item-unseen-count"]
+        XCTAssertTrue(unseenCount.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(unseenCount.label.contains("2 new"), unseenCount.debugDescription)
+        let inboxList = app.collectionViews.firstMatch
+        XCTAssertTrue(inboxList.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(replyRow.isHittable, app.debugDescription)
+        capture("reply-item-in-samples-inbox", app)
+
+        let normalReply = app.descendants(matching: .any)[
+            "normal-reply-item-sample-information-0"
+        ]
+        for _ in 0..<8 where !normalReply.isHittable {
+            inboxList.swipeUp()
+        }
+        XCTAssertTrue(normalReply.isHittable,
+                      "The server-ordered normal reply row must be reachable below New.\n\(app.debugDescription)")
+        let normalQuote = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply")
+        ).firstMatch
+        XCTAssertTrue(normalQuote.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(normalQuote.isHittable, normalQuote.debugDescription)
+        let normalPriority = app.staticTexts["normal-reply-item-priority-now"]
+        XCTAssertTrue(normalPriority.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(normalPriority.label.contains("Urgent"), normalPriority.debugDescription)
+        capture("reply-item-normal-row-in-samples-inbox", app)
+
+        for _ in 0..<8 where !replyRow.isHittable {
+            inboxList.swipeDown()
+        }
+        XCTAssertTrue(replyRow.isHittable,
+                      "The New reply item must remain reachable after viewing its normal row.\n\(app.debugDescription)")
+        replyRow.tap()
+
+        let history = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(history.waitForExistence(timeout: 10), app.debugDescription)
+        let earliestReply = app.staticTexts[
+            "Earliest unseen chat reply: the middle section of the draft now reads better."
+        ]
+        XCTAssertTrue(earliestReply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(earliestReply.isHittable,
+                      "The chat must open scrolled to the earliest unseen reply, past the long earlier history.\n\(app.debugDescription)")
+        XCTAssertFalse(app.staticTexts[
+            "Earlier local discussion turn 1 keeps this example history long."
+        ].isHittable,
+                       "The top of the long history must be off screen when the chat lands on the reply.\n\(app.debugDescription)")
+        capture("reply-item-tap-landed-on-earliest-unseen-reply", app)
+
+        let requestHeading = app.buttons["request-heading"]
+        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(requestHeading.label.contains("Unread conversation"), requestHeading.debugDescription)
+
+        let newestReply = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply: the revised draft")
+        ).firstMatch
+        XCTAssertFalse(newestReply.isHittable,
+                       "The later reply must remain offscreen when the earliest unseen reply opens.")
+        for _ in 0..<12 where !newestReply.isHittable {
+            history.swipeUp()
+        }
+        XCTAssertTrue(newestReply.isHittable,
+                      "Scrolling to the later reply must bring it into the chat viewport.\n\(app.debugDescription)")
+        let readLabel = NSPredicate(format: "label CONTAINS %@", "Conversation read")
+        expectation(for: readLabel, evaluatedWith: requestHeading)
+        waitForExpectations(timeout: 5)
     }
 
     func testForegroundChatIndicatorOpensTheMatchingConversation() {

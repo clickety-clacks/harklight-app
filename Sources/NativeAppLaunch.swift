@@ -1214,6 +1214,7 @@ final class LivePresentationStore {
     private(set) var isSendingDiscussion = false
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
+    private(set) var retractionVisibilityTime = Date()
     private(set) var selectedRequestKey: RequestKey?
     private var activeRefreshCount = 0
     var isRefreshing: Bool { activeRefreshCount > 0 }
@@ -1271,6 +1272,7 @@ final class LivePresentationStore {
     @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
+    @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
     // Reply edits remain local until submission, but must outlive a detail view
@@ -1279,8 +1281,13 @@ final class LivePresentationStore {
     // Clearing a retracted row is list state on this device only: no frame is
     // sent and the retracted record stays intact in the durable store.
     private(set) var clearedRetractions: Set<RequestKey> = []
+#if DEBUG
+    @ObservationIgnored private var pendingRetractionExpiryAdvance: CheckedContinuation<Void, Never>?
+    @ObservationIgnored private var retractionExpiryAdvanceRequested = false
+#endif
     @ObservationIgnored private let clearedRetractionDefaults: UserDefaults
     private static let clearedRetractionsDefaultsKey = "harklight.cleared-retracted-requests"
+    private static let retractedRowVisibilityDuration: TimeInterval = 24 * 60 * 60
     @ObservationIgnored private var presentedStaleAnswerOperationIDs = Set<UUID>()
 
     private struct NoReplyRoutingState {
@@ -1302,10 +1309,11 @@ final class LivePresentationStore {
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
-    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext) throws {
+    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext,
+                     newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false,
-                      diagnostics: nil)
+                      diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
     convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext,
@@ -1324,6 +1332,8 @@ final class LivePresentationStore {
         self.clearedRetractionDefaults = clearedRetractionDefaults
         let areaStore = newMessageAreaDefaults.map { NewMessageAreaStore(defaults: $0) }
         self.messageAreaStore = areaStore
+        let replyStore = newMessageAreaDefaults.map { ReplyItemAreaStore(defaults: $0) }
+        self.replyAreaStore = replyStore
         self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
@@ -1339,6 +1349,7 @@ final class LivePresentationStore {
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
         reconcileNewMessageArea(snapshot.requests, using: areaStore)
+        reconcileReplyItemArea(using: replyStore)
         if let data = clearedRetractionDefaults.data(forKey: Self.clearedRetractionsDefaultsKey),
            let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
             clearedRetractions = cleared
@@ -1371,6 +1382,64 @@ final class LivePresentationStore {
         guard let timestamp else { return nil }
         return Date(timeIntervalSince1970: Double(timestamp) / 1_000)
     }
+
+    static func retractionExpiryDate(for retractionDate: Date?) -> Date? {
+        retractionDate?.addingTimeInterval(retractedRowVisibilityDuration)
+    }
+
+    static func isRetractionExpired(retractionDate: Date?, at now: Date) -> Bool {
+        guard let expiry = retractionExpiryDate(for: retractionDate) else { return false }
+        return now >= expiry
+    }
+
+    func refreshRetractionVisibility(at now: Date = Date()) {
+        retractionVisibilityTime = now
+    }
+
+    func waitForNextRetractionExpiry() async {
+        guard let expiry = nextRetractionExpiry else { return }
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-server-retraction") {
+            await waitForRetractionExpiryAdvance()
+            guard !Task.isCancelled else { return }
+            refreshRetractionVisibility(at: expiry)
+            return
+        }
+#endif
+        while !Task.isCancelled {
+            let remaining = expiry.timeIntervalSince(retractionVisibilityTime)
+            guard remaining > 0 else { break }
+            do {
+                try await Task.sleep(for: .seconds(remaining))
+            } catch {
+                return
+            }
+            refreshRetractionVisibility()
+        }
+        guard !Task.isCancelled else { return }
+        refreshRetractionVisibility()
+    }
+
+#if DEBUG
+    func advanceRetractionExpiryForTesting() {
+        if let continuation = pendingRetractionExpiryAdvance {
+            pendingRetractionExpiryAdvance = nil
+            continuation.resume()
+        } else {
+            retractionExpiryAdvanceRequested = true
+        }
+    }
+
+    private func waitForRetractionExpiryAdvance() async {
+        if retractionExpiryAdvanceRequested {
+            retractionExpiryAdvanceRequested = false
+            return
+        }
+        await withCheckedContinuation { continuation in
+            pendingRetractionExpiryAdvance = continuation
+        }
+    }
+#endif
 
     func retractionLabel(_ key: RequestKey) -> String {
         guard let date = retractionDate(key) else { return "Retracted" }
@@ -1408,13 +1477,22 @@ final class LivePresentationStore {
         return thread.hasUnreadAgentReply
     }
 
-    /// Chat calls this while it is on screen. The mark is durable, so a reply
-    /// replayed after a relaunch or background wake stays unread until shown.
     func markConversationRead(_ key: RequestKey) {
-        guard !isReadOnly, conversationThreads[key]?.latestAgentReply != nil else { return }
+        guard !isReadOnly, let latest = conversationThreads[key]?.latestAgentReply else { return }
+        markConversationRead(key, through: latest.id)
+    }
+
+    /// Chat calls this when the reply crosses the visible threshold. The durable
+    /// position stops at that reply, so later offscreen replies stay unread.
+    func markConversationRead(_ key: RequestKey, through turnID: ExactText) {
+        guard !isReadOnly,
+              conversationThreads[key]?.turns.contains(where: {
+                  $0.id == turnID && $0.kind == .reply && $0.author == .origin
+              }) == true else { return }
         do {
-            let pending = try port.markConversationRead(key, context: port.context)
+            let pending = try port.markConversationRead(key, through: turnID, context: port.context)
             conversationThreads = try port.conversations(context: port.context).threads
+            reconcileReplyItemArea()
             if permitsDelivery, pending != nil {
                 let expected = profileContext
                 Task {
@@ -1720,10 +1798,40 @@ final class LivePresentationStore {
         let skippedMessageRequestTags = completedSkippedMessageRequestTags
         return presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
+            .filter { request in
+                guard isRetracted(request.key) else { return true }
+                return !Self.isRetractionExpired(
+                    retractionDate: retractionDate(request.key), at: retractionVisibilityTime)
+            }
             .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
     }
 
+    var expiredRetractionSearchRows: [InboxRequestRow] {
+        let skippedMessageRequestTags = completedSkippedMessageRequestTags
+        return presentation.requests
+            .filter { $0.lifecycleStatus != .superseded }
+            .filter { request in
+                isRetracted(request.key) &&
+                    Self.isRetractionExpired(
+                        retractionDate: retractionDate(request.key), at: retractionVisibilityTime)
+            }
+            .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
+    }
+
+    var nextRetractionExpiry: Date? {
+        presentation.requests.compactMap { request -> Date? in
+            guard request.lifecycleStatus != .superseded,
+                  isRetracted(request.key),
+                  !clearedRetractions.contains(request.key),
+                  let expiry = Self.retractionExpiryDate(for: retractionDate(request.key)),
+                  expiry > retractionVisibilityTime else { return nil }
+            return expiry
+        }.min()
+    }
+
     var newMessageAreaStore: NewMessageAreaStore? { messageAreaStore }
+
+    var replyItemAreaStore: ReplyItemAreaStore? { replyAreaStore }
 
     private func reconcileNewMessageArea(_ requests: [PresentedRequest],
                                          using store: NewMessageAreaStore? = nil) {
@@ -1736,6 +1844,34 @@ final class LivePresentationStore {
         let revisions = Dictionary(uniqueKeysWithValues: requests.map { ($0.key, $0.requestRevision) })
         store.reconcile(messages, revisions: revisions,
                         accountScopes: [profileContext.identity.personID])
+    }
+
+    private func reconcileReplyItemArea(using store: ReplyItemAreaStore? = nil) {
+        guard let store = store ?? replyAreaStore else { return }
+        var observations: [ReplyItemObservation] = []
+        for (key, thread) in conversationThreads {
+            let legacyReadIndex = thread.readThroughTurn.flatMap { readTurn in
+                thread.turns.firstIndex { $0.id == readTurn }
+            }
+            for (index, turn) in thread.turns.enumerated()
+                where turn.kind == .reply && turn.author == .origin {
+                let isSeen: Bool
+                if let cursor = thread.accountReadThroughConversationSequence,
+                   let sequence = turn.conversationSequence {
+                    isSeen = sequence <= cursor
+                } else if let legacyReadIndex {
+                    isSeen = index <= legacyReadIndex
+                } else {
+                    isSeen = false
+                }
+                observations.append(ReplyItemObservation(parent: key,
+                                                         turnID: turn.id,
+                                                         conversationSequence: turn.conversationSequence,
+                                                         isSeen: isSeen,
+                                                         text: turn.text.rawValue))
+            }
+        }
+        store.reconcile(observations, accountScopes: [profileContext.identity.personID])
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
@@ -1824,6 +1960,7 @@ final class LivePresentationStore {
             chatUnread: listChatUnread(request.key),
             tier: .middle,
             inboxScore: request.inboxScore,
+            inboxReplyScores: request.inboxReplyScores,
             thread: request.inboxThread,
             hasInboxViewEntry: request.hasInboxViewEntry,
             duePhrase: request.inboxDueAtMilliseconds.map { InboxDuePhrase.presentation(for: $0) },
@@ -2667,6 +2804,7 @@ final class LivePresentationStore {
         }
         presentation = snapshot
         reconcileNewMessageArea(snapshot.requests)
+        reconcileReplyItemArea()
         refreshFailedResponseWarnings(for: snapshot.requests)
         recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)

@@ -186,6 +186,59 @@ final class AttentionTierClientTests: XCTestCase {
         XCTAssertNil(view.entries[3].score, "Scores outside the agreed range are unusable.")
     }
 
+    func testViewListItemsPreserveSupportStateAndServerOrder() throws {
+        let wire = try InboxPagingWire(profile: context())
+        let withoutProjection = data(#"{"v":1,"type":"ok","ref":"get","view_rev":"old","entries":[]}"#)
+        guard case let .updated(oldView) = wire.decodeViewGet(withoutProjection, ref: "get") else {
+            return XCTFail("Expected the older server view to decode.")
+        }
+        XCTAssertNil(oldView.listItems, "Absent means the server does not support mixed list rows.")
+
+        let emptyProjection = data(#"{"v":1,"type":"ok","ref":"get","view_rev":"empty","entries":[],"list_items":[]}"#)
+        guard case let .updated(emptyView) = wire.decodeViewGet(emptyProjection, ref: "get") else {
+            return XCTFail("Expected the empty supported projection to decode.")
+        }
+        XCTAssertEqual(emptyView.listItems, [], "A present empty array is supported and empty.")
+        let malformedProjection = data(#"{"v":1,"type":"ok","ref":"get","view_rev":"bad","entries":[],"list_items":null}"#)
+        XCTAssertEqual(wire.decodeViewGet(malformedProjection, ref: "get"), .unavailable,
+                       "A malformed present projection is not mistaken for an older server.")
+
+        let response = data(#"{"v":1,"type":"ok","ref":"get","view_rev":"mixed","entries":[],"list_items":[{"kind":"reply","sender_id":"agent","message_id":"parent","conversation_seq":819,"open_at_conversation_seq":812,"unseen_count":2,"score":0.9,"score_kind":"current"},{"kind":"message","sender_id":"agent","message_id":"parent"},{"kind":"reply","sender_id":"agent","message_id":"seen","conversation_seq":12,"open_at_conversation_seq":12,"unseen_count":0,"score":0.7,"score_kind":"historical"},{"kind":"reply","sender_id":"agent","message_id":"bad-pair","conversation_seq":13,"open_at_conversation_seq":13,"unseen_count":0,"score":0.7,"score_kind":"current"},{"kind":"reply","sender_id":"agent","message_id":"missing-target","conversation_seq":14,"unseen_count":1}]}"#)
+        guard case let .updated(view) = wire.decodeViewGet(response, ref: "get"),
+              let items = view.listItems else {
+            return XCTFail("Expected the server's mixed projection to decode.")
+        }
+        XCTAssertEqual(items.map(\.key.messageID.rawValue),
+                       ["parent", "parent", "seen", "bad-pair"],
+                       "Message and reply identities for one parent are distinct, and invalid elements are skipped.")
+        XCTAssertEqual(items.map(\.kind), [.reply, .message, .reply, .reply])
+        XCTAssertEqual(items[0].conversationSequence, 819)
+        XCTAssertEqual(items[0].openAtConversationSequence, 812)
+        XCTAssertEqual(items[0].unseenCount, 2)
+        XCTAssertEqual(items[0].score, 0.9)
+        XCTAssertEqual(items[0].scoreKind, .current)
+        XCTAssertEqual(items[1].key.accountScope, ExactText("reader-account"))
+        XCTAssertEqual(items[2].score, 0.7)
+        XCTAssertEqual(items[2].scoreKind, .historical)
+        XCTAssertNil(items[3].score, "A score-kind/count mismatch cannot be shown as current or historical.")
+        XCTAssertNil(items[3].scoreKind)
+    }
+
+    func testStoredInboxViewWithoutListItemsRemainsDecodable() throws {
+        let legacy = try JSONEncoder().encode(InboxView(
+            revision: ExactText("legacy"), entries: []))
+        let legacyView = try JSONDecoder().decode(InboxView.self, from: legacy)
+        XCTAssertNil(legacyView.listItems)
+
+        let current = InboxView(revision: ExactText("current"), entries: [],
+            listItems: [InboxViewListItem(kind: .message,
+                key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("agent"),
+                               messageID: ExactText("message")))])
+        let roundTrip = try JSONDecoder().decode(InboxView.self,
+            from: JSONEncoder().encode(current))
+        XCTAssertEqual(roundTrip, current)
+    }
+
     func testRelayTierChangeUpdatesTheExistingRequestWithoutAnotherDelivery() throws {
         let profile = context()
         let store = try AttentionDomainStore(context: profile, persistence: MemoryAttentionStatePersistence())

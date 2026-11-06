@@ -95,6 +95,104 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testNormalProjectionKeepsDistinctRowsInServerSequence() {
+        func row(_ id: String, resolved: Bool = false) -> InboxRequestRow {
+            InboxRequestRow(
+                key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                messageID: ExactText(id)),
+                title: "Message \(id)", sender: "Assistant", status: "",
+                isResolved: resolved, hasUserAction: resolved,
+                hasInboxViewEntry: true)
+        }
+        let first = row("first")
+        let parent = row("parent")
+        let last = row("last")
+        let replyRef = InboxViewListItem(kind: .reply, key: parent.key,
+            conversationSequence: 9, openAtConversationSequence: 7,
+            unseenCount: 2, score: 0.91, scoreKind: .current)
+        let serverOrder = [
+            InboxViewListItem(kind: .message, key: first.key),
+            replyRef,
+            InboxViewListItem(kind: .message, key: last.key)
+        ]
+        let rows: [InboxItem] = [.request(first), .request(parent), .request(last)]
+
+        let normalRows = InboxNormalListProjection.entries(
+            rows: rows, serverItems: serverOrder, in: .inbox, search: "")
+        XCTAssertEqual(normalRows.map(\.id), [
+            .message(.row(.request(first.key))), .reply(parent.key), .message(.row(.request(last.key)))
+        ], "Normal rows follow the mixed server sequence, without sorting by score or parent.")
+        guard case let .reply(projectedReply) = normalRows[1] else {
+            return XCTFail("The reply group should keep its own list identity.")
+        }
+        XCTAssertEqual(projectedReply.score, 0.91)
+        XCTAssertEqual(projectedReply.openAtConversationSequence, 7)
+    }
+
+    @MainActor
+    func testNormalReplyRowsFollowReplyAttentionStateAndFallbackDoesNotInventThem() {
+        let parent = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                            messageID: ExactText("parent")),
+            title: "Answered parent", sender: "Assistant", status: "Answered",
+            hasUserAction: true, hasInboxViewEntry: true)
+        let replyRef = InboxViewListItem(kind: .reply, key: parent.key,
+            conversationSequence: 9, openAtConversationSequence: 9,
+            unseenCount: 0, score: 0.8, scoreKind: .historical)
+        let rows: [InboxItem] = [.request(parent)]
+
+        let allSeen = InboxNormalListProjection.entries(
+            rows: rows, serverItems: [replyRef], in: .replied, search: "")
+        XCTAssertEqual(allSeen.map(\.id), [.reply(parent.key)],
+                       "The reply group remains in the seen tab independently of parent lifecycle.")
+        let replyWithoutLoadedParent = InboxNormalListProjection.entries(
+            rows: [], serverItems: [replyRef], in: .replied, search: "")
+        XCTAssertEqual(replyWithoutLoadedParent.map(\.id), [.reply(parent.key)],
+                       "A reply group remains a row when its parent message is outside the loaded page.")
+        let searchedReplyWithoutLoadedParent = InboxNormalListProjection.entries(
+            rows: [], serverItems: [replyRef], in: .replied, search: "sender")
+        XCTAssertEqual(searchedReplyWithoutLoadedParent.map(\.id), [.reply(parent.key)],
+                       "An unloaded reply parent can still be found by its stable sender identity.")
+        let legacyRows = InboxNormalListProjection.entries(
+            rows: rows, serverItems: nil, in: .replied, search: "")
+        XCTAssertFalse(legacyRows.contains { row in
+            if case .reply = row { return true }
+            return false
+        }, "An older server without list_items cannot create a persistent reply row.")
+        XCTAssertTrue(InboxNormalListProjection.entries(
+            rows: rows, serverItems: [], in: .replied, search: "").isEmpty,
+            "A supported empty projection is not treated as an older server fallback.")
+    }
+
+    @MainActor
+    func testReplyCanRemainInCompactNewAndItsOwnNormalRowThenLeaveNewAlone() {
+        let key = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                             messageID: ExactText("parent"))
+        let reference = InboxViewListItem(kind: .reply, key: key,
+            conversationSequence: 4, openAtConversationSequence: 4,
+            unseenCount: 1, score: 0.84, scoreKind: .current)
+        let observation = ReplyItemObservation(parent: key, turnID: ExactText("reply-4"),
+            conversationSequence: 4, isSeen: false, text: "A live reply")
+        var newLedger = ReplyItemLedger()
+        newLedger.reconcile([], accountScopes: [key.accountScope], now: .now)
+        newLedger.reconcile([observation], now: .now)
+
+        let normalBeforeSelection = InboxNormalListProjection.entries(
+            rows: [], serverItems: [reference], in: .inbox, search: "")
+        XCTAssertEqual(newLedger.entries.map(\.parent), [key],
+                       "The compact New group is present while its normal row is already present.")
+        XCTAssertEqual(normalBeforeSelection.map(\.id), [.reply(key)])
+
+        XCTAssertTrue(newLedger.removeForSelection(key),
+                      "Selecting the compact New copy removes that membership locally.")
+        let normalAfterSelection = InboxNormalListProjection.entries(
+            rows: [], serverItems: [reference], in: .inbox, search: "")
+        XCTAssertTrue(newLedger.entries.isEmpty)
+        XCTAssertEqual(normalAfterSelection.map(\.id), [.reply(key)],
+                       "New departure leaves the server-ordered normal row in place.")
+    }
+
+    @MainActor
     func testMessageFieldsUseServerViewAndIgnoreMalformedOptionalMembersIndependently() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("field-reader"),

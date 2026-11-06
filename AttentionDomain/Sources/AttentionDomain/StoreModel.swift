@@ -293,6 +293,59 @@ public struct InboxViewEntry: Equatable, Codable, Sendable {
     }
 }
 
+/// One reply reference from the server's current view: which conversation
+/// event it is and the score applied to it, when one was.
+public struct InboxViewReply: Equatable, Codable, Sendable {
+    public let key: RequestKey
+    public let conversationSequence: UInt64
+    public let score: Double?
+
+    public init(key: RequestKey, conversationSequence: UInt64, score: Double? = nil) {
+        self.key = key
+        self.conversationSequence = conversationSequence
+        self.score = score
+    }
+}
+
+public enum InboxViewListItemKind: String, Equatable, Hashable, Codable, Sendable {
+    case message
+    case reply
+}
+
+public enum InboxViewScoreKind: String, Equatable, Hashable, Codable, Sendable {
+    case current
+    case historical
+}
+
+/// One identity in the server-owned mixed order for the normal inbox list.
+/// Reply-only fields stay optional so message references remain small and old
+/// persisted views can be decoded without a migration.
+public struct InboxViewListItem: Equatable, Codable, Sendable {
+    public let kind: InboxViewListItemKind
+    public let key: RequestKey
+    public let conversationSequence: UInt64?
+    public let openAtConversationSequence: UInt64?
+    public let unseenCount: Int?
+    public let score: Double?
+    public let scoreKind: InboxViewScoreKind?
+
+    public init(kind: InboxViewListItemKind,
+                key: RequestKey,
+                conversationSequence: UInt64? = nil,
+                openAtConversationSequence: UInt64? = nil,
+                unseenCount: Int? = nil,
+                score: Double? = nil,
+                scoreKind: InboxViewScoreKind? = nil) {
+        self.kind = kind
+        self.key = key
+        self.conversationSequence = conversationSequence
+        self.openAtConversationSequence = openAtConversationSequence
+        self.unseenCount = unseenCount
+        self.score = score
+        self.scoreKind = scoreKind
+    }
+}
+
 /// The latest fetched server ordering and its opaque revision. It is retained
 /// with the account state so a reconnect can send the revision it already holds.
 public struct InboxView: Equatable, Codable, Sendable {
@@ -300,15 +353,24 @@ public struct InboxView: Equatable, Codable, Sendable {
     public let algorithm: ExactText?
     public let basis: ExactText?
     public let entries: [InboxViewEntry]
+    /// Absent on servers that do not report replies; an optional stored field
+    /// keeps previously persisted views decodable.
+    public let replies: [InboxViewReply]?
+    /// Absent on older servers; an empty array is a supported empty projection.
+    public let listItems: [InboxViewListItem]?
 
     public init(revision: ExactText,
                 algorithm: ExactText? = nil,
                 basis: ExactText? = nil,
-                entries: [InboxViewEntry]) {
+                entries: [InboxViewEntry],
+                replies: [InboxViewReply]? = nil,
+                listItems: [InboxViewListItem]? = nil) {
         self.revision = revision
         self.algorithm = algorithm
         self.basis = basis
         self.entries = entries
+        self.replies = replies
+        self.listItems = listItems
     }
 }
 

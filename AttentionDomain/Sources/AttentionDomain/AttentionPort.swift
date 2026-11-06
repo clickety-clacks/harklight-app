@@ -333,6 +333,11 @@ public struct PresentedRequest: Equatable, Sendable {
     public let inboxDueAtMilliseconds: Int?
     public let inboxReason: ExactText?
     public let hasInboxViewEntry: Bool
+    /// Scores the server's view applies to individual chat replies in this
+    /// request's conversation, keyed by conversation sequence. Unlike the
+    /// row-level view fields these survive resolved lifecycles, because a
+    /// reply item can outlive its parent's open state.
+    public let inboxReplyScores: [UInt64: Double]
     /// Sender-authored fields from the message's current revision.
     public let stakeText: ExactText?
     public let byWhenMilliseconds: Int?
@@ -384,6 +389,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 inboxDueAtMilliseconds: Int? = nil,
                 inboxReason: ExactText? = nil,
                 hasInboxViewEntry: Bool = false,
+                inboxReplyScores: [UInt64: Double] = [:],
                 stakeText: ExactText? = nil,
                 byWhenMilliseconds: Int? = nil,
                 noCommentUnavailable: Bool = false,
@@ -421,6 +427,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.inboxDueAtMilliseconds = inboxDueAtMilliseconds
         self.inboxReason = inboxReason
         self.hasInboxViewEntry = hasInboxViewEntry
+        self.inboxReplyScores = inboxReplyScores
         self.stakeText = stakeText
         self.byWhenMilliseconds = byWhenMilliseconds
         self.noCommentUnavailable = noCommentUnavailable
@@ -471,6 +478,9 @@ public struct PresentationSnapshot: Equatable, Sendable {
     public let replayBarrier: UInt64?
     public let repairIssues: [StoreRepairIssue]
     public let inboxViewBasis: ExactText?
+    /// The optional server-owned mixed order for normal message and reply rows.
+    /// `nil` means the server does not support this projection; `[]` is empty.
+    public let inboxViewListItems: [InboxViewListItem]?
     public let requests: [PresentedRequest]
 
     public var showsBasicOrderMarker: Bool {
@@ -482,12 +492,14 @@ public struct PresentationSnapshot: Equatable, Sendable {
                 replayBarrier: UInt64?,
                 repairIssues: [StoreRepairIssue],
                 inboxViewBasis: ExactText? = nil,
+                inboxViewListItems: [InboxViewListItem]? = nil,
                 requests: [PresentedRequest]) {
         self.revision = revision
         self.cursor = cursor
         self.replayBarrier = replayBarrier
         self.repairIssues = repairIssues
         self.inboxViewBasis = inboxViewBasis
+        self.inboxViewListItems = inboxViewListItems
         self.requests = requests
     }
 }
@@ -543,7 +555,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
             requestRevision: revision, supersedesMessageIDs: stored.supersedesMessageIDs,
             supersededByMessageKeys: snapshot.remoteStates[key]?.supersededByMessageKeys ?? [],
             currentRevisionByWhenMilliseconds: currentRequest.byWhenMilliseconds,
-            inboxViewEntry: inboxViewEntry)
+            inboxViewEntry: inboxViewEntry,
+            inboxReplyScores: Self.replyScores(for: key, in: snapshot.inboxView))
     }
 
     public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) throws {
@@ -563,6 +576,14 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     context suppliedContext: PortContext) throws -> PendingConversationReadPosition? {
         try validate(suppliedContext)
         return try store.markConversationRead(request, context: profileContext)
+    }
+
+    @discardableResult
+    public func markConversationRead(_ request: RequestKey,
+                                     through turnID: ExactText,
+                                     context suppliedContext: PortContext) throws -> PendingConversationReadPosition? {
+        try validate(suppliedContext)
+        return try store.markConversationRead(request, through: turnID, context: profileContext)
     }
 
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws {
@@ -978,7 +999,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                             ? Self.defaultAnswerAction(for: snapshot.remoteStates[item.request.key]?.accountAnswerOutcome,
                                                         interface: currentRevisionRequest.interface(deliveredFileNames: deliveredFileNames))
                             : nil,
-                        inboxViewEntry: inboxViewEntry)
+                        inboxViewEntry: inboxViewEntry,
+                        inboxReplyScores: Self.replyScores(for: item.request.key, in: currentView))
         }
         let displayRequests = requests.sorted { left, right in
             if left.inboxStateIsCurrent != right.inboxStateIsCurrent {
@@ -1033,6 +1055,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     replayBarrier: snapshot.replayBarrier,
                                     repairIssues: snapshot.repairIssues,
                                     inboxViewBasis: snapshot.inboxView?.basis,
+                                    inboxViewListItems: snapshot.inboxView?.listItems,
                                     requests: sourceOrderedRequests)
     }
 
@@ -1063,6 +1086,16 @@ public final class AttentionDomainPort: @unchecked Sendable {
             }
         }
         return result
+    }
+
+    private static func replyScores(for key: RequestKey,
+                                    in view: InboxView?) -> [UInt64: Double] {
+        guard let replies = view?.replies, !replies.isEmpty else { return [:] }
+        var scores: [UInt64: Double] = [:]
+        for reply in replies where reply.key == key {
+            if let score = reply.score { scores[reply.conversationSequence] = score }
+        }
+        return scores
     }
 
     private static func defaultAnswerAction(for outcome: AccountAnswerOutcome?,
@@ -1113,7 +1146,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          supersededByMessageKeys: [RequestKey] = [],
                          currentRevisionByWhenMilliseconds: Int? = nil,
                          defaultAnswerAction: ProjectedActionReference? = nil,
-                         inboxViewEntry: InboxViewEntry? = nil) throws -> PresentedRequest {
+                         inboxViewEntry: InboxViewEntry? = nil,
+                         inboxReplyScores: [UInt64: Double] = [:]) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
@@ -1289,6 +1323,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     ? inboxViewEntry?.reason : nil,
                                 hasInboxViewEntry: (status == .open || status == .pending) &&
                                     inboxViewEntry != nil,
+                                inboxReplyScores: inboxReplyScores,
                                 stakeText: request.stakeText,
                                 byWhenMilliseconds: currentRevisionByWhenMilliseconds,
                                 noCommentUnavailable: hasAccountTerminal ? false : noCommentUnavailable,
@@ -1414,6 +1449,7 @@ private extension PresentationSnapshot {
                              replayBarrier: replayBarrier,
                              repairIssues: repairIssues,
                              inboxViewBasis: inboxViewBasis,
+                             inboxViewListItems: inboxViewListItems,
                              requests: requests.filter { $0.key == key })
     }
 }

@@ -36,6 +36,8 @@ struct ConversationPanel: View {
     let key: RequestKey
     let sender: String
     let title: String
+    /// Scrolls this turn into view when the panel opens from a reply item.
+    var initialScrollTurnID: ExactText? = nil
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     var testConversationSheetDidAppear: (() -> Void)? = nil
@@ -107,6 +109,10 @@ struct ConversationPanel: View {
                                         inspectedFileRevision = fileRevision
                                     })
                                     .id(turn.id)
+                                    .onScrollVisibilityChange(threshold: 0.5) { isVisible in
+                                        guard isVisible, turn.kind == .reply, turn.author == .origin else { return }
+                                        store.markConversationRead(key, through: turn.id)
+                                    }
                             }
                         }.padding(.horizontal)
                     }
@@ -115,8 +121,10 @@ struct ConversationPanel: View {
                     .onChange(of: thread.turns.count) { _, _ in
                         if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
-                    .onChange(of: thread.latestAgentReply?.id, initial: true) { _, _ in
-                        store.markConversationRead(key)
+                    .onChange(of: initialScrollTurnID, initial: true) { _, target in
+                        guard let target,
+                              thread.turns.contains(where: { $0.id == target }) else { return }
+                        proxy.scrollTo(target, anchor: .center)
                     }
                 }
                 if let terminal = thread.terminal {

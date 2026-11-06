@@ -2208,12 +2208,28 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// the ordinary relay cursor. A failed view fetch clears only this cache.
     public func setInboxView(_ view: InboxView?,
                              context suppliedContext: ProfileContext) throws {
+        try replaceInboxView(view, context: suppliedContext, fixture: false)
+    }
+
+    /// Installs a server-style ordering view in an in-memory local fixture.
+    /// Relay profiles must use `setInboxView` with the fetched Server result.
+    public func setFixtureInboxView(_ view: InboxView?,
+                                    context suppliedContext: ProfileContext) throws {
+        guard persistence is MemoryAttentionStatePersistence else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        try replaceInboxView(view, context: suppliedContext, fixture: true)
+    }
+
+    private func replaceInboxView(_ view: InboxView?,
+                                  context suppliedContext: ProfileContext,
+                                  fixture: Bool) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay else {
+        guard suppliedContext.transportMode == (fixture ? .fixture : .relay) else {
             throw AttentionStoreError.fixtureOnlyOperation
         }
         if let view {
@@ -2736,10 +2752,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// The conversation cursor commits in the same account transaction as its fact.
     /// Neither it nor its ACK can advance ordinary delivery/lifecycle replay.
     @discardableResult
-    public func applyConversation(_ event: ConversationEvent, context suppliedContext: ProfileContext) throws -> UInt64 {
+    public func applyConversation(_ event: ConversationEvent,
+                                 context suppliedContext: ProfileContext,
+                                 locallyReceivedAtMilliseconds: UInt64? = nil) throws -> UInt64 {
         var validationRejection: ConversationValidationRejection?
         return try applyConversation(event, context: suppliedContext,
-            validationRejection: &validationRejection)
+            validationRejection: &validationRejection,
+            locallyReceivedAtMilliseconds: locallyReceivedAtMilliseconds)
     }
 
     /// The optional output reports which unchanged validation guard rejected
@@ -2747,7 +2766,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func applyConversation(_ event: ConversationEvent,
                                   context suppliedContext: ProfileContext,
-                                  validationRejection: inout ConversationValidationRejection?) throws -> UInt64 {
+                                  validationRejection: inout ConversationValidationRejection?,
+                                  locallyReceivedAtMilliseconds: UInt64? = nil) throws -> UInt64 {
         validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -2770,7 +2790,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
             validationRejection = error.rejection
             throw ConversationError.invalidBinding
         }
-        if conversation.cursor == state.conversation?.cursor { return conversation.cursor }
+        if conversation.cursor == state.conversation?.cursor {
+            return conversation.cursor
+        }
+        if let locallyReceivedAtMilliseconds,
+           case let .turn(turn) = event.fact,
+           turn.kind == .reply, turn.author == .origin,
+           var thread = conversation.threads[event.binding.request] {
+            var facts = thread.facts[turn.id] ?? ConversationTurnFacts()
+            if facts.localLiveArrivalAtMilliseconds == nil {
+                facts.localLiveArrivalAtMilliseconds = locallyReceivedAtMilliseconds
+                thread.facts[turn.id] = facts
+                conversation.threads[event.binding.request] = thread
+            }
+        }
         let key = event.binding.request
         if case let .attentionTier(_, origin, tier, sessionHandle) = event.fact {
             if let thread = conversation.threads[key], sessionHandle != thread.sessionHandle {
@@ -2857,6 +2890,40 @@ public final class AttentionDomainStore: @unchecked Sendable {
         next.conversation = conversation
         try commit(next)
         return conversation.cursor
+    }
+
+    /// Retains the receive time from a live reply frame when replay already
+    /// committed that reply before the frame's wake was processed.
+    /// Returns false while replay has not reached the signaled sequence yet.
+    @discardableResult
+    public func recordLocalLiveReplyArrival(request: RequestKey,
+                                            turnID: ExactText,
+                                            conversationSequence: UInt64,
+                                            receivedAtMilliseconds: UInt64,
+                                            context suppliedContext: ProfileContext) throws -> Bool {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(request, in: context.identity)
+
+        guard var conversation = state.conversation,
+              conversation.cursor >= conversationSequence else { return false }
+        guard var thread = conversation.threads[request],
+              let turn = thread.turns.first(where: { $0.id == turnID }),
+              turn.kind == .reply, turn.author == .origin,
+              turn.conversationSequence == conversationSequence else { return true }
+
+        var facts = thread.facts[turnID] ?? ConversationTurnFacts()
+        guard facts.localLiveArrivalAtMilliseconds == nil else { return true }
+        facts.localLiveArrivalAtMilliseconds = receivedAtMilliseconds
+        thread.facts[turnID] = facts
+        conversation.threads[request] = thread
+        var next = state
+        next.conversation = conversation
+        try commit(next)
+        return true
     }
 
     /// Persists the conversation sequence for an ignored, well-formed update
@@ -3000,6 +3067,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func markConversationRead(_ request: RequestKey,
                                      context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
+        try markConversationRead(request, through: nil, context: suppliedContext)
+    }
+
+    /// Records that Chat has shown a specific reply, without advancing beyond it.
+    @discardableResult
+    public func markConversationRead(_ request: RequestKey,
+                                     through turnID: ExactText,
+                                     context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
+        try markConversationRead(request, through: Optional(turnID), context: suppliedContext)
+    }
+
+    private func markConversationRead(_ request: RequestKey,
+                                     through requestedTurnID: ExactText?,
+                                     context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -3009,15 +3090,39 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation,
               var thread = conversation.threads[request] else { throw ConversationError.missingRequest }
-        guard let latest = thread.latestAgentReply else { return nil }
-        let shouldCommitLocalRead = thread.readThroughTurn != latest.id
-        thread.readThroughTurn = latest.id
+        let turn: ConversationTurn?
+        if let requestedTurnID {
+            turn = thread.turns.first {
+                $0.id == requestedTurnID && $0.kind == .reply && $0.author == .origin
+            }
+        } else {
+            turn = thread.latestAgentReply
+        }
+        guard let turn else { return nil }
+
+        let targetIndex = thread.turns.firstIndex { $0.id == turn.id }
+        let currentIndex = thread.readThroughTurn.flatMap { readID in
+            thread.turns.firstIndex { $0.id == readID }
+        }
+        let currentPosition = conversation.chatReadPositions?[request] ?? 0
+        let localReadSequence = thread.readThroughTurn.flatMap { readID in
+            thread.turns.first { $0.id == readID }?.conversationSequence
+        } ?? 0
+        let currentReadSequence = max(currentPosition, localReadSequence)
+        let advancesLocalRead: Bool
+        if let sequence = turn.conversationSequence {
+            advancesLocalRead = sequence > currentReadSequence &&
+                targetIndex.map { target in currentIndex.map { target > $0 } ?? true } == true
+        } else {
+            advancesLocalRead = targetIndex.map { target in
+                currentIndex.map { target > $0 } ?? (thread.readThroughTurn != turn.id)
+            } ?? (thread.readThroughTurn != turn.id)
+        }
+        if advancesLocalRead { thread.readThroughTurn = turn.id }
         conversation.threads[request] = thread
         let pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
-            position: latest.conversationSequence ?? 0)
-        if conversation == (state.conversation ?? ConversationState()), !shouldCommitLocalRead {
-            return pending
-        }
+            position: max(turn.conversationSequence ?? 0, currentReadSequence))
+        if conversation == (state.conversation ?? ConversationState()) { return pending }
         next.conversation = conversation
         try commit(next)
         return pending
@@ -3586,7 +3691,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             operationID: turn.operationID,
             files: try turn.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
             contentRedacted: turn.contentRedacted, kind: turn.kind, resultStatus: turn.resultStatus,
-            deliveryAcks: turn.deliveryAcks)
+            conversationSequence: turn.conversationSequence, deliveryAcks: turn.deliveryAcks)
     }
 
     private static func externalizingConversationFiles(in draft: ConversationDraft,

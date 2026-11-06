@@ -65,14 +65,16 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private var postCheckpointEventWaiters: [CheckedContinuation<Data, any Error>] = []
     private var postCheckpointEventSpaceWaiters: [CheckedContinuation<Void, any Error>] = []
     private var postCheckpointReadFailure: (any Error)?
-    // Coalesced: one pending signal covers every entry after the core's cursor.
+    // Coalesced: one pending signal covers later entries after the core's
+    // cursor. Retain compact per-reply arrival facts for every frame in it.
     private var liveConversationSignalled = false
+    private var pendingLiveConversationReplyArrivals: [UInt64: LiveConversationReplyArrival] = [:]
     /// True only while a conversation replay holds the socket exchange gate.
     /// Live conversation frames are routed to readers only then.
     private var conversationReplayReading = false
     // A replay frame waits for the queue to empty, so catch-up holds one frame here.
     private var conversationReplaySpaceWaiters: [CheckedContinuation<Void, any Error>] = []
-    private var liveConversationWaiters: [CheckedContinuation<Void, any Error>] = []
+    private var liveConversationWaiters: [CheckedContinuation<LiveConversationSignal, any Error>] = []
     private let socketExchangeGate = RelaySocketExchangeGate()
     /// Tests read this to check that a replay's catch-up stays bounded.
     var queuedResponseFrameCount: Int { responseFrames.count }
@@ -695,13 +697,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         urlSession.invalidateAndCancel()
     }
 
-    public func nextLiveConversationSignal() async throws {
+    public func nextLiveConversationSignal() async throws -> LiveConversationSignal {
         if liveConversationSignalled {
             liveConversationSignalled = false
-            return
+            return LiveConversationSignal(replyArrivals: takeLiveConversationReplyArrivals())
         }
         if let postCheckpointReadFailure { throw postCheckpointReadFailure }
-        try await withCheckedThrowingContinuation { continuation in
+        return try await withCheckedThrowingContinuation { continuation in
             liveConversationWaiters.append(continuation)
         }
     }
@@ -849,7 +851,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 let frame = try await receiveTaskFrame()
                 let kind = Self.frameType(frame)
                 if kind == "conversation" {
-                    signalLiveConversation()
+                    signalLiveConversation(for: frame)
                     // Outside a conversation replay no reader wants this frame,
                     // and another exchange would treat it as fatal. The server
                     // keeps it in the conversation journal, so the replay the
@@ -925,12 +927,37 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         waiters.forEach { $0.resume() }
     }
 
-    private func signalLiveConversation() {
+    private func signalLiveConversation(for frame: Data) {
+        let replyArrival: LiveConversationReplyArrival?
+        if !conversationReplayReading,
+           let wire = try? ConversationWire(profile: profileContext, endpointHost: relayEndpointHost),
+           let update = try? wire.decodeUpdate(frame),
+           case let .event(event) = update,
+           let arrival = LiveConversationReplyArrival(
+                event: event,
+                receivedAtMilliseconds: UInt64(max(0, Date().timeIntervalSince1970 * 1_000))) {
+            replyArrival = arrival
+        } else {
+            replyArrival = nil
+        }
+        if let replyArrival,
+           pendingLiveConversationReplyArrivals[replyArrival.conversationSequence] == nil {
+            pendingLiveConversationReplyArrivals[replyArrival.conversationSequence] = replyArrival
+        }
         if liveConversationWaiters.isEmpty {
             liveConversationSignalled = true
         } else {
-            liveConversationWaiters.removeFirst().resume()
+            let signal = LiveConversationSignal(replyArrivals: takeLiveConversationReplyArrivals())
+            liveConversationWaiters.removeFirst().resume(returning: signal)
         }
+    }
+
+    private func takeLiveConversationReplyArrivals() -> [LiveConversationReplyArrival] {
+        let arrivals = pendingLiveConversationReplyArrivals.values.sorted {
+            $0.conversationSequence < $1.conversationSequence
+        }
+        pendingLiveConversationReplyArrivals.removeAll(keepingCapacity: true)
+        return arrivals
     }
 
     private static func frameType(_ frame: Data) -> String? {

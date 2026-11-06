@@ -612,11 +612,48 @@ struct LiveContentView: View {
                 fixtureStore?.refreshFromDurableStore()
             }
             .onChange(of: scenePhase) { _, phase in
+                if phase == .active { refreshRetractionVisibilityForSceneActivation() }
                 if phase == .background { store.flushPendingDrafts() }
             }
             .onPreferenceChange(ReplyEditorFocusKey.self) { replyEditorFocused = $0 }
             .onAppear { applyPresentationTestFixtureIfNeeded() }
+            .task(id: store.nextRetractionExpiry) {
+                await store.waitForNextRetractionExpiry()
+            }
+#if DEBUG
+            .overlay(alignment: .top) {
+                let arguments = ProcessInfo.processInfo.arguments
+                if arguments.contains("--harklight-test-server-retraction") ||
+                    arguments.contains("--harklight-test-retraction-expiry-after-deadline") {
+                    VStack(spacing: 8) {
+                        if let status = fixtureStore?.serverRetractionTestStatus {
+                            Text(status)
+                                .font(.caption)
+                                .accessibilityIdentifier("server-retraction-persistence-readback")
+                        }
+                        if arguments.contains("--harklight-test-server-retraction") {
+                            Button("Advance retraction expiry clock") {
+                                store.advanceRetractionExpiryForTesting()
+                            }
+                            .accessibilityIdentifier("advance-server-retraction-expiry")
+                        }
+                    }
+                    .padding(8)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+            }
+#endif
         }
+    }
+
+    private func refreshRetractionVisibilityForSceneActivation() {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-retraction-expiry-after-deadline") {
+            return
+        }
+#endif
+        store.refreshRetractionVisibility()
     }
 
 #if DEBUG
@@ -972,6 +1009,7 @@ struct LiveRequestDetail: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @State private var chatPresented = false
+    @State private var pendingChatScrollTarget: ExactText?
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
@@ -1883,7 +1921,7 @@ struct LiveRequestDetail: View {
             .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                              testOpen: testOpenForegroundChatIndicator)
         }
-        .sheet(isPresented: $chatPresented) {
+        .sheet(isPresented: $chatPresented, onDismiss: { pendingChatScrollTarget = nil }) {
             conversationPanel
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
@@ -1893,6 +1931,8 @@ struct LiveRequestDetail: View {
         }
         .onChange(of: context.notificationChatRouteSerial, initial: true) { _, serial in
             guard serial != nil else { return }
+            // Capture the scroll target before didOpen, which may clear the route.
+            pendingChatScrollTarget = context.chatScrollTargetTurnID
             if !context.inlineChat { chatPresented = true }
             context.notificationChatRouteDidOpen?()
         }
@@ -2103,6 +2143,7 @@ struct LiveRequestDetail: View {
     private var conversationPanel: some View {
         ConversationPanel(store: store, key: request.key,
             sender: detailSenderLabel, title: request.title?.rawValue ?? "",
+            initialScrollTurnID: pendingChatScrollTarget,
             testNotificationRouter: testNotificationRouter,
             testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
             testConversationSheetDidAppear: testConversationSheetDidAppear)

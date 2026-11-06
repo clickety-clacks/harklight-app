@@ -349,6 +349,7 @@ final class ConversationPresentationTests: XCTestCase {
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[request])
         XCTAssertEqual(thread.currentRevision, 1)
         XCTAssertEqual(thread.turns.first?.id, turn.id)
+        XCTAssertEqual(thread.turns.first?.conversationSequence, 2)
         XCTAssertEqual(thread.turns.first?.binding, binding)
         XCTAssertEqual(thread.turns.first?.files.first?.id, inline.id)
         XCTAssertEqual(thread.turns.first?.files.first?.content, savedFile.content)

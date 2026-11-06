@@ -12,6 +12,7 @@ struct InboxListColumnCaptureHost: View {
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
     @State private var newMessageAreaStore: NewMessageAreaStore
+    @State private var replyItemAreaStore: ReplyItemAreaStore?
     private let captureState: InboxListColumnCaptureFixture.State
     private let sampleFixture: SampleFixtureDomain
     private let rows: [InboxItem]
@@ -39,11 +40,12 @@ struct InboxListColumnCaptureHost: View {
         rows = fixture.rows.map(InboxItem.request)
         _selected = State(initialValue: fixture.selected)
         _newMessageAreaStore = State(initialValue: fixture.newMessageAreaStore)
+        _replyItemAreaStore = State(initialValue: fixture.replyItemAreaStore)
     }
 
     @ViewBuilder
     var body: some View {
-        if captureState == .fullWidthHigh {
+        if captureState == .fullWidthHigh || captureState == .replyItemFullWidth {
             NavigationStack {
                 productionInboxList
                     .navigationDestination(for: InboxSelection.self) { selection in
@@ -119,7 +121,10 @@ struct InboxListColumnCaptureHost: View {
             tab: .inbox,
             rows: rows,
             warnings: [],
+            conversationStore: sampleFixture.viewModel,
             newMessageAreaStore: newMessageAreaStore,
+            replyItemAreaStore: replyItemAreaStore,
+            openReplyItem: { _, _, _ in },
             isWarningPresented: $isWarningPresented,
             selected: $selected,
             workspaceTab: $workspaceTab,
@@ -155,12 +160,15 @@ private enum InboxListColumnCaptureFixture {
         case selectedPlainAndUnselectedComparison
         case acceptedNewMessage
         case fullWidthHigh
+        case replyItem
+        case replyItemFullWidth
     }
 
     struct Contents {
         let rows: [InboxRequestRow]
         let selected: InboxSelection?
         let newMessageAreaStore: NewMessageAreaStore
+        let replyItemAreaStore: ReplyItemAreaStore?
     }
 
     static func make(for state: State, sampleFixture: SampleFixtureDomain) -> Contents {
@@ -180,14 +188,35 @@ private enum InboxListColumnCaptureFixture {
         let store = NewMessageAreaStore(defaults: defaults,
                                         defaultsKey: "selected-row-capture-new-message-area")
         let now = Date()
+        let isReplyState = state == .replyItem || state == .replyItemFullWidth
         let accountScopes = Set([plainRow, highRow, unselectedRow, newMessageRow].map(\.key.accountScope))
-        store.reconcile([], revisions: [:], accountScopes: accountScopes, now: now)
-        if state == .acceptedNewMessage {
+        store.reconcile([], revisions: [:], accountScopes: accountScopes, now: now.addingTimeInterval(-120))
+        if state == .acceptedNewMessage || isReplyState {
             store.reconcile([
                 NewMessageAreaMessage(key: newMessageRow.key, acceptanceOrder: 1,
                                       isResolved: false, hasSubmittedAnswer: false)
             ], revisions: [newMessageRow.key: newMessageRow.requestRevision],
-               accountScopes: accountScopes, now: now)
+               accountScopes: accountScopes, now: now.addingTimeInterval(-60))
+        }
+
+        var replyItemAreaStore: ReplyItemAreaStore?
+        var replyParentRow = newMessageRow
+        if isReplyState {
+            replyParentRow.inboxReplyScores = [5: 0.93, 6: 0.4]
+            let replyStore = ReplyItemAreaStore(defaults: defaults,
+                                                defaultsKey: "capture-reply-item-area")
+            replyStore.reconcile([], accountScopes: accountScopes, now: now.addingTimeInterval(-120))
+            replyStore.reconcile([
+                ReplyItemObservation(parent: replyParentRow.key,
+                                     turnID: ExactText("capture-reply-earliest"),
+                                     conversationSequence: 5, isSeen: false,
+                                     text: "Earliest unseen chat reply: the middle section of the draft now reads better."),
+                ReplyItemObservation(parent: replyParentRow.key,
+                                     turnID: ExactText("capture-reply-newest"),
+                                     conversationSequence: 6, isSeen: false,
+                                     text: "Newest unseen chat reply: the revised draft tightens the opening, keeps the middle section's new ordering, and closes with the shorter summary we discussed, so the whole note should now fit on one screen.")
+            ], accountScopes: accountScopes, now: now)
+            replyItemAreaStore = replyStore
         }
 
         let rows: [InboxRequestRow]
@@ -205,10 +234,14 @@ private enum InboxListColumnCaptureFixture {
         case .fullWidthHigh:
             rows = [highRow, unselectedRow]
             selected = nil
+        case .replyItem, .replyItemFullWidth:
+            rows = [replyParentRow]
+            selected = nil
         }
 
         return Contents(rows: rows, selected: selected,
-                        newMessageAreaStore: store)
+                        newMessageAreaStore: store,
+                        replyItemAreaStore: replyItemAreaStore)
     }
 
     private static func row(_ messageID: String,

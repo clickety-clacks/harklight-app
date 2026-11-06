@@ -1594,7 +1594,11 @@ final class NativeGuidedTLSTests: XCTestCase {
                            kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
         }
         let live: @Sendable (Int) -> String = { seq in
-            "{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(seq)}\n"
+            "{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(seq),"
+                + "\"sender_id\":\"author\",\"message_id\":\"request\",\"origin\":\"origin\","
+                + "\"session_handle\":\"handle\",\"request_revision\":1,\"kind\":\"reply\","
+                + "\"author\":\"origin\",\"event_id\":\"reply-\(seq)\","
+                + "\"in_reply_to\":\"discussion\",\"text\":\"Live reply\"}\n"
         }
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
             if text.contains("\"inbox_attach\"") {
@@ -1626,18 +1630,25 @@ final class NativeGuidedTLSTests: XCTestCase {
                                             ref: "attach") { _ in }
         // A live reply while nothing is reading the socket signals the core
         // without leaving a frame for the next exchange to read.
-        try await session.nextLiveConversationSignal()
+        let firstLiveSignal = try await session.nextLiveConversationSignal()
+        XCTAssertEqual(firstLiveSignal.replyArrivals.map(\.conversationSequence), [5])
+        XCTAssertGreaterThan(try XCTUnwrap(firstLiveSignal.replyArrivals.first?.receivedAtMilliseconds), 0)
         // A live reply while an inbox page is pending does not reach the page reader.
         let page = try await session.inboxRequest(Data("{\"v\":1,\"type\":\"inbox_page\",\"ref\":\"page\"}\n".utf8),
                                                   ref: "page")
         XCTAssertEqual(try JSONValue.parse(page).uniqueValue(named: "ref")?.stringValue?.rawValue, "page")
-        try await session.nextLiveConversationSignal()
+        let secondLiveSignal = try await session.nextLiveConversationSignal()
+        XCTAssertEqual(secondLiveSignal.replyArrivals.map(\.conversationSequence), [6])
+        XCTAssertGreaterThan(try XCTUnwrap(secondLiveSignal.replyArrivals.first?.receivedAtMilliseconds), 0)
         // The replay the signal starts reads both replies from the durable cursor.
         let frames = ConversationFrameCollector()
         try await session.openConversation(
             Data("{\"v\":1,\"type\":\"conversation_sync\",\"ref\":\"native-conversation-sync\"}\n".utf8)
         ) { frames.append($0) }
         XCTAssertEqual(frames.types, ["ok", "conversation", "conversation", "conversation_resynced"])
+        let replaySignal = try await session.nextLiveConversationSignal()
+        XCTAssertTrue(replaySignal.replyArrivals.isEmpty,
+                      "Conversation-sync history frames do not become live-arrival receipts.")
         await session.close()
     }
 

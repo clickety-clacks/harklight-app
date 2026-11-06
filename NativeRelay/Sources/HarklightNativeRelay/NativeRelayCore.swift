@@ -50,11 +50,38 @@ public extension AuthenticatedConversationSession {
     }
 }
 
+/// A post-checkpoint signal asks the core to replay from its durable cursor.
+/// It includes every origin reply received since the last signal was consumed,
+/// so replayed backlog cannot borrow a later fetch time.
+public struct LiveConversationReplyArrival: Equatable, Sendable {
+    public let conversationSequence: UInt64
+    public let request: RequestKey
+    public let turnID: ExactText
+    public let receivedAtMilliseconds: UInt64
+
+    public init?(event: ConversationEvent, receivedAtMilliseconds: UInt64) {
+        guard case let .turn(turn) = event.fact,
+              turn.kind == .reply, turn.author == .origin else { return nil }
+        conversationSequence = event.sequence
+        request = event.binding.request
+        turnID = turn.id
+        self.receivedAtMilliseconds = receivedAtMilliseconds
+    }
+}
+
+public struct LiveConversationSignal: Equatable, Sendable {
+    public let replyArrivals: [LiveConversationReplyArrival]
+
+    public init(replyArrivals: [LiveConversationReplyArrival]) {
+        self.replyArrivals = replyArrivals
+    }
+}
+
 /// After the projection is opened, the relay pushes new conversation entries
-/// on the same connection. The transport only reports that one arrived; the
-/// core then replays from its durable conversation cursor and ACKs.
+/// on the same connection. The transport preserves the exact live reply event
+/// and its receive time while the core replays and ACKs from its durable cursor.
 public protocol AuthenticatedConversationEventSession: AuthenticatedConversationSession {
-    func nextLiveConversationSignal() async throws
+    func nextLiveConversationSignal() async throws -> LiveConversationSignal
 }
 
 public protocol AuthenticatedConversationFileSession: AuthenticatedConversationSession {
@@ -135,6 +162,7 @@ public actor NativeRelayCore {
     // A core owns one authenticated connection; a new connection probes again.
     public private(set) var conversationsUnavailable = false
     private var conversationReplay: ConversationReplayProgress?
+    private var pendingLiveReplyArrivals: [UInt64: LiveConversationReplyArrival] = [:]
     // A failed receipt must not refetch full history on every later replay on
     // this connection. Keep attempts for the core's lifetime, without storing
     // rejection records or changing the durable conversation cursor.
@@ -1467,17 +1495,20 @@ public actor NativeRelayCore {
         do {
             var high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
                 using: transport, wire: wire)
+            flushCommittedLiveReplyArrivals()
             do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
             catch InstallationTransportError.acknowledgementBehind {
                 diagnose(.conversation, .acknowledgement, .retrying,
                          error: InstallationTransportError.acknowledgementBehind)
                 high = try await replayConversation(since: 0, using: transport, wire: wire)
+                flushCommittedLiveReplyArrivals()
                 try await transport.acknowledgeConversation(wire.acknowledge(high))
             }
             if drainReadPositions,
                try await sendPendingConversationReadPositions(using: transport) {
                 high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
                     using: transport, wire: wire)
+                flushCommittedLiveReplyArrivals()
                 try await transport.acknowledgeConversation(wire.acknowledge(high))
             }
             diagnose(.conversation, .acknowledgement, .completed)
@@ -1571,9 +1602,46 @@ public actor NativeRelayCore {
 
     private func consumeLiveConversationSignals(from events: any AuthenticatedConversationEventSession) async {
         while !Task.isCancelled {
-            do { try await events.nextLiveConversationSignal() }
+            let signal: LiveConversationSignal
+            do { signal = try await events.nextLiveConversationSignal() }
             catch { return }
+            for arrival in signal.replyArrivals {
+                retainLiveReplyArrival(arrival)
+            }
             await replayLiveConversation()
+        }
+    }
+
+    private func retainLiveReplyArrival(_ arrival: LiveConversationReplyArrival) {
+        if pendingLiveReplyArrivals[arrival.conversationSequence] == nil {
+            pendingLiveReplyArrivals[arrival.conversationSequence] = arrival
+        }
+        flushCommittedLiveReplyArrivals()
+    }
+
+    private func flushCommittedLiveReplyArrivals() {
+        let cursor: UInt64
+        do {
+            cursor = try store.conversationSnapshot(context: context).cursor
+        } catch {
+            diagnose(.conversation, .conversationReplay,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            return
+        }
+        for sequence in pendingLiveReplyArrivals.keys.sorted() where sequence <= cursor {
+            guard let arrival = pendingLiveReplyArrivals[sequence] else { continue }
+            do {
+                let isResolved = try store.recordLocalLiveReplyArrival(
+                    request: arrival.request, turnID: arrival.turnID,
+                    conversationSequence: arrival.conversationSequence,
+                    receivedAtMilliseconds: arrival.receivedAtMilliseconds,
+                    context: context)
+                if isResolved { pendingLiveReplyArrivals.removeValue(forKey: sequence) }
+            } catch {
+                diagnose(.conversation, .conversationReplay,
+                         NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                         conversationSequence: sequence)
+            }
         }
     }
 
@@ -1592,6 +1660,7 @@ public actor NativeRelayCore {
         // A failure leaves the durable cursor unchanged; the next live entry,
         // foreground or push resync replays from it.
         try? await replayConversationAndAcknowledge(using: transport)
+        flushCommittedLiveReplyArrivals()
     }
 
     private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,
@@ -1754,8 +1823,27 @@ public actor NativeRelayCore {
                 }
                 var validationRejection: ConversationValidationRejection?
                 do {
+                    let liveArrival = pendingLiveReplyArrivals[event.sequence]
+                    let locallyReceivedAtMilliseconds: UInt64?
+                    if case let .turn(turn) = event.fact,
+                       turn.kind == .reply, turn.author == .origin,
+                       liveArrival?.request == event.binding.request,
+                       liveArrival?.turnID == turn.id {
+                        locallyReceivedAtMilliseconds = liveArrival?.receivedAtMilliseconds
+                    } else {
+                        locallyReceivedAtMilliseconds = nil
+                    }
                     _ = try store.applyConversation(event, context: context,
-                        validationRejection: &validationRejection)
+                        validationRejection: &validationRejection,
+                        locallyReceivedAtMilliseconds: locallyReceivedAtMilliseconds)
+                    if let liveArrival,
+                       try store.recordLocalLiveReplyArrival(
+                           request: liveArrival.request, turnID: liveArrival.turnID,
+                           conversationSequence: liveArrival.conversationSequence,
+                           receivedAtMilliseconds: liveArrival.receivedAtMilliseconds,
+                           context: context) {
+                        pendingLiveReplyArrivals.removeValue(forKey: event.sequence)
+                    }
                 } catch {
                     guard isUnusableConversationMessage(error) else { throw error }
                     if let validationRejection,
