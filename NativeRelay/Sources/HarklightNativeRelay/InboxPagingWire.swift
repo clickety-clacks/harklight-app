@@ -119,9 +119,12 @@ public struct InboxPagingWire: Sendable {
             return .unavailable
         }
         let listItems: [InboxViewListItem]?
+        var freeOrderVersion = value.uniqueValue(named: "free_order_version")?.integerValue
         if let rawListItems = value.uniqueValue(named: "list_items") {
             guard let array = rawListItems.arrayValues else { return .unavailable }
             listItems = decodeViewListItems(array)
+            // A partially decoded sequence cannot establish a complete Free view.
+            if listItems?.count != array.count { freeOrderVersion = nil }
         } else {
             listItems = nil
         }
@@ -152,7 +155,8 @@ public struct InboxPagingWire: Sendable {
                                   basis: text(value, "basis").map(ExactText.init),
                                   entries: entries,
                                   replies: decodeViewReplies(value),
-                                  listItems: listItems))
+                                  listItems: listItems,
+                                  freeOrderVersion: freeOrderVersion))
     }
 
     /// Reply references are additive view data: a server without them sends no
@@ -202,7 +206,8 @@ public struct InboxPagingWire: Sendable {
             switch kind {
             case .message:
                 guard seen.insert(identity).inserted else { continue }
-                items.append(InboxViewListItem(kind: .message, key: key))
+                items.append(InboxViewListItem(kind: .message, key: key,
+                                               freeSection: decodeFreeSection(raw)))
             case .reply:
                 guard let sequenceValue = raw.uniqueValue(named: "conversation_seq")?.integerValue,
                       let sequence = UInt64(exactly: sequenceValue),
@@ -227,10 +232,21 @@ public struct InboxPagingWire: Sendable {
                     openAtConversationSequence: openSequence,
                     unseenCount: unseenCount,
                     score: scoreKind == nil ? nil : score,
-                    scoreKind: scoreKind))
+                    scoreKind: scoreKind,
+                    freeSection: decodeFreeSection(raw)))
             }
         }
         return items
+    }
+
+    private func decodeFreeSection(_ item: JSONValue) -> InboxFreeSection? {
+        guard let section = item.uniqueValue(named: "free_section"),
+              case .object = section, section.hasUniqueObjectKeys,
+              let stateText = text(section, "state"),
+              let state = InboxFreeSection.State(rawValue: stateText),
+              let groupText = text(section, "group"),
+              let group = InboxFreeSection.Group(rawValue: groupText) else { return nil }
+        return InboxFreeSection(state: state, group: group)
     }
 
     private struct ReplyIdentity: Hashable {

@@ -160,7 +160,7 @@ struct InboxNotificationDestination: Equatable {
     let workspaceTab: InboxWorkspaceTab
     let search = ""
 
-    init(route: NativeInboxNavigation, rows: [InboxItem]) {
+    init(route: NativeInboxNavigation, rows: [InboxItem], usesFreeOrder: Bool = false) {
         guard let key = route.request else {
             selection = nil
             selectedTab = .inbox
@@ -169,7 +169,7 @@ struct InboxNotificationDestination: Equatable {
         }
 
         let selection = InboxSelection.request(key)
-        let isReplied = rows.first(where: { $0.id == selection })?.belongsToReplied == true
+        let isReplied = !usesFreeOrder && rows.first(where: { $0.id == selection })?.belongsToReplied == true
         let messageTab: InboxMessageTab = isReplied ? .replied : .inbox
         self.selection = selection
         selectedTab = messageTab
@@ -438,10 +438,23 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private var orderedIDs: [InboxSelection] { rows.map(\.id) }
+    private var usesFreeOrder: Bool {
+        InboxFreeOrder.isSupported(version: conversationStore?.presentation.inboxFreeOrderVersion,
+                                   items: conversationStore?.presentation.inboxViewListItems)
+    }
     private var cardNavigationIDs: [InboxSelection] {
         // A Seen or answered card may leave this tab while it remains open.
         guard !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return orderedIDs
+        }
+        if usesFreeOrder, workspaceTab == .inbox {
+            return InboxNormalListProjection.entries(rows: rows,
+                serverItems: conversationStore?.presentation.inboxViewListItems,
+                freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
+                in: .inbox, search: search).flatMap { entry -> [InboxSelection] in
+                    guard case let .message(message) = entry else { return [] }
+                    return message.members.map(\.id)
+                }
         }
         return InboxListProjection.filteredRows(rows, in: workspaceTab,
             search: search).map(\.id)
@@ -805,7 +818,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 settings = false
                 // Notification routing changes presentation only. Keep it out
                 // of ordinary navigation cleanup so a tap cannot mutate the domain.
-                let destination = InboxNotificationDestination(route: route, rows: rows)
+                let destination = InboxNotificationDestination(route: route, rows: rows,
+                                                               usesFreeOrder: usesFreeOrder)
                 workspaceTab = destination.workspaceTab
                 selectedTab = destination.selectedTab
                 search = destination.search
@@ -993,13 +1007,34 @@ struct InboxList: View {
     }
 
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
-        InboxListProjection.filteredRows(rows, in: tab, search: search)
+        if showsFreeOrder {
+            return normalListEntries.flatMap { entry -> [InboxItem] in
+                guard case let .message(message) = entry else { return [] }
+                return message.members
+            }
+        }
+        return InboxListProjection.filteredRows(rows, in: tab, search: search)
+    }
+
+    private var showsFreeOrder: Bool {
+        tab == .inbox && InboxFreeOrder.isSupported(
+            version: conversationStore?.presentation.inboxFreeOrderVersion,
+            items: conversationStore?.presentation.inboxViewListItems)
+    }
+
+    private var freeHistoryIDs: Set<InboxNormalListDisplayEntry.ID> {
+        guard showsFreeOrder else { return [] }
+        return Set((conversationStore?.presentation.inboxViewListItems ?? []).compactMap { item in
+            guard item.freeSection?.state == .history else { return nil }
+            return item.kind == .reply ? .reply(item.key) : .message(.row(.request(item.key)))
+        })
     }
 
     private var normalListEntries: [InboxNormalListDisplayEntry] {
         InboxNormalListProjection.entries(
             rows: rows,
             serverItems: conversationStore?.presentation.inboxViewListItems,
+            freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
             in: tab,
             search: search)
     }
@@ -1361,13 +1396,33 @@ struct InboxList: View {
     /// can keep its old visible range and draw none of the matching rows, so a
     /// filter change starts the list again at its first row.
     private func showFirstRow(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
+        if showsFreeOrder {
+            for entry in normalListEntries {
+                switch entry {
+                case .heading: continue
+                case let .reply(reference):
+                    proxy.scrollTo(InboxListRowScrollTarget(tab: tab,
+                        selection: .request(reference.key), placement: .normalReplyItem), anchor: .top)
+                case let .message(message):
+                    let first = message.members[0]
+                    expandThreadContaining(first.id, in: tab)
+                    proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: first.id), anchor: .top)
+                }
+                return
+            }
+            return
+        }
         guard let first = filteredRows(in: tab).first else { return }
         expandThreadContaining(first.id, in: tab)
         proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: first.id), anchor: .top)
     }
 
     private func expandThreadContaining(_ selection: InboxSelection, in tab: InboxWorkspaceTab) {
-        guard let group = InboxListProjection.visibleEntries(rows, in: tab, search: search)
+        let entries: [InboxListEntry] = showsFreeOrder ? normalListEntries.compactMap {
+            guard case let .message(message) = $0 else { return nil }
+            return message
+        } : InboxListProjection.visibleEntries(rows, in: tab, search: search)
+        guard let group = entries
             .first(where: { entry in
                 guard case .thread = entry else { return false }
                 return entry.members.contains { $0.id == selection }
@@ -1593,6 +1648,22 @@ struct InboxList: View {
                                in tab: InboxWorkspaceTab,
                                using proxy: ScrollViewProxy) -> some View {
         switch entry {
+        case let .heading(heading):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(heading.title)
+                    .font(.caption.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                if let explanation = heading.explanation {
+                    Text(explanation).font(.caption)
+                }
+            }
+            .foregroundStyle(designPalette.neutral.secondaryTextColor)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(designPalette.neutral.backgroundColor)
         case let .message(messageEntry):
             switch messageEntry {
             case let .row(row):
@@ -1622,6 +1693,7 @@ struct InboxList: View {
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
         let normalEntries = normalListEntries
+        let historyIDs = freeHistoryIDs
         let historyRows = matchingExpiredRetractionRows
         let areaRows = combinedNewMessageAreaRows
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
@@ -1660,7 +1732,7 @@ struct InboxList: View {
                 }
                 .listSectionMargins(.vertical, 0)
             }
-            if tab == .inbox && showsBasicOrderMarker {
+            if tab == .inbox && showsBasicOrderMarker && !showsFreeOrder {
                 Text("Basic order")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(designPalette.neutral.secondaryTextColor)
@@ -1670,6 +1742,7 @@ struct InboxList: View {
             }
             ForEach(normalEntries) { entry in
                 normalListRow(entry, in: tab, using: proxy)
+                    .opacity(historyIDs.contains(entry.id) ? 0.7 : 1)
             }
             if !historyRows.isEmpty {
                 Section {

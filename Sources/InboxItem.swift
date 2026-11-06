@@ -204,19 +204,51 @@ enum InboxThreadListProjection {
     }
 }
 
+struct InboxFreeHeading: Hashable {
+    enum Kind: Hashable {
+        case history, earlierActivity, earlierMessages, earlierChatReplies, unknownOrder
+    }
+
+    let state: InboxFreeSection.State
+    let kind: Kind
+
+    var title: String {
+        switch kind {
+        case .history: String(localized: "History")
+        case .earlierActivity: String(localized: "Earlier activity")
+        case .earlierMessages: String(localized: "Earlier messages")
+        case .earlierChatReplies: String(localized: "Earlier chat replies")
+        case .unknownOrder: String(localized: "Arrival order unavailable")
+        }
+    }
+
+    var explanation: String? {
+        switch kind {
+        case .earlierActivity:
+            String(localized: "Earlier messages and chat replies are grouped separately; their combined arrival order is unavailable.")
+        case .unknownOrder:
+            String(localized: "These chat replies have no verified arrival order. Their position here does not mean they are older than the replies above.")
+        default: nil
+        }
+    }
+}
+
 enum InboxNormalListDisplayEntry: Identifiable {
     case message(InboxListEntry)
     case reply(InboxViewListItem)
+    case heading(InboxFreeHeading)
 
     enum ID: Hashable {
         case message(InboxListEntryID)
         case reply(RequestKey)
+        case heading(InboxFreeHeading)
     }
 
     var id: ID {
         switch self {
         case let .message(entry): .message(entry.id)
         case let .reply(item): .reply(item.key)
+        case let .heading(heading): .heading(heading)
         }
     }
 }
@@ -229,6 +261,7 @@ enum InboxNormalListProjection {
     /// while it also appears in the compact New area.
     static func entries(rows: [InboxItem],
                         serverItems: [InboxViewListItem]?,
+                        freeOrderVersion: Int? = nil,
                         in tab: InboxWorkspaceTab,
                         search: String) -> [InboxNormalListDisplayEntry] {
         guard let serverItems else {
@@ -248,29 +281,61 @@ enum InboxNormalListProjection {
         }
 
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isFree = tab == .inbox && InboxFreeOrder.isSupported(
+            version: freeOrderVersion, items: serverItems)
         var result: [InboxNormalListDisplayEntry] = []
         var pendingMessages: [InboxItem] = []
+        var currentSection: InboxFreeSection?
+        var headings = Set<InboxFreeHeading>()
 
         func flushMessages() {
             guard !pendingMessages.isEmpty else { return }
-            result.append(contentsOf: InboxThreadListProjection.grouped(pendingMessages).map {
+            let entries = isFree && currentSection?.state == .history
+                ? pendingMessages.map { InboxListEntry.row($0) }
+                : InboxThreadListProjection.grouped(pendingMessages)
+            result.append(contentsOf: entries.map {
                 .message($0)
             })
             pendingMessages.removeAll(keepingCapacity: true)
+        }
+
+        func enterSection(_ section: InboxFreeSection?) {
+            guard isFree, let section, section != currentSection else { return }
+            flushMessages()
+            currentSection = section
+            func heading(_ kind: InboxFreeHeading.Kind) {
+                let heading = InboxFreeHeading(state: section.state, kind: kind)
+                if headings.insert(heading).inserted { result.append(.heading(heading)) }
+            }
+            if section.state == .history { heading(.history) }
+            if section.group != .common { heading(.earlierActivity) }
+            switch section.group {
+            case .common: break
+            case .earlierMessages: heading(.earlierMessages)
+            case .earlierChatReplies: heading(.earlierChatReplies)
+            case .earlierChatRepliesUnknown:
+                heading(.earlierChatReplies)
+                heading(.unknownOrder)
+            }
         }
 
         for item in serverItems {
             switch item.kind {
             case .message:
                 guard let row = rowsByKey[item.key],
-                      row.belongsToReplied == (tab.messageTab == .replied),
-                      query.isEmpty || InboxItem.request(row).matchesSearch(query) else { continue }
+                      isFree || row.belongsToReplied == (tab.messageTab == .replied),
+                      query.isEmpty || InboxItem.request(row).matchesSearch(query) else {
+                    flushMessages()
+                    continue
+                }
+                enterSection(item.freeSection)
                 pendingMessages.append(.request(row))
             case .reply:
                 flushMessages()
                 guard let unseenCount = item.unseenCount,
-                      (unseenCount == 0 ? tab == .replied : tab == .inbox),
+                      isFree || (unseenCount == 0 ? tab == .replied : tab == .inbox),
                       matchesReplySearch(item, query: query, rowsByKey: rowsByKey) else { continue }
+                enterSection(item.freeSection)
                 result.append(.reply(item))
             }
         }
