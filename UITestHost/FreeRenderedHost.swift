@@ -21,7 +21,7 @@ struct FreeRenderedHost: View {
 
     var body: some View {
         LiveContentView(store: fixture.viewModel, samples: samples)
-            .safeAreaInset(edge: .bottom) {
+            .safeAreaInset(edge: .top) {
                 Text(fixture.phase)
                     .font(.caption2)
                     .frame(maxWidth: .infinity)
@@ -69,6 +69,9 @@ private final class FreeRenderedFixture {
             try addMessage("newer", title: "Generated newer parent")
             try setCapturedView("free-active")
         }
+        // Generated replay completion advertises the existing read-position
+        // capability. Local visibility can then queue its real read operation.
+        try domain.finishConversationReplay(at: sequence, chatReadPositions: [], context: context)
         try viewModel.refreshFromDurableStore()
     }
 
@@ -115,7 +118,8 @@ private final class FreeRenderedFixture {
             fact: .availability(sessionHandle: handle, .listening)), context: context)
         if seen {
             sequence += 1
-            try domain.applyConversation(ConversationEvent(sequence: sequence, binding: binding,
+            try domain.applyConversation(ConversationEvent(sequence: sequence,
+                binding: ConversationBinding(request: key(id), revision: 0),
                 fact: .readPosition(eventID: ExactText("generated-read-\(id)"),
                                     readThroughConversationSequence: replySequence)), context: context)
         }
