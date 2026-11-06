@@ -825,7 +825,8 @@ private struct ConversationTurnView: View {
                 }
             }.font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             if let replyContext {
-                Text("Replying to: " + replyContext).lineLimit(2).font(.caption2).foregroundStyle(.secondary)
+                Text(MessageMarkdown.attributed(replyContext, prefixedBy: "Replying to: "))
+                    .lineLimit(2).font(.caption2).foregroundStyle(.secondary)
             }
             if turn.contentRedacted == true {
                 Text("Person-authored content is not included in this device projection.")
@@ -836,7 +837,9 @@ private struct ConversationTurnView: View {
                 if let status = turn.resultStatus {
                     Text("Original answer result: " + status.rawValue).font(.caption.weight(.semibold))
                 }
-                if !turn.text.rawValue.isEmpty { Text(MessageTextLinks.attributed(turn.text.rawValue)).textSelection(.enabled) }
+                if !turn.text.rawValue.isEmpty {
+                    Text(MessageMarkdown.attributed(turn.text.rawValue)).textSelection(.enabled)
+                }
             }
             ForEach(turn.files) { file in
                 Button { inspect(file, turn.binding.revision) } label: { Label(file.name.rawValue, systemImage: "doc") }.font(.caption)

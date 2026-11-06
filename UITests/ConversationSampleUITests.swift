@@ -140,6 +140,229 @@ final class ConversationSampleUITests: XCTestCase {
         }
     }
 
+    func testMarkdownRendersInNewNormalDetailAndConversationWithoutChangingRowTaps() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+
+        for appearance in ["light", "dark"] {
+            let app = XCUIApplication()
+            app.launchArguments = [
+                "--harklight-test-inbox-list-column",
+                "--harklight-test-inbox-list-\(appearance)",
+                "--harklight-test-inbox-list-state=markdown",
+                "--harklight-markdown-acceptance",
+                "--harklight-test-markdown-reply-item"
+            ]
+            app.launch()
+
+            let newRow = app.descendants(matching: .any)[
+                "new-message-area-request-row-sample-markdown-acceptance"
+            ]
+            XCTAssertTrue(newRow.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(newRow.label.contains("A Markdown note"), newRow.debugDescription)
+            XCTAssertFalse(newRow.label.contains("**"), newRow.debugDescription)
+            let selection = app.descendants(matching: .any)["priority-capture-selection"]
+            XCTAssertTrue(selection.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(selection.value as? String, "none", app.debugDescription)
+            let firstSeenProbe = app.descendants(matching: .any)["markdown-row-first-seen"]
+            XCTAssertTrue(firstSeenProbe.waitForExistence(timeout: 5), app.debugDescription)
+            let firstSeenExpectation = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value != %@ AND value != %@", "unseen", "missing"),
+                object: firstSeenProbe)
+            XCTAssertEqual(XCTWaiter.wait(for: [firstSeenExpectation], timeout: 5), .completed,
+                           "The visible New row should retain its normal visibility-based Seen behavior.")
+            let firstSeenBeforeLink = firstSeenProbe.value as? String
+            let newReplyRow = app.descendants(matching: .any)[
+                "reply-item-request-row-sample-markdown-acceptance"
+            ]
+            XCTAssertTrue(newReplyRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(newReplyRow.label.contains("reply guide"), newReplyRow.debugDescription)
+            XCTAssertFalse(newReplyRow.label.contains("[reply guide]"), newReplyRow.debugDescription)
+            let replyFirstSeenProbe = app.descendants(matching: .any)["markdown-reply-first-seen"]
+            XCTAssertTrue(replyFirstSeenProbe.waitForExistence(timeout: 5), app.debugDescription)
+            let replyFirstSeenExpectation = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value != %@ AND value != %@", "unseen", "missing"),
+                object: replyFirstSeenProbe)
+            XCTAssertEqual(XCTWaiter.wait(for: [replyFirstSeenExpectation], timeout: 5), .completed,
+                           "The visible New reply should retain its normal visibility-based Seen behavior.")
+            let replyFirstSeenBeforeLink = replyFirstSeenProbe.value as? String
+            let list = app.collectionViews.firstMatch
+            XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+            captureInboxColumnState("markdown-\(appearance)-new-row", app)
+            captureInboxColumnState("markdown-\(appearance)-new-reply-row", app)
+
+            let newGuide = app.links.matching(
+                NSPredicate(format: "label CONTAINS %@", "Open guide")
+            ).firstMatch
+            XCTAssertTrue(newGuide.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(newGuide.isHittable, newGuide.debugDescription)
+            newGuide.tap()
+            let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+            XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10), app.debugDescription)
+            app.activate()
+            XCTAssertEqual(selection.value as? String, "none",
+                           "Opening a link in New must leave its row unselected.")
+            XCTAssertEqual(firstSeenProbe.value as? String, firstSeenBeforeLink,
+                           "Opening a link must not change the New row's Seen timestamp.")
+            XCTAssertTrue(newRow.waitForExistence(timeout: 5),
+                          "Opening a New-row link must not remove the item or mark it seen.\n\(app.debugDescription)")
+
+            let newReplyGuide = newReplyRow.links.matching(
+                NSPredicate(format: "label CONTAINS %@", "reply guide")
+            ).firstMatch
+            XCTAssertTrue(newReplyGuide.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(newReplyGuide.isHittable, newReplyGuide.debugDescription)
+            newReplyGuide.tap()
+            XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10), app.debugDescription)
+            app.activate()
+            XCTAssertEqual(selection.value as? String, "none",
+                           "Opening a New reply link must leave its parent unselected.")
+            XCTAssertEqual(replyFirstSeenProbe.value as? String, replyFirstSeenBeforeLink,
+                           "Opening a New reply link must not change its Seen timestamp.")
+            XCTAssertTrue(newReplyRow.exists,
+                          "Opening a New reply link must not remove the item.\n\(app.debugDescription)")
+
+            let normalReplyRow = app.descendants(matching: .any)[
+                "normal-reply-item-sample-markdown-acceptance"
+            ]
+            for _ in 0..<8 where !normalReplyRow.isHittable { list.swipeUp() }
+            XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalReplyRow.isHittable,
+                          "The reply must also retain its normal prioritized row.\n\(app.debugDescription)")
+            XCTAssertTrue(normalReplyRow.label.contains("A Markdown note"), normalReplyRow.debugDescription)
+            XCTAssertFalse(normalReplyRow.label.contains("**"), normalReplyRow.debugDescription)
+            captureInboxColumnState("markdown-\(appearance)-normal-reply-row", app)
+
+            let normalReplyGuide = normalReplyRow.links.matching(
+                NSPredicate(format: "label CONTAINS %@", "reply guide")
+            ).firstMatch
+            XCTAssertTrue(normalReplyGuide.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalReplyGuide.isHittable, normalReplyGuide.debugDescription)
+            let normalReplyFirstSeenBeforeLink = replyFirstSeenProbe.value as? String
+            normalReplyGuide.tap()
+            XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10), app.debugDescription)
+            app.activate()
+            XCTAssertEqual(selection.value as? String, "none",
+                           "Opening a normal reply link must leave its parent unselected.")
+            XCTAssertEqual(replyFirstSeenProbe.value as? String, normalReplyFirstSeenBeforeLink,
+                           "Opening a normal reply link must not change its Seen timestamp.")
+            XCTAssertTrue(normalReplyRow.exists,
+                          "Opening a normal reply link must preserve the normal reply row.\n\(app.debugDescription)")
+
+            let normalRow = app.descendants(matching: .any)["request-row-sample-markdown-acceptance"]
+            for _ in 0..<8 where !normalRow.isHittable { list.swipeUp() }
+            XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalRow.isHittable,
+                          "The same request must remain in its normal prioritized position.\n\(app.debugDescription)")
+            captureInboxColumnState("markdown-\(appearance)-normal-row", app)
+
+            let normalGuide = normalRow.links.matching(
+                NSPredicate(format: "label CONTAINS %@", "Open guide")
+            ).firstMatch
+            XCTAssertTrue(normalGuide.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalGuide.isHittable, normalGuide.debugDescription)
+            normalGuide.tap()
+            XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10), app.debugDescription)
+            app.activate()
+            XCTAssertEqual(selection.value as? String, "none",
+                           "Opening a normal-row link must not select or mark the request seen.")
+            XCTAssertTrue(normalRow.exists, app.debugDescription)
+
+            for _ in 0..<8 where !newRow.isHittable { list.swipeDown() }
+            XCTAssertTrue(newRow.isHittable, app.debugDescription)
+            // Stay in the button's blank trailing area so this is a row tap,
+            // not a tap on the embedded Markdown link.
+            newRow.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.82)).tap()
+            let selected = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", "sample-markdown-acceptance"),
+                object: selection)
+            XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
+                           "A non-link tap in New keeps the existing request navigation.\n\(app.debugDescription)")
+            let heading = app.buttons["request-heading"]
+            XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(heading.label.contains("A Markdown note"), heading.debugDescription)
+            XCTAssertFalse(heading.label.contains("**"), heading.debugDescription)
+            let body = app.textViews["request-message-body"]
+            XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+            let bodyText = body.value as? String ?? body.label
+            XCTAssertTrue(bodyText.contains("First item"), bodyText)
+            XCTAssertTrue(bodyText.contains("A quoted sentence"), bodyText)
+            XCTAssertTrue(bodyText.contains("let answer = 42"), bodyText)
+            XCTAssertFalse(bodyText.contains("**"), bodyText)
+            XCTAssertFalse(bodyText.contains("```"), bodyText)
+            let stake = app.staticTexts["request-stake"]
+            XCTAssertTrue(stake.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(stake.label.contains("main risk"), stake.debugDescription)
+            capture("markdown-\(appearance)-detail", app)
+
+            app.buttons["Chat"].tap()
+            let history = app.scrollViews["conversation-history-scroll"]
+            XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+            let conversationText = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "Could you explain")
+            ).firstMatch
+            XCTAssertTrue(conversationText.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertFalse(conversationText.label.contains("**"), conversationText.debugDescription)
+            XCTAssertTrue(app.links.matching(
+                NSPredicate(format: "label CONTAINS %@", "guide")
+            ).firstMatch.exists, app.debugDescription)
+            XCTAssertTrue(app.links.matching(
+                NSPredicate(format: "label CONTAINS %@", "reply guide")
+            ).firstMatch.exists, app.debugDescription)
+            capture("markdown-\(appearance)-conversation", app)
+            app.terminate()
+        }
+    }
+
+    func testPlainTextRemainsReadableInNewNormalAndDetailInLightAndDark() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+
+        for appearance in ["light", "dark"] {
+            let app = XCUIApplication()
+            app.launchArguments = [
+                "--harklight-test-inbox-list-column",
+                "--harklight-test-inbox-list-\(appearance)",
+                "--harklight-test-inbox-list-state=acceptedNewMessage"
+            ]
+            app.launch()
+
+            let selection = app.descendants(matching: .any)["priority-capture-selection"]
+            XCTAssertTrue(selection.waitForExistence(timeout: 5), app.debugDescription)
+            let newRow = app.descendants(matching: .any)[
+                "new-message-area-request-row-sample-information-0"
+            ]
+            XCTAssertTrue(newRow.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(newRow.label.contains("Thursday"), newRow.debugDescription)
+            XCTAssertFalse(newRow.label.contains("**"), newRow.debugDescription)
+            captureInboxColumnState("plain-\(appearance)-new-row", app)
+
+            let list = app.collectionViews.firstMatch
+            XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+            let normalRow = app.descendants(matching: .any)["request-row-sample-information-0"]
+            for _ in 0..<8 where !normalRow.isHittable { list.swipeUp() }
+            XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalRow.label.contains("Thursday"), normalRow.debugDescription)
+            XCTAssertFalse(normalRow.label.contains("**"), normalRow.debugDescription)
+            captureInboxColumnState("plain-\(appearance)-normal-row", app)
+
+            for _ in 0..<8 where !newRow.isHittable { list.swipeDown() }
+            XCTAssertTrue(newRow.isHittable, app.debugDescription)
+            newRow.tap()
+            let selected = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", "sample-information-0"),
+                object: selection)
+            XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
+                           "Plain-text New selection should keep existing navigation.\n\(app.debugDescription)")
+            XCTAssertTrue(newRow.waitForNonExistence(timeout: 5), app.debugDescription)
+            let body = app.textViews["request-message-body"]
+            XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+            let bodyText = body.value as? String ?? body.label
+            XCTAssertTrue(bodyText.contains("The new time is 2 PM."), bodyText)
+            XCTAssertFalse(bodyText.contains("**"), bodyText)
+            capture("plain-\(appearance)-detail", app)
+            app.terminate()
+        }
+    }
+
     func testReplyItemOpensParentChatScrolledToEarliestUnseenReply() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -690,6 +913,7 @@ final class ConversationSampleUITests: XCTestCase {
     func testAcceptedSenderUpdateIsVisibleInTheSameOrdinaryRequestAndHistory() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-markdown-history"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Archive", in: app)
@@ -706,9 +930,17 @@ final class ConversationSampleUITests: XCTestCase {
         app.buttons["Original · draft"].tap()
         app.buttons["conversation-earlier-answer"].tap()
         XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
-            format: "label CONTAINS %@", "The new collection is ready. Choose what happens to the earlier sketches."
-        )).firstMatch.waitForExistence(timeout: 5))
+        let earlierTitle = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Archive the old")
+        ).firstMatch
+        let earlierBody = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "earlier sketches")
+        ).firstMatch
+        XCTAssertTrue(earlierTitle.waitForExistence(timeout: 5), earlierTitle.debugDescription)
+        XCTAssertFalse(earlierTitle.label.contains("*"), earlierTitle.debugDescription)
+        XCTAssertTrue(earlierBody.waitForExistence(timeout: 5), earlierBody.debugDescription)
+        XCTAssertTrue(earlierBody.label.contains("new collection"), earlierBody.debugDescription)
+        XCTAssertFalse(earlierBody.label.contains("*"), earlierBody.debugDescription)
         capture("sender-updated-earlier-question-and-draft", app)
     }
 

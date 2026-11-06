@@ -53,7 +53,7 @@ struct InboxListColumnCaptureHost: View {
                     }
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
-            .overlay(alignment: .topLeading) { selectionProbe }
+            .overlay(alignment: .topLeading) { accessibilityProbe }
         } else {
             NavigationSplitView {
                 productionInboxList
@@ -65,7 +65,7 @@ struct InboxListColumnCaptureHost: View {
             }
             .navigationSplitViewStyle(.balanced)
             .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
-            .overlay(alignment: .topLeading) { selectionProbe }
+            .overlay(alignment: .topLeading) { accessibilityProbe }
         }
     }
 
@@ -106,6 +106,60 @@ struct InboxListColumnCaptureHost: View {
             .accessibilityValue(Text(verbatim: selectionProbeValue))
             .accessibilityIdentifier("priority-capture-selection")
             .allowsHitTesting(false)
+    }
+
+    private var markdownFirstSeenProbe: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(verbatim: "Markdown row first seen"))
+            .accessibilityValue(Text(verbatim: markdownFirstSeenValue))
+            .accessibilityIdentifier("markdown-row-first-seen")
+            .allowsHitTesting(false)
+    }
+
+    private var markdownReplyFirstSeenProbe: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(verbatim: "Markdown reply first seen"))
+            .accessibilityValue(Text(verbatim: markdownReplyFirstSeenValue))
+            .accessibilityIdentifier("markdown-reply-first-seen")
+            .allowsHitTesting(false)
+    }
+
+    private var accessibilityProbe: some View {
+        VStack(spacing: 0) {
+            selectionProbe
+            if captureState == .markdown {
+                markdownFirstSeenProbe
+                markdownReplyFirstSeenProbe
+            }
+        }
+    }
+
+    private var markdownFirstSeenValue: String {
+        guard let row = rows.compactMap({ item -> InboxRequestRow? in
+            guard case let .request(row) = item,
+                  row.key.messageID.rawValue == "sample-markdown-acceptance" else { return nil }
+            return row
+        }).first,
+              let entry = newMessageAreaStore.entries.first(where: { $0.key == row.key }) else {
+            return "missing"
+        }
+        return entry.firstSeenAt.map { String($0.timeIntervalSince1970) } ?? "unseen"
+    }
+
+    private var markdownReplyFirstSeenValue: String {
+        guard let row = rows.compactMap({ item -> InboxRequestRow? in
+            guard case let .request(row) = item,
+                  row.key.messageID.rawValue == "sample-markdown-acceptance" else { return nil }
+            return row
+        }).first,
+              let entry = replyItemAreaStore?.entries.first(where: { $0.parent == row.key }) else {
+            return "missing"
+        }
+        return entry.firstSeenAt.map { String($0.timeIntervalSince1970) } ?? "unseen"
     }
 
     private var selectionProbeValue: String {
@@ -159,6 +213,7 @@ private enum InboxListColumnCaptureFixture {
         case selectedHigh
         case selectedPlainAndUnselectedComparison
         case acceptedNewMessage
+        case markdown
         case fullWidthHigh
         case replyItem
         case replyItemFullWidth
@@ -179,6 +234,9 @@ private enum InboxListColumnCaptureFixture {
                           sampleFixture: sampleFixture)
         let unselectedRow = row("sample-textChoice-0", sampleFixture: sampleFixture)
         let newMessageRow = row("sample-information-0", sampleFixture: sampleFixture)
+        let markdownRow = state == .markdown
+            ? row("sample-markdown-acceptance", sampleFixture: sampleFixture)
+            : nil
 
         let suiteName = "com.example.attentionclient.duo-prototype.uitesthost.capture.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -188,10 +246,18 @@ private enum InboxListColumnCaptureFixture {
         let store = NewMessageAreaStore(defaults: defaults,
                                         defaultsKey: "selected-row-capture-new-message-area")
         let now = Date()
-        let isReplyState = state == .replyItem || state == .replyItemFullWidth
-        let accountScopes = Set([plainRow, highRow, unselectedRow, newMessageRow].map(\.key.accountScope))
+        let isReplyState = state == .replyItem || state == .replyItemFullWidth || state == .markdown
+        var scopedRows = [plainRow, highRow, unselectedRow, newMessageRow]
+        if let markdownRow { scopedRows.append(markdownRow) }
+        let accountScopes = Set(scopedRows.map(\.key.accountScope))
         store.reconcile([], revisions: [:], accountScopes: accountScopes, now: now.addingTimeInterval(-120))
-        if state == .acceptedNewMessage || isReplyState {
+        if state == .markdown, let markdownRow {
+            store.reconcile([
+                NewMessageAreaMessage(key: markdownRow.key, acceptanceOrder: 1,
+                                      isResolved: false, hasSubmittedAnswer: false)
+            ], revisions: [markdownRow.key: markdownRow.requestRevision],
+               accountScopes: accountScopes, now: now.addingTimeInterval(-60))
+        } else if state == .acceptedNewMessage || isReplyState {
             store.reconcile([
                 NewMessageAreaMessage(key: newMessageRow.key, acceptanceOrder: 1,
                                       isResolved: false, hasSubmittedAnswer: false)
@@ -200,22 +266,38 @@ private enum InboxListColumnCaptureFixture {
         }
 
         var replyItemAreaStore: ReplyItemAreaStore?
-        var replyParentRow = newMessageRow
+        var replyParentRow = state == .markdown ? (markdownRow ?? newMessageRow) : newMessageRow
         if isReplyState {
             replyParentRow.inboxReplyScores = [5: 0.93, 6: 0.4]
             let replyStore = ReplyItemAreaStore(defaults: defaults,
                                                 defaultsKey: "capture-reply-item-area")
             replyStore.reconcile([], accountScopes: accountScopes, now: now.addingTimeInterval(-120))
-            replyStore.reconcile([
-                ReplyItemObservation(parent: replyParentRow.key,
-                                     turnID: ExactText("capture-reply-earliest"),
-                                     conversationSequence: 5, isSeen: false,
-                                     text: "Earliest unseen chat reply: the middle section of the draft now reads better."),
-                ReplyItemObservation(parent: replyParentRow.key,
-                                     turnID: ExactText("capture-reply-newest"),
-                                     conversationSequence: 6, isSeen: false,
-                                     text: "Newest unseen chat reply: the revised draft tightens the opening, keeps the middle section's new ordering, and closes with the shorter summary we discussed, so the whole note should now fit on one screen.")
-            ], accountScopes: accountScopes, now: now)
+            let observations: [ReplyItemObservation]
+            if state == .markdown,
+               let thread = sampleFixture.viewModel.conversation(for: replyParentRow.key),
+               let reply = thread.turns.first(where: {
+                   $0.id == ExactText("markdown-reply-item") &&
+                       $0.author == .origin && $0.kind == .reply
+               }) {
+                observations = [ReplyItemObservation(
+                    parent: replyParentRow.key,
+                    turnID: reply.id,
+                    conversationSequence: reply.conversationSequence,
+                    isSeen: false,
+                    text: reply.text.rawValue)]
+            } else {
+                observations = [
+                    ReplyItemObservation(parent: replyParentRow.key,
+                                         turnID: ExactText("capture-reply-earliest"),
+                                         conversationSequence: 5, isSeen: false,
+                                         text: "Earliest unseen chat reply: the middle section of the draft now reads better."),
+                    ReplyItemObservation(parent: replyParentRow.key,
+                                         turnID: ExactText("capture-reply-newest"),
+                                         conversationSequence: 6, isSeen: false,
+                                         text: "Newest unseen chat reply: the revised draft tightens the opening, keeps the middle section's new ordering, and closes with the shorter summary we discussed, so the whole note should now fit on one screen.")
+                ]
+            }
+            replyStore.reconcile(observations, accountScopes: accountScopes, now: now)
             replyItemAreaStore = replyStore
         }
 
@@ -230,6 +312,12 @@ private enum InboxListColumnCaptureFixture {
             selected = nil
         case .acceptedNewMessage:
             rows = [newMessageRow]
+            selected = nil
+        case .markdown:
+            guard let markdownRow else {
+                preconditionFailure("The Markdown capture state needs its test-only sample message.")
+            }
+            rows = [replyParentRow]
             selected = nil
         case .fullWidthHigh:
             rows = [highRow, unselectedRow]

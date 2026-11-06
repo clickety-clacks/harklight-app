@@ -524,6 +524,9 @@ enum SampleCatalog {
         if ProcessInfo.processInfo.arguments.contains("--harklight-data-detector-acceptance") {
             acceptanceMessages.append(dataDetectorAcceptanceMessage)
         }
+        if ProcessInfo.processInfo.arguments.contains("--harklight-markdown-acceptance") {
+            acceptanceMessages.append(markdownAcceptanceMessage)
+        }
         if ProcessInfo.processInfo.arguments.contains("--harklight-message-kind-acceptance") {
             if let requestIndex = messages.firstIndex(where: { $0.id == "sample-note-0" }) {
                 messages[requestIndex].declaredMessageType = .request
@@ -568,6 +571,32 @@ enum SampleCatalog {
         chatUnread: false,
         hasChat: false,
         fixtureCreatedAtMilliseconds: 1_790_000_000_000)
+
+    private static let markdownAcceptanceMessage = SampleMessage(
+        id: "sample-markdown-acceptance",
+        kind: .information,
+        sender: "Markdown assistant",
+        initials: "MA",
+        title: "A **Markdown** note",
+        body: """
+        [Open guide](https://example.invalid/markdown-guide) for *formatted* details.
+
+        - First item
+        - Second item
+
+        > A quoted sentence stays readable.
+
+        ```swift
+        let answer = 42
+        ```
+        """,
+        options: [],
+        deadline: nil,
+        missed: false,
+        revised: false,
+        chatUnread: true,
+        hasChat: true,
+        fixtureCreatedAtMilliseconds: 1_790_000_120_000)
 
     private static let messageKindAcceptanceMessage = SampleMessage(
         id: "sample-message-kind-success",
