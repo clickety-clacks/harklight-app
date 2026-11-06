@@ -14,9 +14,9 @@ final class ConversationSampleUITests: XCTestCase {
             ("fullWidthHigh", "request-row-sample-approval-0", nil, nil, nil, true),
             ("acceptedNewMessage", "new-message-area-request-row-sample-information-0",
              nil, nil, nil, false),
-            ("replyItem", "reply-item-request-row-sample-approval-0",
+            ("replyItem", "reply-item-request-row-sample-information-0",
              nil, nil, nil, false),
-            ("replyItemFullWidth", "reply-item-request-row-sample-approval-0",
+            ("replyItemFullWidth", "reply-item-request-row-sample-information-0",
              nil, nil, nil, true),
         ]
 
@@ -118,14 +118,14 @@ final class ConversationSampleUITests: XCTestCase {
                     let unseenCount = app.descendants(matching: .any)["reply-item-unseen-count"]
                     XCTAssertTrue(unseenCount.waitForExistence(timeout: 5), app.debugDescription)
                     XCTAssertTrue(unseenCount.label.contains("2 new"), unseenCount.debugDescription)
-                    let badge = app.descendants(matching: .any)["reply-item-priority-high"]
+                    let badge = app.descendants(matching: .any)["reply-item-priority-now"]
                     XCTAssertTrue(badge.waitForExistence(timeout: 5), app.debugDescription)
                     let normalReply = app.descendants(matching: .any)[
-                        "normal-reply-item-sample-approval-0"
+                        "normal-reply-item-sample-information-0"
                     ]
                     XCTAssertTrue(normalReply.waitForExistence(timeout: 5), app.debugDescription)
                     let normalPriority = app.descendants(matching: .any)[
-                        "normal-reply-item-priority-high"
+                        "normal-reply-item-priority-now"
                     ]
                     XCTAssertTrue(normalPriority.waitForExistence(timeout: 5), app.debugDescription)
                     let acceptedMessage = app.descendants(matching: .any)["new-message-area-request-row-sample-information-0"]

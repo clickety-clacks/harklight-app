@@ -200,7 +200,7 @@ private enum InboxListColumnCaptureFixture {
         }
 
         var replyItemAreaStore: ReplyItemAreaStore?
-        var replyParentRow = plainRow
+        var replyParentRow = newMessageRow
         if isReplyState {
             replyParentRow.inboxReplyScores = [5: 0.93, 6: 0.4]
             let replyStore = ReplyItemAreaStore(defaults: defaults,
@@ -235,7 +235,7 @@ private enum InboxListColumnCaptureFixture {
             rows = [highRow, unselectedRow]
             selected = nil
         case .replyItem, .replyItemFullWidth:
-            rows = [replyParentRow, newMessageRow]
+            rows = [replyParentRow]
             selected = nil
         }
 
