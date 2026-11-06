@@ -237,11 +237,14 @@ final class ConversationSampleUITests: XCTestCase {
             ).firstMatch
             XCTAssertTrue(normalReplyGuide.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(normalReplyGuide.isHittable, normalReplyGuide.debugDescription)
+            let normalReplyFirstSeenBeforeLink = replyFirstSeenProbe.value as? String
             normalReplyGuide.tap()
             XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10), app.debugDescription)
             app.activate()
             XCTAssertEqual(selection.value as? String, "none",
                            "Opening a normal reply link must leave its parent unselected.")
+            XCTAssertEqual(replyFirstSeenProbe.value as? String, normalReplyFirstSeenBeforeLink,
+                           "Opening a normal reply link must not change its Seen timestamp.")
             XCTAssertTrue(normalReplyRow.exists,
                           "Opening a normal reply link must preserve the normal reply row.\n\(app.debugDescription)")
 
