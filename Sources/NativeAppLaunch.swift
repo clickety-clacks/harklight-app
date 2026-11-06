@@ -1214,6 +1214,7 @@ final class LivePresentationStore {
     private(set) var isSendingDiscussion = false
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
+    private(set) var retractionVisibilityTime = Date()
     private(set) var selectedRequestKey: RequestKey?
     private var activeRefreshCount = 0
     var isRefreshing: Bool { activeRefreshCount > 0 }
@@ -1280,8 +1281,13 @@ final class LivePresentationStore {
     // Clearing a retracted row is list state on this device only: no frame is
     // sent and the retracted record stays intact in the durable store.
     private(set) var clearedRetractions: Set<RequestKey> = []
+#if DEBUG
+    @ObservationIgnored private var pendingRetractionExpiryAdvance: CheckedContinuation<Void, Never>?
+    @ObservationIgnored private var retractionExpiryAdvanceRequested = false
+#endif
     @ObservationIgnored private let clearedRetractionDefaults: UserDefaults
     private static let clearedRetractionsDefaultsKey = "harklight.cleared-retracted-requests"
+    private static let retractedRowVisibilityDuration: TimeInterval = 24 * 60 * 60
     @ObservationIgnored private var presentedStaleAnswerOperationIDs = Set<UUID>()
 
     private struct NoReplyRoutingState {
@@ -1376,6 +1382,64 @@ final class LivePresentationStore {
         guard let timestamp else { return nil }
         return Date(timeIntervalSince1970: Double(timestamp) / 1_000)
     }
+
+    static func retractionExpiryDate(for retractionDate: Date?) -> Date? {
+        retractionDate?.addingTimeInterval(retractedRowVisibilityDuration)
+    }
+
+    static func isRetractionExpired(retractionDate: Date?, at now: Date) -> Bool {
+        guard let expiry = retractionExpiryDate(for: retractionDate) else { return false }
+        return now >= expiry
+    }
+
+    func refreshRetractionVisibility(at now: Date = Date()) {
+        retractionVisibilityTime = now
+    }
+
+    func waitForNextRetractionExpiry() async {
+        guard let expiry = nextRetractionExpiry else { return }
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-server-retraction") {
+            await waitForRetractionExpiryAdvance()
+            guard !Task.isCancelled else { return }
+            refreshRetractionVisibility(at: expiry)
+            return
+        }
+#endif
+        while !Task.isCancelled {
+            let remaining = expiry.timeIntervalSince(retractionVisibilityTime)
+            guard remaining > 0 else { break }
+            do {
+                try await Task.sleep(for: .seconds(remaining))
+            } catch {
+                return
+            }
+            refreshRetractionVisibility()
+        }
+        guard !Task.isCancelled else { return }
+        refreshRetractionVisibility()
+    }
+
+#if DEBUG
+    func advanceRetractionExpiryForTesting() {
+        if let continuation = pendingRetractionExpiryAdvance {
+            pendingRetractionExpiryAdvance = nil
+            continuation.resume()
+        } else {
+            retractionExpiryAdvanceRequested = true
+        }
+    }
+
+    private func waitForRetractionExpiryAdvance() async {
+        if retractionExpiryAdvanceRequested {
+            retractionExpiryAdvanceRequested = false
+            return
+        }
+        await withCheckedContinuation { continuation in
+            pendingRetractionExpiryAdvance = continuation
+        }
+    }
+#endif
 
     func retractionLabel(_ key: RequestKey) -> String {
         guard let date = retractionDate(key) else { return "Retracted" }
@@ -1734,7 +1798,23 @@ final class LivePresentationStore {
         let skippedMessageRequestTags = completedSkippedMessageRequestTags
         return presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
+            .filter { request in
+                guard isRetracted(request.key) else { return true }
+                return !Self.isRetractionExpired(
+                    retractionDate: retractionDate(request.key), at: retractionVisibilityTime)
+            }
             .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
+    }
+
+    var nextRetractionExpiry: Date? {
+        presentation.requests.compactMap { request -> Date? in
+            guard request.lifecycleStatus != .superseded,
+                  isRetracted(request.key),
+                  !clearedRetractions.contains(request.key),
+                  let expiry = Self.retractionExpiryDate(for: retractionDate(request.key)),
+                  expiry > retractionVisibilityTime else { return nil }
+            return expiry
+        }.min()
     }
 
     var newMessageAreaStore: NewMessageAreaStore? { messageAreaStore }

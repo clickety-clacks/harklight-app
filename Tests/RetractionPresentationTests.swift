@@ -24,7 +24,7 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertThrowsError(try InstalledRelayDecoder.RelayWire(profile: context).decodeEvent(literal))
     }
 
-    func testRetractionJoinsBothDurableOrdersWithoutRewritingQueuedBindingsOrReopening() throws {
+    func testRetractionJoinsBothDurableOrdersWithoutRewritingQueuedBindingsOrReopening() async throws {
         for conversationFirst in [false, true] {
             let context = profile()
             let persistence = MemoryAttentionStatePersistence()
@@ -88,13 +88,42 @@ final class RetractionPresentationTests: XCTestCase {
                 intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("keep"))])))
             XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context), retained)
             let model = try LivePresentationStore(store: domain, context: context)
+            let expiry = Date(timeIntervalSince1970: Self.retractedAtSeconds + 24 * 60 * 60)
+            model.refreshRetractionVisibility(at: expiry.addingTimeInterval(-0.05))
             XCTAssertTrue(model.isRetracted(key))
             XCTAssertEqual(model.retractionDate(key)?.timeIntervalSince1970 ?? 0, Self.retractedAtSeconds, accuracy: 0.000_5)
             XCTAssertTrue(model.inboxRows.first?.status.contains(model.retractionLabel(key)) == true)
             XCTAssertNotEqual(model.retractionLabel(key), "Retracted", "The shown retraction carries its time")
             XCTAssertEqual(model.request(for: key)?.lifecycleStatus, .cleared)
             XCTAssertEqual(try domain.snapshot(context: context).requests.count, 1)
+
+            let expiryTask = Task { await model.waitForNextRetractionExpiry() }
+            await expiryTask.value
+            XCTAssertFalse(model.inboxRows.contains { $0.key == key }, "The row leaves automatically at its retraction-based deadline")
+            XCTAssertTrue(model.isRetracted(key))
+            XCTAssertTrue(model.conversation(for: key)?.isRetracted == true)
+            XCTAssertEqual(try domain.snapshot(context: context).requests.count, 1)
+            XCTAssertEqual(try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
+                .draft.compatibility.selectedActionID, ExactText("keep"))
+            XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context), retained)
+
+            let relaunchedDomain = try AttentionDomainStore(context: context, persistence: persistence)
+            let relaunched = try LivePresentationStore(store: relaunchedDomain, context: context)
+            XCTAssertFalse(relaunched.inboxRows.contains { $0.key == key }, "An expired timestamp stays hidden after relaunch")
+            XCTAssertTrue(relaunched.isRetracted(key))
+            XCTAssertTrue(relaunched.conversation(for: key)?.isRetracted == true)
+            XCTAssertEqual(try relaunchedDomain.snapshot(context: context).requests.count, 1)
         }
+    }
+
+    func testRetractionExpiryUsesItsTimestampAndKeepsRowsWithoutOne() {
+        let retractedAt = Date(timeIntervalSince1970: Self.retractedAtSeconds)
+        let expiry = retractedAt.addingTimeInterval(24 * 60 * 60)
+        XCTAssertFalse(LivePresentationStore.isRetractionExpired(
+            retractionDate: retractedAt, at: expiry.addingTimeInterval(-1)))
+        XCTAssertTrue(LivePresentationStore.isRetractionExpired(retractionDate: retractedAt, at: expiry))
+        XCTAssertNil(LivePresentationStore.retractionExpiryDate(for: nil))
+        XCTAssertFalse(LivePresentationStore.isRetractionExpired(retractionDate: nil, at: .distantFuture))
     }
 
     func testEveryRetractionWireShapeRequiresItsRetractionTime() throws {
@@ -337,6 +366,8 @@ final class RetractionPresentationTests: XCTestCase {
         }
         defaults.set(try JSONEncoder().encode(Set([staleKey])), forKey: "harklight.cleared-retracted-requests")
         let model = try LivePresentationStore(store: domain, context: context, clearedRetractionDefaults: defaults)
+        let beforeExpiry = Date(timeIntervalSince1970: Self.retractedAtSeconds + 24 * 60 * 60 - 1)
+        model.refreshRetractionVisibility(at: beforeExpiry)
         XCTAssertEqual(model.inboxRows.count, 3, "A stale cleared entry hides nothing unless its request is retracted")
         XCTAssertTrue(try XCTUnwrap(model.inboxRows.first { $0.key == retractedKey }).isRetracted)
         XCTAssertFalse(try XCTUnwrap(model.inboxRows.first { $0.key == staleKey }).isRetracted)
@@ -351,6 +382,7 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty, "Clearing sends no frame")
         XCTAssertEqual(try domain.snapshot(context: context).requests.count, 3)
         let restarted = try LivePresentationStore(store: domain, context: context, clearedRetractionDefaults: defaults)
+        restarted.refreshRetractionVisibility(at: beforeExpiry)
         XCTAssertEqual(Set(restarted.inboxRows.map(\.key)), [staleKey, openKey], "The cleared row stays hidden after relaunch")
     }
 

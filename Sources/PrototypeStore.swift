@@ -1,6 +1,7 @@
 import Observation
 import Foundation
 import AttentionDomain
+import HarklightNativeRelay
 
 enum DemoTerminalScenario: String, CaseIterable, Identifiable, Sendable {
     case ownOperationAccepted
@@ -31,6 +32,32 @@ enum DemoTerminalScenario: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+struct NativeServerRetractionFixture: Decodable {
+    let fixture_version: Int
+    let fixture_id: String
+    let server_commit: String
+    let producer_commit: String
+    let host: String
+    let person_id: String
+    let reader_device_id: String
+    let sender_id: String
+    let message_id: String
+    let native_retraction: Retraction
+}
+
+extension NativeServerRetractionFixture {
+    struct Retraction: Decodable {
+        let retracted_at_ms: UInt64
+        let relay_high_water: UInt64
+        let conversation_high_water: UInt64
+        let delivery_event_json: String
+        let lifecycle_event_json: String
+        let conversation_event_json: [String]
+        let retraction_event_id: String
+        let retraction_conversation_seq: UInt64
+    }
+}
+
 @MainActor
 @Observable
 final class PrototypeStore {
@@ -41,6 +68,7 @@ final class PrototypeStore {
     let captureLimitBytes: Int
     private(set) var selectedRequestKey: RequestKey?
     private(set) var persistenceError: String?
+    private(set) var serverRetractionTestStatus: String?
     private(set) var snapshot: AttentionStoreSnapshot?
     private(set) var presentationStore: LivePresentationStore?
 
@@ -55,15 +83,21 @@ final class PrototypeStore {
          loadError: String? = nil,
          captureLimitBytes: Int = defaultCaptureLimit,
          persistence: (any AttentionStatePersistence)? = nil,
-         resetFixtureAtLaunch: Bool = false) {
+         resetFixtureAtLaunch: Bool = false,
+         serverRetractionFixture: NativeServerRetractionFixture? = nil,
+         seedServerRetractionFixture: Bool = false,
+         expireServerRetractionAtLaunch: Bool = false) {
         self.fixtures = fixtures
         self.captureLimitBytes = max(0, captureLimitBytes)
         self.selectedRequestKey = fixtures.requests.first?.key
 
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:attention-client-m2"),
-                                       personID: fixtures.accountScope,
-                                       deviceID: ExactText("fictional-sample-device"))
-        let profile = ProfileContext(identity: identity, transportMode: .fixture)
+        let identity = ProfileIdentity(
+            trustedRelayAuthority: ExactText(serverRetractionFixture?.host ?? "fixture-only:attention-client-m2"),
+            personID: serverRetractionFixture.map { ExactText($0.person_id) } ?? fixtures.accountScope,
+            deviceID: ExactText(serverRetractionFixture?.reader_device_id ?? "fictional-sample-device"))
+        let profile = ProfileContext(
+            identity: identity,
+            transportMode: serverRetractionFixture == nil ? .fixture : .relay)
         self.profileContext = profile
 
         var createdStore: AttentionDomainStore?
@@ -71,21 +105,61 @@ final class PrototypeStore {
         var createdPresentation: LivePresentationStore?
         var initialSnapshot: AttentionStoreSnapshot?
         var initializationError: String?
+        var serverRetractionTestStatus: String?
         do {
             let store = try AttentionDomainStore(context: profile,
                                                  persistence: persistence ?? MemoryAttentionStatePersistence(),
                                                  maximumWireFrameBytes: max(0, captureLimitBytes))
             let requests = fixtures.requests.map { StoredRequest(key: $0.key, originalPayload: $0.originalPayload) }
-            if resetFixtureAtLaunch {
-                try store.resetFixtureState(requests, context: profile)
-            } else {
-                try store.registerFixtureRequests(requests, context: profile)
+            if serverRetractionFixture == nil {
+                if resetFixtureAtLaunch {
+                    try store.resetFixtureState(requests, context: profile)
+                } else {
+                    try store.registerFixtureRequests(requests, context: profile)
+                }
             }
+#if DEBUG
+            if seedServerRetractionFixture {
+                guard resetFixtureAtLaunch, let serverRetractionFixture else {
+                    throw ConversationError.missingRequest
+                }
+                try Self.seedServerRetractionFixture(serverRetractionFixture, in: store, context: profile)
+            }
+            if resetFixtureAtLaunch,
+               ProcessInfo.processInfo.arguments.contains("--harklight-test-retraction-expiry-relaunch") {
+                try Self.seedRetractionExpiryRelaunchFixture(in: store, fixtures: fixtures, context: profile)
+            }
+#endif
             createdStore = store
             createdPort = AttentionDomainPort(store: store)
-            createdPresentation = try LivePresentationStore(
-                localFixtureStore: store,
-                context: profile)
+            if serverRetractionFixture == nil {
+                createdPresentation = try LivePresentationStore(
+                    localFixtureStore: store,
+                    context: profile)
+            } else {
+                createdPresentation = try LivePresentationStore(
+                    disconnectedStore: store,
+                    context: profile)
+            }
+#if DEBUG
+            if let serverRetractionFixture,
+               let presentation = createdPresentation {
+                let key = RequestKey(accountScope: profile.identity.personID,
+                                     senderID: ExactText(serverRetractionFixture.sender_id),
+                                     messageID: ExactText(serverRetractionFixture.message_id))
+                guard let retractionDate = presentation.retractionDate(key) else {
+                    throw ConversationError.missingRequest
+                }
+                if expireServerRetractionAtLaunch {
+                    presentation.refreshRetractionVisibility(
+                        at: retractionDate.addingTimeInterval(86_401))
+                }
+                let phase = expireServerRetractionAtLaunch ? "after_process_relaunch" : "first_process"
+                serverRetractionTestStatus = try Self.recordServerRetractionReadback(
+                    serverRetractionFixture, requestKey: key, in: store,
+                    presentation: presentation, context: profile, phase: phase)
+            }
+#endif
             initialSnapshot = try store.snapshot(context: profile)
         } catch {
             initializationError = error.localizedDescription
@@ -94,14 +168,179 @@ final class PrototypeStore {
         self.port = createdPort
         self.presentationStore = createdPresentation
         self.snapshot = initialSnapshot
+        self.serverRetractionTestStatus = serverRetractionTestStatus
         self.loadError = loadError ?? initializationError.map { "Local durable state could not be opened: \($0)" }
     }
 
+#if DEBUG
+    private static func seedServerRetractionFixture(_ fixture: NativeServerRetractionFixture,
+                                                    in store: AttentionDomainStore,
+                                                    context: ProfileContext) throws {
+        let retraction = fixture.native_retraction
+        let relayWire = try RelayWire(profile: context)
+        let delivery = try relayWire.decodeEvent(Data(retraction.delivery_event_json.utf8))
+        guard case let .delivery(request, _) = delivery.body,
+              request.key.senderID.rawValue == fixture.sender_id,
+              request.key.messageID.rawValue == fixture.message_id else {
+            throw ConversationError.missingRequest
+        }
+        try store.apply(delivery, context: context)
+
+        let port = AttentionDomainPort(store: store)
+        guard let selector = try port.inspect(context: port.context, request: request.key)
+                .requests.first?.selector,
+              var answerDraft = try store.snapshot(context: context).drafts[request.key] else {
+            throw ConversationError.missingRequest
+        }
+        answerDraft.compatibility.selectedActionID = ExactText("keep")
+        try store.saveDraft(answerDraft, selector: selector, context: context)
+        let conversationWire = try ConversationWire(profile: context)
+        let conversationEvents = try retraction.conversation_event_json.map {
+            try conversationWire.decodeEvent(Data($0.utf8))
+        }
+        guard conversationEvents.count >= 3 else { throw ConversationError.missingRequest }
+        for event in conversationEvents.dropLast() {
+            try store.applyConversation(event, context: context)
+        }
+
+        let lifecycle = try relayWire.decodeEvent(Data(retraction.lifecycle_event_json.utf8))
+        guard lifecycle.conversation?.retractedAtMilliseconds == retraction.retracted_at_ms else {
+            throw ConversationError.missingRequest
+        }
+        try store.apply(lifecycle, context: context)
+        if let retractionEvent = conversationEvents.last {
+            try store.applyConversation(retractionEvent, context: context)
+        }
+
+        let snapshot = try store.snapshot(context: context)
+        let conversation = try store.conversationSnapshot(context: context)
+        guard let thread = conversation.threads[request.key],
+              snapshot.requests.contains(where: { $0.key == request.key }),
+              snapshot.drafts[request.key]?.compatibility.selectedActionID == ExactText("keep"),
+              thread.turns.count >= 2,
+              thread.turns.contains(where: { $0.text.rawValue == "What should I check first?" }),
+              thread.turns.contains(where: { $0.text.rawValue == "Check the exact bytes." }),
+              thread.retraction?.retractedAtMilliseconds == retraction.retracted_at_ms,
+              thread.terminal == .cleared else {
+            throw ConversationError.missingRequest
+        }
+    }
+
+
+    private static func recordServerRetractionReadback(
+        _ fixture: NativeServerRetractionFixture,
+        requestKey: RequestKey,
+        in store: AttentionDomainStore,
+        presentation: LivePresentationStore,
+        context: ProfileContext,
+        phase: String
+    ) throws -> String {
+        let snapshot = try store.snapshot(context: context)
+        let conversation = try store.conversationSnapshot(context: context)
+        guard let thread = conversation.threads[requestKey],
+              snapshot.requests.contains(where: { $0.key == requestKey }),
+              snapshot.drafts[requestKey]?.compatibility.selectedActionID == ExactText("keep"),
+              thread.turns.count >= 2,
+              thread.turns.contains(where: { $0.text.rawValue == "What should I check first?" }),
+              thread.turns.contains(where: { $0.text.rawValue == "Check the exact bytes." }),
+              thread.retraction?.retractedAtMilliseconds == fixture.native_retraction.retracted_at_ms,
+              thread.terminal == .cleared,
+              let retractionDate = presentation.retractionDate(requestKey),
+              let expiryDate = LivePresentationStore.retractionExpiryDate(for: retractionDate) else {
+            throw ConversationError.missingRequest
+        }
+
+        let readback: [String: Any] = [
+            "fixture_id": fixture.fixture_id,
+            "server_commit": fixture.server_commit,
+            "producer_commit": fixture.producer_commit,
+            "phase": phase,
+            "retracted_at_ms": fixture.native_retraction.retracted_at_ms,
+            "expiry_at_ms": UInt64(expiryDate.timeIntervalSince1970 * 1_000),
+            "visibility_time_ms": UInt64(presentation.retractionVisibilityTime.timeIntervalSince1970 * 1_000),
+            "expired_in_presentation": LivePresentationStore.isRetractionExpired(
+                retractionDate: retractionDate, at: presentation.retractionVisibilityTime),
+            "request_retained": true,
+            "answer_draft_action_id": "keep",
+            "conversation_turn_count": thread.turns.count,
+            "conversation_turn_texts": thread.turns.map { $0.text.rawValue },
+            "conversation_retraction_retained": true,
+            "conversation_terminal": "cleared"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: readback, options: [.sortedKeys])
+        let directory = try FileAttentionStatePersistence.applicationSupport().directoryURL
+        try FileManager.default.createDirectory(at: directory,
+                                               withIntermediateDirectories: true)
+        try data.write(to: directory.appendingPathComponent("native-server-retraction-readback.json"),
+                       options: .atomic)
+        return "Server retraction persisted: \(phase)"
+    }
+
+    private static func seedRetractionExpiryRelaunchFixture(in store: AttentionDomainStore,
+                                                           fixtures: FixtureSet,
+                                                           context: ProfileContext) throws {
+        guard let request = fixtures.requests.first(where: {
+            $0.key.messageID.rawValue == "facilities-01"
+        }) else {
+            throw ConversationError.missingRequest
+        }
+
+        let binding = ConversationBinding(request: request.key, revision: 1)
+        let sessionHandle = ExactText("retraction-expiry-relaunch-fixture")
+        let terminalTurn = ExactText("retraction-expiry-relaunch-terminal")
+        let firstSequence = try store.conversationSnapshot(context: context).cursor + 1
+        let terminalSequence = firstSequence + 1
+        let retractionSequence = terminalSequence + 1
+        let retractedAtMilliseconds = UInt64(
+            Date().addingTimeInterval(-86_400 + 180).timeIntervalSince1970 * 1_000)
+
+        try store.applyConversation(ConversationEvent(sequence: firstSequence, binding: binding,
+            fact: .request(sessionHandle: sessionHandle, payload: request.originalPayload)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: terminalSequence, binding: binding,
+            fact: .terminal(turn: terminalTurn, author: .origin, state: .cleared)), context: context)
+        try store.applyConversation(ConversationEvent(sequence: retractionSequence, binding: binding,
+            fact: .retraction(turn: terminalTurn, terminalSequence: terminalSequence),
+            retractedAtMilliseconds: retractedAtMilliseconds), context: context)
+    }
+#endif
+
     static func loadFromBundle(_ bundle: Bundle = .main) -> PrototypeStore {
         do {
+            let arguments = ProcessInfo.processInfo.arguments
+#if DEBUG
+            let usesServerRetractionFixture = arguments.contains("--harklight-test-server-retraction") ||
+                arguments.contains("--harklight-test-retraction-expiry-after-deadline")
+            if usesServerRetractionFixture {
+                guard let fixtureURL = bundle.url(forResource: "native-server-retraction",
+                                                  withExtension: "json") else {
+                    throw ConversationError.missingRequest
+                }
+                let fixture = try JSONDecoder().decode(
+                    NativeServerRetractionFixture.self, from: Data(contentsOf: fixtureURL))
+                guard fixture.fixture_version == 1,
+                      fixture.server_commit == "f7a002600f8e03fbfe8c766266ac6a7f2ab2b500",
+                      fixture.native_retraction.retracted_at_ms > 0 else {
+                    throw ConversationError.missingRequest
+                }
+                let emptyFixtures = FixtureSet(
+                    accountScope: ExactText(fixture.person_id), requests: [],
+                    legacyValueConformanceVectors: [], legacyTextConformanceVectors: [],
+                    validSubmissions: [], invalidSubmissions: [], pointVectors: [],
+                    terminalContexts: [], additionalCases: [])
+                return PrototypeStore(
+                    fixtures: emptyFixtures,
+                    persistence: try FileAttentionStatePersistence.applicationSupport(),
+                    resetFixtureAtLaunch: arguments.contains("--reset-attention-fixture"),
+                    serverRetractionFixture: fixture,
+                    seedServerRetractionFixture: arguments.contains("--harklight-test-server-retraction") &&
+                        arguments.contains("--reset-attention-fixture"),
+                    expireServerRetractionAtLaunch: arguments.contains(
+                        "--harklight-test-retraction-expiry-after-deadline"))
+            }
+#endif
             return PrototypeStore(fixtures: try FixtureSet.loadBundled(from: bundle),
                                   persistence: try FileAttentionStatePersistence.applicationSupport(),
-                                  resetFixtureAtLaunch: ProcessInfo.processInfo.arguments.contains("--reset-attention-fixture"))
+                                  resetFixtureAtLaunch: arguments.contains("--reset-attention-fixture"))
         } catch {
             let empty = FixtureSet(accountScope: ExactText("fictional-sample-account"),
                                   requests: [],
