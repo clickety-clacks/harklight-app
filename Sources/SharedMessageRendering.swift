@@ -185,19 +185,22 @@ enum MessageMarkdown {
                 case let .listItem(ordinal):
                     if markedListItems.insert(component.identity).inserted {
                         let parentComponents = components.prefix(index)
-                        let hasOrderedListParent = parentComponents.contains { parent in
-                            if case .orderedList = parent.kind { return true }
-                            return false
-                        }
-                        let hasUnorderedListParent = parentComponents.contains { parent in
-                            if case .unorderedList = parent.kind { return true }
-                            return false
-                        }
+                        let nearestListKind = components.enumerated()
+                            .compactMap { offset, candidate -> (distance: Int, isOrdered: Bool)? in
+                                switch candidate.kind {
+                                case .orderedList:
+                                    return (abs(offset - index), true)
+                                case .unorderedList:
+                                    return (abs(offset - index), false)
+                                default:
+                                    return nil
+                                }
+                            }
+                            .min { $0.distance < $1.distance }
                         // Foundation encodes ordered-list position directly on
-                        // the list item; the parent chain is not always present
-                        // on iOS 27. Keep that ordinal only when no unordered
-                        // parent identifies a bullet list.
-                        let isOrdered = hasOrderedListParent || (ordinal > 0 && !hasUnorderedListParent)
+                        // the list item; its parent may appear on either side
+                        // of that item in the presentation-intent chain.
+                        let isOrdered = nearestListKind?.isOrdered ?? (ordinal > 0)
                         let depth = parentComponents.reduce(into: 0) { count, parent in
                             if case .listItem(_) = parent.kind { count += 1 }
                         }
