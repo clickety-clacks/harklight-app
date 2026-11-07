@@ -841,19 +841,17 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(found, app.debugDescription)
             if kind == "value" {
                 clearSearch(in: app)
-                inboxTab.tap()
-                XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+                selectMessageTab("Inbox", in: app)
                 XCTAssertTrue(inboxTab.isSelected)
-                repliedTab.tap()
+                selectMessageTab("Replied", in: app)
+                XCTAssertTrue(repliedTab.isSelected,
+                              "The unsent reply is checked in the Replied tab.")
                 enterSearch(query, in: app)
                 XCTAssertFalse(row.waitForExistence(timeout: 1),
                                "A prefilled but unsent reply stays in Inbox.")
                 clearSearch(in: app)
-                let closeSearchAfterReplied = app.buttons["Close"]
-                if closeSearchAfterReplied.exists && closeSearchAfterReplied.isHittable {
-                    closeSearchAfterReplied.tap()
-                }
-                inboxTab.tap()
+                selectMessageTab("Inbox", in: app)
+                XCTAssertTrue(inboxTab.isSelected)
                 enterSearch(query, in: app)
                 XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             }
