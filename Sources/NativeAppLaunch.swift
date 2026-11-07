@@ -2038,6 +2038,28 @@ final class LivePresentationStore {
         presentation.requests.first { $0.key == key }
     }
 
+    /// Records only an explicit detail-content navigation. The durable
+    /// operation is stored before any best-effort relay send; a reconnect will
+    /// retry it with the same message identity and revision.
+    func reportMessageContentOpened(_ request: PresentedRequest) {
+        guard permitsDelivery, !isReadOnly, !isLocalExample,
+              request.requestRevision > 0 else { return }
+        do {
+            _ = try attentionStore.enqueueMessageOpen(request.key,
+                                                       requestRevision: request.requestRevision,
+                                                       context: profileContext)
+        } catch {
+            // Opening remains available when the local report cannot be saved.
+            // Without a durable outbox entry, no relay report is attempted.
+            diagnostics?.record(area: .localStore, phase: .messageOpen, transition: .failed,
+                                error: error, request: request.key,
+                                requestRevision: request.requestRevision,
+                                receiptState: .unknown)
+            return
+        }
+        Task { await NativeRelayLifecycle.shared.sendPendingMessageOpens() }
+    }
+
     func failedResponseWarning(for key: RequestKey,
                                revision: UInt64? = nil) -> FailedResponseWarning? {
         guard let request = request(for: key),

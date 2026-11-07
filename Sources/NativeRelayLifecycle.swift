@@ -1053,6 +1053,13 @@ final class NativeRelayLifecycle {
         return await refreshFlights.coalesced()
     }
 
+    /// Attempts durable message-open reports on the current authenticated
+    /// relay session. With no active session, the store keeps them for the
+    /// ordinary reconnect drain.
+    func sendPendingMessageOpens() async {
+        _ = await core?.sendPendingMessageOpens()
+    }
+
     /// The terminal event batch used by the foreground lifecycle and its
     /// focused behavior test. Keeping the mapping here makes the emitted
     /// boundary and validation facts testable without constructing journal

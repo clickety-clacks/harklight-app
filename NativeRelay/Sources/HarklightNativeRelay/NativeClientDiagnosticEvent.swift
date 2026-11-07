@@ -28,6 +28,7 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case relayAdmission
     case ordinaryReplay
     case inboxPage
+    case messageOpen
     case conversationReplay
     case conversationReadPosition
     case acknowledgement
@@ -318,6 +319,7 @@ public enum NativeDiagnosticCauseCode {
         "relay_inbox_paging_unavailable", "relay_inbox_paging_busy",
         "unknown_update_kind",
         "invalid_chat_read_positions",
+        "message_open_unsupported", "message_open_confirmation_unresolved",
         "invalid_relay_endpoint", "invalid_trust_anchor", "wrong_device_identity",
         "relay_fixture_profile", "relay_wrong_installation", "relay_inactive", "relay_invalid_replay",
         "relay_origin_content_missing", "relay_event_rejected", "relay_operation_result_mismatch",
@@ -351,7 +353,8 @@ public enum NativeDiagnosticCauseCode {
     ]
 
     private static let serverReasons: Set<String> = [
-        "invalid_request", "invalid_cursor", "unauthorized", "forbidden", "not_found",
+        "invalid_request", "invalid_cursor", "invalid_field", "unknown_type",
+        "unauthorized", "forbidden", "not_found",
         "unsupported_version", "request_closed", "revision_mismatch", "upload_discarded",
         "op_id_mismatch", "conflict", "expired", "used", "too_large"
     ]

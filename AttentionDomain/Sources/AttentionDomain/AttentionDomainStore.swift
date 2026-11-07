@@ -191,6 +191,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 Set(checkpoint.batches.flatMap(\.operationIDs)).count == checkpoint.batches.flatMap(\.operationIDs).count
             } &&
             (loaded.replayPublishedInboxCurrentKeys ?? []).allSatisfy { $0.accountScope == context.identity.personID }
+            let loadedMessageOpens = loaded.pendingMessageOpens ?? []
+            let validPendingMessageOpens = Set(loadedMessageOpens.map(\.operationID)).count == loadedMessageOpens.count &&
+                loadedMessageOpens.allSatisfy {
+                    $0.requestKey.accountScope == context.identity.personID && $0.requestRevision > 0
+                }
             var validIntents = true
             var acceptedAwaitingReplay: [RequestKey: Submission] = [:]
             for entry in loaded.intents {
@@ -232,7 +237,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     $0.value.readThroughConversationSequence > 0
             } ?? true
             guard validConversationThreads, validConversationEvents,
-                  validConversationReadPositions, validPendingConversationReadPositions else {
+                  validConversationReadPositions, validPendingConversationReadPositions,
+                  validPendingMessageOpens else {
                 throw AttentionStoreError.persistence("The conversation store contains a different account's requests.")
             }
             loaded.conversation?.orderTurnsFromProjectionEvents()
@@ -599,6 +605,59 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         guard state.outboxOrder.contains(intentID) else { return nil }
         return state.intents[intentID]
+    }
+
+    /// Persist a message-open observation before any relay send. Reopening the
+    /// same content revision while its first report is pending reuses the
+    /// original operation ID and exact identity.
+    @discardableResult
+    public func enqueueMessageOpen(_ requestKey: RequestKey,
+                                   requestRevision: UInt64,
+                                   context suppliedContext: ProfileContext) throws -> PendingMessageOpen {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(requestKey, in: suppliedContext.identity)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard requestRevision > 0 else { throw AttentionStoreError.invalidSubmission }
+
+        let pending = state.pendingMessageOpens ?? []
+        if let existing = pending.first(where: {
+            $0.requestKey == requestKey && $0.requestRevision == requestRevision
+        }) {
+            return existing
+        }
+
+        var operationID = UUID()
+        while pending.contains(where: { $0.operationID == operationID }) { operationID = UUID() }
+        let operation = PendingMessageOpen(requestKey: requestKey,
+                                           requestRevision: requestRevision,
+                                           operationID: operationID)
+        var next = state
+        next.pendingMessageOpens = pending + [operation]
+        try commit(next)
+        return operation
+    }
+
+    /// Retire only the exact pending operation that received durable success
+    /// or an explicit permanent rejection from the relay.
+    @discardableResult
+    public func retireMessageOpen(_ operationID: UUID,
+                                  context suppliedContext: ProfileContext) throws -> Bool {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        let pending = state.pendingMessageOpens ?? []
+        guard pending.contains(where: { $0.operationID == operationID }) else { return false }
+        var next = state
+        next.pendingMessageOpens = pending.filter { $0.operationID != operationID }
+        try commit(next)
+        return true
     }
 
     public func recordAcceptedOperation(_ intentID: UUID,
@@ -2640,7 +2699,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       inboxView: state.inboxView,
                                       inboxCurrentKeys: inboxCurrentKeys,
                                       pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
-                                      inboxReferences: state.inboxReferences ?? [:])
+                                      inboxReferences: state.inboxReferences ?? [:],
+                                      pendingMessageOpens: state.pendingMessageOpens ?? [])
     }
 
     /// Returns only the contiguous relay cursor after validating the profile.
@@ -4059,6 +4119,8 @@ private struct PersistedAttentionState: Codable {
     var inboxReferences: [RequestKey: RemoteRequestState]?
     // Optional keeps existing schema-2 account files readable without resetting their data.
     var conversation: ConversationState?
+    // Optional preserves schema-2 files created before deliberate-open reporting.
+    var pendingMessageOpens: [PendingMessageOpen]?
 
     init(profileIdentity: ProfileIdentity) {
         self.schemaVersion = Self.currentSchemaVersion

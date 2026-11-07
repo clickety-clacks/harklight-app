@@ -153,6 +153,8 @@ public actor NativeRelayCore {
     private var inboxViewUnsupportedForConnection = false
     private var inboxViewFetchInProgress = false
     private var pendingInboxViewRevision: ExactText?
+    private var messageOpenUnsupportedForConnection = false
+    private var pendingMessageOpenDrainRequested = false
     private var postCheckpointAcknowledgementGateOpen = false
     private var postCheckpointAcknowledgedCursor: UInt64?
     private var pendingPostCheckpointAcknowledgement: UInt64?
@@ -531,6 +533,7 @@ public actor NativeRelayCore {
             failedStep = .validateRelayState
             try validate()
             onProgress(.postAckDrainFinished(.completed))
+            _ = await drainPendingMessageOpens(using: pagingSession)
             return max(high, durableCursor)
         } catch {
             let errorCode = NativeDiagnosticCauseCode.forPostAckError(error)
@@ -1961,6 +1964,20 @@ public actor NativeRelayCore {
         return try await drainPending()
     }
 
+    /// Sends only durable message-open outbox entries. Unsupported or uncertain
+    /// replies leave the original operation queued and never fail inbox sync.
+    @discardableResult
+    public func sendPendingMessageOpens() async -> Int {
+        guard let pagingSession = session as? any AuthenticatedInboxPagingSession else { return 0 }
+        guard !busy else {
+            pendingMessageOpenDrainRequested = true
+            return 0
+        }
+        busy = true
+        defer { releaseBusy() }
+        return await drainPendingMessageOpens(using: pagingSession)
+    }
+
     private func releaseBusy() {
         busy = false
         if pendingLiveConversationReplay {
@@ -1970,6 +1987,10 @@ public actor NativeRelayCore {
         if pendingConversationReadPositionDrain {
             pendingConversationReadPositionDrain = false
             Task { await sendPendingConversationReadPositions() }
+        }
+        if pendingMessageOpenDrainRequested {
+            pendingMessageOpenDrainRequested = false
+            Task { _ = await sendPendingMessageOpens() }
         }
         if !pendingInboxPageWaiters.isEmpty {
             let waiters = pendingInboxPageWaiters
@@ -2198,6 +2219,63 @@ public actor NativeRelayCore {
             }
         }
         return attempted
+    }
+
+    private func drainPendingMessageOpens(using pagingSession: any AuthenticatedInboxPagingSession) async -> Int {
+        guard !messageOpenUnsupportedForConnection,
+              let pending = try? store.snapshot(context: context).pendingMessageOpens else { return 0 }
+        let wire = MessageOpenWire()
+        var retired = 0
+        for operation in pending {
+            guard !messageOpenUnsupportedForConnection else { break }
+            do {
+                try validate()
+                let response = try await pagingSession.inboxRequest(
+                    wire.request(for: operation), ref: MessageOpenWire.requestRef)
+                switch wire.decodeResult(response, for: operation) {
+                case .confirmed:
+                    _ = try store.retireMessageOpen(operation.operationID, context: context)
+                    retired += 1
+                case let .permanentlyRejected(reason):
+                    diagnose(.relay, .messageOpen, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                             operationIDSource: .localRequestCorrelation,
+                             operationID: operation.operationID,
+                             request: operation.requestKey, revision: operation.requestRevision,
+                             receipt: .terminal)
+                    _ = try store.retireMessageOpen(operation.operationID, context: context)
+                    retired += 1
+                case .unsupported:
+                    messageOpenUnsupportedForConnection = true
+                    diagnose(.relay, .messageOpen, .unresolved,
+                             causeCode: "message_open_unsupported",
+                             operationIDSource: .localRequestCorrelation,
+                             operationID: operation.operationID,
+                             request: operation.requestKey, revision: operation.requestRevision,
+                             receipt: .pendingUnconfirmed)
+                case .unresolved:
+                    // The operation may have committed even though this client
+                    // cannot prove it. Keep its original ID and retry later.
+                    diagnose(.relay, .messageOpen, .unresolved,
+                             causeCode: "message_open_confirmation_unresolved",
+                             operationIDSource: .localRequestCorrelation,
+                             operationID: operation.operationID,
+                             request: operation.requestKey, revision: operation.requestRevision,
+                             receipt: .pendingUnconfirmed)
+                    return retired
+                }
+            } catch {
+                // Open reporting is additive. A transport/storage uncertainty
+                // must not turn a successful inbox catch-up into a failure.
+                diagnose(.relay, .messageOpen, .unresolved, error: error,
+                         operationIDSource: .localRequestCorrelation,
+                         operationID: operation.operationID,
+                         request: operation.requestKey, revision: operation.requestRevision,
+                         receipt: .pendingUnconfirmed)
+                return retired
+            }
+        }
+        return retired
     }
 
     private func diagnose(_ area: NativeDiagnosticArea,
