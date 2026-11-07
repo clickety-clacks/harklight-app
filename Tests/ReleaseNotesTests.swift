@@ -106,19 +106,23 @@ final class ReleaseNotesTests: XCTestCase {
         let document = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         let entries = try XCTUnwrap(document["entries"] as? [[String: Any]])
-        let rawEntry = try XCTUnwrap(entries.first { $0["id"] as? String == "fresh-release-notes" })
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertNil(entries.first { $0["id"] as? String == "fresh-release-notes" })
+        let pendingIdentifier = "fresh-release-notes-follow-up"
+        let rawEntry = try XCTUnwrap(entries.first { $0["id"] as? String == pendingIdentifier })
         XCTAssertTrue(rawEntry["testFlightBuildNumber"] is NSNull)
 
         let note = try XCTUnwrap(HarklightReleaseNotes.numberedEntries(
             currentBuildIdentifier: "142", in: bundle)
-            .first { $0.id == "fresh-release-notes" })
+            .first { $0.id == pendingIdentifier })
         XCTAssertEqual(note.buildIdentifier, 142)
         XCTAssertEqual(note.highlights.map(\.id), [
             "grouped-replies-and-retractions",
             "formatted-messages",
             "release-build-identification",
             "dynamic-type-message-text",
-            "responsive-chat-composer"
+            "responsive-chat-composer",
+            "new-replies-across-conversations"
         ])
 
         let messageTextDetail = try XCTUnwrap(note.highlights.first {
@@ -131,6 +135,11 @@ final class ReleaseNotesTests: XCTestCase {
         })
         XCTAssertEqual(String(localized: composerDetail.detail),
                        "Typing a message stays responsive while you work with attachments and other message controls.")
+        let repliesDetail = try XCTUnwrap(note.highlights.first {
+            $0.id == "new-replies-across-conversations"
+        })
+        XCTAssertEqual(String(localized: repliesDetail.detail),
+                       "Reading a reply in one conversation does not mark new replies in other conversations as read.")
     }
 
     func testGeneratedNoChangeEntryKeepsItsSinglePlainHighlight() throws {
