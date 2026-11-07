@@ -3,18 +3,19 @@ import XCTest
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
     func testCurrentReleaseOpensOnFirstInstallAndShowsItsBuildInSettings() {
+        let simulatedCurrentBuild = "142" // Synthetic metadata; no archive mapping is claimed.
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_FRESH_INSTALL"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "119"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = simulatedCurrentBuild
         app.launch()
 
         XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 119"].exists,
+        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["See what's new in each release"].exists,
+        XCTAssertTrue(app.staticTexts["Know which release is installed"].exists,
                       app.debugDescription)
 
         app.buttons["Done"].tap()
@@ -26,11 +27,11 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        let buildHeader = app.staticTexts["Version 0.1.0 · Build 119"]
+        let buildHeader = app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"]
         revealHistoryElement(buildHeader, in: app)
         XCTAssertTrue(buildHeader.exists,
                       "Settings keeps the current release's build label.")
-        let updateTitle = app.staticTexts["See what's new in each release"]
+        let updateTitle = app.staticTexts["Know which release is installed"]
         revealHistoryElement(updateTitle, in: app)
         XCTAssertTrue(updateTitle.exists,
                       app.debugDescription)
@@ -59,8 +60,12 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
                       app.debugDescription)
-        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build 107"].exists,
-                       "A later installed build must not relabel this update.")
+        let pendingHeader = app.staticTexts["Version 0.1.0 · Build 107"]
+        revealHistoryElement(pendingHeader, in: app)
+        XCTAssertTrue(pendingHeader.exists,
+                      "The pending release uses the installed build number.")
+        XCTAssertTrue(app.staticTexts["Version 0.1.0 · First confirmed in Build 106"].exists,
+                      "A later installed build must not relabel the historical update.")
 
         app.buttons["Done"].tap()
         let settings = app.buttons["inbox-settings"]
@@ -95,9 +100,9 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(updateTitle.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       "The update sheet identifies the released build and version.")
-        XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
+        XCTAssertTrue(app.staticTexts["Know which release is installed"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
+        XCTAssertTrue(app.staticTexts["What’s New opens when a release has new notes, and both it and Settings show each release’s build number."].exists,
                       app.debugDescription)
         XCTAssertFalse(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
                        "Earlier build notes do not appear in the current update sheet.")
@@ -134,12 +139,16 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(build61Header.isHittable,
                       "The earlier numbered release is visible before history is scrolled.")
         XCTAssertTrue(inboxScrollingTitle.isHittable, app.debugDescription)
+        revealHistoryElement(inboxScrollingDetail, in: app)
         XCTAssertTrue(inboxScrollingDetail.isHittable, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["See clearer release notes"].isHittable,
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts[
+        let releaseNoteFormatTitle = app.staticTexts["See clearer release notes"]
+        revealHistoryElement(releaseNoteFormatTitle, in: app)
+        XCTAssertTrue(releaseNoteFormatTitle.isHittable, app.debugDescription)
+        let releaseNoteFormatDetail = app.staticTexts[
             "Each update now has an icon, a short title and a clear description."
-        ].isHittable, app.debugDescription)
+        ]
+        revealHistoryElement(releaseNoteFormatDetail, in: app)
+        XCTAssertTrue(releaseNoteFormatDetail.isHittable, app.debugDescription)
         attachScreenshot("release-notes-settings-history", from: app)
 
         let build59Header = app.staticTexts["Version 0.1.0 · Build 59"]
@@ -170,7 +179,7 @@ final class ReleaseNotesUITests: XCTestCase {
     }
 
     private func revealHistoryElement(_ element: XCUIElement, in app: XCUIApplication) {
-        for _ in 0..<8 where !element.isHittable {
+        for _ in 0..<40 where !element.isHittable {
             let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.70))
             let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.56))
             start.press(forDuration: 0.05, thenDragTo: end)

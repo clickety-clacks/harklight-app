@@ -1,0 +1,41 @@
+{
+  "entries": [
+    {
+      "id": "fresh-release-notes",
+      "marketingVersion": "0.1.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "grouped-replies-and-retractions",
+          "symbol": "bubble.left.and.bubble.right",
+          "title": "Keep track of replies",
+          "detail": "Agent replies that still need attention are grouped together. Retracted replies remain visible for up to 24 hours."
+        },
+        {
+          "id": "formatted-messages",
+          "symbol": "text.alignleft",
+          "title": "Read formatted messages clearly",
+          "detail": "Links and other formatting stay readable in message details and inbox previews."
+        },
+        {
+          "id": "release-build-identification",
+          "symbol": "sparkles",
+          "title": "Know which release is installed",
+          "detail": "What’s New opens when a release has new notes, and both it and Settings show each release’s build number."
+        },
+        {
+          "id": "dynamic-type-message-text",
+          "symbol": "textformat.size",
+          "title": "Read messages at your preferred text size",
+          "detail": "Message details and inbox rows use a readable standard size and adjust to your device’s text-size setting."
+        },
+        {
+          "id": "responsive-chat-composer",
+          "symbol": "keyboard",
+          "title": "Keep Chat responsive as you type",
+          "detail": "Typing a message stays responsive while you work with attachments and other message controls."
+        }
+      ]
+    }
+  ]
+}

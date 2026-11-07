@@ -7,6 +7,24 @@ private struct PersistedAttentionStateHeader: Decodable {
     let profileIdentity: ProfileIdentity
 }
 
+private struct GeneratedReleaseNotesFile: Decodable {
+    let entries: [GeneratedReleaseNote]
+}
+
+private struct GeneratedReleaseNote: Decodable {
+    struct Highlight: Decodable {
+        let id: String
+        let symbol: String
+        let title: String
+        let detail: String
+    }
+
+    let id: String
+    let marketingVersion: String
+    let testFlightBuildNumber: Int?
+    let highlights: [Highlight]
+}
+
 struct HarklightReleaseNote: Identifiable, Sendable {
     struct Highlight: Identifiable, Sendable {
         let id: String
@@ -28,6 +46,17 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 
     init(buildIdentifier: Int, marketingVersion: String, highlights: [Highlight]) {
         id = String(buildIdentifier)
+        self.buildIdentifier = buildIdentifier
+        confirmedContainingBuildIdentifier = nil
+        self.marketingVersion = marketingVersion
+        historyDateDescription = nil
+        visibleFromBuildIdentifier = nil
+        self.highlights = highlights
+    }
+
+    init(generatedIdentifier: String, buildIdentifier: Int,
+         marketingVersion: String, highlights: [Highlight]) {
+        id = generatedIdentifier
         self.buildIdentifier = buildIdentifier
         confirmedContainingBuildIdentifier = nil
         self.marketingVersion = marketingVersion
@@ -59,7 +88,7 @@ enum HarklightReleaseNotes {
     /// Keep these older updates' identifiers stable for existing installations.
     /// Build 106 is the earliest confirmed containing build for the existing updates below;
     /// it does not establish when they first shipped.
-    /// Add future releases to the numbered entries below using their expected shipping build.
+    /// Generated release entries ship in Resources/HarklightReleaseNotes.json.
     static let updateEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
             historyIdentifier: "failed-response-retry",
@@ -607,6 +636,45 @@ enum HarklightReleaseNotes {
         guard let value = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
               !value.isEmpty else { return nil }
         return value
+    }
+
+    static func generatedEntries(
+        from data: Data,
+        currentBuildIdentifier: String?
+    ) throws -> [HarklightReleaseNote] {
+        let file = try JSONDecoder().decode(GeneratedReleaseNotesFile.self, from: data)
+        let runtimeBuild = currentBuildIdentifier.flatMap(Int.init)
+        return file.entries.compactMap { entry in
+            guard let build = entry.testFlightBuildNumber ?? runtimeBuild else { return nil }
+            let highlights = entry.highlights.map { highlight in
+                HarklightReleaseNote.Highlight(
+                    id: highlight.id,
+                    symbol: highlight.symbol,
+                    title: LocalizedStringResource(String.LocalizationValue(highlight.title)),
+                    detail: LocalizedStringResource(String.LocalizationValue(highlight.detail)))
+            }
+            return HarklightReleaseNote(
+                generatedIdentifier: entry.id,
+                buildIdentifier: build,
+                marketingVersion: entry.marketingVersion,
+                highlights: highlights)
+        }
+    }
+
+    static func numberedEntries(
+        currentBuildIdentifier: String?,
+        in bundle: Bundle = .main
+    ) -> [HarklightReleaseNote] {
+        let generated: [HarklightReleaseNote]
+        if let url = bundle.url(forResource: "HarklightReleaseNotes", withExtension: "json"),
+           let data = try? Data(contentsOf: url),
+           let decoded = try? generatedEntries(from: data,
+                                               currentBuildIdentifier: currentBuildIdentifier) {
+            generated = decoded
+        } else {
+            generated = []
+        }
+        return generated + entries
     }
 
     static func releasedEntries(
