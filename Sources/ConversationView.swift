@@ -42,12 +42,12 @@ struct ConversationPanel: View {
     let key: RequestKey
     let sender: String
     let title: String
-    var discussionUnavailableReason: LocalizedStringResource? = nil
     /// Scrolls this turn into view when the panel opens from a reply item.
     var initialScrollTurnID: ExactText? = nil
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     var testConversationSheetDidAppear: (() -> Void)? = nil
+    var discussionUnavailableReason: LocalizedStringResource? = nil
     @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
     @State private var inspectedFileRevision: UInt64?
