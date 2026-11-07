@@ -932,6 +932,7 @@ struct InboxList: View {
     let triggerNotification: (() -> Void)?
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     private var reduceMotion: Bool {
         reduceMotionOverride ?? systemReduceMotion
     }
@@ -1008,6 +1009,12 @@ struct InboxList: View {
             return designPalette.accent.color
         }
         return designPalette.messageType(item.resolvedMessageType).backgroundColor
+    }
+
+    private var searchFieldPlacement: SearchFieldPlacement {
+        horizontalSizeClass == .compact
+            ? .navigationBarDrawer(displayMode: .always)
+            : .sidebar
     }
 
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
@@ -1779,7 +1786,7 @@ struct InboxList: View {
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
-        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
+        .searchable(text: $search, placement: searchFieldPlacement, prompt: "Search messages")
         .searchPresentationToolbarBehavior(.avoidHidingContent)
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)

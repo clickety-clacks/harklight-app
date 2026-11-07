@@ -417,23 +417,26 @@ final class ConversationSampleUITests: XCTestCase {
                 XCTAssertTrue(newRow.waitForExistence(timeout: 10), app.debugDescription)
                 let list = app.collectionViews.firstMatch
                 XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+                let normalReplyRow = app.descendants(matching: .any)[
+                    "normal-reply-item-sample-markdown-acceptance"
+                ]
+                XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
 
                 for setting in settings {
                     selectMessageTextSize(setting, in: app)
                     reveal(newRow, in: list)
                     XCTAssertTrue(newRow.isHittable, newRow.debugDescription)
                     XCTAssertTrue(newRow.label.contains("A Markdown note"), newRow.debugDescription)
+                    assertSearchFieldDoesNotCover(normalReplyRow, in: app)
                     capture("message-size-\(setting.value)-\(appearance)-\(category.name)-new-list", app)
                 }
 
                 for setting in settings {
                     selectMessageTextSize(setting, in: app)
-                    let normalReplyRow = app.descendants(matching: .any)[
-                        "normal-reply-item-sample-markdown-acceptance"
-                    ]
                     reveal(normalReplyRow, in: list, direction: .up)
                     XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
                     XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
+                    assertSearchFieldDoesNotCover(normalReplyRow, in: app)
                     capture("message-size-\(setting.value)-\(appearance)-\(category.name)-normal-reply", app)
 
                     let normalRow = app.descendants(matching: .any)[
@@ -496,6 +499,13 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(option.isSelected,
                       "The message text size control did not select \(setting.title).\n\(app.debugDescription)")
         app.buttons["Done"].tap()
+    }
+
+    private func assertSearchFieldDoesNotCover(_ row: XCUIElement, in app: XCUIApplication) {
+        let searchField = app.searchFields.firstMatch
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(row.frame.intersects(searchField.frame),
+                       "The search field must not cover a message row.\n\(app.debugDescription)")
     }
 
     private func reveal(_ element: XCUIElement,
