@@ -1271,6 +1271,8 @@ final class LivePresentationStore {
     private(set) var isReadOnly: Bool
     @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
+    @ObservationIgnored private var locallyReconciledConversationReadRevisions = Set<UInt64>()
+    @ObservationIgnored private var conversationProjectionRevision: UInt64?
     @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
     @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
@@ -1346,6 +1348,7 @@ final class LivePresentationStore {
         self.attentionStore = store
         self.presentation = snapshot
         self.conversationThreads = try port.conversations(context: port.context).threads
+        self.conversationProjectionRevision = snapshot.revision
         self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
         self.selectedRequestKey = snapshot.requests.first?.key
         reconcileNewMessageArea(snapshot.requests, using: areaStore)
@@ -1490,10 +1493,23 @@ final class LivePresentationStore {
                   $0.id == turnID && $0.kind == .reply && $0.author == .origin
               }) == true else { return }
         do {
-            let pending = try port.markConversationRead(key, through: turnID, context: port.context)
-            conversationThreads = try port.conversations(context: port.context).threads
-            reconcileReplyItemArea()
-            if permitsDelivery, pending != nil {
+            let update = try port.markConversationReadAndProject(key, through: turnID,
+                                                                 context: port.context)
+            let canSkipObservedRefresh = update.didCommit &&
+                update.previousRevision == presentation.revision &&
+                conversationProjectionRevision == update.previousRevision &&
+                observation != nil
+            if conversationThreads[key] != update.thread {
+                conversationThreads[key] = update.thread
+                reconcileReplyItemArea(for: key)
+            }
+            if conversationProjectionRevision == update.previousRevision {
+                conversationProjectionRevision = update.revision
+            }
+            if canSkipObservedRefresh {
+                locallyReconciledConversationReadRevisions.insert(update.revision)
+            }
+            if permitsDelivery, update.pendingPosition != nil {
                 let expected = profileContext
                 Task {
                     await NativeRelayLifecycle.shared.sendPendingConversationReadPositions(expected: expected)
@@ -1846,10 +1862,17 @@ final class LivePresentationStore {
                         accountScopes: [profileContext.identity.personID])
     }
 
-    private func reconcileReplyItemArea(using store: ReplyItemAreaStore? = nil) {
+    private func reconcileReplyItemArea(for request: RequestKey? = nil,
+                                        using store: ReplyItemAreaStore? = nil) {
         guard let store = store ?? replyAreaStore else { return }
+        let account = profileContext.identity.personID
+        // A partial conversation view cannot establish the account's first-run
+        // baseline. Fall back to the full snapshot until that baseline exists.
+        let scopedRequest = request.flatMap {
+            store.ledger.baselineEstablishedAccounts.contains(account) ? $0 : nil
+        }
         var observations: [ReplyItemObservation] = []
-        for (key, thread) in conversationThreads {
+        for (key, thread) in conversationThreads where scopedRequest == nil || key == scopedRequest {
             let legacyReadIndex = thread.readThroughTurn.flatMap { readTurn in
                 thread.turns.firstIndex { $0.id == readTurn }
             }
@@ -1871,7 +1894,8 @@ final class LivePresentationStore {
                                                          text: turn.text.rawValue))
             }
         }
-        store.reconcile(observations, accountScopes: [profileContext.identity.personID])
+        let parentScope = scopedRequest.map { Set([$0]) }
+        store.reconcile(observations, accountScopes: [account], parentScope: parentScope)
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
@@ -2797,14 +2821,23 @@ final class LivePresentationStore {
 
     private func adopt(_ snapshot: PresentationSnapshot) {
         let previousRoutingStates = noReplyRoutingStates(for: presentation.requests)
-        do { conversationThreads = try port.conversations(context: port.context).threads }
-        catch {
-            observationError = "The local conversation could not be refreshed."
-            diagnose(.localStore, .projectionRefresh, .failed, error: error)
+        let locallyReconciledRead = locallyReconciledConversationReadRevisions.remove(snapshot.revision) != nil
+        locallyReconciledConversationReadRevisions = Set(
+            locallyReconciledConversationReadRevisions.filter { $0 > snapshot.revision })
+        if !locallyReconciledRead {
+            do {
+                conversationThreads = try port.conversations(context: port.context).threads
+                conversationProjectionRevision = snapshot.revision
+            }
+            catch {
+                conversationProjectionRevision = nil
+                observationError = "The local conversation could not be refreshed."
+                diagnose(.localStore, .projectionRefresh, .failed, error: error)
+            }
         }
         presentation = snapshot
         reconcileNewMessageArea(snapshot.requests)
-        reconcileReplyItemArea()
+        if !locallyReconciledRead { reconcileReplyItemArea() }
         refreshFailedResponseWarnings(for: snapshot.requests)
         recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)

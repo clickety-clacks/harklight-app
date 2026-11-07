@@ -3067,7 +3067,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func markConversationRead(_ request: RequestKey,
                                      context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
-        try markConversationRead(request, through: nil, context: suppliedContext)
+        try markConversationReadUpdate(request, through: nil, context: suppliedContext).pendingPosition
     }
 
     /// Records that Chat has shown a specific reply, without advancing beyond it.
@@ -3075,18 +3075,27 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func markConversationRead(_ request: RequestKey,
                                      through turnID: ExactText,
                                      context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
-        try markConversationRead(request, through: Optional(turnID), context: suppliedContext)
+        try markConversationReadUpdate(request, through: turnID, context: suppliedContext).pendingPosition
     }
 
-    private func markConversationRead(_ request: RequestKey,
-                                     through requestedTurnID: ExactText?,
-                                     context suppliedContext: ProfileContext) throws -> PendingConversationReadPosition? {
+    /// Marks a specific visible reply read and returns its updated local thread
+    /// and commit revision for efficient client projection refresh.
+    public func markConversationReadAndProject(_ request: RequestKey,
+                                               through turnID: ExactText,
+                                               context suppliedContext: ProfileContext) throws -> ConversationReadUpdate {
+        try markConversationReadUpdate(request, through: turnID, context: suppliedContext)
+    }
+
+    private func markConversationReadUpdate(_ request: RequestKey,
+                                            through requestedTurnID: ExactText?,
+                                            context suppliedContext: ProfileContext) throws -> ConversationReadUpdate {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(request, in: context.identity)
+        let previousRevision = state.revision
         var next = state
         guard var conversation = next.conversation,
               var thread = conversation.threads[request] else { throw ConversationError.missingRequest }
@@ -3098,7 +3107,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
         } else {
             turn = thread.latestAgentReply
         }
-        guard let turn else { return nil }
+        guard let turn else {
+            return ConversationReadUpdate(pendingPosition: nil, thread: thread,
+                previousRevision: previousRevision, revision: state.revision, didCommit: false)
+        }
 
         let targetIndex = thread.turns.firstIndex { $0.id == turn.id }
         let currentIndex = thread.readThroughTurn.flatMap { readID in
@@ -3122,10 +3134,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
         conversation.threads[request] = thread
         let pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
             position: max(turn.conversationSequence ?? 0, currentReadSequence))
-        if conversation == (state.conversation ?? ConversationState()) { return pending }
+        if conversation == (state.conversation ?? ConversationState()) {
+            return ConversationReadUpdate(pendingPosition: pending,
+                thread: conversation.threads[request], previousRevision: previousRevision,
+                revision: state.revision, didCommit: false)
+        }
         next.conversation = conversation
         try commit(next)
-        return pending
+        return ConversationReadUpdate(pendingPosition: pending,
+            thread: state.conversation?.threads[request], previousRevision: previousRevision,
+            revision: state.revision, didCommit: true)
     }
 
     public func acceptConversationReadPosition(_ pending: PendingConversationReadPosition,

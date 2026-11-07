@@ -122,13 +122,18 @@ struct ReplyItemLedger: Codable, Equatable {
     }
 
     mutating func reconcile(_ observations: [ReplyItemObservation],
-                            accountScopes: Set<ExactText> = [], now: Date) {
-        let observedAccounts = accountScopes.union(observations.map(\.accountScope))
+                            accountScopes: Set<ExactText> = [],
+                            parentScope: Set<RequestKey>? = nil,
+                            now: Date) {
+        let scopedObservations = parentScope.map { scope in
+            observations.filter { scope.contains($0.parent) }
+        } ?? observations
+        let observedAccounts = accountScopes.union(scopedObservations.map(\.accountScope))
         let newAccounts = observedAccounts.subtracting(baselineEstablishedAccounts)
         for account in newAccounts {
             // Replies already on the device when this account first runs the
             // feature are baseline history, not new arrivals.
-            for observation in observations where observation.accountScope == account {
+            for observation in scopedObservations where observation.accountScope == account {
                 knownReplyIDs.insert(ReplyItemIdentity(parent: observation.parent,
                                                        turnID: observation.turnID))
             }
@@ -136,26 +141,41 @@ struct ReplyItemLedger: Codable, Equatable {
         }
 
         var seenTurnIDsByParent: [RequestKey: Set<ExactText>] = [:]
-        for observation in observations where observation.isSeen {
+        for observation in scopedObservations where observation.isSeen {
             seenTurnIDsByParent[observation.parent, default: []].insert(observation.turnID)
         }
 
         // Drop replies the account's read position has passed, here or on
         // another device; an item with nothing left unseen leaves. Its
         // replies stay known, so a left item never re-enters on replay.
-        for (parent, entry) in entriesByParent {
-            let seenTurnIDs = seenTurnIDsByParent[parent] ?? []
-            guard !seenTurnIDs.isEmpty else { continue }
-            var updated = entry
-            updated.unseenReplies.removeAll { seenTurnIDs.contains($0.turnID) }
-            if updated.unseenReplies.isEmpty {
-                entriesByParent.removeValue(forKey: parent)
-            } else if updated != entry {
-                entriesByParent[parent] = updated
+        if let parentScope {
+            for parent in parentScope {
+                guard let entry = entriesByParent[parent],
+                      let seenTurnIDs = seenTurnIDsByParent[parent],
+                      !seenTurnIDs.isEmpty else { continue }
+                var updated = entry
+                updated.unseenReplies.removeAll { seenTurnIDs.contains($0.turnID) }
+                if updated.unseenReplies.isEmpty {
+                    entriesByParent.removeValue(forKey: parent)
+                } else if updated != entry {
+                    entriesByParent[parent] = updated
+                }
+            }
+        } else {
+            for (parent, entry) in entriesByParent {
+                let seenTurnIDs = seenTurnIDsByParent[parent] ?? []
+                guard !seenTurnIDs.isEmpty else { continue }
+                var updated = entry
+                updated.unseenReplies.removeAll { seenTurnIDs.contains($0.turnID) }
+                if updated.unseenReplies.isEmpty {
+                    entriesByParent.removeValue(forKey: parent)
+                } else if updated != entry {
+                    entriesByParent[parent] = updated
+                }
             }
         }
 
-        for observation in observations where !newAccounts.contains(observation.accountScope) {
+        for observation in scopedObservations where !newAccounts.contains(observation.accountScope) {
             let identity = ReplyItemIdentity(parent: observation.parent,
                                              turnID: observation.turnID)
             guard !knownReplyIDs.contains(identity) else { continue }
@@ -270,9 +290,12 @@ final class ReplyItemAreaStore {
     var nextExpiry: Date? { ledger.nextExpiry }
 
     func reconcile(_ observations: [ReplyItemObservation],
-                   accountScopes: Set<ExactText> = [], now: Date = .now) {
+                   accountScopes: Set<ExactText> = [],
+                   parentScope: Set<RequestKey>? = nil,
+                   now: Date = .now) {
         let previousLedger = ledger
-        ledger.reconcile(observations, accountScopes: accountScopes, now: now)
+        ledger.reconcile(observations, accountScopes: accountScopes,
+                         parentScope: parentScope, now: now)
         if ledger != previousLedger { persist() }
     }
 
