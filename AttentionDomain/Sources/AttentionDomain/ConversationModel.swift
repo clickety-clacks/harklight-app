@@ -660,6 +660,28 @@ public struct PendingConversationReadPosition: Equatable, Codable, Sendable {
     }
 }
 
+/// The local projection produced by a read-position update, so callers can
+/// refresh only the affected conversation without rebuilding every thread.
+public struct ConversationReadUpdate: Sendable {
+    public let pendingPosition: PendingConversationReadPosition?
+    public let thread: ConversationThread?
+    public let previousRevision: UInt64
+    public let revision: UInt64
+    public let didCommit: Bool
+
+    init(pendingPosition: PendingConversationReadPosition?,
+         thread: ConversationThread?,
+         previousRevision: UInt64,
+         revision: UInt64,
+         didCommit: Bool) {
+        self.pendingPosition = pendingPosition
+        self.thread = thread
+        self.previousRevision = previousRevision
+        self.revision = revision
+        self.didCommit = didCommit
+    }
+}
+
 struct ConversationState: Codable, Equatable {
     var cursor: UInt64 = 0
     var events: [UInt64: ConversationEvent] = [:]
