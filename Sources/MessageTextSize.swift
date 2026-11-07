@@ -107,7 +107,7 @@ struct MessageTextSizeSettingsSection: View {
                 .foregroundStyle(.secondary)
         } header: {
             Text("Message text")
+                .accessibilityIdentifier("message-text-size-section")
         }
-        .accessibilityIdentifier("message-text-size-section")
     }
 }

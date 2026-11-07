@@ -481,6 +481,10 @@ final class ConversationSampleUITests: XCTestCase {
     private func selectMessageTextSize(_ setting: (value: String, title: String),
                                        in app: XCUIApplication) {
         let settingsButton = app.buttons["inbox-settings"]
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<4 where !settingsButton.isHittable && list.exists {
+            list.swipeDown()
+        }
         XCTAssertTrue(settingsButton.waitForExistence(timeout: 10), app.debugDescription)
         settingsButton.tap()
 
