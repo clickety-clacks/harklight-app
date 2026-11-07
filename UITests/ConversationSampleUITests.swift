@@ -384,6 +384,170 @@ final class ConversationSampleUITests: XCTestCase {
         app.terminate()
     }
 
+    func testMessageTextSizeSettingMatrixPersistsAndRendersLiveInListAndDetail() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let settings: [(value: String, title: String)] = [
+            ("standard", "Standard"),
+            ("large", "Large"),
+            ("larger", "Larger")
+        ]
+        let categories: [(name: String, value: String?)] = [
+            ("default", nil),
+            ("accessibility", UIContentSizeCategory.accessibilityLarge.rawValue)
+        ]
+
+        for appearance in ["light", "dark"] {
+            for category in categories {
+                let app = XCUIApplication()
+                app.launchArguments = [
+                    "--harklight-test-inbox-list-column",
+                    "--harklight-test-inbox-list-\(appearance)",
+                    "--harklight-test-inbox-list-state=markdown",
+                    "--harklight-markdown-acceptance",
+                    "--harklight-test-markdown-reply-item"
+                ]
+                if let value = category.value {
+                    app.launchArguments += ["-UIPreferredContentSizeCategoryName", value]
+                }
+                app.launch()
+
+                let newRow = app.descendants(matching: .any)[
+                    "new-message-area-request-row-sample-markdown-acceptance"
+                ]
+                XCTAssertTrue(newRow.waitForExistence(timeout: 10), app.debugDescription)
+                let list = app.collectionViews.firstMatch
+                XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+
+                for setting in settings {
+                    selectMessageTextSize(setting, in: app)
+                    reveal(newRow, in: list)
+                    XCTAssertTrue(newRow.isHittable, newRow.debugDescription)
+                    XCTAssertTrue(newRow.label.contains("A Markdown note"), newRow.debugDescription)
+                    capture("message-size-\(setting.value)-\(appearance)-\(category.name)-new-list", app)
+                }
+
+                for setting in settings {
+                    selectMessageTextSize(setting, in: app)
+                    let normalReplyRow = app.descendants(matching: .any)[
+                        "normal-reply-item-sample-markdown-acceptance"
+                    ]
+                    reveal(normalReplyRow, in: list, direction: .up)
+                    XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
+                    capture("message-size-\(setting.value)-\(appearance)-\(category.name)-normal-reply", app)
+
+                    let normalRow = app.descendants(matching: .any)[
+                        "request-row-sample-markdown-acceptance"
+                    ]
+                    reveal(normalRow, in: list, direction: .up)
+                    XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(normalRow.isHittable, normalRow.debugDescription)
+                    capture("message-size-\(setting.value)-\(appearance)-\(category.name)-normal-request", app)
+                }
+
+                let nonLinkTapOffset = CGVector(dx: 0.88, dy: 0.82)
+                reveal(newRow, at: nonLinkTapOffset, in: list)
+                XCTAssertTrue(
+                    list.frame.contains(tapPoint(for: nonLinkTapOffset, in: newRow)),
+                    "The non-link tap point must be inside the visible list.\n\(app.debugDescription)")
+                XCTAssertTrue(newRow.isHittable, newRow.debugDescription)
+                newRow.coordinate(withNormalizedOffset: nonLinkTapOffset).tap()
+                let heading = app.buttons["request-heading"]
+                XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
+                let body = app.textViews["request-message-body"]
+                XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+                let stake = app.staticTexts["request-stake"]
+                XCTAssertTrue(stake.waitForExistence(timeout: 5), app.debugDescription)
+
+                for setting in settings {
+                    // The size control is in the inbox Settings sheet. Return to
+                    // the list, change the preference, then reopen the same New
+                    // row to verify the selected size in detail without relaunching.
+                    let back = workspaceBackButton(in: app)
+                    XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+                    back.tap()
+                    XCTAssertTrue(newRow.waitForExistence(timeout: 5), app.debugDescription)
+                    selectMessageTextSize(setting, in: app)
+                    reveal(newRow, at: nonLinkTapOffset, in: list)
+                    XCTAssertTrue(
+                        list.frame.contains(tapPoint(for: nonLinkTapOffset, in: newRow)),
+                        "The non-link tap point must be inside the visible list.\n\(app.debugDescription)")
+                    XCTAssertTrue(newRow.isHittable, newRow.debugDescription)
+                    newRow.coordinate(withNormalizedOffset: nonLinkTapOffset).tap()
+                    XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(stake.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(heading.label.contains("A Markdown note"), heading.debugDescription)
+                    XCTAssertTrue((body.value as? String ?? body.label).contains("let answer = 42"),
+                                  body.debugDescription)
+                    capture("message-size-\(setting.value)-\(appearance)-\(category.name)-detail", app)
+                }
+
+                app.terminate()
+                app.launchArguments.append("--harklight-test-preserve-message-text-size")
+                app.launch()
+                XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10),
+                              app.debugDescription)
+                app.buttons["inbox-settings"].tap()
+                let larger = app.buttons["message-text-size-larger"]
+                XCTAssertTrue(larger.waitForExistence(timeout: 5), app.debugDescription)
+                XCTAssertTrue(larger.isSelected,
+                              "The chosen message size should persist after relaunch.\n\(app.debugDescription)")
+                app.terminate()
+            }
+        }
+    }
+
+    private func selectMessageTextSize(_ setting: (value: String, title: String),
+                                       in app: XCUIApplication) {
+        let settingsButton = app.buttons["inbox-settings"]
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<4 where !settingsButton.isHittable && list.exists {
+            list.swipeDown()
+        }
+        XCTAssertTrue(settingsButton.waitForExistence(timeout: 10), app.debugDescription)
+        settingsButton.tap()
+
+        let picker = app.segmentedControls["message-text-size-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), app.debugDescription)
+        let option = app.buttons["message-text-size-\(setting.value)"]
+        XCTAssertTrue(option.waitForExistence(timeout: 5), app.debugDescription)
+        if !option.isSelected { option.tap() }
+        XCTAssertTrue(option.isSelected,
+                      "The message text size control did not select \(setting.title).\n\(app.debugDescription)")
+        app.buttons["Done"].tap()
+    }
+
+    private func reveal(_ element: XCUIElement,
+                        at tapOffset: CGVector,
+                        in list: XCUIElement) {
+        for _ in 0..<12 where !list.frame.contains(tapPoint(for: tapOffset, in: element)) {
+            list.swipeDown()
+        }
+    }
+
+    private func tapPoint(for offset: CGVector, in element: XCUIElement) -> CGPoint {
+        let frame = element.frame
+        return CGPoint(x: frame.minX + frame.width * offset.dx,
+                       y: frame.minY + frame.height * offset.dy)
+    }
+
+    private func reveal(_ element: XCUIElement,
+                        in list: XCUIElement,
+                        direction: SwipeDirection = .down) {
+        for _ in 0..<12 where !element.isHittable {
+            switch direction {
+            case .up: list.swipeUp()
+            case .down: list.swipeDown()
+            }
+        }
+    }
+
+    private enum SwipeDirection {
+        case up
+        case down
+    }
+
     func testPlainTextRemainsReadableInNewNormalAndDetailInLightAndDark() {
         XCUIDevice.shared.orientation = .landscapeLeft
 

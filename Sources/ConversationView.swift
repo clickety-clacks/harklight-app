@@ -50,6 +50,7 @@ struct ConversationPanel: View {
     @State private var fileError: String?
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.messageTextSize) private var messageTextSize
     @Environment(\.scenePhase) private var scenePhase
 
     private var thread: ConversationThread? { store.conversation(for: key) }
@@ -96,6 +97,7 @@ struct ConversationPanel: View {
                     hasNotAcceptedCardForRetainedAnswer: hasNotAcceptedCard,
                     initialScrollTurnID: initialScrollTurnID,
                     dynamicTypeSize: dynamicTypeSize,
+                    messageTextSize: messageTextSize,
                     inspect: { file, fileRevision in
                         fileError = nil
                         inspectedFile = file
@@ -239,6 +241,7 @@ private struct ConversationHistoryContent: View, Equatable {
     let hasNotAcceptedCardForRetainedAnswer: Bool
     let initialScrollTurnID: ExactText?
     let dynamicTypeSize: DynamicTypeSize
+    let messageTextSize: MessageTextSize
     let inspect: (ConversationFile, UInt64) -> Void
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
@@ -260,7 +263,8 @@ private struct ConversationHistoryContent: View, Equatable {
         lhs.local == rhs.local &&
         lhs.hasNotAcceptedCardForRetainedAnswer == rhs.hasNotAcceptedCardForRetainedAnswer &&
         lhs.initialScrollTurnID == rhs.initialScrollTurnID &&
-        lhs.dynamicTypeSize == rhs.dynamicTypeSize
+        lhs.dynamicTypeSize == rhs.dynamicTypeSize &&
+        lhs.messageTextSize == rhs.messageTextSize
         // `inspect` writes through the same ConversationPanel @State slots;
         // closure identity changes on body re-evaluation but its target does not.
     }
@@ -939,7 +943,9 @@ private struct ConversationTurnView: View {
             }.font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             if let replyContext {
                 Text(MessageMarkdown.attributed(replyContext, prefixedBy: "Replying to: "))
-                    .lineLimit(2).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .messageTextSize(basePointSize: 11, relativeTo: .caption2)
+                    .foregroundStyle(.secondary)
             }
             if turn.contentRedacted == true {
                 Text("Person-authored content is not included in this device projection.")
@@ -951,7 +957,9 @@ private struct ConversationTurnView: View {
                     Text("Original answer result: " + status.rawValue).font(.caption.weight(.semibold))
                 }
                 if !turn.text.rawValue.isEmpty {
-                    Text(MessageMarkdown.attributed(turn.text.rawValue)).textSelection(.enabled)
+                    Text(MessageMarkdown.attributed(turn.text.rawValue))
+                        .messageTextSize()
+                        .textSelection(.enabled)
                 }
             }
             ForEach(turn.files) { file in

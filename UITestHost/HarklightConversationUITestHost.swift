@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import AttentionDomain
 
@@ -15,6 +16,10 @@ struct HarklightConversationUITestHost: App {
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
+        if !arguments.contains("--harklight-test-preserve-message-text-size") {
+            UserDefaults.standard.set(MessageTextSize.standard.rawValue,
+                                      forKey: MessageTextSize.preferenceKey)
+        }
         if arguments.contains("--harklight-test-inbox-list-column") || arguments.contains("--free-rendered") {
             _prototypeFixture = State(initialValue: nil)
             _conversationFixture = State(initialValue: nil)
