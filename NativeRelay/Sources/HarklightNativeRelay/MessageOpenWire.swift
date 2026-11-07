@@ -47,7 +47,7 @@ public struct MessageOpenWire: Sendable {
                   value.uniqueValue(named: "message_id")?.stringValue == operation.requestKey.messageID,
                   case let .number(revisionNumber)? = value.uniqueValue(named: "request_revision"),
                   UInt64(revisionNumber.lexeme) == operation.requestRevision,
-                  value.uniqueValue(named: "opened")?.boolValue == true else {
+                  value.uniqueValue(named: "opened") == .bool(true) else {
                 return .unresolved
             }
             return .confirmed
