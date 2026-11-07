@@ -15,13 +15,13 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Know which release is installed"].exists,
+        XCTAssertTrue(app.staticTexts["Read chats after a request is replaced"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Keep track of replies across conversations"].exists,
-                      "The first-launch note includes the newer cross-conversation reply behavior.")
         XCTAssertTrue(app.staticTexts[
-            "Reading a reply in one conversation does not mark new replies in other conversations as read."
+            "You can still open a replaced request’s chat history, but you can’t send new messages there."
         ].exists, app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Keep track of replies across conversations"].exists,
+                       "A fresh install shows only the current pending entry.")
 
         app.buttons["Done"].tap()
         let settings = app.buttons["inbox-settings"]
@@ -36,6 +36,10 @@ final class ReleaseNotesUITests: XCTestCase {
         revealHistoryElement(buildHeader, in: app)
         XCTAssertTrue(buildHeader.exists,
                       "Settings keeps the current release's build label.")
+        let shippedBuildHeader = app.staticTexts["Version 0.1.0 · Build 139"]
+        revealHistoryElement(shippedBuildHeader, in: app)
+        XCTAssertTrue(shippedBuildHeader.exists,
+                      "Settings preserves the stamped TestFlight build for the earlier entry.")
         let updateTitle = app.staticTexts["Know which release is installed"]
         revealHistoryElement(updateTitle, in: app)
         XCTAssertTrue(updateTitle.exists,
@@ -114,10 +118,13 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(updateTitle.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       "The update sheet identifies the released build and version.")
-        XCTAssertTrue(app.staticTexts["Know which release is installed"].exists,
+        XCTAssertTrue(app.staticTexts["Read chats after a request is replaced"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["What’s New opens when a release has new notes, and both it and Settings show each release’s build number."].exists,
-                      app.debugDescription)
+        XCTAssertTrue(app.staticTexts[
+            "You can still open a replaced request’s chat history, but you can’t send new messages there."
+        ].exists, app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
+                       "The stamped Build139 entry is future history at this synthetic build.")
         XCTAssertFalse(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
                        "Earlier build notes do not appear in the current update sheet.")
         XCTAssertFalse(app.staticTexts["See clearer release notes"].exists,
