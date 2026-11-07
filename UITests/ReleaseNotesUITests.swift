@@ -139,12 +139,16 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(build61Header.isHittable,
                       "The earlier numbered release is visible before history is scrolled.")
         XCTAssertTrue(inboxScrollingTitle.isHittable, app.debugDescription)
+        revealHistoryElement(inboxScrollingDetail, in: app)
         XCTAssertTrue(inboxScrollingDetail.isHittable, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["See clearer release notes"].isHittable,
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts[
+        let releaseNoteFormatTitle = app.staticTexts["See clearer release notes"]
+        revealHistoryElement(releaseNoteFormatTitle, in: app)
+        XCTAssertTrue(releaseNoteFormatTitle.isHittable, app.debugDescription)
+        let releaseNoteFormatDetail = app.staticTexts[
             "Each update now has an icon, a short title and a clear description."
-        ].isHittable, app.debugDescription)
+        ]
+        revealHistoryElement(releaseNoteFormatDetail, in: app)
+        XCTAssertTrue(releaseNoteFormatDetail.isHittable, app.debugDescription)
         attachScreenshot("release-notes-settings-history", from: app)
 
         let build59Header = app.staticTexts["Version 0.1.0 · Build 59"]
