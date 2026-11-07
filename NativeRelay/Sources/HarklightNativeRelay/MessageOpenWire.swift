@@ -62,7 +62,7 @@ public struct MessageOpenWire: Sendable {
             if reason == "unknown_type" || reason.contains("unsupported") {
                 return .unsupported
             }
-            if reason == "invalid_field" || reason == "not_found" {
+            if reason == "invalid_field" || reason == "not_found" || reason == "operation_conflict" {
                 return .permanentlyRejected(reason: reason)
             }
             return .unresolved
