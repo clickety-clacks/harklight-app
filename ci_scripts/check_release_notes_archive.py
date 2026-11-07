@@ -90,7 +90,7 @@ def check(repo: Path, commit: str) -> str:
         raise CheckFailure("cannot evaluate release notes: CI commit does not match checkout HEAD")
 
     parents = git(repo, "rev-list", "--parents", "-n", "1", head).split()
-    if len(parents) != 2:
+    if len(parents) < 2:
         raise CheckFailure("cannot evaluate release notes: HEAD's first parent is unavailable")
     parent = parents[1]
     git(repo, "rev-parse", "--verify", f"{parent}^{{commit}}")
