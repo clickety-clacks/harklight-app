@@ -1775,6 +1775,9 @@ struct InboxList: View {
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
+        // The native searchable field floats over the List's bottom edge.
+        // Keep enough trailing scroll content for the final reply text to clear it.
+        .contentMargins(.bottom, 80, for: .scrollContent)
         .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
         .searchPresentationToolbarBehavior(.avoidHidingContent)
         .navigationTitle("Harklight")

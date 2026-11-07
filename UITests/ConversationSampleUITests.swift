@@ -141,6 +141,60 @@ final class ConversationSampleUITests: XCTestCase {
         }
     }
 
+    func testFloatingSearchKeepsNormalReplyTextVisibleAtLargeContentSizes() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+
+        for contentSize in [
+            UIContentSizeCategory.large,
+            UIContentSizeCategory.extraExtraLarge,
+            UIContentSizeCategory.extraExtraExtraLarge
+        ] {
+            let app = XCUIApplication()
+            app.launchArguments = [
+                "-UIPreferredContentSizeCategoryName", contentSize.rawValue,
+                "--harklight-test-inbox-list-column",
+                "--harklight-test-inbox-list-light",
+                "--harklight-test-inbox-list-state=markdown",
+                "--harklight-markdown-acceptance",
+                "--harklight-test-markdown-reply-item"
+            ]
+            app.launch()
+
+            let list = app.collectionViews.firstMatch
+            XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
+
+            let normalReplyRow = app.descendants(matching: .any)[
+                "normal-reply-item-sample-markdown-acceptance"
+            ]
+            XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
+            let replyText = normalReplyRow.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "Open reply guide")
+            ).firstMatch
+            XCTAssertTrue(replyText.waitForExistence(timeout: 5), app.debugDescription)
+
+            let searchField = app.searchFields.firstMatch
+            XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(searchField.isHittable, searchField.debugDescription)
+            for _ in 0..<8 where replyText.frame.maxY > searchField.frame.minY {
+                list.swipeUp()
+            }
+            XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
+            XCTAssertTrue(replyText.isHittable, replyText.debugDescription)
+            XCTAssertLessThanOrEqual(
+                replyText.frame.maxY,
+                searchField.frame.minY,
+                "The floating Search field must not cover the normal reply text.\n\(app.debugDescription)"
+            )
+
+            searchField.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+            searchField.typeText("Markdown\n")
+            XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5),
+                          "Searching still finds the visible reply.\n\(app.debugDescription)")
+            app.terminate()
+        }
+    }
+
     func testMarkdownRendersInNewNormalDetailAndConversationWithoutChangingRowTaps() {
         XCUIDevice.shared.orientation = .landscapeLeft
 
