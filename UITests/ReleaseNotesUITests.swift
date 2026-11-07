@@ -17,6 +17,11 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Know which release is installed"].exists,
                       app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Keep track of replies across conversations"].exists,
+                      "The first-launch note includes the newer cross-conversation reply behavior.")
+        XCTAssertTrue(app.staticTexts[
+            "Reading a reply in one conversation does not mark new replies in other conversations as read."
+        ].exists, app.debugDescription)
 
         app.buttons["Done"].tap()
         let settings = app.buttons["inbox-settings"]
@@ -35,6 +40,15 @@ final class ReleaseNotesUITests: XCTestCase {
         revealHistoryElement(updateTitle, in: app)
         XCTAssertTrue(updateTitle.exists,
                       app.debugDescription)
+        let repliesTitle = app.staticTexts["Keep track of replies across conversations"]
+        revealHistoryElement(repliesTitle, in: app)
+        XCTAssertTrue(repliesTitle.exists,
+                      "Settings history keeps the cross-conversation reply note.")
+        let repliesDetail = app.staticTexts[
+            "Reading a reply in one conversation does not mark new replies in other conversations as read."
+        ]
+        revealHistoryElement(repliesDetail, in: app)
+        XCTAssertTrue(repliesDetail.exists, app.debugDescription)
     }
 
     func testPost79UpdateShowsEarliestConfirmedContainingBuildWithoutRelabeling() {
@@ -136,8 +150,10 @@ final class ReleaseNotesUITests: XCTestCase {
         let inboxScrollingDetail = app.staticTexts[
             "Scrolling the inbox list does less work, so it should feel smoother."
         ]
+        revealHistoryElement(build61Header, in: app)
         XCTAssertTrue(build61Header.isHittable,
-                      "The earlier numbered release is visible before history is scrolled.")
+                      "Settings history keeps the earlier numbered release available after scrolling.")
+        revealHistoryElement(inboxScrollingTitle, in: app)
         XCTAssertTrue(inboxScrollingTitle.isHittable, app.debugDescription)
         revealHistoryElement(inboxScrollingDetail, in: app)
         XCTAssertTrue(inboxScrollingDetail.isHittable, app.debugDescription)
