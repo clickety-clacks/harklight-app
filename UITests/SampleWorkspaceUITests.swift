@@ -822,7 +822,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             let query: String = switch kind {
             case "textChoice": "Which approach"
             case "pictureChoice": "Which cover"
-            case "instructions": "Prepare"
+            case "instructions": "Prepare the studio display"
             case "review": "welcome"
             case "multipleChoice": "update go"
             case "value": "how long"
@@ -1024,12 +1024,10 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-card", app)
             app.buttons["Chat"].tap()
-            let sheet = app.sheets.firstMatch
-            XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
-            let composer = sheet.textViews["sample-chat-composer"]
+            let composer = app.textViews["sample-chat-composer"]
             XCTAssertTrue(composer.waitForExistence(timeout: 5))
             composer.tap(); composer.typeText("Local orientation " + name)
-            let send = sheet.buttons["Send locally"]
+            let send = app.buttons["Send locally"]
             XCTAssertTrue(send.isHittable)
             send.tap()
             XCTAssertTrue(app.staticTexts["Local orientation " + name].waitForExistence(timeout: 5))
