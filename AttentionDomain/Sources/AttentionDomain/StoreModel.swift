@@ -187,6 +187,24 @@ public struct Submission: Equatable, Codable, Sendable {
     }
 }
 
+/// A deliberate message-content open that is durable locally until the relay
+/// confirms the account-wide fact or explicitly rejects the operation.
+/// This is an outbox record only; settled opens are not retained as local
+/// per-device history.
+public struct PendingMessageOpen: Equatable, Codable, Identifiable, Sendable {
+    public let requestKey: RequestKey
+    public let requestRevision: UInt64
+    public let operationID: UUID
+
+    public var id: UUID { operationID }
+
+    public init(requestKey: RequestKey, requestRevision: UInt64, operationID: UUID = UUID()) {
+        self.requestKey = requestKey
+        self.requestRevision = requestRevision
+        self.operationID = operationID
+    }
+}
+
 public enum OwnOutcome: String, Equatable, Codable, Sendable {
     case accepted
     case refused
@@ -934,6 +952,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let inboxCurrentKeys: Set<RequestKey>?
     public let pendingRelayOverlays: [UInt64: RelayEvent]
     public let inboxReferences: [RequestKey: RemoteRequestState]
+    public let pendingMessageOpens: [PendingMessageOpen]
 
     public init(requests: [RequestKey: StoredRequest],
                 drafts: [RequestKey: RequestDraft],
@@ -952,7 +971,8 @@ public struct AttentionStoreSnapshot: Sendable {
                 inboxView: InboxView? = nil,
                 inboxCurrentKeys: Set<RequestKey>? = nil,
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
-                inboxReferences: [RequestKey: RemoteRequestState] = [:]) {
+                inboxReferences: [RequestKey: RemoteRequestState] = [:],
+                pendingMessageOpens: [PendingMessageOpen] = []) {
         self.conversationThreads = conversationThreads
         self.requests = requests
         self.drafts = drafts
@@ -971,6 +991,7 @@ public struct AttentionStoreSnapshot: Sendable {
         self.inboxCurrentKeys = inboxCurrentKeys
         self.pendingRelayOverlays = pendingRelayOverlays
         self.inboxReferences = inboxReferences
+        self.pendingMessageOpens = pendingMessageOpens
     }
 }
 

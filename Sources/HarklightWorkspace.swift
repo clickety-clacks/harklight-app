@@ -532,10 +532,16 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         if let newRequest {
             if replyChatRoute?.key != newRequest {
                 conversationStore?.newMessageAreaStore?.open(newRequest)
+                reportMessageContentOpen(for: newRequest)
             }
             selectRequest(newRequest)
         }
         samples.select(newSampleID, departingFrom: oldSampleID)
+    }
+
+    private func reportMessageContentOpen(for key: RequestKey) {
+        guard let request = conversationStore?.request(for: key) else { return }
+        conversationStore?.reportMessageContentOpened(request)
     }
 
     /// Opens a reply group's parent with its relevant reply in view.
@@ -733,6 +739,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: selection) { _, _ in
                 relatedMessageNavigationPath.removeAll()
             }
+            .onChange(of: relatedMessageNavigationPath) { oldPath, newPath in
+                guard newPath.count > oldPath.count, let target = newPath.last else { return }
+                switch target {
+                case let .supersedes(key), let .replacement(key):
+                    reportMessageContentOpen(for: key)
+                }
+            }
         }
         splitView.scrollBounceBehavior(.always, axes: .vertical)
     }
@@ -828,6 +841,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 selection = destination.selection
                 if let key = route.request {
                     conversationStore?.newMessageAreaStore?.open(key)
+                    reportMessageContentOpen(for: key)
                     lastViewedSelection = .request(key)
                     selectRequest(key)
                 }
