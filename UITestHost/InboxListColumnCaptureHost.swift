@@ -7,7 +7,10 @@ import AttentionDomain
 @MainActor
 struct InboxListColumnCaptureHost: View {
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(MessageTextSize.preferenceKey)
+    private var selectedMessageTextSize = MessageTextSize.standard.rawValue
     @State private var isWarningPresented = false
+    @State private var isSettingsPresented = false
     @State private var selected: InboxSelection?
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
@@ -45,27 +48,37 @@ struct InboxListColumnCaptureHost: View {
 
     @ViewBuilder
     var body: some View {
-        if captureState == .fullWidthHigh || captureState == .replyItemFullWidth {
-            NavigationStack {
-                productionInboxList
-                    .navigationDestination(for: InboxSelection.self) { selection in
-                        selectedDetail(for: selection)
-                    }
-            }
-            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
-            .overlay(alignment: .topLeading) { accessibilityProbe }
-        } else {
-            NavigationSplitView {
-                productionInboxList
-                    .navigationSplitViewColumnWidth(min: 250, ideal: 250, max: 250)
-            } detail: {
+        Group {
+            if captureState == .fullWidthHigh || captureState == .replyItemFullWidth {
                 NavigationStack {
-                    selectedDetail(for: selected)
+                    productionInboxList
+                        .navigationDestination(for: InboxSelection.self) { selection in
+                            selectedDetail(for: selection)
+                        }
                 }
+                .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+                .overlay(alignment: .topLeading) { accessibilityProbe }
+            } else {
+                NavigationSplitView {
+                    productionInboxList
+                        .navigationSplitViewColumnWidth(min: 250, ideal: 250, max: 250)
+                } detail: {
+                    NavigationStack {
+                        selectedDetail(for: selected)
+                    }
+                }
+                .navigationSplitViewStyle(.balanced)
+                .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+                .overlay(alignment: .topLeading) { accessibilityProbe }
             }
-            .navigationSplitViewStyle(.balanced)
-            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
-            .overlay(alignment: .topLeading) { accessibilityProbe }
+        }
+        .environment(\.messageTextSize,
+                     MessageTextSize.resolve(storedValue: selectedMessageTextSize))
+        .sheet(isPresented: $isSettingsPresented) {
+            LiveInboxSettings(store: sampleFixture.viewModel,
+                              launch: nil,
+                              archiveDeparture: nil,
+                              connectionStatus: nil)
         }
     }
 
@@ -186,7 +199,7 @@ struct InboxListColumnCaptureHost: View {
             lastViewedSelection: nil,
             restoreLastViewed: false,
             didRestoreLastViewed: {},
-            showSettings: {},
+            showSettings: { isSettingsPresented = true },
             markSeen: { _ in },
             markNoComment: { _ in },
             clearRetracted: { _ in },
