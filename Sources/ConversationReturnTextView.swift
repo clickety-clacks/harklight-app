@@ -30,24 +30,97 @@ struct ConversationReturnTextView: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.parent = self
-        if view.text != text { view.text = text }
-        view.isEditable = isEnabled
-        view.accessibilityValue = text.isEmpty ? placeholder : text
+        if view.text != text {
+            context.coordinator.invalidateSizeMeasurement()
+            view.text = text
+        }
+        if view.isEditable != isEnabled {
+            view.isEditable = isEnabled
+        }
+        let accessibilityValue = text.isEmpty ? placeholder : text
+        if view.accessibilityValue as? String != accessibilityValue {
+            view.accessibilityValue = accessibilityValue
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView,
                       context: Context) -> CGSize? {
         guard let width = proposal.width, width > 0 else { return nil }
+        if let cached = context.coordinator.cachedSizeThatFits(for: uiView, width: width) {
+            return cached
+        }
         let lineHeight = uiView.font?.lineHeight ?? 20
         let measured = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-        return CGSize(width: width, height: min(max(measured.height, lineHeight), lineHeight * 5))
+        let size = CGSize(width: width, height: min(max(measured.height, lineHeight), lineHeight * 5))
+        context.coordinator.cacheSizeThatFits(size, for: uiView, width: width)
+        return size
     }
 
     final class Coordinator: NSObject, UITextViewDelegate, UITextPasteDelegate {
         var parent: ConversationReturnTextView
         private var applyingPaste = false
+        private var cachedMeasurementKey: MeasurementKey?
+        private var cachedMeasurementSize: CGSize?
+
+        private struct InsetsKey: Equatable {
+            let top: CGFloat
+            let left: CGFloat
+            let bottom: CGFloat
+            let right: CGFloat
+
+            init(_ insets: UIEdgeInsets) {
+                top = insets.top
+                left = insets.left
+                bottom = insets.bottom
+                right = insets.right
+            }
+        }
+
+        private struct MeasurementKey: Equatable {
+            let text: String
+            let width: CGFloat
+            let fontName: String?
+            let fontPointSize: CGFloat
+            let fontLineHeight: CGFloat
+            let fontTraits: UInt32
+            let textContainerInset: InsetsKey
+            let contentInset: InsetsKey
+            let adjustedContentInset: InsetsKey
+            let lineFragmentPadding: CGFloat
+            let isComposing: Bool
+
+            init(_ textView: UITextView, width: CGFloat) {
+                text = textView.text
+                self.width = width
+                fontName = textView.font?.fontName
+                fontPointSize = textView.font?.pointSize ?? 0
+                fontLineHeight = textView.font?.lineHeight ?? 20
+                fontTraits = textView.font?.fontDescriptor.symbolicTraits.rawValue ?? 0
+                textContainerInset = InsetsKey(textView.textContainerInset)
+                contentInset = InsetsKey(textView.contentInset)
+                adjustedContentInset = InsetsKey(textView.adjustedContentInset)
+                lineFragmentPadding = textView.textContainer.lineFragmentPadding
+                isComposing = textView.markedTextRange != nil
+            }
+        }
 
         init(_ parent: ConversationReturnTextView) { self.parent = parent }
+
+        func invalidateSizeMeasurement() {
+            cachedMeasurementKey = nil
+            cachedMeasurementSize = nil
+        }
+
+        func cachedSizeThatFits(for textView: UITextView, width: CGFloat) -> CGSize? {
+            let key = MeasurementKey(textView, width: width)
+            guard cachedMeasurementKey == key else { return nil }
+            return cachedMeasurementSize
+        }
+
+        func cacheSizeThatFits(_ size: CGSize, for textView: UITextView, width: CGFloat) {
+            cachedMeasurementKey = MeasurementKey(textView, width: width)
+            cachedMeasurementSize = size
+        }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
                       replacementText replacement: String) -> Bool {
