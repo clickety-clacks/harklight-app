@@ -31,6 +31,11 @@ enum ConversationPanelEmptyState: Equatable {
     }
 }
 
+enum ConversationPanelText {
+    static let supersededReadOnlyReason: LocalizedStringResource =
+        "This request was replaced. You can browse its chat history, but cannot send new messages."
+}
+
 @MainActor
 struct ConversationPanel: View {
     let store: LivePresentationStore
@@ -42,6 +47,7 @@ struct ConversationPanel: View {
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     var testConversationSheetDidAppear: (() -> Void)? = nil
+    var discussionUnavailableReason: LocalizedStringResource? = nil
     @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
     @State private var inspectedFileRevision: UInt64?
@@ -117,6 +123,12 @@ struct ConversationPanel: View {
                         .foregroundStyle(.secondary)
                         .padding()
                         .accessibilityIdentifier("conversation-unavailable")
+                } else if let discussionUnavailableReason {
+                    Label(discussionUnavailableReason, systemImage: "lock")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal)
+                        .accessibilityIdentifier("conversation-read-only-reason")
                 } else if store.isReadOnly {
                     ReadOnlyConversationDraftView(draft: draft) { file in
                         fileError = nil
