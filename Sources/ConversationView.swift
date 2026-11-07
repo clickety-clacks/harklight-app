@@ -48,15 +48,17 @@ struct ConversationPanel: View {
     @State private var openingFile = false
     @State private var fileError: String?
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
 
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var revision: UInt64 { selectedRevision ?? thread?.currentRevision ?? 1 }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
 
-    private var hasNotAcceptedCardForRetainedAnswer: Bool {
-        guard thread?.isRetracted == true,
-              let request = store.request(for: key),
+    private func hasNotAcceptedCardForRetainedAnswer(thread: ConversationThread,
+                                                      request: PresentedRequest?) -> Bool {
+        guard thread.isRetracted,
+              let request,
               request.lifecycleStatus != .superseded,
               request.supersededByMessageKeys.isEmpty else { return false }
         let attemptedAnswer = AnswerConfirmationText.formatted(
@@ -75,6 +77,9 @@ struct ConversationPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             if let thread {
+                let request = store.request(for: key)
+                let hasNotAcceptedCard = hasNotAcceptedCardForRetainedAnswer(thread: thread,
+                                                                              request: request)
                 if thread.revisionNumbers.count > 1 {
                     Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
                         ForEach(thread.revisionNumbers, id: \.self) { value in
@@ -84,49 +89,18 @@ struct ConversationPanel: View {
                     }
                     }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
                 }
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 18) {
-                            if let earlier = store.historicalAnswerDraft(for: key, revision: revision),
-                               !hasNotAcceptedCardForRetainedAnswer {
-                                DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
-                                    HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
-                                }.accessibilityIdentifier("conversation-earlier-answer")
-                            }
-                            ForEach(thread.turns) { turn in
-                                ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
-                                    sender: sender, local: store.isLocalExample,
-                                    availability: thread.latestReportedAvailabilityObservation,
-                                    hasReply: thread.turns.contains {
-                                        $0.author != .person && $0.inReplyTo == turn.id &&
-                                            ($0.kind == nil || $0.kind == .reply)
-                                    },
-                                    replyContext: turn.inReplyTo.flatMap { id in thread.turns.first { $0.id == id }?.text.rawValue },
-                                    retracted: thread.isRetracted && thread.terminalTurn == turn.id,
-                                    inspect: { file, fileRevision in
-                                        fileError = nil
-                                        inspectedFile = file
-                                        inspectedFileRevision = fileRevision
-                                    })
-                                    .id(turn.id)
-                                    .onScrollVisibilityChange(threshold: 0.5) { isVisible in
-                                        guard isVisible, turn.kind == .reply, turn.author == .origin else { return }
-                                        store.markConversationRead(key, through: turn.id)
-                                    }
-                            }
-                        }.padding(.horizontal)
-                    }
-                    .accessibilityIdentifier("conversation-history-scroll")
-                    .scrollDismissesKeyboard(.interactively)
-                    .onChange(of: thread.turns.count) { _, _ in
-                        if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
-                    .onChange(of: initialScrollTurnID, initial: true) { _, target in
-                        guard let target,
-                              thread.turns.contains(where: { $0.id == target }) else { return }
-                        proxy.scrollTo(target, anchor: .center)
-                    }
-                }
+                ConversationHistoryContent(store: store, key: key, revision: revision,
+                    thread: thread, request: request, sender: sender,
+                    local: store.isLocalExample,
+                    hasNotAcceptedCardForRetainedAnswer: hasNotAcceptedCard,
+                    initialScrollTurnID: initialScrollTurnID,
+                    dynamicTypeSize: dynamicTypeSize,
+                    inspect: { file, fileRevision in
+                        fileError = nil
+                        inspectedFile = file
+                        inspectedFileRevision = fileRevision
+                    })
+                    .equatable()
                 if let terminal = thread.terminal {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
@@ -250,6 +224,93 @@ struct ConversationPanel: View {
         }
     }
 
+}
+
+@MainActor
+private struct ConversationHistoryContent: View, Equatable {
+    let store: LivePresentationStore
+    let key: RequestKey
+    let revision: UInt64
+    let thread: ConversationThread
+    let request: PresentedRequest?
+    let sender: String
+    let local: Bool
+    let hasNotAcceptedCardForRetainedAnswer: Bool
+    let initialScrollTurnID: ExactText?
+    let dynamicTypeSize: DynamicTypeSize
+    let inspect: (ConversationFile, UInt64) -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        // Read cursors change as replies cross the visibility threshold, but
+        // they do not change any content rendered by this transcript subtree.
+        lhs.store === rhs.store &&
+        lhs.key == rhs.key &&
+        lhs.revision == rhs.revision &&
+        lhs.thread.currentRevision == rhs.thread.currentRevision &&
+        lhs.thread.revisions == rhs.thread.revisions &&
+        lhs.thread.turns == rhs.thread.turns &&
+        lhs.thread.facts == rhs.thread.facts &&
+        lhs.thread.answerDrafts == rhs.thread.answerDrafts &&
+        lhs.thread.latestReportedAvailabilityObservation == rhs.thread.latestReportedAvailabilityObservation &&
+        lhs.thread.terminalTurn == rhs.thread.terminalTurn &&
+        lhs.thread.isRetracted == rhs.thread.isRetracted &&
+        lhs.request == rhs.request &&
+        lhs.sender == rhs.sender &&
+        lhs.local == rhs.local &&
+        lhs.hasNotAcceptedCardForRetainedAnswer == rhs.hasNotAcceptedCardForRetainedAnswer &&
+        lhs.initialScrollTurnID == rhs.initialScrollTurnID &&
+        lhs.dynamicTypeSize == rhs.dynamicTypeSize
+        // `inspect` writes through the same ConversationPanel @State slots;
+        // closure identity changes on body re-evaluation but its target does not.
+    }
+
+    var body: some View {
+        let textByTurnID = Dictionary(
+            thread.turns.map { ($0.id, $0.text.rawValue) },
+            uniquingKeysWith: { first, _ in first })
+        let replyTargetIDs = Set(thread.turns.compactMap { turn -> ExactText? in
+            guard turn.author != .person,
+                  turn.kind == nil || turn.kind == .reply else { return nil }
+            return turn.inReplyTo
+        })
+        let turnIDs = Set(thread.turns.map(\.id))
+
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    if let earlier = store.historicalAnswerDraft(for: key, revision: revision),
+                       !hasNotAcceptedCardForRetainedAnswer {
+                        DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
+                            HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
+                        }.accessibilityIdentifier("conversation-earlier-answer")
+                    }
+                    ForEach(thread.turns) { turn in
+                        ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
+                            sender: sender, local: local,
+                            availability: thread.latestReportedAvailabilityObservation,
+                            hasReply: replyTargetIDs.contains(turn.id),
+                            replyContext: turn.inReplyTo.flatMap { textByTurnID[$0] },
+                            retracted: thread.isRetracted && thread.terminalTurn == turn.id,
+                            inspect: inspect)
+                            .id(turn.id)
+                            .onScrollVisibilityChange(threshold: 0.5) { isVisible in
+                                guard isVisible, turn.kind == .reply, turn.author == .origin else { return }
+                                store.markConversationRead(key, through: turn.id)
+                            }
+                    }
+                }.padding(.horizontal)
+            }
+            .accessibilityIdentifier("conversation-history-scroll")
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: thread.turns.count) { _, _ in
+                if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+            .onChange(of: initialScrollTurnID, initial: true) { _, target in
+                guard let target, turnIDs.contains(target) else { return }
+                proxy.scrollTo(target, anchor: .center)
+            }
+        }
+    }
 }
 
 @MainActor
