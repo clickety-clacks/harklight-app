@@ -1,7 +1,7 @@
 {
   "entries": [
     {
-      "id": "fresh-release-notes",
+      "id": "fresh-release-notes-follow-up",
       "marketingVersion": "0.1.0",
       "testFlightBuildNumber": null,
       "highlights": [
@@ -34,6 +34,12 @@
           "symbol": "keyboard",
           "title": "Keep Chat responsive as you type",
           "detail": "Typing a message stays responsive while you work with attachments and other message controls."
+        },
+        {
+          "id": "new-replies-across-conversations",
+          "symbol": "bubble.left.and.bubble.right",
+          "title": "Keep track of replies across conversations",
+          "detail": "Reading a reply in one conversation does not mark new replies in other conversations as read."
         }
       ]
     }
