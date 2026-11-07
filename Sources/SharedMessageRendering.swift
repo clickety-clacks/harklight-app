@@ -313,7 +313,7 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         let rendered = NSMutableAttributedString(string: "")
         for run in markdown.runs {
             let piece = NSMutableAttributedString(
-                attributedString: NSAttributedString(markdown[run.range]))
+                attributedString: NSAttributedString(AttributedString(markdown[run.range])))
             if piece.length > 0 {
                 let fullRange = NSRange(location: 0, length: piece.length)
                 piece.addAttribute(.font,
