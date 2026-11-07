@@ -241,7 +241,7 @@ private struct ConversationHistoryContent: View, Equatable {
     let dynamicTypeSize: DynamicTypeSize
     let inspect: (ConversationFile, UInt64) -> Void
 
-    static func == (lhs: Self, rhs: Self) -> Bool {
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         // Read cursors change as replies cross the visibility threshold, but
         // they do not change any content rendered by this transcript subtree.
         lhs.store === rhs.store &&
