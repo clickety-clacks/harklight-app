@@ -309,32 +309,34 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     static func attributedMessage(_ text: String,
                                   foregroundColor: UIColor,
                                   bodyFont: UIFont) -> NSAttributedString {
-        let rendered = NSMutableAttributedString(
-            attributedString: NSAttributedString(MessageMarkdown.attributed(text)))
-        if rendered.length > 0 {
-            let fullRange = NSRange(location: 0, length: rendered.length)
-            var fontRuns: [(range: NSRange, font: UIFont?)] = []
-            rendered.enumerateAttribute(.font, in: fullRange) { value, range, _ in
-                fontRuns.append((range, value as? UIFont))
+        let markdown = MessageMarkdown.attributed(text)
+        let rendered = NSMutableAttributedString(string: "")
+        for run in markdown.runs {
+            let piece = NSMutableAttributedString(
+                attributedString: NSAttributedString(markdown[run.range]))
+            if piece.length > 0 {
+                let fullRange = NSRange(location: 0, length: piece.length)
+                piece.addAttribute(.font,
+                                   value: Self.bodyFont(
+                                    matching: run.inlinePresentationIntent,
+                                    base: bodyFont),
+                                   range: fullRange)
+                piece.addAttribute(.foregroundColor,
+                                   value: foregroundColor,
+                                   range: fullRange)
             }
-            for run in fontRuns {
-                rendered.addAttribute(.font,
-                                      value: Self.bodyFont(matching: run.font, base: bodyFont),
-                                      range: run.range)
-            }
-            rendered.addAttribute(.foregroundColor,
-                                  value: foregroundColor,
-                                  range: fullRange)
+            rendered.append(piece)
         }
         return rendered
     }
 
-    private static func bodyFont(matching markdownFont: UIFont?, base bodyFont: UIFont) -> UIFont {
-        let traits = markdownFont?.fontDescriptor.symbolicTraits ?? []
-        if traits.contains(.traitMonoSpace) {
-            let weight: UIFont.Weight = traits.contains(.traitBold) ? .bold : .regular
+    private static func bodyFont(matching intent: InlinePresentationIntent?,
+                                 base bodyFont: UIFont) -> UIFont {
+        let presentation = intent ?? []
+        if presentation.contains(.code) {
+            let weight: UIFont.Weight = presentation.contains(.stronglyEmphasized) ? .bold : .regular
             let monospaced = UIFont.monospacedSystemFont(ofSize: bodyFont.pointSize, weight: weight)
-            guard traits.contains(.traitItalic) else { return monospaced }
+            guard presentation.contains(.emphasized) else { return monospaced }
             let monospacedTraits = monospaced.fontDescriptor.symbolicTraits.union(.traitItalic)
             guard let descriptor = monospaced.fontDescriptor.withSymbolicTraits(monospacedTraits) else {
                 return monospaced
@@ -342,7 +344,13 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
             return UIFont(descriptor: descriptor, size: bodyFont.pointSize)
         }
 
-        let emphasis = traits.intersection([.traitBold, .traitItalic])
+        var emphasis: UIFontDescriptor.SymbolicTraits = []
+        if presentation.contains(.stronglyEmphasized) {
+            emphasis.insert(.traitBold)
+        }
+        if presentation.contains(.emphasized) {
+            emphasis.insert(.traitItalic)
+        }
         guard !emphasis.isEmpty,
               let descriptor = bodyFont.fontDescriptor.withSymbolicTraits(emphasis) else {
             return bodyFont
