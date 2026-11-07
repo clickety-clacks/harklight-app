@@ -941,7 +941,9 @@ struct LiveInboxSettings: View {
                                                     closeSettings: { dismiss() })
                 }
                 ReleaseNotesSettingsSection(notes: HarklightReleaseNotes.settingsHistory(
-                    currentBuildIdentifier: HarklightReleaseNotes.currentBuildIdentifier()))
+                    currentBuildIdentifier: HarklightReleaseNotes.currentBuildIdentifier(),
+                    entries: HarklightReleaseNotes.numberedEntries(
+                        currentBuildIdentifier: HarklightReleaseNotes.currentBuildIdentifier())))
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) {
