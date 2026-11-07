@@ -99,6 +99,40 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(secondLaunch.notesToShow.isEmpty)
     }
 
+    func testBundledPendingReleaseNoteCoversCurrentMessageImprovements() throws {
+        let bundle = Bundle(for: ReleaseNotesTests.self)
+        let url = try XCTUnwrap(bundle.url(
+            forResource: "HarklightReleaseNotes", withExtension: "json"))
+        let document = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let entries = try XCTUnwrap(document["entries"] as? [[String: Any]])
+        let rawEntry = try XCTUnwrap(entries.first { $0["id"] as? String == "fresh-release-notes" })
+        XCTAssertTrue(rawEntry["testFlightBuildNumber"] is NSNull)
+
+        let note = try XCTUnwrap(HarklightReleaseNotes.numberedEntries(
+            currentBuildIdentifier: "142", in: bundle)
+            .first { $0.id == "fresh-release-notes" })
+        XCTAssertEqual(note.buildIdentifier, 142)
+        XCTAssertEqual(note.highlights.map(\.id), [
+            "grouped-replies-and-retractions",
+            "formatted-messages",
+            "release-build-identification",
+            "dynamic-type-message-text",
+            "responsive-chat-composer"
+        ])
+
+        let messageTextDetail = try XCTUnwrap(note.highlights.first {
+            $0.id == "dynamic-type-message-text"
+        })
+        XCTAssertEqual(String(localized: messageTextDetail.detail),
+                       "Message details and inbox rows use a readable standard size and adjust to your device’s text-size setting.")
+        let composerDetail = try XCTUnwrap(note.highlights.first {
+            $0.id == "responsive-chat-composer"
+        })
+        XCTAssertEqual(String(localized: composerDetail.detail),
+                       "Typing a message stays responsive while you work with attachments and other message controls.")
+    }
+
     func testGeneratedNoChangeEntryKeepsItsSinglePlainHighlight() throws {
         let data = Data(#"""
         {"entries":[{"id":"no-change","marketingVersion":"0.1.0",

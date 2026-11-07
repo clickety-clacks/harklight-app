@@ -22,6 +22,18 @@
           "symbol": "sparkles",
           "title": "Know which release is installed",
           "detail": "What’s New opens when a release has new notes, and both it and Settings show each release’s build number."
+        },
+        {
+          "id": "dynamic-type-message-text",
+          "symbol": "textformat.size",
+          "title": "Read messages at your preferred text size",
+          "detail": "Message details and inbox rows use a readable standard size and adjust to your device’s text-size setting."
+        },
+        {
+          "id": "responsive-chat-composer",
+          "symbol": "keyboard",
+          "title": "Keep Chat responsive as you type",
+          "detail": "Typing a message stays responsive while you work with attachments and other message controls."
         }
       ]
     }
