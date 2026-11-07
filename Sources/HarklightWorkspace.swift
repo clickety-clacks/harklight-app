@@ -1775,6 +1775,10 @@ struct InboxList: View {
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
+        // The native searchable field floats over the List's bottom edge.
+        // On compact layouts, keep enough trailing scroll content for the final
+        // reply text to clear it without adding blank space on regular layouts.
+        .modifier(CompactSearchScrollClearance())
         .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
         .searchPresentationToolbarBehavior(.avoidHidingContent)
         .navigationTitle("Harklight")
@@ -1867,6 +1871,19 @@ struct InboxList: View {
             } else {
                 renderedList(using: proxy)
             }
+        }
+    }
+}
+
+private struct CompactSearchScrollClearance: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if horizontalSizeClass == .compact {
+            content.contentMargins(.bottom, 80, for: .scrollContent)
+        } else {
+            content
         }
     }
 }
