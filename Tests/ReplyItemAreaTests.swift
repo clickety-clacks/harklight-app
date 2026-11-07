@@ -116,6 +116,27 @@ final class ReplyItemAreaTests: XCTestCase {
                        "A genuinely new reply on the same parent enters as a fresh item.")
     }
 
+    func testReadPositionReconciliationOnlyChangesTheViewedRequest() throws {
+        var ledger = ReplyItemLedger()
+        let account = ExactText("account")
+        ledger.reconcile([], accountScopes: [account], now: baselineDate)
+
+        let viewed = reply("viewed", turn: "reply-1", sequence: 1, text: "Viewed reply")
+        let other = reply("other", turn: "reply-2", sequence: 2, text: "Other reply")
+        ledger.reconcile([viewed, other], now: baselineDate.addingTimeInterval(1))
+        let otherBeforeRead = try XCTUnwrap(ledger.entries.first { $0.parent == other.parent })
+
+        let viewedAsRead = reply("viewed", turn: "reply-1", sequence: 1,
+                                 seen: true, text: "Viewed reply")
+        ledger.reconcile([viewedAsRead], accountScopes: [account],
+                         parentScope: [viewed.parent],
+                         now: baselineDate.addingTimeInterval(2))
+
+        XCTAssertNil(ledger.entries.first { $0.parent == viewed.parent })
+        XCTAssertEqual(ledger.entries.first { $0.parent == other.parent }, otherBeforeRead,
+                       "Reading one conversation must leave another conversation's New replies unchanged.")
+    }
+
     func testSelectionRemovesNewMembershipWithoutTreatingRepliesAsSeen() {
         var ledger = ReplyItemLedger()
         ledger.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
