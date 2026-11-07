@@ -63,6 +63,7 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertEqual(
             ReleaseNotesLifecycle.notesToPresent(
                 currentBuildIdentifier: "142", entries: entries,
+                seenUpdateIdentifiers: Set(HarklightReleaseNotes.updateEntries.map(\.id)),
                 seenBuildIdentifiers: [141], lastSeenBuildIdentifier: 141,
                 hasPriorAppState: true).map(\.id),
             ["new-release"])
@@ -81,6 +82,8 @@ final class ReleaseNotesTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set(141, forKey: ReleaseNotesLifecycle.lastSeenBuildIdentifierDefaultsKey)
         defaults.set(["141"], forKey: ReleaseNotesLifecycle.seenBuildIdentifiersDefaultsKey)
+        defaults.set(HarklightReleaseNotes.updateEntries.map(\.id),
+                     forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey)
         let firstLaunch = ReleaseNotesPresentation(
             currentBuildIdentifier: "142", hasPriorAppState: true,
             entries: entries, defaults: defaults)
@@ -253,7 +256,7 @@ final class ReleaseNotesTests: XCTestCase {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 79 })
         let highlight = try XCTUnwrap(entry.highlights.first)
 
-        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 79)
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 119)
         XCTAssertEqual(entry.marketingVersion, "0.1.0")
         XCTAssertEqual(entry.highlights.map(\.id), ["detail-edge-pull-removal"])
         XCTAssertEqual(highlight.symbol, "arrow.up.arrow.down")
@@ -270,7 +273,7 @@ final class ReleaseNotesTests: XCTestCase {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 78 })
         let highlight = try XCTUnwrap(entry.highlights.first)
 
-        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 79)
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 119)
         XCTAssertEqual(entry.marketingVersion, "0.1.0")
         XCTAssertEqual(entry.highlights.map(\.id), ["reply-checkmark-commit"])
         XCTAssertEqual(highlight.symbol, "square.and.pencil")
@@ -286,7 +289,7 @@ final class ReleaseNotesTests: XCTestCase {
     func testBuildSeventySevenInboxAnswerRecoveryNoteIsFixedAndHiddenUntilThatBuild() throws {
         let entry = try XCTUnwrap(HarklightReleaseNotes.entries.first { $0.buildIdentifier == 77 })
 
-        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 79)
+        XCTAssertEqual(HarklightReleaseNotes.entries.first?.buildIdentifier, 119)
         XCTAssertEqual(entry.marketingVersion, "0.1.0")
         XCTAssertEqual(entry.highlights.map(\.id), ["inbox-answer-recovery"])
         XCTAssertEqual(

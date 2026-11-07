@@ -60,7 +60,9 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 107"].exists,
+        let pendingHeader = app.staticTexts["Version 0.1.0 · Build 107"]
+        revealHistoryElement(pendingHeader, in: app)
+        XCTAssertTrue(pendingHeader.exists,
                       "The pending release uses the installed build number.")
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · First confirmed in Build 106"].exists,
                       "A later installed build must not relabel the historical update.")
@@ -173,7 +175,7 @@ final class ReleaseNotesUITests: XCTestCase {
     }
 
     private func revealHistoryElement(_ element: XCUIElement, in app: XCUIApplication) {
-        for _ in 0..<8 where !element.isHittable {
+        for _ in 0..<40 where !element.isHittable {
             let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.70))
             let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.56))
             start.press(forDuration: 0.05, thenDragTo: end)

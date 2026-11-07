@@ -706,8 +706,7 @@ enum HarklightReleaseNotes {
         updateEntries: [HarklightReleaseNote] = HarklightReleaseNotes.updateEntries
     ) -> [HarklightReleaseNote] {
         guard let currentBuild = currentBuildIdentifier.flatMap(Int.init) else { return [] }
-        let entries = entries ?? HarklightReleaseNotes.numberedEntries(
-            currentBuildIdentifier: currentBuildIdentifier)
+        let entries = entries ?? HarklightReleaseNotes.entries
         let visibleUpdates = visibleUpdateEntries(currentBuildIdentifier: currentBuildIdentifier,
                                                  entries: updateEntries)
         let buildNotes = releasedEntries(currentBuildIdentifier: currentBuildIdentifier,
@@ -799,8 +798,7 @@ final class ReleaseNotesPresentation {
         defaults: UserDefaults = .standard
     ) {
         self.defaults = defaults
-        let entries = entries ?? HarklightReleaseNotes.numberedEntries(
-            currentBuildIdentifier: currentBuildIdentifier)
+        let entries = entries ?? HarklightReleaseNotes.entries
         let lastSeenBuildIdentifier = ReleaseNotesLifecycle.lastSeenBuildIdentifier(defaults: defaults)
         let seenUpdateIdentifiers = Set(defaults.stringArray(
             forKey: ReleaseNotesLifecycle.seenUpdateIdentifiersDefaultsKey) ?? [])
