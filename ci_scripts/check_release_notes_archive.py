@@ -83,17 +83,31 @@ def read_entries(repo: Path, revision: str, source: str) -> list[dict]:
     return parse_entries(contents, source)
 
 
+def first_parent(repo: Path, head: str) -> str:
+    parents = git(repo, "rev-list", "--parents", "-n", "1", head).split()
+    if len(parents) < 2:
+        try:
+            git(repo, "fetch", "--quiet", "--no-tags", "--deepen=1", "origin", head)
+        except CheckFailure as error:
+            raise CheckFailure(
+                "cannot evaluate release notes: HEAD's first parent is unavailable"
+            ) from error
+        parents = git(repo, "rev-list", "--parents", "-n", "1", head).split()
+    if len(parents) < 2:
+        raise CheckFailure("cannot evaluate release notes: HEAD's first parent is unavailable")
+
+    parent = parents[1]
+    git(repo, "rev-parse", "--verify", f"{parent}^{{commit}}")
+    return parent
+
+
 def check(repo: Path, commit: str) -> str:
     head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").strip()
     resolved_commit = git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
     if not resolved_commit or resolved_commit != head:
         raise CheckFailure("cannot evaluate release notes: CI commit does not match checkout HEAD")
 
-    parents = git(repo, "rev-list", "--parents", "-n", "1", head).split()
-    if len(parents) < 2:
-        raise CheckFailure("cannot evaluate release notes: HEAD's first parent is unavailable")
-    parent = parents[1]
-    git(repo, "rev-parse", "--verify", f"{parent}^{{commit}}")
+    parent = first_parent(repo, head)
 
     if not tree_file_exists(repo, head):
         raise CheckFailure(f"missing release notes file: {NOTES_PATH}")
