@@ -1017,7 +1017,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
             let landscape = orientation == .landscapeLeft || orientation == .landscapeRight
             XCTAssertEqual(app.frame.width > app.frame.height, landscape, app.debugDescription)
-            enterSearch("Archive", in: app)
+            enterSearch("Archive the old studio sketches", in: app)
             XCTAssertTrue(app.descendants(matching: .any)["sample-approval-0"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-list", app)
             app.descendants(matching: .any)["sample-approval-0"].tap()
