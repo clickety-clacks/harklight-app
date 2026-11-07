@@ -69,6 +69,7 @@ final class ReleaseNotesTests: XCTestCase {
             ["new-release"])
         XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
             currentBuildIdentifier: "142", entries: entries,
+            seenUpdateIdentifiers: Set(HarklightReleaseNotes.updateEntries.map(\.id)),
             seenBuildIdentifiers: [141, 142], lastSeenBuildIdentifier: 142,
             hasPriorAppState: true).isEmpty)
         XCTAssertEqual(
