@@ -1,4 +1,5 @@
 import AttentionDomain
+import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
@@ -371,6 +372,74 @@ enum ConversationSubmittedText {
 }
 
 @MainActor
+@Observable
+private final class ConversationComposerTextSession {
+    // Keystroke updates stay in the editor/send leaves instead of invalidating
+    // the composer that also builds attachment and control content.
+    var stagedText = ""
+    var textEditRevision: UInt64 = 0
+    var savedText = ""
+    var stagedBinding: ConversationBinding?
+    @ObservationIgnored var textSaveTask: Task<Void, Never>?
+}
+
+@MainActor
+private struct ConversationComposerTextInput: View {
+    let session: ConversationComposerTextSession
+    let isEnabled: Bool
+    let onTextChange: () -> Void
+    let onReturn: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ConversationReturnTextView(text: Binding(get: { session.stagedText }, set: { text in
+                guard session.stagedText != text else { return }
+                session.textEditRevision &+= 1
+                session.stagedText = text
+                onTextChange()
+            }), isEnabled: isEnabled, onReturn: onReturn)
+                .padding(.vertical, 11)
+            if session.stagedText.isEmpty {
+                Text("Write a message…")
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 11)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct ConversationComposerSendButton: View {
+    let session: ConversationComposerTextSession
+    let isLocalExample: Bool
+    let frozen: Bool
+    let isSendingDiscussion: Bool
+    let allowsDiscussion: Bool
+    let hasFiles: Bool
+    let hasPendingUploadCleanup: Bool
+    let hasAbandonedDiscussion: Bool
+    let hasUnreadyUploadReference: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: frozen ? "arrow.clockwise" : "arrow.up")
+                .font(.headline)
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
+        .accessibilityLabel(isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
+        .accessibilityIdentifier("sample-chat-send")
+        .disabled(isSendingDiscussion || !allowsDiscussion || hasPendingUploadCleanup ||
+                  hasAbandonedDiscussion || hasUnreadyUploadReference ||
+                  (!frozen && session.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasFiles))
+    }
+}
+
+@MainActor
 private struct ConversationComposer: View {
     let store: LivePresentationStore
     let key: RequestKey
@@ -378,11 +447,7 @@ private struct ConversationComposer: View {
     let inspect: (ConversationFile, UInt64) -> Void
     @State private var pickingFiles = false
     @State private var attachmentChoices = false
-    @State private var stagedText = ""
-    @State private var textEditRevision: UInt64 = 0
-    @State private var savedText = ""
-    @State private var stagedBinding: ConversationBinding?
-    @State private var textSaveTask: Task<Void, Never>?
+    @State private var textSession = ConversationComposerTextSession()
     @Environment(\.scenePhase) private var scenePhase
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
@@ -439,74 +504,60 @@ private struct ConversationComposer: View {
                     }
                     .padding(.top, 8)
                 }
-                ZStack(alignment: .topLeading) {
-                    ConversationReturnTextView(text: Binding(get: { stagedText }, set: { text in
-                        guard stagedText != text else { return }
-                        textEditRevision &+= 1
-                        stagedText = text
-                        scheduleTextSave()
-                    }), isEnabled: !frozen && allowsDiscussion, onReturn: sendStagedText)
-                        .padding(.vertical, 11)
-                    if stagedText.isEmpty {
-                        Text("Write a message…")
-                            .foregroundStyle(.secondary)
-                            .padding(.vertical, 11)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
-                    }
-                }
+                ConversationComposerTextInput(session: textSession,
+                    isEnabled: !frozen && allowsDiscussion,
+                    onTextChange: scheduleTextSave, onReturn: sendStagedText)
             }
             .padding(.horizontal, 12)
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
             .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
-            Button { sendStagedText() } label: {
-                Image(systemName: frozen ? "arrow.clockwise" : "arrow.up")
-                    .font(.headline)
-                    .frame(width: 30, height: 30)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
-            .accessibilityLabel(store.isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
-            .accessibilityIdentifier("sample-chat-send")
-            .disabled(store.isSendingDiscussion || !allowsDiscussion || store.hasPendingUploadCleanup(for: key, revision: revision) || store.hasAbandonedDiscussion(for: key, revision: revision) || store.hasUnreadyUploadReference(for: key, revision: revision) || (!frozen && stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.files.isEmpty))
+            ConversationComposerSendButton(session: textSession,
+                isLocalExample: store.isLocalExample, frozen: frozen,
+                isSendingDiscussion: store.isSendingDiscussion,
+                allowsDiscussion: allowsDiscussion,
+                hasFiles: !draft.files.isEmpty,
+                hasPendingUploadCleanup: store.hasPendingUploadCleanup(for: key, revision: revision),
+                hasAbandonedDiscussion: store.hasAbandonedDiscussion(for: key, revision: revision),
+                hasUnreadyUploadReference: store.hasUnreadyUploadReference(for: key, revision: revision),
+                action: sendStagedText)
         }
         .onChange(of: ConversationBinding(request: key, revision: revision), initial: true) { _, binding in
-            if let stagedBinding, stagedBinding != binding { _ = persistStagedText() }
-            textSaveTask?.cancel()
-            stagedBinding = binding
+            if let stagedBinding = textSession.stagedBinding, stagedBinding != binding { _ = persistStagedText() }
+            textSession.textSaveTask?.cancel()
+            textSession.stagedBinding = binding
             let current = store.conversationDraft(for: binding.request, revision: binding.revision)
             if let unsaved = store.unsavedConversationText(for: binding) {
-                stagedText = unsaved
-                savedText = current.text.rawValue
+                textSession.stagedText = unsaved
+                textSession.savedText = current.text.rawValue
                 return
             }
             // A confirmed send can await replay while its exact operation stays durable.
             if case .acceptedPendingReplay = current.disposition {
-                stagedText = ""
-                savedText = ""
+                textSession.stagedText = ""
+                textSession.savedText = ""
             } else {
-                stagedText = current.text.rawValue
-                savedText = stagedText
+                textSession.stagedText = current.text.rawValue
+                textSession.savedText = textSession.stagedText
             }
         }
         .onChange(of: draft.text) { old, new in
-            guard stagedText == savedText else { return }
+            guard textSession.stagedText == textSession.savedText else { return }
             if old != new {
-                stagedText = new.rawValue
-                savedText = stagedText
+                textSession.stagedText = new.rawValue
+                textSession.savedText = textSession.stagedText
             }
         }
         .onChange(of: draft.disposition) { _, disposition in
-            if case .saved = disposition, stagedText != savedText { scheduleTextSave() }
-            if case .rejected = disposition, stagedText != savedText { scheduleTextSave() }
+            if case .saved = disposition, textSession.stagedText != textSession.savedText { scheduleTextSave() }
+            if case .rejected = disposition, textSession.stagedText != textSession.savedText { scheduleTextSave() }
         }
         .onDisappear {
-            textSaveTask?.cancel()
+            textSession.textSaveTask?.cancel()
             _ = persistStagedText()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
-                textSaveTask?.cancel()
+                textSession.textSaveTask?.cancel()
                 _ = persistStagedText()
             }
         }
@@ -521,44 +572,45 @@ private struct ConversationComposer: View {
     }
 
     private func scheduleTextSave() {
-        textSaveTask?.cancel()
-        let expected = stagedText
-        let binding = stagedBinding
-        textSaveTask = Task { @MainActor in
+        textSession.textSaveTask?.cancel()
+        let expected = textSession.stagedText
+        let binding = textSession.stagedBinding
+        textSession.textSaveTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled, stagedBinding == binding, stagedText == expected else { return }
+            guard !Task.isCancelled, textSession.stagedBinding == binding,
+                  textSession.stagedText == expected else { return }
             _ = persistStagedText()
         }
     }
 
     @discardableResult
     private func persistStagedText() -> Bool {
-        guard let binding = stagedBinding else { return false }
-        guard stagedText != savedText else { return true }
+        guard let binding = textSession.stagedBinding else { return false }
+        guard textSession.stagedText != textSession.savedText else { return true }
         guard store.updateConversation(for: binding.request, revision: binding.revision,
-                                       text: stagedText) else { return false }
-        savedText = stagedText
+                                       text: textSession.stagedText) else { return false }
+        textSession.savedText = textSession.stagedText
         return true
     }
 
     private func sendStagedText() {
-        textSaveTask?.cancel()
+        textSession.textSaveTask?.cancel()
         guard !store.isSendingDiscussion, allowsDiscussion,
               !store.hasPendingUploadCleanup(for: key, revision: revision),
               !store.hasAbandonedDiscussion(for: key, revision: revision),
               !store.hasUnreadyUploadReference(for: key, revision: revision),
-              frozen || !stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else { return }
-        guard persistStagedText(), let binding = stagedBinding else { return }
-        let submittedText = stagedText
-        let submittedEdit = textEditRevision
+              frozen || !textSession.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else { return }
+        guard persistStagedText(), let binding = textSession.stagedBinding else { return }
+        let submittedText = textSession.stagedText
+        let submittedEdit = textSession.textEditRevision
         store.sendDiscussion(for: binding.request, revision: binding.revision) { accepted in
-            guard stagedBinding == binding else { return }
+            guard textSession.stagedBinding == binding else { return }
             let remaining = ConversationSubmittedText.afterResult(
                 accepted: accepted, submitted: submittedText, submittedEdit: submittedEdit,
-                current: stagedText, currentEdit: textEditRevision)
-            if remaining != stagedText {
-                stagedText = remaining
-                savedText = remaining
+                current: textSession.stagedText, currentEdit: textSession.textEditRevision)
+            if remaining != textSession.stagedText {
+                textSession.stagedText = remaining
+                textSession.savedText = remaining
             }
         }
     }
