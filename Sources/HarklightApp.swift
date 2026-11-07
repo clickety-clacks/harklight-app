@@ -31,13 +31,16 @@ struct HarklightApp: App {
         } else {
             defaults = .standard
         }
+        let currentBuildIdentifier = isReferenceOrFixtureRun
+            ? nil
+            : HarklightReleaseNotes.currentBuildIdentifier()
         _releaseNotes = State(initialValue: ReleaseNotesPresentation(
-            currentBuildIdentifier: isReferenceOrFixtureRun
-                ? nil
-                : HarklightReleaseNotes.currentBuildIdentifier(),
+            currentBuildIdentifier: currentBuildIdentifier,
             hasPriorAppState: isReleaseNotesUITest
                 ? ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST_FRESH_INSTALL"] != "1"
                 : launch.hasPriorAppState,
+            entries: HarklightReleaseNotes.numberedEntries(
+                currentBuildIdentifier: currentBuildIdentifier),
             defaults: defaults))
     }
 
