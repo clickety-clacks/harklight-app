@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 @MainActor
 final class ConversationSampleUITests: XCTestCase {
@@ -311,6 +312,76 @@ final class ConversationSampleUITests: XCTestCase {
             capture("markdown-\(appearance)-conversation", app)
             app.terminate()
         }
+    }
+
+    func testMarkdownUsesAccessibilityDynamicTypeInNewNormalAndDetail() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--harklight-test-inbox-list-column",
+            "--harklight-test-inbox-list-light",
+            "--harklight-test-inbox-list-state=markdown",
+            "--harklight-markdown-acceptance",
+            "--harklight-test-markdown-reply-item",
+            "-UIPreferredContentSizeCategoryName",
+            UIContentSizeCategory.accessibilityLarge.rawValue
+        ]
+        app.launch()
+
+        let newRow = app.descendants(matching: .any)[
+            "new-message-area-request-row-sample-markdown-acceptance"
+        ]
+        XCTAssertTrue(newRow.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(newRow.label.contains("A Markdown note"), newRow.debugDescription)
+        XCTAssertFalse(newRow.label.contains("**"), newRow.debugDescription)
+        captureInboxColumnState("markdown-accessibility-new-row", app)
+
+        let newReplyRow = app.descendants(matching: .any)[
+            "reply-item-request-row-sample-markdown-acceptance"
+        ]
+        XCTAssertTrue(newReplyRow.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(newReplyRow.label.contains("reply guide"), newReplyRow.debugDescription)
+        captureInboxColumnState("markdown-accessibility-new-reply-row", app)
+
+        let list = app.collectionViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        let normalReplyRow = app.descendants(matching: .any)[
+            "normal-reply-item-sample-markdown-acceptance"
+        ]
+        for _ in 0..<8 where !normalReplyRow.isHittable { list.swipeUp() }
+        XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
+        captureInboxColumnState("markdown-accessibility-normal-reply-row", app)
+
+        let normalRow = app.descendants(matching: .any)["request-row-sample-markdown-acceptance"]
+        for _ in 0..<8 where !normalRow.isHittable { list.swipeUp() }
+        XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(normalRow.isHittable, normalRow.debugDescription)
+        XCTAssertTrue(normalRow.label.contains("A Markdown note"), normalRow.debugDescription)
+        captureInboxColumnState("markdown-accessibility-normal-row", app)
+
+        for _ in 0..<8 where !newRow.isHittable { list.swipeDown() }
+        XCTAssertTrue(newRow.isHittable, newRow.debugDescription)
+        newRow.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.82)).tap()
+
+        let selection = app.descendants(matching: .any)["priority-capture-selection"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 5), app.debugDescription)
+        let selected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "sample-markdown-acceptance"),
+            object: selection)
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
+                       "A non-link tap in the larger-text New row must keep existing navigation.\n\(app.debugDescription)")
+        let heading = app.buttons["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(heading.label.contains("A Markdown note"), heading.debugDescription)
+        let body = app.textViews["request-message-body"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+        let bodyText = body.value as? String ?? body.label
+        XCTAssertTrue(bodyText.contains("First item"), bodyText)
+        XCTAssertTrue(bodyText.contains("let answer = 42"), bodyText)
+        XCTAssertFalse(bodyText.contains("```"), bodyText)
+        capture("markdown-accessibility-detail", app)
+        app.terminate()
     }
 
     func testPlainTextRemainsReadableInNewNormalAndDetailInLightAndDark() {

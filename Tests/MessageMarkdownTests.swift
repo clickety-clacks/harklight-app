@@ -52,7 +52,8 @@ final class MessageMarkdownTests: XCTestCase {
         let color = UIColor.white
         let rendered = SystemDetectedMessageBody.attributedMessage(
             "A plain **bold** [link](https://example.com)",
-            foregroundColor: color)
+            foregroundColor: color,
+            bodyFont: UIFont.preferredFont(forTextStyle: .body))
         let linkIndex = (rendered.string as NSString).range(of: "link").location
 
         XCTAssertGreaterThan(linkIndex, 0)
@@ -63,6 +64,49 @@ final class MessageMarkdownTests: XCTestCase {
                 rendered.attribute(.foregroundColor, at: index, effectiveRange: nil) as? UIColor)
             XCTAssertTrue(runColor.isEqual(color), "Unexpected message body color at UTF-16 index \(index)")
         }
+    }
+
+    @MainActor
+    func testUIKitMessageBodyUsesSystemBodySizeAndPreservesMarkdownFontTraits() throws {
+        let standardTraits = UITraitCollection(preferredContentSizeCategory: .large)
+        let accessibilityTraits = UITraitCollection(
+            preferredContentSizeCategory: .accessibilityExtraExtraLarge)
+        let standardBody = UIFont.preferredFont(forTextStyle: .body, compatibleWith: standardTraits)
+        let accessibilityBody = UIFont.preferredFont(forTextStyle: .body,
+                                                      compatibleWith: accessibilityTraits)
+        XCTAssertGreaterThan(accessibilityBody.pointSize, standardBody.pointSize)
+
+        let source = "Plain **bold**, *italic*, `code`, [link](https://example.com)"
+        let standard = SystemDetectedMessageBody.attributedMessage(
+            source, foregroundColor: .label, bodyFont: standardBody)
+        let accessibility = SystemDetectedMessageBody.attributedMessage(
+            source, foregroundColor: .label, bodyFont: accessibilityBody)
+
+        func font(for substring: String, in text: NSAttributedString,
+                  file: StaticString = #filePath, line: UInt = #line) throws -> UIFont {
+            let index = (text.string as NSString).range(of: substring).location
+            XCTAssertNotEqual(index, NSNotFound, file: file, line: line)
+            return try XCTUnwrap(text.attribute(.font, at: index, effectiveRange: nil) as? UIFont,
+                                 file: file, line: line)
+        }
+
+        for (text, expectedPointSize) in [(standard, standardBody.pointSize),
+                                          (accessibility, accessibilityBody.pointSize)] {
+            XCTAssertEqual(try font(for: "Plain", in: text).pointSize,
+                           expectedPointSize, accuracy: 0.1)
+            XCTAssertTrue(try font(for: "bold", in: text).fontDescriptor.symbolicTraits
+                .contains(.traitBold))
+            XCTAssertTrue(try font(for: "italic", in: text).fontDescriptor.symbolicTraits
+                .contains(.traitItalic))
+            XCTAssertTrue(try font(for: "code", in: text).fontDescriptor.symbolicTraits
+                .contains(.traitMonoSpace))
+            let linkIndex = (text.string as NSString).range(of: "link").location
+            XCTAssertEqual(text.attribute(.link, at: linkIndex, effectiveRange: nil) as? URL,
+                           URL(string: "https://example.com"))
+        }
+
+        XCTAssertGreaterThan(try font(for: "Plain", in: accessibility).pointSize,
+                             try font(for: "Plain", in: standard).pointSize)
     }
 
     func testVisibleTextForAccessibilityOmitsMarkdownSyntax() {

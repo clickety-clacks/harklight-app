@@ -1603,7 +1603,7 @@ struct LiveRequestDetail: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(detailColors.secondaryTextColor)
                         Text(MessageMarkdown.attributed(stake.rawValue))
-                            .font(.subheadline)
+                            .font(.body)
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                             .accessibilityIdentifier("request-stake")
@@ -2205,7 +2205,7 @@ struct HistoricalAnswerDraftView: View {
             Text(MessageMarkdown.attributed(request.title?.rawValue ?? "Earlier question"))
                 .font(.headline)
             if let body = request.body {
-                Text(MessageMarkdown.attributed(body.rawValue)).font(.caption)
+                Text(MessageMarkdown.attributed(body.rawValue)).font(.body)
             }
             Text(retracted ? "Saved answer · request retracted. Its original wording and choices are retained." : "Not delivered · this selection belongs to the earlier question")
                 .font(.caption).foregroundStyle(.secondary)

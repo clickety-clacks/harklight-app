@@ -2045,7 +2045,7 @@ private struct NewMessageAreaRowContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(displayedSummary)
-                .font(.subheadline)
+                .font(.body)
                 .foregroundStyle(palette.neutral.textColor)
                 .tint(palette.neutral.textColor)
                 .lineLimit(2)
@@ -2159,7 +2159,7 @@ private struct ReplyItemRowContent: View {
                     .accessibilityHidden(true)
                 Text(MessageMarkdown.preview(entry.newestUnseenReply?.text ?? "",
                                              characterLimit: 320))
-                    .font(.subheadline)
+                    .font(.body)
                     .foregroundStyle(palette.neutral.textColor)
                     .tint(palette.neutral.textColor)
                     .lineLimit(1)
@@ -2408,7 +2408,7 @@ struct InboxRowContent: View {
                     }
                     if let bodyText = row.bodyText, !bodyText.isEmpty {
                         Text(MessageMarkdown.attributed(bodyText))
-                            .font(.subheadline)
+                            .font(.body)
                             .foregroundStyle(secondaryRowTextColor)
                             .tint(secondaryRowTextColor)
                             .lineLimit(row.tier.bodyLineLimit)
@@ -2667,7 +2667,7 @@ private struct ReplyItemNormalRowContent: View {
                 if let projection {
                     Text(MessageMarkdown.preview(projection.quotedReply.text.rawValue,
                                                  characterLimit: 480))
-                        .font(.subheadline)
+                        .font(.body)
                         .foregroundStyle(primaryTextColor)
                         .tint(primaryTextColor)
                         .lineLimit(3)
