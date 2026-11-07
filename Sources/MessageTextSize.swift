@@ -31,12 +31,10 @@ enum MessageTextSize: String, CaseIterable, Equatable, Identifiable, Sendable {
     }
 
     func font(basePointSize: CGFloat = 17,
-              weight: Font.Weight = .regular,
-              relativeTo textStyle: Font.TextStyle = .body) -> Font {
+              weight: Font.Weight = .regular) -> Font {
         .system(size: basePointSize * multiplier,
                 weight: weight,
-                design: .default,
-                relativeTo: textStyle)
+                design: .default)
     }
 
     func uiFont(basePointSize: CGFloat = 17,
@@ -61,14 +59,20 @@ extension EnvironmentValues {
 
 private struct MessageTextSizeModifier: ViewModifier {
     @Environment(\.messageTextSize) private var messageTextSize
+    @ScaledMetric private var scaledBasePointSize: CGFloat
     let basePointSize: CGFloat
     let weight: Font.Weight
-    let relativeTo: Font.TextStyle
+
+    init(basePointSize: CGFloat, weight: Font.Weight, relativeTo textStyle: Font.TextStyle) {
+        self.basePointSize = basePointSize
+        self.weight = weight
+        self._scaledBasePointSize = ScaledMetric(wrappedValue: basePointSize,
+                                                  relativeTo: textStyle)
+    }
 
     func body(content: Content) -> some View {
-        content.font(messageTextSize.font(basePointSize: basePointSize,
-                                          weight: weight,
-                                          relativeTo: relativeTo))
+        content.font(messageTextSize.font(basePointSize: scaledBasePointSize,
+                                          weight: weight))
     }
 }
 

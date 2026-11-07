@@ -2232,6 +2232,9 @@ struct InboxRowContent: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.backgroundProminence) private var backgroundProminence
     @Environment(\.messageTextSize) private var messageTextSize
+    @ScaledMetric(relativeTo: .title2) private var topTitlePointSize: CGFloat = 22
+    @ScaledMetric(relativeTo: .headline) private var middleTitlePointSize: CGFloat = 17
+    @ScaledMetric(relativeTo: .subheadline) private var lowTitlePointSize: CGFloat = 15
 
     private var palette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
@@ -2460,11 +2463,11 @@ struct InboxRowContent: View {
     private var titleFont: Font {
         switch row.tier {
         case .top:
-            messageTextSize.font(basePointSize: 22, weight: .bold, relativeTo: .title2)
+            messageTextSize.font(basePointSize: topTitlePointSize, weight: .bold)
         case .middle:
-            messageTextSize.font(basePointSize: 17, weight: .semibold, relativeTo: .headline)
+            messageTextSize.font(basePointSize: middleTitlePointSize, weight: .semibold)
         case .low:
-            messageTextSize.font(basePointSize: 15, weight: .semibold, relativeTo: .subheadline)
+            messageTextSize.font(basePointSize: lowTitlePointSize, weight: .semibold)
         }
     }
 

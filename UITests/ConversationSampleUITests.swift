@@ -464,6 +464,7 @@ final class ConversationSampleUITests: XCTestCase {
                 }
 
                 app.terminate()
+                app.launchArguments.append("--harklight-test-preserve-message-text-size")
                 app.launch()
                 XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10),
                               app.debugDescription)
