@@ -304,16 +304,79 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     let text: String
     let foregroundColor: Color
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     static func attributedMessage(_ text: String,
-                                  foregroundColor: UIColor) -> NSAttributedString {
-        let rendered = NSMutableAttributedString(
-            attributedString: NSAttributedString(MessageMarkdown.attributed(text)))
-        if rendered.length > 0 {
-            rendered.addAttribute(.foregroundColor,
-                                  value: foregroundColor,
-                                  range: NSRange(location: 0, length: rendered.length))
+                                  foregroundColor: UIColor,
+                                  bodyFont: UIFont) -> NSAttributedString {
+        let markdown = MessageMarkdown.attributed(text)
+        let rendered = NSMutableAttributedString(string: "")
+        for run in markdown.runs {
+            let piece = NSMutableAttributedString(
+                attributedString: NSAttributedString(AttributedString(markdown[run.range])))
+            if piece.length > 0 {
+                let fullRange = NSRange(location: 0, length: piece.length)
+                piece.addAttribute(.font,
+                                   value: Self.bodyFont(
+                                    matching: run.inlinePresentationIntent,
+                                    base: bodyFont),
+                                   range: fullRange)
+                piece.addAttribute(.foregroundColor,
+                                   value: foregroundColor,
+                                   range: fullRange)
+            }
+            rendered.append(piece)
         }
         return rendered
+    }
+
+    private static func bodyFont(matching intent: InlinePresentationIntent?,
+                                 base bodyFont: UIFont) -> UIFont {
+        let presentation = intent ?? []
+        if presentation.contains(.code) {
+            let weight: UIFont.Weight = presentation.contains(.stronglyEmphasized) ? .bold : .regular
+            let monospaced = UIFont.monospacedSystemFont(ofSize: bodyFont.pointSize, weight: weight)
+            guard presentation.contains(.emphasized) else { return monospaced }
+            let monospacedTraits = monospaced.fontDescriptor.symbolicTraits.union(.traitItalic)
+            guard let descriptor = monospaced.fontDescriptor.withSymbolicTraits(monospacedTraits) else {
+                return monospaced
+            }
+            return UIFont(descriptor: descriptor, size: bodyFont.pointSize)
+        }
+
+        var emphasis: UIFontDescriptor.SymbolicTraits = []
+        if presentation.contains(.stronglyEmphasized) {
+            emphasis.insert(.traitBold)
+        }
+        if presentation.contains(.emphasized) {
+            emphasis.insert(.traitItalic)
+        }
+        guard !emphasis.isEmpty,
+              let descriptor = bodyFont.fontDescriptor.withSymbolicTraits(emphasis) else {
+            return bodyFont
+        }
+        return UIFont(descriptor: descriptor, size: bodyFont.pointSize)
+    }
+
+    private func preferredBodyFont(for textView: UITextView) -> UIFont {
+        let category: UIContentSizeCategory
+        switch dynamicTypeSize {
+        case .xSmall: category = .extraSmall
+        case .small: category = .small
+        case .medium: category = .medium
+        case .large: category = .large
+        case .xLarge: category = .extraLarge
+        case .xxLarge: category = .extraExtraLarge
+        case .xxxLarge: category = .extraExtraExtraLarge
+        case .accessibility1: category = .accessibilityMedium
+        case .accessibility2: category = .accessibilityLarge
+        case .accessibility3: category = .accessibilityExtraLarge
+        case .accessibility4: category = .accessibilityExtraExtraLarge
+        case .accessibility5: category = .accessibilityExtraExtraExtraLarge
+        @unknown default: category = textView.traitCollection.preferredContentSizeCategory
+        }
+        let traits = UITraitCollection(preferredContentSizeCategory: category)
+        return UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)
     }
 
     func makeUIView(context: Context) -> UITextView {
@@ -325,17 +388,23 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         textView.backgroundColor = .clear
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
-        textView.font = .preferredFont(forTextStyle: .body)
+        let bodyFont = preferredBodyFont(for: textView)
+        textView.font = bodyFont
         textView.adjustsFontForContentSizeCategory = true
         textView.attributedText = Self.attributedMessage(
-            text, foregroundColor: UIColor(foregroundColor))
+            text, foregroundColor: UIColor(foregroundColor), bodyFont: bodyFont)
         updateColors(on: textView)
         textView.accessibilityIdentifier = "request-message-body"
         return textView
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        let markdown = Self.attributedMessage(text, foregroundColor: UIColor(foregroundColor))
+        let bodyFont = preferredBodyFont(for: textView)
+        if textView.font?.isEqual(bodyFont) != true {
+            textView.font = bodyFont
+        }
+        let markdown = Self.attributedMessage(
+            text, foregroundColor: UIColor(foregroundColor), bodyFont: bodyFont)
         if !textView.attributedText.isEqual(to: markdown) {
             textView.attributedText = markdown
         }
