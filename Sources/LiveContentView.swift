@@ -1850,11 +1850,11 @@ struct LiveRequestDetail: View {
                     skippedMessageWarningButton
                 }
             }
+            ToolbarItemGroup(placement: .bottomBar) {
+                Spacer()
+                chatButton
+            }
             if !isSupersedesReadOnly {
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Spacer()
-                    chatButton
-                }
                 ToolbarItem(placement: .confirmationAction) {
                     if request.informationalSeenStatus != nil {
                         if seenActionIsComplete { EmptyView() } else { finishSeenButton }
@@ -2146,7 +2146,10 @@ struct LiveRequestDetail: View {
             initialScrollTurnID: pendingChatScrollTarget,
             testNotificationRouter: testNotificationRouter,
             testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
-            testConversationSheetDidAppear: testConversationSheetDidAppear)
+            testConversationSheetDidAppear: testConversationSheetDidAppear,
+            discussionUnavailableReason: isSupersedesReadOnly
+                ? ConversationPanelText.supersededReadOnlyReason
+                : nil)
     }
 
     static func informationalSeenText(_ status: InformationalSeenStatus) -> String {
