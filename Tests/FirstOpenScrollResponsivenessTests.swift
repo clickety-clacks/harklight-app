@@ -42,6 +42,7 @@ private final class DelayedAttentionPersistence: AttentionStatePersistence, @unc
     private var nextWriteDelay: TimeInterval?
     private var writeCount = 0
     private var delayedWriteWasOnMainThread: Bool?
+    private var delayedWriteDidStart = false
 
     func load(identity: ProfileIdentity) throws -> Data? { lock.withLock { data } }
 
@@ -49,7 +50,10 @@ private final class DelayedAttentionPersistence: AttentionStatePersistence, @unc
         let delay = lock.withLock {
             let delay = nextWriteDelay
             nextWriteDelay = nil
-            if delay != nil { delayedWriteWasOnMainThread = Thread.isMainThread }
+            if delay != nil {
+                delayedWriteWasOnMainThread = Thread.isMainThread
+                delayedWriteDidStart = true
+            }
             return delay
         }
         if let delay { Thread.sleep(forTimeInterval: delay) }
@@ -60,11 +64,15 @@ private final class DelayedAttentionPersistence: AttentionStatePersistence, @unc
     }
 
     func delayNextWrite(by interval: TimeInterval) {
-        lock.withLock { nextWriteDelay = interval }
+        lock.withLock {
+            nextWriteDelay = interval
+            delayedWriteDidStart = false
+        }
     }
 
     var writes: Int { lock.withLock { writeCount } }
     var delayedWriteThreadWasMain: Bool? { lock.withLock { delayedWriteWasOnMainThread } }
+    var hasDelayedWriteStarted: Bool { lock.withLock { delayedWriteDidStart } }
 }
 
 @MainActor
@@ -140,6 +148,93 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
         XCTAssertEqual(persistence.delayedWriteThreadWasMain, false,
                        "The attention plist encoding and persistence belong off main.")
         print(String(format: "detail persistence main-actor block: %.3f ms (controlled write delay: %.0f ms; writer on main: %@)",
+                     mainActorDelay, persistenceDelay * 1000,
+                     String(describing: persistence.delayedWriteThreadWasMain)))
+    }
+
+    func testInboxFirstPageCatchUpPersistenceDoesNotBlockInboxAdoption() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = DelayedAttentionPersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        _ = try domain.beginInboxCandidate(startupID: "first-open", since: 0,
+            batches: [], context: context)
+        let defaults = DelayedUserDefaults()
+        let presentation = try LivePresentationStore(store: domain, context: context,
+            newMessageAreaDefaults: defaults)
+
+        let arrivingKey = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("first-page"))
+        let payload = try JSONValue.parse(Data(#"{"title":"First page"}"#.utf8))
+        let acceptance = RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: arrivingKey, originalPayload: payload), .message))
+        persistence.delayNextWrite(by: persistenceDelay)
+        let catchUp = Task.detached {
+            try domain.saveInboxInitialPage(snapshotID: "snapshot", highWater: 1,
+                items: [InboxSnapshotItem(acceptance: acceptance)], nextCursor: nil,
+                receiptCursor: nil, context: context)
+        }
+        await waitUntil { persistence.hasDelayedWriteStarted }
+        let mainActorDelay = await measureMainActorDelay {
+            try? presentation.refreshFromDurableStore()
+        }
+        try await catchUp.value
+        try presentation.refreshFromDurableStore()
+
+        XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
+                          "Inbox adoption must read the committed snapshot while catch-up persists.")
+        XCTAssertEqual(persistence.delayedWriteThreadWasMain, false,
+                       "Relay message persistence must run away from the inbox's main actor.")
+        XCTAssertNotNil(presentation.request(for: arrivingKey))
+        print(String(format: "inbox first-page adoption main-actor block: %.3f ms (controlled plist delay: %.0f ms; writer on main: %@)",
+                     mainActorDelay, persistenceDelay * 1000,
+                     String(describing: persistence.delayedWriteThreadWasMain)))
+    }
+
+    func testConversationCatchUpPersistenceDoesNotBlockDetailAdoption() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = DelayedAttentionPersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let request = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Conversation"}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: request, originalPayload: payload), .message)), context: context)
+        let binding = ConversationBinding(request: request, revision: 1)
+        let session = ExactText("session")
+        let question = ConversationTurn(id: ExactText("question"), binding: binding,
+            author: .person, sessionHandle: session, text: ExactText("Question"), kind: .discussion)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: session, payload: payload)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(question)), context: context)
+        let presentation = try LivePresentationStore(store: domain, context: context,
+            newMessageAreaDefaults: DelayedUserDefaults())
+        let reply = ConversationTurn(id: ExactText("reply"), binding: binding,
+            author: .origin, sessionHandle: session, text: ExactText("Reply"),
+            inReplyTo: question.id, kind: .reply)
+
+        persistence.delayNextWrite(by: persistenceDelay)
+        let catchUp = Task.detached {
+            try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+                fact: .turn(reply)), context: context)
+        }
+        await waitUntil { persistence.hasDelayedWriteStarted }
+        let mainActorDelay = await measureMainActorDelay {
+            try? presentation.refreshFromDurableStore()
+        }
+        try await catchUp.value
+        try presentation.refreshFromDurableStore()
+
+        XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
+                          "Detail adoption must read the committed snapshot while catch-up persists.")
+        XCTAssertEqual(persistence.delayedWriteThreadWasMain, false,
+                       "Conversation catch-up persistence must run away from the detail's main actor.")
+        XCTAssertTrue(presentation.hasUnreadAgentReply(request))
+        print(String(format: "conversation catch-up adoption main-actor block: %.3f ms (controlled plist delay: %.0f ms; writer on main: %@)",
                      mainActorDelay, persistenceDelay * 1000,
                      String(describing: persistence.delayedWriteThreadWasMain)))
     }

@@ -132,8 +132,8 @@ public final class FileAttentionStatePersistence: AttentionStatePersistence, @un
 }
 
 public final class AttentionDomainStore: @unchecked Sendable {
-    // Writers take this gate before the state lock, so a queued writer never
-    // keeps readers from the last committed state while an older page is saved.
+    // Serialize writers while presentation readers can keep using the last
+    // committed state during a durable write.
     private let writerLock = NSRecursiveLock()
     private let lock = NSRecursiveLock()
     private let context: ProfileContext
@@ -2948,7 +2948,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
         }
         next.conversation = conversation
-        try commit(next)
+        try commit(next, allowingCommittedReads: true)
         return conversation.cursor
     }
 
@@ -3666,16 +3666,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     private func commit(_ proposed: PersistedAttentionState,
-                        allowingCommittedReads: Bool = false) throws {
+                        allowingCommittedReads: Bool = true) throws {
         // File payloads are normalized when events and drafts enter the state,
         // and loaded state is normalized during initialization. Rewalking every
         // retained conversation value here makes an unrelated text edit grow
         // with conversation history.
         var next = proposed
         next.revision = state.revision &+ 1
-        // Only saveInboxOlderPage opts in, with exactly one state-lock hold.
-        // The writer gate stays held through persistence, recovery, publication
-        // and the caller's index updates. No other writer can derive stale state.
+        // Readers may use the last committed snapshot while the next revision is
+        // encoded and persisted. The writer gate stays held through persistence,
+        // recovery, publication and the caller's index updates, so no writer can
+        // derive a new revision from the pending one.
         var stateLockReleased = allowingCommittedReads
         if stateLockReleased { lock.unlock() }
         defer { if stateLockReleased { lock.lock() } }
