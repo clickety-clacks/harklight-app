@@ -238,6 +238,11 @@ struct ReplyItemLedger: Codable, Equatable, Sendable {
     }
 }
 
+struct PreparedReplyItemAreaReconciliation: Sendable {
+    let ledger: ReplyItemLedger
+    let didChange: Bool
+}
+
 enum NewMessageAreaRowOrder {
     /// Merges message entries and reply items, each already newest-first,
     /// into one newest-received-on-device-first list. A tie goes to the
@@ -274,13 +279,17 @@ final class ReplyItemAreaStore {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let defaultsKey: String
     @ObservationIgnored private let persistence: DeferredLedgerPersistence<ReplyItemLedger>
+    @ObservationIgnored private var reconciliationGeneration: UInt64 = 0
     private(set) var ledger: ReplyItemLedger
 
-    init(defaults: UserDefaults = .standard, defaultsKey: String = ReplyItemAreaStore.defaultsKey) {
+    init(defaults: UserDefaults = .standard, defaultsKey: String = ReplyItemAreaStore.defaultsKey,
+         initialLedger: ReplyItemLedger? = nil) {
         self.defaults = defaults
         self.defaultsKey = defaultsKey
         self.persistence = DeferredLedgerPersistence(defaults: defaults, key: defaultsKey)
-        if let data = defaults.data(forKey: defaultsKey),
+        if let initialLedger {
+            ledger = initialLedger
+        } else if let data = defaults.data(forKey: defaultsKey),
            let saved = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) {
             ledger = saved
         } else {
@@ -296,25 +305,58 @@ final class ReplyItemAreaStore {
                    parentScope: Set<RequestKey>? = nil,
                    now: Date = .now) {
         let previousLedger = ledger
+        let prepared = Self.prepareReconciliation(ledger: ledger,
+            observations: observations, accountScopes: accountScopes,
+            parentScope: parentScope, now: now)
+        ledger = prepared.ledger
+        if ledger != previousLedger { persist() }
+        reconciliationGeneration &+= 1
+    }
+
+    nonisolated static func prepareReconciliation(
+        ledger seed: ReplyItemLedger,
+        observations: [ReplyItemObservation],
+        accountScopes: Set<ExactText> = [],
+        parentScope: Set<RequestKey>? = nil,
+        now: Date = .now
+    ) -> PreparedReplyItemAreaReconciliation {
+        var ledger = seed
         ledger.reconcile(observations, accountScopes: accountScopes,
                          parentScope: parentScope, now: now)
-        if ledger != previousLedger { persist() }
+        return PreparedReplyItemAreaReconciliation(ledger: ledger, didChange: ledger != seed)
+    }
+
+    func reconciliationSeed() -> (ledger: ReplyItemLedger, generation: UInt64) {
+        (ledger, reconciliationGeneration)
+    }
+
+    @discardableResult
+    func applyPreparedReconciliation(_ prepared: PreparedReplyItemAreaReconciliation,
+                                     basedOn generation: UInt64) -> Bool {
+        guard reconciliationGeneration == generation else { return false }
+        ledger = prepared.ledger
+        if prepared.didChange { persist() }
+        reconciliationGeneration &+= 1
+        return true
     }
 
     func markFirstSeen(_ parent: RequestKey, at date: Date = .now) {
         let oldEntries = ledger.entriesByParent
         ledger.markFirstSeen(parent, at: date)
         guard oldEntries != ledger.entriesByParent else { return }
+        reconciliationGeneration &+= 1
         persist()
     }
 
     func removeForSelection(_ parent: RequestKey) {
         guard ledger.removeForSelection(parent) else { return }
+        reconciliationGeneration &+= 1
         persist()
     }
 
     func removeExpired(now: Date = .now) {
         guard ledger.pruneExpired(now: now) else { return }
+        reconciliationGeneration &+= 1
         persist()
     }
 

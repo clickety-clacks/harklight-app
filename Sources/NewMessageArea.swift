@@ -130,6 +130,13 @@ struct NewMessageAreaLedger: Codable, Equatable, Sendable {
     }
 }
 
+struct PreparedNewMessageAreaReconciliation: Sendable {
+    let ledger: NewMessageAreaLedger
+    let revisions: [RequestKey: UInt64]
+    let removedEntries: Set<RequestKey>
+    let didChange: Bool
+}
+
 struct NewMessageAreaSummaryKey: Hashable, Sendable {
     let request: RequestKey
     let revision: UInt64
@@ -170,14 +177,18 @@ final class NewMessageAreaStore {
     @ObservationIgnored private let persistence: DeferredLedgerPersistence<NewMessageAreaLedger>
     @ObservationIgnored private var inFlightSummaries: [NewMessageAreaSummaryKey: Task<Void, Never>] = [:]
     @ObservationIgnored private var currentRevisionByKey: [RequestKey: UInt64] = [:]
+    @ObservationIgnored private var reconciliationGeneration: UInt64 = 0
     private(set) var ledger: NewMessageAreaLedger
     private(set) var summaries: [NewMessageAreaSummaryKey: String] = [:]
 
-    init(defaults: UserDefaults = .standard, defaultsKey: String = NewMessageAreaStore.defaultsKey) {
+    init(defaults: UserDefaults = .standard, defaultsKey: String = NewMessageAreaStore.defaultsKey,
+         initialLedger: NewMessageAreaLedger? = nil) {
         self.defaults = defaults
         self.defaultsKey = defaultsKey
         self.persistence = DeferredLedgerPersistence(defaults: defaults, key: defaultsKey)
-        if let data = defaults.data(forKey: defaultsKey),
+        if let initialLedger {
+            ledger = initialLedger
+        } else if let data = defaults.data(forKey: defaultsKey),
            let saved = try? JSONDecoder().decode(NewMessageAreaLedger.self, from: data) {
             ledger = saved
         } else {
@@ -196,11 +207,11 @@ final class NewMessageAreaStore {
     func reconcile(_ messages: [NewMessageAreaMessage], revisions: [RequestKey: UInt64],
                    accountScopes: Set<ExactText> = [], now: Date = .now) {
         let previousLedger = ledger
-        let oldEntries = Set(ledger.entriesByKey.keys)
-        ledger.reconcile(messages, accountScopes: accountScopes, now: now)
+        let prepared = Self.prepareReconciliation(ledger: ledger, messages: messages,
+            revisions: revisions, accountScopes: accountScopes, now: now)
+        ledger = prepared.ledger
         currentRevisionByKey = revisions
-        let activeEntries = Set(ledger.entriesByKey.keys)
-        for key in oldEntries.subtracting(activeEntries) { cancelSummaries(for: key) }
+        for key in prepared.removedEntries { cancelSummaries(for: key) }
         for summaryKey in Array(inFlightSummaries.keys)
             where revisions[summaryKey.request] != summaryKey.revision {
             cancelSummary(summaryKey)
@@ -210,12 +221,54 @@ final class NewMessageAreaStore {
             summaries.removeValue(forKey: summaryKey)
         }
         if ledger != previousLedger { persist() }
+        reconciliationGeneration &+= 1
+    }
+
+    nonisolated static func prepareReconciliation(
+        ledger seed: NewMessageAreaLedger,
+        messages: [NewMessageAreaMessage],
+        revisions: [RequestKey: UInt64],
+        accountScopes: Set<ExactText> = [],
+        now: Date = .now
+    ) -> PreparedNewMessageAreaReconciliation {
+        var ledger = seed
+        ledger.reconcile(messages, accountScopes: accountScopes, now: now)
+        return PreparedNewMessageAreaReconciliation(
+            ledger: ledger,
+            revisions: revisions,
+            removedEntries: Set(seed.entriesByKey.keys).subtracting(ledger.entriesByKey.keys),
+            didChange: ledger != seed)
+    }
+
+    func reconciliationSeed() -> (ledger: NewMessageAreaLedger, generation: UInt64) {
+        (ledger, reconciliationGeneration)
+    }
+
+    @discardableResult
+    func applyPreparedReconciliation(_ prepared: PreparedNewMessageAreaReconciliation,
+                                     basedOn generation: UInt64) -> Bool {
+        guard reconciliationGeneration == generation else { return false }
+        ledger = prepared.ledger
+        currentRevisionByKey = prepared.revisions
+        for key in prepared.removedEntries { cancelSummaries(for: key) }
+        for summaryKey in Array(inFlightSummaries.keys)
+            where prepared.revisions[summaryKey.request] != summaryKey.revision {
+            cancelSummary(summaryKey)
+        }
+        for summaryKey in Array(summaries.keys)
+            where prepared.revisions[summaryKey.request] != summaryKey.revision {
+            summaries.removeValue(forKey: summaryKey)
+        }
+        if prepared.didChange { persist() }
+        reconciliationGeneration &+= 1
+        return true
     }
 
     func markFirstSeen(_ key: RequestKey, at date: Date = .now) {
         let oldEntries = ledger.entriesByKey
         ledger.markFirstSeen(key, at: date)
         guard oldEntries != ledger.entriesByKey else { return }
+        reconciliationGeneration &+= 1
         persist()
     }
 
@@ -226,6 +279,7 @@ final class NewMessageAreaStore {
     func remove(_ key: RequestKey) {
         guard ledger.entriesByKey[key] != nil else { return }
         ledger.remove(key)
+        reconciliationGeneration &+= 1
         cancelSummaries(for: key)
         persist()
     }
@@ -233,6 +287,7 @@ final class NewMessageAreaStore {
     func removeExpired(now: Date = .now) {
         let oldEntries = Set(ledger.entriesByKey.keys)
         guard ledger.pruneExpired(now: now) else { return }
+        reconciliationGeneration &+= 1
         let activeEntries = Set(ledger.entriesByKey.keys)
         for key in oldEntries.subtracting(activeEntries) { cancelSummaries(for: key) }
         persist()
