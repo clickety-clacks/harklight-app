@@ -24,7 +24,7 @@ struct NewMessageAreaEntry: Codable, Equatable, Identifiable, Sendable {
     var id: RequestKey { key }
 }
 
-struct NewMessageAreaLedger: Codable, Equatable {
+struct NewMessageAreaLedger: Codable, Equatable, Sendable {
     static let expiryInterval: TimeInterval = 60 * 60
 
     private(set) var baselineEstablishedAccounts: Set<ExactText> = []
@@ -167,6 +167,7 @@ final class NewMessageAreaStore {
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let defaultsKey: String
+    @ObservationIgnored private let persistence: DeferredLedgerPersistence<NewMessageAreaLedger>
     @ObservationIgnored private var inFlightSummaries: [NewMessageAreaSummaryKey: Task<Void, Never>] = [:]
     @ObservationIgnored private var currentRevisionByKey: [RequestKey: UInt64] = [:]
     private(set) var ledger: NewMessageAreaLedger
@@ -175,6 +176,7 @@ final class NewMessageAreaStore {
     init(defaults: UserDefaults = .standard, defaultsKey: String = NewMessageAreaStore.defaultsKey) {
         self.defaults = defaults
         self.defaultsKey = defaultsKey
+        self.persistence = DeferredLedgerPersistence(defaults: defaults, key: defaultsKey)
         if let data = defaults.data(forKey: defaultsKey),
            let saved = try? JSONDecoder().decode(NewMessageAreaLedger.self, from: data) {
             ledger = saved
@@ -278,8 +280,7 @@ final class NewMessageAreaStore {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(ledger) else { return }
-        defaults.set(data, forKey: defaultsKey)
+        persistence.schedule(ledger)
     }
 }
 

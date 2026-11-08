@@ -1197,6 +1197,11 @@ final class LivePresentationStore {
         let revision: UInt64
     }
 
+    private struct ConversationReadKey: Hashable, Sendable {
+        let request: RequestKey
+        let turnID: ExactText
+    }
+
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
@@ -1272,6 +1277,7 @@ final class LivePresentationStore {
     @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var locallyReconciledConversationReadRevisions = Set<UInt64>()
+    @ObservationIgnored private var pendingConversationReadUpdates = Set<ConversationReadKey>()
     @ObservationIgnored private var conversationProjectionRevision: UInt64?
     @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
     @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
@@ -1492,31 +1498,54 @@ final class LivePresentationStore {
               conversationThreads[key]?.turns.contains(where: {
                   $0.id == turnID && $0.kind == .reply && $0.author == .origin
               }) == true else { return }
-        do {
-            let update = try port.markConversationReadAndProject(key, through: turnID,
-                                                                 context: port.context)
-            let canSkipObservedRefresh = update.didCommit &&
-                update.previousRevision == presentation.revision &&
-                conversationProjectionRevision == update.previousRevision &&
-                observation != nil
-            if conversationThreads[key] != update.thread {
-                conversationThreads[key] = update.thread
-                reconcileReplyItemArea(for: key)
+        let readKey = ConversationReadKey(request: key, turnID: turnID)
+        guard pendingConversationReadUpdates.insert(readKey).inserted else { return }
+        let port = self.port
+        let context = port.context
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let update = try port.markConversationReadAndProject(key, through: turnID,
+                                                                     context: context)
+                await self?.finishConversationRead(readKey, update: update)
+            } catch {
+                await self?.finishConversationRead(
+                    readKey, errorDescription: String(describing: error))
             }
-            if conversationProjectionRevision == update.previousRevision {
-                conversationProjectionRevision = update.revision
+        }
+    }
+
+    private func finishConversationRead(_ readKey: ConversationReadKey,
+                                        update: ConversationReadUpdate? = nil,
+                                        errorDescription: String? = nil) {
+        pendingConversationReadUpdates.remove(readKey)
+        guard !isReadOnly else { return }
+        guard let update else {
+            UIDiagnostics.shared.record(
+                "store.markConversationRead \(UIDiagnostics.describe(readKey.request)) error=\(errorDescription ?? "unknown")")
+            return
+        }
+        if let currentRevision = conversationProjectionRevision,
+           currentRevision > update.revision { return }
+
+        let canSkipObservedRefresh = update.didCommit &&
+            update.previousRevision == presentation.revision &&
+            conversationProjectionRevision == update.previousRevision &&
+            observation != nil
+        if conversationThreads[readKey.request] != update.thread {
+            conversationThreads[readKey.request] = update.thread
+            reconcileReplyItemArea(for: readKey.request)
+        }
+        if conversationProjectionRevision == update.previousRevision {
+            conversationProjectionRevision = update.revision
+        }
+        if canSkipObservedRefresh {
+            locallyReconciledConversationReadRevisions.insert(update.revision)
+        }
+        if permitsDelivery, update.pendingPosition != nil {
+            let expected = profileContext
+            Task {
+                await NativeRelayLifecycle.shared.sendPendingConversationReadPositions(expected: expected)
             }
-            if canSkipObservedRefresh {
-                locallyReconciledConversationReadRevisions.insert(update.revision)
-            }
-            if permitsDelivery, update.pendingPosition != nil {
-                let expected = profileContext
-                Task {
-                    await NativeRelayLifecycle.shared.sendPendingConversationReadPositions(expected: expected)
-                }
-            }
-        } catch {
-            UIDiagnostics.shared.record("store.markConversationRead \(UIDiagnostics.describe(key)) error=\(error)")
         }
     }
 

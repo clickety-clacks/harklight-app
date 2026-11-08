@@ -1,0 +1,245 @@
+import AttentionDomain
+import Foundation
+import XCTest
+@testable import Harklight
+
+private final class DelayedUserDefaults: UserDefaults, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    private var nextWriteDelay: TimeInterval?
+    private var writeCount = 0
+    private var delayedWriteWasOnMainThread: Bool?
+
+    override func data(forKey defaultName: String) -> Data? {
+        lock.withLock { values[defaultName] }
+    }
+
+    override func set(_ value: Any?, forKey defaultName: String) {
+        let delay = lock.withLock {
+            let delay = nextWriteDelay
+            nextWriteDelay = nil
+            if delay != nil { delayedWriteWasOnMainThread = Thread.isMainThread }
+            return delay
+        }
+        if let delay { Thread.sleep(forTimeInterval: delay) }
+        lock.withLock {
+            values[defaultName] = value as? Data
+            writeCount += 1
+        }
+    }
+
+    func delayNextWrite(by interval: TimeInterval) {
+        lock.withLock { nextWriteDelay = interval }
+    }
+
+    var writes: Int { lock.withLock { writeCount } }
+    var delayedWriteThreadWasMain: Bool? { lock.withLock { delayedWriteWasOnMainThread } }
+}
+
+private final class DelayedAttentionPersistence: AttentionStatePersistence, @unchecked Sendable {
+    private let lock = NSLock()
+    private var data: Data?
+    private var nextWriteDelay: TimeInterval?
+    private var writeCount = 0
+    private var delayedWriteWasOnMainThread: Bool?
+
+    func load(identity: ProfileIdentity) throws -> Data? { lock.withLock { data } }
+
+    func commit(_ data: Data, identity: ProfileIdentity) throws {
+        let delay = lock.withLock {
+            let delay = nextWriteDelay
+            nextWriteDelay = nil
+            if delay != nil { delayedWriteWasOnMainThread = Thread.isMainThread }
+            return delay
+        }
+        if let delay { Thread.sleep(forTimeInterval: delay) }
+        lock.withLock {
+            self.data = data
+            writeCount += 1
+        }
+    }
+
+    func delayNextWrite(by interval: TimeInterval) {
+        lock.withLock { nextWriteDelay = interval }
+    }
+
+    var writes: Int { lock.withLock { writeCount } }
+    var delayedWriteThreadWasMain: Bool? { lock.withLock { delayedWriteWasOnMainThread } }
+}
+
+@MainActor
+final class FirstOpenScrollResponsivenessTests: XCTestCase {
+    private let persistenceDelay: TimeInterval = 0.5
+
+    func testInboxFirstSeenPersistenceDoesNotBlockTheMainActor() async throws {
+        let defaults = DelayedUserDefaults()
+        let key = "first-open-list-\(UUID().uuidString)"
+        let store = NewMessageAreaStore(defaults: defaults, defaultsKey: key)
+        let account = ExactText("account")
+        let baseline = message("baseline", order: 1)
+        store.reconcile([baseline], revisions: [baseline.key: 1], accountScopes: [account])
+        await waitForWriteCount(defaults, atLeast: 1)
+
+        let newMessages = (2...1001).map { message("message-\($0)", order: UInt64($0)) }
+        let allMessages = [baseline] + newMessages
+        store.reconcile(allMessages,
+            revisions: Dictionary(uniqueKeysWithValues: allMessages.map { ($0.key, 1) }),
+            accountScopes: [account])
+        await waitForLedger(defaults, key: key, entryCount: newMessages.count)
+
+        let writesBefore = defaults.writes
+        defaults.delayNextWrite(by: persistenceDelay)
+        let mainActorDelay = await measureMainActorDelay {
+            store.markFirstSeen(newMessages.last!.key)
+        }
+        await waitForWriteCount(defaults, atLeast: writesBefore + 1)
+
+        XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
+                          "First-seen persistence must not hold the list's main actor.")
+        XCTAssertEqual(defaults.delayedWriteThreadWasMain, false,
+                       "The ledger encoding and UserDefaults write belong off main.")
+        await waitForFirstSeen(defaults, key: key, expected: newMessages.last!.key)
+        print(String(format: "list persistence main-actor block: %.3f ms (controlled write delay: %.0f ms; writer on main: %@)",
+                     mainActorDelay, persistenceDelay * 1000,
+                     String(describing: defaults.delayedWriteThreadWasMain)))
+    }
+
+    func testDetailReadPersistenceDoesNotBlockTheMainActor() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        let persistence = DelayedAttentionPersistence()
+        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let request = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: request, revision: 1)
+        let session = ExactText("session")
+        let question = ConversationTurn(id: ExactText("question"), binding: binding,
+            author: .person, sessionHandle: session, text: ExactText("Question"), kind: .discussion)
+        let reply = ConversationTurn(id: ExactText("reply"), binding: binding,
+            author: .origin, sessionHandle: session, text: ExactText("Reply"),
+            inReplyTo: question.id, kind: .reply)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: session, payload: .null)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(question)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .turn(reply)), context: context)
+        let store = try LivePresentationStore(localFixtureStore: domain, context: context)
+
+        let writesBefore = persistence.writes
+        persistence.delayNextWrite(by: persistenceDelay)
+        let mainActorDelay = await measureMainActorDelay {
+            store.markConversationRead(request, through: reply.id)
+        }
+        await waitForWriteCount(persistence, atLeast: writesBefore + 1)
+        await waitUntil { !store.hasUnreadAgentReply(request) }
+
+        XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
+                          "Opening a visible reply must not hold the detail scroll's main actor.")
+        XCTAssertEqual(persistence.delayedWriteThreadWasMain, false,
+                       "The attention plist encoding and persistence belong off main.")
+        print(String(format: "detail persistence main-actor block: %.3f ms (controlled write delay: %.0f ms; writer on main: %@)",
+                     mainActorDelay, persistenceDelay * 1000,
+                     String(describing: persistence.delayedWriteThreadWasMain)))
+    }
+
+    func testInboxReplyFirstSeenPersistenceDoesNotBlockTheMainActor() async throws {
+        let defaults = DelayedUserDefaults()
+        let key = "first-open-replies-\(UUID().uuidString)"
+        let store = ReplyItemAreaStore(defaults: defaults, defaultsKey: key)
+        let account = ExactText("account")
+        store.reconcile([], accountScopes: [account])
+        await waitForReplyLedger(defaults, key: key, entryCount: 0)
+
+        let parent = RequestKey(accountScope: account,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        store.reconcile([ReplyItemObservation(parent: parent, turnID: ExactText("reply"),
+            conversationSequence: 1, isSeen: false, text: "Reply")])
+        await waitForReplyLedger(defaults, key: key, entryCount: 1)
+
+        let writesBefore = defaults.writes
+        defaults.delayNextWrite(by: persistenceDelay)
+        let mainActorDelay = await measureMainActorDelay {
+            store.markFirstSeen(parent)
+        }
+        await waitForWriteCount(defaults, atLeast: writesBefore + 1)
+        await waitUntil {
+            guard let data = defaults.data(forKey: key),
+                  let ledger = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) else {
+                return false
+            }
+            return ledger.entriesByParent[parent]?.firstSeenAt != nil
+        }
+
+        XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
+                          "First-seen reply persistence must not hold the list's main actor.")
+        XCTAssertEqual(defaults.delayedWriteThreadWasMain, false,
+                       "Reply ledger encoding and UserDefaults writes belong off main.")
+        print(String(format: "list reply persistence main-actor block: %.3f ms (controlled write delay: %.0f ms; writer on main: %@)",
+                     mainActorDelay, persistenceDelay * 1000,
+                     String(describing: defaults.delayedWriteThreadWasMain)))
+    }
+
+    private func message(_ id: String, order: UInt64) -> NewMessageAreaMessage {
+        NewMessageAreaMessage(key: RequestKey(accountScope: ExactText("account"),
+            senderID: ExactText("sender"), messageID: ExactText(id)),
+            acceptanceOrder: order, isResolved: false, hasSubmittedAnswer: false)
+    }
+
+    private func measureMainActorDelay(_ operation: () -> Void) async -> Double {
+        let marker = Task { @MainActor in DispatchTime.now().uptimeNanoseconds }
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        operation()
+        let markerAt = await marker.value
+        return Double(markerAt - startedAt) / 1_000_000
+    }
+
+    private func waitForWriteCount(_ defaults: DelayedUserDefaults, atLeast count: Int) async {
+        await waitUntil { defaults.writes >= count }
+    }
+
+    private func waitForWriteCount(_ persistence: DelayedAttentionPersistence, atLeast count: Int) async {
+        await waitUntil { persistence.writes >= count }
+    }
+
+    private func waitForLedger(_ defaults: DelayedUserDefaults, key: String, entryCount: Int) async {
+        await waitUntil {
+            guard let data = defaults.data(forKey: key),
+                  let ledger = try? JSONDecoder().decode(NewMessageAreaLedger.self, from: data) else {
+                return false
+            }
+            return ledger.entriesByKey.count == entryCount
+        }
+    }
+
+    private func waitForReplyLedger(_ defaults: DelayedUserDefaults, key: String,
+                                   entryCount: Int) async {
+        await waitUntil {
+            guard let data = defaults.data(forKey: key),
+                  let ledger = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) else {
+                return false
+            }
+            return ledger.entriesByParent.count == entryCount
+        }
+    }
+
+    private func waitForFirstSeen(_ defaults: DelayedUserDefaults, key: String,
+                                  expected: RequestKey) async {
+        await waitUntil {
+            guard let data = defaults.data(forKey: key),
+                  let ledger = try? JSONDecoder().decode(NewMessageAreaLedger.self, from: data) else {
+                return false
+            }
+            return ledger.entriesByKey[expected]?.firstSeenAt != nil
+        }
+    }
+
+    private func waitUntil(_ condition: @MainActor () -> Bool) async {
+        for _ in 0..<400 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Timed out waiting for the background persistence result.")
+    }
+}

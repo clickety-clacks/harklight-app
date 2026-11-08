@@ -104,7 +104,7 @@ struct ReplyItemIdentity: Codable, Hashable, Sendable {
     let turnID: ExactText
 }
 
-struct ReplyItemLedger: Codable, Equatable {
+struct ReplyItemLedger: Codable, Equatable, Sendable {
     static let expiryInterval: TimeInterval = 60 * 60
 
     private(set) var baselineEstablishedAccounts: Set<ExactText> = []
@@ -273,11 +273,13 @@ final class ReplyItemAreaStore {
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let defaultsKey: String
+    @ObservationIgnored private let persistence: DeferredLedgerPersistence<ReplyItemLedger>
     private(set) var ledger: ReplyItemLedger
 
     init(defaults: UserDefaults = .standard, defaultsKey: String = ReplyItemAreaStore.defaultsKey) {
         self.defaults = defaults
         self.defaultsKey = defaultsKey
+        self.persistence = DeferredLedgerPersistence(defaults: defaults, key: defaultsKey)
         if let data = defaults.data(forKey: defaultsKey),
            let saved = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) {
             ledger = saved
@@ -317,7 +319,6 @@ final class ReplyItemAreaStore {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(ledger) else { return }
-        defaults.set(data, forKey: defaultsKey)
+        persistence.schedule(ledger)
     }
 }
