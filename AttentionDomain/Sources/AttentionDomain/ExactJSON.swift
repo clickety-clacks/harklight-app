@@ -8,13 +8,22 @@ public struct ExactText: Hashable, Codable, Sendable {
     }
 
     public static func == (lhs: ExactText, rhs: ExactText) -> Bool {
-        lhs.rawValue.utf8.elementsEqual(rhs.rawValue.utf8)
+        var lhsValue = lhs.rawValue
+        var rhsValue = rhs.rawValue
+        return lhsValue.withUTF8 { lhsBytes in
+            rhsValue.withUTF8 { rhsBytes in
+                guard lhsBytes.count == rhsBytes.count else { return false }
+                guard !lhsBytes.isEmpty else { return true }
+                return memcmp(lhsBytes.baseAddress!, rhsBytes.baseAddress!, lhsBytes.count) == 0
+            }
+        }
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(rawValue.utf8.count)
-        for byte in rawValue.utf8 {
-            hasher.combine(byte)
+        var value = rawValue
+        value.withUTF8 { bytes in
+            hasher.combine(bytes.count)
+            hasher.combine(bytes: UnsafeRawBufferPointer(bytes))
         }
     }
 }
