@@ -83,7 +83,7 @@
     {
       "id": "post-144-inbox-live-updates",
       "marketingVersion": "0.1.0",
-      "testFlightBuildNumber": null,
+      "testFlightBuildNumber": 148,
       "highlights": [
         {
           "id": "inbox-catch-up-background-preparation",
