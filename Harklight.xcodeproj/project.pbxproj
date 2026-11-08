@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0053F575C119A8E676072E2E /* SharedMessageRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B412A14FC3FDBB5787422E3 /* SharedMessageRendering.swift */; };
+		0251A75A44FD78CF2CC704EB /* DeferredLedgerPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FF36830F85D91E29E16F8B /* DeferredLedgerPersistence.swift */; };
 		0507747FEC7DD8500EA5ABC2 /* HarklightWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B98C9EEBD955363D00AC737 /* HarklightWorkspace.swift */; };
 		0608B149AEEF38132FBC94AC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DA73983703AF494F97B44D03 /* Assets.xcassets */; };
 		09DF56C0F9A249D2933FADD1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DA73983703AF494F97B44D03 /* Assets.xcassets */; };
@@ -75,6 +76,7 @@
 		6E6C074BD5717BB6D2CBDD57 /* HarklightNativeRelay in Frameworks */ = {isa = PBXBuildFile; productRef = C116660513A2FE807B80AAD3 /* HarklightNativeRelay */; };
 		6FBFD563E7455BEC855DB24D /* HarklightBuildProvenance.plist in Resources */ = {isa = PBXBuildFile; fileRef = 1E47211C3CC07D39F1EF3FBF /* HarklightBuildProvenance.plist */; };
 		6FCE111E5FBE12F820254A81 /* attention-client-m2-fixtures.json in Resources */ = {isa = PBXBuildFile; fileRef = EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */; };
+		702B357F4163F9F769D328FD /* DeferredLedgerPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FF36830F85D91E29E16F8B /* DeferredLedgerPersistence.swift */; };
 		73E1C95C8C0B539645C93648 /* NativeRelayLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */; };
 		764918613CBACFC9E367C980 /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 5491828815E9F9310A8FB19B /* AttentionDomain */; };
 		782CD559247C24AFCC18A24F /* LiveContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7753DC115D8E0AF282B32EB7 /* LiveContentView.swift */; };
@@ -225,6 +227,7 @@
 		5E74397EED841B8F6A5601C9 /* ConversationDomainTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDomainTests.swift; sourceTree = "<group>"; };
 		5F320A27E5B0E129F5A38828 /* NativeGuidedJoinTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeGuidedJoinTests.swift; sourceTree = "<group>"; };
 		613A02CBAAC60B413737D9CF /* guided-local-tls.pem */ = {isa = PBXFileReference; path = "guided-local-tls.pem"; sourceTree = "<group>"; };
+		63FF36830F85D91E29E16F8B /* DeferredLedgerPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeferredLedgerPersistence.swift; sourceTree = "<group>"; };
 		641E40458DF87034CD087B52 /* HarklightConversationUITestHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarklightConversationUITestHost.swift; sourceTree = "<group>"; };
 		660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleCardScreen.swift; sourceTree = "<group>"; };
 		69EEC3F07C72D78B3516529C /* NativeNotificationPermissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeNotificationPermissionTests.swift; sourceTree = "<group>"; };
@@ -461,6 +464,7 @@
 				0FD0F77C018CF082033BCA6E /* ConversationFileStorage.swift */,
 				339E15F97694A217F778CAC0 /* ConversationReturnTextView.swift */,
 				F68B30BAF95249EB48C166A9 /* ConversationView.swift */,
+				63FF36830F85D91E29E16F8B /* DeferredLedgerPersistence.swift */,
 				407E539F1063EFB0E135C9A1 /* DevelopmentPushRegistration.swift */,
 				31790F646FEF94ED413BE1EC /* ForegroundChatNotificationIndicator.swift */,
 				9EA260044E9E03BE572ABF11 /* HarklightApp.swift */,
@@ -773,6 +777,7 @@
 				F81B025E53C8D48163280624 /* ConversationFileStorage.swift in Sources */,
 				23166F9652ECA7FE554A4525 /* ConversationReturnTextView.swift in Sources */,
 				7BDFD2B2D70BD71596D8B6C5 /* ConversationView.swift in Sources */,
+				702B357F4163F9F769D328FD /* DeferredLedgerPersistence.swift in Sources */,
 				FD60725972D79FDF0DB82F5E /* DevelopmentPushRegistration.swift in Sources */,
 				ADC799B02EE081019BC8EF4D /* ForegroundChatNotificationIndicator.swift in Sources */,
 				3B5256DF599C29BBE67FDC2E /* HarklightConversationUITestHost.swift in Sources */,
@@ -824,6 +829,7 @@
 				17DEB0A678698B7E8369CD27 /* ConversationFileStorage.swift in Sources */,
 				9D89298BEE42012D75B28E08 /* ConversationReturnTextView.swift in Sources */,
 				4132D611C16A7A8746EC9773 /* ConversationView.swift in Sources */,
+				0251A75A44FD78CF2CC704EB /* DeferredLedgerPersistence.swift in Sources */,
 				695B08E084DD584FDFDBBFC4 /* DevelopmentPushRegistration.swift in Sources */,
 				C74DD75C77F1A869E7A9F430 /* ForegroundChatNotificationIndicator.swift in Sources */,
 				F6D494F49D42E37FE1769737 /* HarklightApp.swift in Sources */,
