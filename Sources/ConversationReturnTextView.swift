@@ -41,6 +41,11 @@ struct ConversationReturnTextView: UIViewRepresentable {
         if view.isEditable != isEnabled {
             view.isEditable = isEnabled
         }
+        if isEnabled {
+            view.accessibilityTraits.remove(.notEnabled)
+        } else {
+            view.accessibilityTraits.insert(.notEnabled)
+        }
         let accessibilityValue = text.isEmpty ? placeholder : text
         if view.accessibilityValue as? String != accessibilityValue {
             view.accessibilityValue = accessibilityValue
