@@ -794,13 +794,20 @@ final class NativeAppLaunch {
         state = .enrollmentRequired
         await NativeRelayLifecycle.shared.deactivate()
         guard activationGeneration == generation else { return }
-        let persistence = try FileAttentionStatePersistence.applicationSupport()
-        let fileStorage = try ConversationFileStorage(identity: installation.context.identity)
-        let store = try AttentionDomainStore(context: installation.context, persistence: persistence,
-                                             conversationFileReferences: fileStorage)
-        let presentation = try LivePresentationStore(store: store, context: installation.context,
-                                                     diagnostics: diagnostics,
-                                                     newMessageAreaDefaults: .standard)
+        let context = installation.context
+        let (store, fileStorage) = try await Task.detached(priority: .userInitiated) {
+            let persistence = try FileAttentionStatePersistence.applicationSupport()
+            let fileStorage = try ConversationFileStorage(identity: context.identity)
+            let store = try AttentionDomainStore(context: context, persistence: persistence,
+                                                 conversationFileReferences: fileStorage)
+            return (store, fileStorage)
+        }.value
+        guard activationGeneration == generation else { return }
+        let activation = try await LivePresentationStore.makeForActivation(
+            store: store, context: context, diagnostics: diagnostics,
+            newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
+        guard activationGeneration == generation else { return }
+        let presentation = activation.presentation
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
                                                            context: installation.context,
@@ -1137,7 +1144,7 @@ final class NativeAppLaunch {
 
 /// C's admitted presentation is the only live view feed. Its revision stream
 /// reflects replay visibility and durable edits without a second H journal.
-struct StaleAnswerDialog: Identifiable, Equatable {
+struct StaleAnswerDialog: Identifiable, Equatable, Sendable {
     var id: UUID { operationID }
     let operationID: UUID
     let requestKey: RequestKey
@@ -1157,10 +1164,60 @@ struct StaleAnswerDialog: Identifiable, Equatable {
     }
 }
 
+private struct NoReplyRoutingState: Sendable {
+    let requestRevision: UInt64
+    let isNoReply: Bool
+    let route: NativeDiagnosticNoReplyRoute?
+}
+
+private struct PreparedNoReplyRoutingChange: Sendable {
+    let request: RequestKey
+    let revision: UInt64
+    let operationID: UUID?
+    let route: NativeDiagnosticNoReplyRoute
+}
+
+private struct PreparedLivePresentationInitialState: Sendable {
+    let port: AttentionDomainPort
+    let snapshot: PresentationSnapshot
+    let conversationThreads: [RequestKey: ConversationThread]
+    let conversationFiles: ConversationFileStorage?
+    let messageLedger: NewMessageAreaLedger
+    let replyLedger: ReplyItemLedger
+    let preparedMessageArea: PreparedNewMessageAreaReconciliation
+    let preparedReplyArea: PreparedReplyItemAreaReconciliation
+    let failedResponseWarnings: [RequestKey: LivePresentationStore.FailedResponseWarning]
+    let staleAnswerDialog: StaleAnswerDialog?
+}
+
+private struct VersionedPreparedNewMessageAreaReconciliation: Sendable {
+    let value: PreparedNewMessageAreaReconciliation
+    let generation: UInt64
+}
+
+private struct VersionedPreparedReplyItemAreaReconciliation: Sendable {
+    let value: PreparedReplyItemAreaReconciliation
+    let generation: UInt64
+}
+
+private struct PreparedLivePresentationUpdate: Sendable {
+    let conversationThreads: [RequestKey: ConversationThread]
+    let messageArea: VersionedPreparedNewMessageAreaReconciliation?
+    let replyItemArea: VersionedPreparedReplyItemAreaReconciliation?
+    let failedResponseWarnings: [RequestKey: LivePresentationStore.FailedResponseWarning]
+    let warningGeneration: UInt64
+    let noReplyRoutingChanges: [PreparedNoReplyRoutingChange]
+    let staleAnswerDialog: StaleAnswerDialog?
+    let requestKeys: Set<RequestKey>
+    let firstRequestKey: RequestKey?
+    let actionErrorRequest: RequestKey?
+    let shouldClearActionError: Bool
+}
+
 @MainActor
 @Observable
 final class LivePresentationStore {
-    struct FailedResponseWarning: Equatable {
+    struct FailedResponseWarning: Equatable, Sendable {
         let requestRevision: UInt64
         let failedOperationID: UUID?
         let answerKind: SubmissionAnswerKind
@@ -1195,6 +1252,11 @@ final class LivePresentationStore {
     private struct DraftBufferKey: Hashable {
         let request: RequestKey
         let revision: UInt64
+    }
+
+    private struct ConversationReadKey: Hashable, Sendable {
+        let request: RequestKey
+        let turnID: ExactText
     }
 
     private(set) var conversationThreads: [RequestKey: ConversationThread]
@@ -1272,6 +1334,8 @@ final class LivePresentationStore {
     @ObservationIgnored private let diagnostics: NativeClientDiagnosticJournal?
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var locallyReconciledConversationReadRevisions = Set<UInt64>()
+    @ObservationIgnored private var failedResponseWarningGeneration: UInt64 = 0
+    @ObservationIgnored private var pendingConversationReadUpdates = Set<ConversationReadKey>()
     @ObservationIgnored private var conversationProjectionRevision: UInt64?
     @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
     @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
@@ -1291,12 +1355,6 @@ final class LivePresentationStore {
     private static let clearedRetractionsDefaultsKey = "harklight.cleared-retracted-requests"
     private static let retractedRowVisibilityDuration: TimeInterval = 24 * 60 * 60
     @ObservationIgnored private var presentedStaleAnswerOperationIDs = Set<UUID>()
-
-    private struct NoReplyRoutingState {
-        let requestRevision: UInt64
-        let isNoReply: Bool
-        let route: NativeDiagnosticNoReplyRoute?
-    }
 
     convenience init(store: AttentionDomainStore, context: ProfileContext,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
@@ -1325,40 +1383,142 @@ final class LivePresentationStore {
                       diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
+    static func makeForActivation(
+        store: AttentionDomainStore,
+        context: ProfileContext,
+        conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
+        diagnostics: NativeClientDiagnosticJournal? = nil,
+        clearedRetractionDefaults: UserDefaults = .standard,
+        newMessageAreaDefaults: UserDefaults? = nil,
+        conversationFiles suppliedConversationFiles: ConversationFileStorage? = nil
+    ) async throws -> (presentation: LivePresentationStore,
+                        mainActorWorkMilliseconds: Double,
+                        activationPreparationMilliseconds: Double) {
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        let activationStartedAt = DispatchTime.now().uptimeNanoseconds
+        var mainActorWorkNanoseconds: UInt64 = 0
+        var mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
+        let messageLedgerData = newMessageAreaDefaults?.data(forKey: NewMessageAreaStore.defaultsKey)
+        let replyLedgerData = newMessageAreaDefaults?.data(forKey: ReplyItemAreaStore.defaultsKey)
+        let diagnosticEvents = diagnostics?.events ?? []
+        mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
+        let initial = try await Task.detached(priority: .userInitiated) {
+            let port = AttentionDomainPort(store: store)
+            let snapshot = try port.observe(context: port.context)
+            let conversationThreads = try port.conversations(context: port.context).threads
+            let attentionSnapshot = try store.snapshot(context: context)
+            let messageLedger = messageLedgerData.flatMap {
+                try? JSONDecoder().decode(NewMessageAreaLedger.self, from: $0)
+            } ?? NewMessageAreaLedger()
+            let replyLedger = replyLedgerData.flatMap {
+                try? JSONDecoder().decode(ReplyItemLedger.self, from: $0)
+            } ?? ReplyItemLedger()
+            let messages = Self.newMessageObservations(for: snapshot.requests)
+            let revisions = Dictionary(uniqueKeysWithValues: snapshot.requests.map {
+                ($0.key, $0.requestRevision)
+            })
+            let replyObservations = Self.replyObservations(
+                in: conversationThreads,
+                account: context.identity.personID,
+                ledger: replyLedger)
+            let now = Date()
+            let preparedMessageArea = NewMessageAreaStore.prepareReconciliation(
+                ledger: messageLedger, messages: messages, revisions: revisions,
+                accountScopes: [context.identity.personID], now: now)
+            let preparedReplyArea = ReplyItemAreaStore.prepareReconciliation(
+                ledger: replyLedger, observations: replyObservations.observations,
+                accountScopes: [context.identity.personID],
+                parentScope: replyObservations.parentScope, now: now)
+            let failedResponseWarnings = Self.prepareFailedResponseWarnings(
+                previous: [:], requests: snapshot.requests, attentionSnapshot: attentionSnapshot,
+                diagnosticEvents: diagnosticEvents)
+            let staleAnswerDialog = Self.staleAnswerDialog(in: snapshot, presentedIDs: [])
+            let conversationFiles = try suppliedConversationFiles ??
+                ConversationFileStorage(identity: context.identity)
+            return PreparedLivePresentationInitialState(
+                port: port, snapshot: snapshot, conversationThreads: conversationThreads,
+                conversationFiles: conversationFiles,
+                messageLedger: messageLedger, replyLedger: replyLedger,
+                preparedMessageArea: preparedMessageArea, preparedReplyArea: preparedReplyArea,
+                failedResponseWarnings: failedResponseWarnings,
+                staleAnswerDialog: staleAnswerDialog)
+        }.value
+
+        mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
+        let presentation = try LivePresentationStore(
+            store: store, context: context, permitsDelivery: true,
+            diagnostics: diagnostics, conversationAvailability: conversationAvailability,
+            clearedRetractionDefaults: clearedRetractionDefaults,
+            newMessageAreaDefaults: newMessageAreaDefaults, preparedInitialState: initial)
+        mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
+        let activationPreparationNanoseconds = DispatchTime.now().uptimeNanoseconds - activationStartedAt
+        return (presentation, Double(mainActorWorkNanoseconds) / 1_000_000,
+                Double(activationPreparationNanoseconds) / 1_000_000)
+    }
+
     private init(store: AttentionDomainStore, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                  clearedRetractionDefaults: UserDefaults = .standard,
-                 newMessageAreaDefaults: UserDefaults? = nil) throws {
+                 newMessageAreaDefaults: UserDefaults? = nil,
+                 preparedInitialState: PreparedLivePresentationInitialState? = nil) throws {
         self.clearedRetractionDefaults = clearedRetractionDefaults
-        let areaStore = newMessageAreaDefaults.map { NewMessageAreaStore(defaults: $0) }
+        let areaStore = newMessageAreaDefaults.map {
+            NewMessageAreaStore(defaults: $0, initialLedger: preparedInitialState?.messageLedger)
+        }
         self.messageAreaStore = areaStore
-        let replyStore = newMessageAreaDefaults.map { ReplyItemAreaStore(defaults: $0) }
+        let replyStore = newMessageAreaDefaults.map {
+            ReplyItemAreaStore(defaults: $0, initialLedger: preparedInitialState?.replyLedger)
+        }
         self.replyAreaStore = replyStore
         self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
         self.isReadOnly = isReadOnly
         self.diagnostics = diagnostics
-        _ = try store.snapshot(context: context)
-        let port = AttentionDomainPort(store: store)
-        let snapshot = try port.observe(context: port.context)
+        if let preparedInitialState {
+            self.failedResponseWarnings = preparedInitialState.failedResponseWarnings
+            self.staleAnswerDialog = preparedInitialState.staleAnswerDialog
+        }
+        let port = preparedInitialState?.port ?? AttentionDomainPort(store: store)
+        let snapshot: PresentationSnapshot
+        let conversationThreads: [RequestKey: ConversationThread]
+        let conversationFiles: ConversationFileStorage?
+        if let preparedInitialState {
+            snapshot = preparedInitialState.snapshot
+            conversationThreads = preparedInitialState.conversationThreads
+            conversationFiles = preparedInitialState.conversationFiles
+        } else {
+            snapshot = try port.observe(context: port.context)
+            conversationThreads = try port.conversations(context: port.context).threads
+            conversationFiles = context.transportMode == .relay
+                ? try ConversationFileStorage(identity: context.identity) : nil
+        }
         self.port = port
         self.attentionStore = store
         self.presentation = snapshot
-        self.conversationThreads = try port.conversations(context: port.context).threads
+        self.conversationThreads = conversationThreads
         self.conversationProjectionRevision = snapshot.revision
-        self.conversationFiles = context.transportMode == .relay ? try ConversationFileStorage(identity: context.identity) : nil
+        self.conversationFiles = conversationFiles
         self.selectedRequestKey = snapshot.requests.first?.key
-        reconcileNewMessageArea(snapshot.requests, using: areaStore)
-        reconcileReplyItemArea(using: replyStore)
+        if let preparedInitialState {
+            _ = areaStore?.applyPreparedReconciliation(preparedInitialState.preparedMessageArea,
+                                                        basedOn: 0)
+            _ = replyStore?.applyPreparedReconciliation(preparedInitialState.preparedReplyArea,
+                                                        basedOn: 0)
+        } else {
+            reconcileNewMessageArea(snapshot.requests, using: areaStore)
+            reconcileReplyItemArea(using: replyStore)
+        }
         if let data = clearedRetractionDefaults.data(forKey: Self.clearedRetractionsDefaultsKey),
            let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
             clearedRetractions = cleared
         }
-        refreshFailedResponseWarnings(for: snapshot.requests)
-        presentStaleAnswerIfAvailable(in: snapshot)
+        if preparedInitialState == nil {
+            refreshFailedResponseWarnings(for: snapshot.requests)
+            presentStaleAnswerIfAvailable(in: snapshot)
+        }
     }
 
     /// Read-only real account archives are offline relay data, not fictional
@@ -1492,31 +1652,54 @@ final class LivePresentationStore {
               conversationThreads[key]?.turns.contains(where: {
                   $0.id == turnID && $0.kind == .reply && $0.author == .origin
               }) == true else { return }
-        do {
-            let update = try port.markConversationReadAndProject(key, through: turnID,
-                                                                 context: port.context)
-            let canSkipObservedRefresh = update.didCommit &&
-                update.previousRevision == presentation.revision &&
-                conversationProjectionRevision == update.previousRevision &&
-                observation != nil
-            if conversationThreads[key] != update.thread {
-                conversationThreads[key] = update.thread
-                reconcileReplyItemArea(for: key)
+        let readKey = ConversationReadKey(request: key, turnID: turnID)
+        guard pendingConversationReadUpdates.insert(readKey).inserted else { return }
+        let port = self.port
+        let context = port.context
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let update = try port.markConversationReadAndProject(key, through: turnID,
+                                                                     context: context)
+                await self?.finishConversationRead(readKey, update: update)
+            } catch {
+                await self?.finishConversationRead(
+                    readKey, errorDescription: String(describing: error))
             }
-            if conversationProjectionRevision == update.previousRevision {
-                conversationProjectionRevision = update.revision
+        }
+    }
+
+    private func finishConversationRead(_ readKey: ConversationReadKey,
+                                        update: ConversationReadUpdate? = nil,
+                                        errorDescription: String? = nil) {
+        pendingConversationReadUpdates.remove(readKey)
+        guard !isReadOnly else { return }
+        guard let update else {
+            UIDiagnostics.shared.record(
+                "store.markConversationRead \(UIDiagnostics.describe(readKey.request)) error=\(errorDescription ?? "unknown")")
+            return
+        }
+        if let currentRevision = conversationProjectionRevision,
+           currentRevision > update.revision { return }
+
+        let canSkipObservedRefresh = update.didCommit &&
+            update.previousRevision == presentation.revision &&
+            conversationProjectionRevision == update.previousRevision &&
+            observation != nil
+        if conversationThreads[readKey.request] != update.thread {
+            conversationThreads[readKey.request] = update.thread
+            reconcileReplyItemArea(for: readKey.request)
+        }
+        if conversationProjectionRevision == update.previousRevision {
+            conversationProjectionRevision = update.revision
+        }
+        if canSkipObservedRefresh {
+            locallyReconciledConversationReadRevisions.insert(update.revision)
+        }
+        if permitsDelivery, update.pendingPosition != nil {
+            let expected = profileContext
+            Task {
+                await NativeRelayLifecycle.shared.sendPendingConversationReadPositions(expected: expected)
             }
-            if canSkipObservedRefresh {
-                locallyReconciledConversationReadRevisions.insert(update.revision)
-            }
-            if permitsDelivery, update.pendingPosition != nil {
-                let expected = profileContext
-                Task {
-                    await NativeRelayLifecycle.shared.sendPendingConversationReadPositions(expected: expected)
-                }
-            }
-        } catch {
-            UIDiagnostics.shared.record("store.markConversationRead \(UIDiagnostics.describe(key)) error=\(error)")
         }
     }
 
@@ -1852,24 +2035,32 @@ final class LivePresentationStore {
     private func reconcileNewMessageArea(_ requests: [PresentedRequest],
                                          using store: NewMessageAreaStore? = nil) {
         guard let store = store ?? messageAreaStore else { return }
-        let messages = requests.map {
-            NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
-                                  isResolved: $0.isResolved,
-                                  hasSubmittedAnswer: $0.intentReceipt != nil)
-        }
+        let messages = Self.newMessageObservations(for: requests)
         let revisions = Dictionary(uniqueKeysWithValues: requests.map { ($0.key, $0.requestRevision) })
         store.reconcile(messages, revisions: revisions,
                         accountScopes: [profileContext.identity.personID])
     }
 
-    private func reconcileReplyItemArea(for request: RequestKey? = nil,
-                                        using store: ReplyItemAreaStore? = nil) {
-        guard let store = store ?? replyAreaStore else { return }
-        let account = profileContext.identity.personID
+    private nonisolated static func newMessageObservations(
+        for requests: [PresentedRequest]
+    ) -> [NewMessageAreaMessage] {
+        requests.map {
+            NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
+                                  isResolved: $0.isResolved,
+                                  hasSubmittedAnswer: $0.intentReceipt != nil)
+        }
+    }
+
+    private nonisolated static func replyObservations(
+        in conversationThreads: [RequestKey: ConversationThread],
+        account: ExactText,
+        ledger: ReplyItemLedger,
+        request: RequestKey? = nil
+    ) -> (observations: [ReplyItemObservation], parentScope: Set<RequestKey>?) {
         // A partial conversation view cannot establish the account's first-run
         // baseline. Fall back to the full snapshot until that baseline exists.
         let scopedRequest = request.flatMap {
-            store.ledger.baselineEstablishedAccounts.contains(account) ? $0 : nil
+            ledger.baselineEstablishedAccounts.contains(account) ? $0 : nil
         }
         var observations: [ReplyItemObservation] = []
         for (key, thread) in conversationThreads where scopedRequest == nil || key == scopedRequest {
@@ -1894,8 +2085,17 @@ final class LivePresentationStore {
                                                          text: turn.text.rawValue))
             }
         }
-        let parentScope = scopedRequest.map { Set([$0]) }
-        store.reconcile(observations, accountScopes: [account], parentScope: parentScope)
+        return (observations, scopedRequest.map { Set([$0]) })
+    }
+
+    private func reconcileReplyItemArea(for request: RequestKey? = nil,
+                                        using store: ReplyItemAreaStore? = nil) {
+        guard let store = store ?? replyAreaStore else { return }
+        let account = profileContext.identity.personID
+        let preparedInput = Self.replyObservations(in: conversationThreads, account: account,
+                                                   ledger: store.ledger, request: request)
+        store.reconcile(preparedInput.observations, accountScopes: [account],
+                        parentScope: preparedInput.parentScope)
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
@@ -2141,7 +2341,8 @@ final class LivePresentationStore {
             return warning
         }
         guard request.answerNotDelivered || request.noCommentUnavailable else { return nil }
-        return makeFailedResponseWarning(for: request, submission: nil, retryOperationID: nil)
+        return Self.makeFailedResponseWarning(for: request, submission: nil,
+            retryOperationID: nil, diagnosticEvents: diagnostics?.events ?? [])
     }
 
     func canRetryFailedResponse(for key: RequestKey) -> Bool {
@@ -2181,6 +2382,7 @@ final class LivePresentationStore {
                current.failedOperationID == warning.failedOperationID {
                 current.retryOperationID = receipt.opID
                 failedResponseWarnings[key] = current
+                failedResponseWarningGeneration &+= 1
             }
             retryPendingDelivery()
             return true
@@ -2752,6 +2954,15 @@ final class LivePresentationStore {
     private func typedInputs(for request: PresentedRequest,
                              draft answerDraft: RequestDraft,
                              explicitCompatibilityAction: ExactText? = nil) throws -> [TypedInputRecord] {
+        try Self.resolvedTypedInputs(for: request, draft: answerDraft,
+                                     explicitCompatibilityAction: explicitCompatibilityAction)
+    }
+
+    private nonisolated static func resolvedTypedInputs(
+        for request: PresentedRequest,
+        draft answerDraft: RequestDraft,
+        explicitCompatibilityAction: ExactText? = nil
+    ) throws -> [TypedInputRecord] {
         switch request.projection {
         case let .sender(sender):
             return try sender.inputs.map { input in
@@ -2813,7 +3024,7 @@ final class LivePresentationStore {
                 let updates = try port.snapshots(context: port.context,
                                                  afterRevision: presentation.revision)
                 for try await snapshot in updates {
-                    adopt(snapshot)
+                    _ = try await adoptForLiveUpdates(snapshot)
                 }
             } catch is CancellationError {
                 return
@@ -2877,21 +3088,189 @@ final class LivePresentationStore {
         notificationProjectionDidChange?()
     }
 
-    private func refreshFailedResponseWarnings(for requests: [PresentedRequest]) {
-        guard let snapshot = try? attentionStore.snapshot(context: profileContext) else { return }
-        let submissions = Array(snapshot.intents.values)
-        var refreshed = failedResponseWarnings
+    func adoptForLiveUpdates(_ firstSnapshot: PresentationSnapshot) async throws -> Double {
+        var snapshot = firstSnapshot
+        let port = self.port
+        let store = attentionStore
+        let context = profileContext
+        let account = context.identity.personID
+        var mainActorWorkNanoseconds: UInt64 = 0
 
-        for (key, warning) in failedResponseWarnings {
+        while !Task.isCancelled {
+            guard presentation.revision <= snapshot.revision else {
+                return Double(mainActorWorkNanoseconds) / 1_000_000
+            }
+            let messageSeed = messageAreaStore?.reconciliationSeed()
+            let replySeed = replyAreaStore?.reconciliationSeed()
+            let previousRequests = presentation.requests
+            let previousWarnings = failedResponseWarnings
+            let warningGeneration = failedResponseWarningGeneration
+            let diagnosticEvents = diagnostics?.events ?? []
+            let shouldRecordNoReplyRouting = diagnostics != nil
+            let presentedStaleIDs = presentedStaleAnswerOperationIDs
+            let capturedActionErrorRequest = actionErrorRequest
+            let updateSnapshot = snapshot
+            var mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
+            let preparation = Task.detached(priority: .userInitiated) {
+                let conversationThreads = try port.conversations(context: port.context).threads
+                let attentionSnapshot = try store.snapshot(context: context)
+                let messages = Self.newMessageObservations(for: updateSnapshot.requests)
+                let revisions = Dictionary(uniqueKeysWithValues: updateSnapshot.requests.map {
+                    ($0.key, $0.requestRevision)
+                })
+                let messageArea = messageSeed.map { seed in
+                    VersionedPreparedNewMessageAreaReconciliation(
+                        value: NewMessageAreaStore.prepareReconciliation(
+                            ledger: seed.ledger, messages: messages, revisions: revisions,
+                            accountScopes: [account]),
+                        generation: seed.generation)
+                }
+                let replyItemArea = replySeed.map { seed in
+                    let observations = Self.replyObservations(
+                        in: conversationThreads, account: account, ledger: seed.ledger)
+                    return VersionedPreparedReplyItemAreaReconciliation(
+                        value: ReplyItemAreaStore.prepareReconciliation(
+                            ledger: seed.ledger, observations: observations.observations,
+                            accountScopes: [account], parentScope: observations.parentScope),
+                        generation: seed.generation)
+                }
+                let failedResponseWarnings = Self.prepareFailedResponseWarnings(
+                    previous: previousWarnings, requests: updateSnapshot.requests,
+                    attentionSnapshot: attentionSnapshot, diagnosticEvents: diagnosticEvents)
+                let previousRoutingStates = Self.noReplyRoutingStates(
+                    for: previousRequests, failedResponseWarnings: previousWarnings)
+                let currentRoutingStates = Self.noReplyRoutingStates(
+                    for: updateSnapshot.requests, failedResponseWarnings: failedResponseWarnings)
+                let noReplyRoutingChanges = shouldRecordNoReplyRouting
+                    ? Self.noReplyRoutingChanges(from: previousRoutingStates,
+                        currentStates: currentRoutingStates, in: updateSnapshot.requests)
+                    : []
+                let staleAnswerDialog = Self.staleAnswerDialog(
+                    in: updateSnapshot, presentedIDs: presentedStaleIDs)
+                let requestsByKey = Dictionary(uniqueKeysWithValues: updateSnapshot.requests.map {
+                    ($0.key, $0)
+                })
+                let shouldClearActionError = capturedActionErrorRequest.flatMap { key in
+                    requestsByKey[key].map {
+                        $0.intentReceipt != nil || $0.lifecycleStatus != .open
+                    }
+                } ?? false
+                return PreparedLivePresentationUpdate(
+                    conversationThreads: conversationThreads,
+                    messageArea: messageArea, replyItemArea: replyItemArea,
+                    failedResponseWarnings: failedResponseWarnings,
+                    warningGeneration: warningGeneration,
+                    noReplyRoutingChanges: noReplyRoutingChanges,
+                    staleAnswerDialog: staleAnswerDialog,
+                    requestKeys: Set(updateSnapshot.requests.map(\.key)),
+                    firstRequestKey: updateSnapshot.requests.first?.key,
+                    actionErrorRequest: capturedActionErrorRequest,
+                    shouldClearActionError: shouldClearActionError)
+            }
+            mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
+            let prepared = try await preparation.value
+            mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
+
+            guard presentation.revision <= snapshot.revision else {
+                mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
+                return Double(mainActorWorkNanoseconds) / 1_000_000
+            }
+            let locallyReconciledRead = locallyReconciledConversationReadRevisions
+                .contains(snapshot.revision)
+            let messageSeedIsCurrent = prepared.messageArea.map {
+                messageAreaStore?.reconciliationSeed().generation == $0.generation
+            } ?? true
+            let replySeedIsCurrent = locallyReconciledRead || (prepared.replyItemArea.map {
+                replyAreaStore?.reconciliationSeed().generation == $0.generation
+            } ?? true)
+            guard messageSeedIsCurrent && replySeedIsCurrent &&
+                    failedResponseWarningGeneration == prepared.warningGeneration else {
+                mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
+                let refresh = Task.detached(priority: .userInitiated) {
+                    try port.observe(context: port.context)
+                }
+                snapshot = try await refresh.value
+                mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
+                continue
+            }
+
+            if let messageArea = prepared.messageArea {
+                _ = messageAreaStore?.applyPreparedReconciliation(
+                    messageArea.value, basedOn: messageArea.generation)
+            }
+            if !locallyReconciledRead, let replyItemArea = prepared.replyItemArea {
+                _ = replyAreaStore?.applyPreparedReconciliation(
+                    replyItemArea.value, basedOn: replyItemArea.generation)
+            }
+            if locallyReconciledRead {
+                locallyReconciledConversationReadRevisions.remove(snapshot.revision)
+            } else {
+                conversationThreads = prepared.conversationThreads
+                conversationProjectionRevision = snapshot.revision
+            }
+            locallyReconciledConversationReadRevisions = Set(
+                locallyReconciledConversationReadRevisions.filter { $0 > snapshot.revision })
+            presentation = snapshot
+            failedResponseWarnings = prepared.failedResponseWarnings
+            failedResponseWarningGeneration &+= 1
+            recordNoReplyRoutingChanges(prepared.noReplyRoutingChanges)
+            if staleAnswerDialog == nil, let candidate = prepared.staleAnswerDialog,
+               !presentedStaleAnswerOperationIDs.contains(candidate.operationID) {
+                staleAnswerDialog = candidate
+            }
+            if prepared.shouldClearActionError,
+               actionErrorRequest == prepared.actionErrorRequest {
+                clearActionError()
+            }
+            if selectedRequestKey.map(prepared.requestKeys.contains) != true {
+                selectedRequestKey = prepared.firstRequestKey
+            }
+            notificationProjectionDidChange?()
+            mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
+            return Double(mainActorWorkNanoseconds) / 1_000_000
+        }
+        return Double(mainActorWorkNanoseconds) / 1_000_000
+    }
+
+    private func refreshFailedResponseWarnings(
+        for requests: [PresentedRequest],
+        attentionSnapshot suppliedSnapshot: AttentionStoreSnapshot? = nil
+    ) {
+        let snapshot: AttentionStoreSnapshot
+        if let suppliedSnapshot {
+            snapshot = suppliedSnapshot
+        } else {
+            guard let loaded = try? attentionStore.snapshot(context: profileContext) else { return }
+            snapshot = loaded
+        }
+        failedResponseWarnings = Self.prepareFailedResponseWarnings(
+            previous: failedResponseWarnings, requests: requests, attentionSnapshot: snapshot,
+            diagnosticEvents: diagnostics?.events ?? [])
+        failedResponseWarningGeneration &+= 1
+    }
+
+    private nonisolated static func prepareFailedResponseWarnings(
+        previous: [RequestKey: FailedResponseWarning],
+        requests: [PresentedRequest],
+        attentionSnapshot snapshot: AttentionStoreSnapshot,
+        diagnosticEvents: [NativeClientDiagnosticEvent]
+    ) -> [RequestKey: FailedResponseWarning] {
+        let submissionsByID = Dictionary(grouping: snapshot.intents.values, by: \.operationID)
+            .compactMapValues { $0.first }
+        let submissionsByRequest = Dictionary(grouping: snapshot.intents.values, by: \.requestKey)
+        let requestsByKey = Dictionary(uniqueKeysWithValues: requests.map { ($0.key, $0) })
+        var refreshed = previous
+
+        for (key, warning) in previous {
             guard let retryOperationID = warning.retryOperationID,
-                  let retry = submissions.first(where: { $0.operationID == retryOperationID }) else { continue }
+                  let retry = submissionsByID[retryOperationID] else { continue }
             switch retry.disposition {
             case .accepted, .terminal:
                 refreshed.removeValue(forKey: key)
             case .failed, .unsupported:
                 refreshed.removeValue(forKey: key)
             default:
-                if let request = requests.first(where: { $0.key == key }),
+                if let request = requestsByKey[key],
                    request.intentReceipt?.opID == retryOperationID,
                    request.receiptFacts?.ownOutcome == .accepted {
                     refreshed.removeValue(forKey: key)
@@ -2914,21 +3293,24 @@ final class LivePresentationStore {
             if refreshed[request.key]?.requestRevision != request.requestRevision {
                 refreshed.removeValue(forKey: request.key)
             }
-            let candidates = submissions.filter {
-                $0.requestKey == request.key && ($0.requestRevision ?? 1) == request.requestRevision &&
-                    Self.isDefinitiveFailure($0.disposition)
+            let candidates = (submissionsByRequest[request.key] ?? []).filter {
+                ($0.requestRevision ?? 1) == request.requestRevision &&
+                    isDefinitiveFailure($0.disposition)
             }
 
             if request.answerNotDelivered || request.noCommentUnavailable {
-                if let failed = failureSubmission(for: request, among: candidates) {
+                if let failed = failureSubmission(for: request, among: candidates,
+                                                  diagnosticEvents: diagnosticEvents) {
                     let retryOperationID = refreshed[request.key].flatMap {
                         $0.failedOperationID == failed.operationID ? $0.retryOperationID : nil
                     }
                     refreshed[request.key] = makeFailedResponseWarning(
-                        for: request, submission: failed, retryOperationID: retryOperationID)
+                        for: request, submission: failed, retryOperationID: retryOperationID,
+                        diagnosticEvents: diagnosticEvents)
                 } else if refreshed[request.key]?.requestRevision != request.requestRevision {
                     refreshed[request.key] = makeFailedResponseWarning(
-                        for: request, submission: nil, retryOperationID: nil)
+                        for: request, submission: nil, retryOperationID: nil,
+                        diagnosticEvents: diagnosticEvents)
                 }
                 continue
             }
@@ -2936,9 +3318,11 @@ final class LivePresentationStore {
             if let receipt = request.intentReceipt,
                request.receiptFacts?.ownOutcome != .accepted,
                let failed = failureSubmission(for: request,
-                    among: candidates.filter { Self.matches(receipt: receipt, submission: $0) }) {
+                    among: candidates.filter { matches(receipt: receipt, submission: $0) },
+                    diagnosticEvents: diagnosticEvents) {
                 refreshed[request.key] = makeFailedResponseWarning(
-                    for: request, submission: failed, retryOperationID: receipt.opID)
+                    for: request, submission: failed, retryOperationID: receipt.opID,
+                    diagnosticEvents: diagnosticEvents)
                 continue
             }
             let serverReportedTerminal = request.inboxStateIsCurrent &&
@@ -2948,14 +3332,17 @@ final class LivePresentationStore {
             }
         }
 
-        failedResponseWarnings = refreshed
+        return refreshed
     }
 
-    private func failureSubmission(for request: PresentedRequest,
-                                   among candidates: [Submission]) -> Submission? {
+    private nonisolated static func failureSubmission(
+        for request: PresentedRequest,
+        among candidates: [Submission],
+        diagnosticEvents: [NativeClientDiagnosticEvent]
+    ) -> Submission? {
         guard !candidates.isEmpty else { return nil }
         let candidateIDs = Set(candidates.map(\.operationID))
-        for event in (diagnostics?.events ?? []).reversed()
+        for event in diagnosticEvents.reversed()
         where event.area == .answer && event.phase == .originalOperationDelivery &&
             event.transition == .rejected {
             if let operationID = event.operationID, candidateIDs.contains(operationID),
@@ -2969,9 +3356,12 @@ final class LivePresentationStore {
         return first
     }
 
-    private func makeFailedResponseWarning(for request: PresentedRequest,
-                                           submission: Submission?,
-                                           retryOperationID: UUID?) -> FailedResponseWarning {
+    private nonisolated static func makeFailedResponseWarning(
+        for request: PresentedRequest,
+        submission: Submission?,
+        retryOperationID: UUID?,
+        diagnosticEvents: [NativeClientDiagnosticEvent]
+    ) -> FailedResponseWarning {
         let answerKind: SubmissionAnswerKind = submission?.isNoComment == true ||
             (submission == nil && request.noCommentUnavailable) ? .noComment : .answer
         return FailedResponseWarning(
@@ -2980,11 +3370,13 @@ final class LivePresentationStore {
             answerKind: answerKind,
             submittedInputs: submission?.typedInputs ?? [],
             answerDraft: submission.flatMap { retryDraft(for: $0, request: request) },
-            detail: submission.map(failureDetail(for:)) ?? "No additional safe failure detail was retained.",
+            detail: submission.map { failureDetail(for: $0, diagnosticEvents: diagnosticEvents) }
+                ?? "No additional safe failure detail was retained.",
             retryOperationID: retryOperationID)
     }
 
-    private func retryDraft(for submission: Submission, request: PresentedRequest) -> RequestDraft? {
+    private nonisolated static func retryDraft(for submission: Submission,
+                                               request: PresentedRequest) -> RequestDraft? {
         let blankInputs: [ExactText: InputDraft]
         if case let .sender(sender) = request.projection {
             blankInputs = Dictionary(uniqueKeysWithValues: sender.inputs.map { ($0.id, InputDraft()) })
@@ -3025,13 +3417,16 @@ final class LivePresentationStore {
                 draft.compatibility.textByActionID[action] = text
             }
         }
-        guard let rebuilt = try? typedInputs(for: request, draft: draft),
+        guard let rebuilt = try? resolvedTypedInputs(for: request, draft: draft),
               rebuilt == submission.typedInputs else { return nil }
         return draft
     }
 
-    private func failureDetail(for submission: Submission) -> LocalizedStringResource {
-        let events = (diagnostics?.events ?? []).filter { $0.operationID == submission.operationID }
+    private nonisolated static func failureDetail(
+        for submission: Submission,
+        diagnosticEvents: [NativeClientDiagnosticEvent]
+    ) -> LocalizedStringResource {
+        let events = diagnosticEvents.filter { $0.operationID == submission.operationID }
         if submission.isNoComment,
            let responseClass = events.last(where: {
                $0.phase == .noReplyResponseDecode && $0.transition == .completed
@@ -3040,7 +3435,7 @@ final class LivePresentationStore {
             case .unsupportedRefusal:
                 return "The app classified the server reply as an unsupported refusal."
             case .serverError:
-                if let code = meaningfulFailureCode(in: events) { return Self.failureDescription(for: code) }
+                if let code = meaningfulFailureCode(in: events) { return failureDescription(for: code) }
                 return "The app classified the reply as a server error."
             case .unknownFrame:
                 return "The reply did not match a response the app recognizes."
@@ -3053,18 +3448,18 @@ final class LivePresentationStore {
             }
         }
         if let code = meaningfulFailureCode(in: events) {
-            return Self.failureDescription(for: code)
+            return failureDescription(for: code)
         }
         return "No additional safe failure detail was retained."
     }
 
-    private func meaningfulFailureCode(in events: [NativeClientDiagnosticEvent]) -> String? {
+    private nonisolated static func meaningfulFailureCode(in events: [NativeClientDiagnosticEvent]) -> String? {
         events.reversed().compactMap(\.causeCode).first {
             !["answer_not_delivered", "no_comment_unsupported", "unknown_error"].contains($0)
         }
     }
 
-    private static func failureDescription(for code: String) -> LocalizedStringResource {
+    private nonisolated static func failureDescription(for code: String) -> LocalizedStringResource {
         switch code {
         case "server_invalid_request": "The server reported that the request was invalid."
         case "server_revision_mismatch": "The server reported that the message revision did not match."
@@ -3084,38 +3479,66 @@ final class LivePresentationStore {
         }
     }
 
-    private static func isDefinitiveFailure(_ disposition: IntentDisposition) -> Bool {
+    private nonisolated static func isDefinitiveFailure(_ disposition: IntentDisposition) -> Bool {
         switch disposition {
         case .failed, .unsupported: true
         default: false
         }
     }
 
-    private static func matches(receipt: IntentReceipt, warning: FailedResponseWarning) -> Bool {
+    private nonisolated static func matches(receipt: IntentReceipt,
+                                            warning: FailedResponseWarning) -> Bool {
         receipt.inputs == warning.submittedInputs &&
             (receipt.answerKind ?? .answer) == warning.answerKind
     }
 
-    private static func matches(receipt: IntentReceipt, submission: Submission) -> Bool {
+    private nonisolated static func matches(receipt: IntentReceipt, submission: Submission) -> Bool {
         receipt.inputs == submission.typedInputs &&
             (receipt.answerKind ?? .answer) == (submission.answerKind ?? .answer)
     }
 
-    private static func matches(_ candidate: Submission, response: Submission) -> Bool {
+    private nonisolated static func matches(_ candidate: Submission, response: Submission) -> Bool {
         candidate.typedInputs == response.typedInputs &&
             (candidate.answerKind ?? .answer) == (response.answerKind ?? .answer)
     }
 
     private func noReplyRoutingStates(for requests: [PresentedRequest]) -> [RequestKey: NoReplyRoutingState] {
+        Self.noReplyRoutingStates(for: requests, failedResponseWarnings: failedResponseWarnings)
+    }
+
+    private nonisolated static func noReplyRoutingStates(
+        for requests: [PresentedRequest],
+        failedResponseWarnings: [RequestKey: FailedResponseWarning]
+    ) -> [RequestKey: NoReplyRoutingState] {
         var states: [RequestKey: NoReplyRoutingState] = [:]
-        let skippedMessageRequestTags = completedSkippedMessageRequestTags
         for request in requests {
             let isNoReply = request.intentReceipt?.answerKind == .noComment ||
                 request.lifecycleStatus == .noComment || request.noCommentUnavailable
-            let route = isNoReply ? makeInboxRow(for: request,
-                                                 skippedMessageRequestTags: skippedMessageRequestTags).map {
-                $0.belongsToReplied ? NativeDiagnosticNoReplyRoute.replied : .inbox
-            } : nil
+            let hasKnownDeliveryFailure = request.informationalSeenStatus == nil &&
+                request.staleAnswerRevision == nil &&
+                (failedResponseWarnings[request.key]?.requestRevision == request.requestRevision ||
+                 request.answerNotDelivered || request.noCommentUnavailable)
+            let hasDeliveryWarning = hasKnownDeliveryFailure || request.staleAnswerRevision != nil
+            let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
+                request.receiptFacts?.ownOutcome == .unconfirmed &&
+                request.lifecycleStatus != .pending
+            let serverReportedFinalResponse = request.inboxStateIsCurrent &&
+                (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment)
+            let hasAcceptedOwnSubmission = request.receiptFacts?.ownOutcome == .accepted
+            let receiptStatus = request.answerNotDelivered ? .some(InboxResponseReceiptStatus.failed) :
+                InboxRequestRow.responseReceiptStatus(request.intentReceipt,
+                    hasUnconfirmedOutcome: hasUnconfirmedOwnSubmission,
+                    serverReportedFinalResponse: serverReportedFinalResponse,
+                    hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
+            let hasFailedResponse = receiptStatus == .failed || hasDeliveryWarning
+            let hasUserAction = receiptStatus == .pendingOrAccepted ||
+                request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment
+            let belongsToReplied = !hasFailedResponse &&
+                (hasUserAction || request.informationalSeenStatus == .pending ||
+                 request.informationalSeenStatus == .confirmed)
+            let route = isNoReply
+                ? (belongsToReplied ? NativeDiagnosticNoReplyRoute.replied : .inbox)
+                : nil
             states[request.key] = NoReplyRoutingState(requestRevision: request.requestRevision,
                 isNoReply: isNoReply, route: route)
         }
@@ -3124,8 +3547,32 @@ final class LivePresentationStore {
 
     private func recordNoReplyRoutingChanges(from previousStates: [RequestKey: NoReplyRoutingState],
                                              in requests: [PresentedRequest]) {
+        recordNoReplyRoutingChanges(from: previousStates,
+            currentStates: Self.noReplyRoutingStates(for: requests,
+                failedResponseWarnings: failedResponseWarnings), in: requests)
+    }
+
+    private func recordNoReplyRoutingChanges(from previousStates: [RequestKey: NoReplyRoutingState],
+                                             currentStates: [RequestKey: NoReplyRoutingState],
+                                             in requests: [PresentedRequest]) {
+        recordNoReplyRoutingChanges(Self.noReplyRoutingChanges(from: previousStates,
+            currentStates: currentStates, in: requests))
+    }
+
+    private func recordNoReplyRoutingChanges(_ changes: [PreparedNoReplyRoutingChange]) {
         guard let diagnostics else { return }
-        let currentStates = noReplyRoutingStates(for: requests)
+        for change in changes {
+            diagnostics.recordNoReplyRoutingIfChanged(request: change.request,
+                revision: change.revision, operationID: change.operationID, route: change.route)
+        }
+    }
+
+    private nonisolated static func noReplyRoutingChanges(
+        from previousStates: [RequestKey: NoReplyRoutingState],
+        currentStates: [RequestKey: NoReplyRoutingState],
+        in requests: [PresentedRequest]
+    ) -> [PreparedNoReplyRoutingChange] {
+        var changes: [PreparedNoReplyRoutingChange] = []
         for request in requests {
             // A row newly appearing in a projection may be old paged history, not
             // a routing transition observed by this client.
@@ -3135,26 +3582,35 @@ final class LivePresentationStore {
             let changed = previous.requestRevision != current.requestRevision ||
                 !previous.isNoReply || previous.route != route
             guard changed else { continue }
-            diagnostics.recordNoReplyRoutingIfChanged(request: request.key,
+            changes.append(PreparedNoReplyRoutingChange(request: request.key,
                 revision: request.requestRevision,
                 operationID: request.intentReceipt?.answerKind == .noComment
                     ? request.intentReceipt?.opID : nil,
-                route: route)
+                route: route))
         }
+        return changes
     }
 
     private func presentStaleAnswerIfAvailable(in snapshot: PresentationSnapshot) {
         guard staleAnswerDialog == nil,
-              let stale = snapshot.requests.first(where: { request in
-                  guard let stale = request.staleAnswerRevision else { return false }
-                  return !presentedStaleAnswerOperationIDs.contains(stale.operationID)
-              }),
-              let notice = stale.staleAnswerRevision else { return }
-            staleAnswerDialog = StaleAnswerDialog(operationID: notice.operationID,
-                requestKey: stale.key, submittedRevision: notice.submittedRevision,
-                currentRevision: notice.currentRevision,
-                title: stale.title?.rawValue ?? "Message",
-                body: stale.body?.rawValue ?? "")
+              let prepared = Self.staleAnswerDialog(in: snapshot,
+                  presentedIDs: presentedStaleAnswerOperationIDs) else { return }
+        staleAnswerDialog = prepared
+    }
+
+    private nonisolated static func staleAnswerDialog(
+        in snapshot: PresentationSnapshot,
+        presentedIDs: Set<UUID>
+    ) -> StaleAnswerDialog? {
+        guard let stale = snapshot.requests.first(where: { request in
+            guard let notice = request.staleAnswerRevision else { return false }
+            return !presentedIDs.contains(notice.operationID)
+        }), let notice = stale.staleAnswerRevision else { return nil }
+        return StaleAnswerDialog(operationID: notice.operationID,
+            requestKey: stale.key, submittedRevision: notice.submittedRevision,
+            currentRevision: notice.currentRevision,
+            title: stale.title?.rawValue ?? "Message",
+            body: stale.body?.rawValue ?? "")
     }
 
     private func discussionOperationID(for request: RequestKey, revision: UInt64) -> UUID? {

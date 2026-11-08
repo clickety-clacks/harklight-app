@@ -103,7 +103,7 @@ final class NewMessageAreaTests: XCTestCase {
     }
 
     @MainActor
-    func testStorePersistsEntryAndFirstSeenInTheLocalDefaultsDomain() throws {
+    func testStorePersistsEntryAndFirstSeenInTheLocalDefaultsDomain() async throws {
         let suite = "NewMessageAreaTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -120,12 +120,28 @@ final class NewMessageAreaTests: XCTestCase {
         store.reconcile([message], revisions: [key: 1], now: receivedAt)
         store.markFirstSeen(key, at: firstSeenAt)
 
+        await waitUntil {
+            guard let data = defaults.data(forKey: NewMessageAreaStore.defaultsKey),
+                  let ledger = try? JSONDecoder().decode(NewMessageAreaLedger.self, from: data) else {
+                return false
+            }
+            return ledger.entriesByKey[key]?.firstSeenAt == firstSeenAt
+        }
         let restored = NewMessageAreaStore(defaults: defaults)
         XCTAssertEqual(restored.entries.first?.key, key)
         XCTAssertEqual(restored.entries.first?.receivedAt, receivedAt)
         XCTAssertEqual(restored.entries.first?.firstSeenAt, firstSeenAt)
         XCTAssertNil(restored.summary(for: key, revision: 1),
                      "Generated message text is held in memory, not persisted with local state.")
+    }
+
+    @MainActor
+    private func waitUntil(_ condition: @MainActor () -> Bool) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("The new-message ledger was not persisted.")
     }
 
     func testSubmittedAnswerAndResolvedOutcomeRemoveEntries() {

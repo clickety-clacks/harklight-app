@@ -193,7 +193,7 @@ final class ReplyItemAreaTests: XCTestCase {
     }
 
     @MainActor
-    func testStorePersistsEntriesInTheLocalDefaultsDomain() throws {
+    func testStorePersistsEntriesInTheLocalDefaultsDomain() async throws {
         let suite = "ReplyItemAreaTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -206,6 +206,13 @@ final class ReplyItemAreaTests: XCTestCase {
                         now: receivedAt)
         store.markFirstSeen(parent("message"), at: firstSeenAt)
 
+        await waitUntil {
+            guard let data = defaults.data(forKey: ReplyItemAreaStore.defaultsKey),
+                  let ledger = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) else {
+                return false
+            }
+            return ledger.entriesByParent[parent("message")]?.firstSeenAt == firstSeenAt
+        }
         let restored = ReplyItemAreaStore(defaults: defaults)
         XCTAssertEqual(restored.entries.first?.parent, parent("message"))
         XCTAssertEqual(restored.entries.first?.receivedAt, receivedAt)
@@ -215,7 +222,7 @@ final class ReplyItemAreaTests: XCTestCase {
     }
 
     @MainActor
-    func testSelectionDeparturePersistsLocally() throws {
+    func testSelectionDeparturePersistsLocally() async throws {
         let suite = "ReplyItemAreaSelectionTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -226,11 +233,27 @@ final class ReplyItemAreaTests: XCTestCase {
                         now: baselineDate.addingTimeInterval(1))
         store.removeForSelection(parent("message"))
 
+        await waitUntil {
+            guard let data = defaults.data(forKey: ReplyItemAreaStore.defaultsKey),
+                  let ledger = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) else {
+                return false
+            }
+            return ledger.entriesByParent.isEmpty
+        }
         let restored = ReplyItemAreaStore(defaults: defaults)
         restored.reconcile([reply("message", turn: "reply-1", sequence: 1)],
                            now: baselineDate.addingTimeInterval(2))
         XCTAssertTrue(restored.entries.isEmpty,
                       "A selected item stays out of New after process restart and replay.")
+    }
+
+    @MainActor
+    private func waitUntil(_ condition: @MainActor () -> Bool) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("The reply ledger was not persisted.")
     }
 
     func testNormalReplyProjectionUsesServerQuoteAndOpenTargets() throws {

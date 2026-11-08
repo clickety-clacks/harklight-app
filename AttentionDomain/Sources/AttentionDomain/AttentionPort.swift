@@ -906,6 +906,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             Self.viewSlots(for: orderedRequests.map { $0.request.key }, in: $0,
                            remoteStates: snapshot.remoteStates)
         } ?? [:]
+        let intentsByRequest = Dictionary(grouping: snapshot.intents.values, by: \.requestKey)
         let requests = try orderedRequests.map { item in
             let session = snapshot.fixtureSessions[item.request.key]
             let thread = snapshot.conversationThreads[item.request.key]
@@ -919,7 +920,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 guard candidate.requestKey == item.request.key else { return false }
                 return (candidate.requestRevision ?? 1) == conversationRevision
             }
-            let currentIntents = snapshot.intents.values.filter(matchesCurrentRevision)
+            let requestIntents = intentsByRequest[item.request.key] ?? []
+            let currentIntents = requestIntents.filter(matchesCurrentRevision)
             let projectedRequest: StoredRequest
             if let payload = thread?.revisions[presentedRevision] {
                 projectedRequest = StoredRequest(key: item.request.key, originalPayload: payload)
@@ -979,9 +981,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
             let noCommentUnavailable = hasUnsupportedNoComment && submission == nil
             let answerNotDelivered = hasFailedAnswer && submission == nil && !noCommentUnavailable &&
                 snapshot.remoteStates[item.request.key]?.isTerminal != true
-            let staleAnswerRevision = snapshot.intents.values.compactMap { candidate -> StaleAnswerRevision? in
-                guard candidate.requestKey == item.request.key,
-                      case let .staleRevision(currentRevision) = candidate.disposition,
+            let staleAnswerRevision = requestIntents.compactMap { candidate -> StaleAnswerRevision? in
+                guard case let .staleRevision(currentRevision) = candidate.disposition,
                       conversationRevision >= currentRevision else { return nil }
                 let submittedRevision = candidate.requestRevision ?? 1
                 return StaleAnswerRevision(operationID: candidate.operationID,

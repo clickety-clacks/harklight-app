@@ -678,7 +678,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertThrowsError(try fixture.domain.prepareDiscussion(ConversationBinding(request: revised.key, revision: 2), context: fixture.context))
     }
 
-    func testAgentReplyStaysUnreadUntilChatShowsItAcrossForegroundAndRelaunch() throws {
+    func testAgentReplyStaysUnreadUntilChatShowsItAcrossForegroundAndRelaunch() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -721,6 +721,9 @@ final class ConversationPresentationTests: XCTestCase {
             context: context)
         XCTAssertTrue(resumed.hasUnreadAgentReply(request))
         resumed.markConversationRead(request)
+        await waitUntilMainActor("the persisted origin reply read position") {
+            !resumed.hasUnreadAgentReply(request)
+        }
         XCTAssertFalse(resumed.hasUnreadAgentReply(request))
     }
 
@@ -780,6 +783,15 @@ final class ConversationPresentationTests: XCTestCase {
         try model.refreshFromDurableStore()
         XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, true,
                        "A closed request must still show an unseen agent reply.")
+    }
+
+    private func waitUntilMainActor(_ description: String,
+                                    condition: () -> Bool) async {
+        for _ in 0..<400 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Timed out waiting for \(description).")
     }
 
 }
