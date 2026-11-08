@@ -99,7 +99,7 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(secondLaunch.notesToShow.isEmpty)
     }
 
-    func testBundledReleaseNotesPreserveBuild144AndAddPendingInboxCatchUpNote() throws {
+    func testBundledReleaseNotesPreserveBuild144AndAddPendingInboxLiveUpdatesNote() throws {
         let bundle = Bundle(for: ReleaseNotesTests.self)
         let url = try XCTUnwrap(bundle.url(
             forResource: "HarklightReleaseNotes", withExtension: "json"))
@@ -111,7 +111,7 @@ final class ReleaseNotesTests: XCTestCase {
         let build139Identifier = "fresh-release-notes-follow-up"
         let pendingEntries = entries.filter { $0["testFlightBuildNumber"] is NSNull }
         XCTAssertEqual(pendingEntries.compactMap { $0["id"] as? String }, [
-            "post-144-inbox-catch-up"
+            "post-144-inbox-live-updates"
         ])
         let rawStampedEntry = try XCTUnwrap(
             entries.first { $0["id"] as? String == build139Identifier })
@@ -152,15 +152,20 @@ final class ReleaseNotesTests: XCTestCase {
                        "There’s less extra space around the New section.")
 
         let inboxCatchUpNote = try XCTUnwrap(
-            numberedEntries.first { $0.id == "post-144-inbox-catch-up" })
+            numberedEntries.first { $0.id == "post-144-inbox-live-updates" })
         XCTAssertEqual(inboxCatchUpNote.buildIdentifier, 9000)
         XCTAssertEqual(inboxCatchUpNote.highlights.map(\.id), [
-            "inbox-catch-up-scroll-responsiveness"
+            "inbox-catch-up-background-preparation",
+            "inbox-deliveries-during-refresh"
         ])
         XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[0].title),
-                       "Keep scrolling as Inbox catches up")
+                       "Prepare Inbox history in the background")
         XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[0].detail),
-                       "Inbox prepares messages and conversation history in the background, helping it stay responsive as new updates arrive.")
+                       "Inbox prepares messages and conversation history in the background as it catches up.")
+        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[1].title),
+                       "Receive new messages during refresh")
+        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[1].detail),
+                       "Inbox continues receiving new messages while its current view refreshes.")
 
         let messageTextDetail = try XCTUnwrap(build139Note.highlights.first {
             $0.id == "dynamic-type-message-text"

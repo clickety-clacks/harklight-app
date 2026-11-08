@@ -81,15 +81,21 @@
       ]
     },
     {
-      "id": "post-144-inbox-catch-up",
+      "id": "post-144-inbox-live-updates",
       "marketingVersion": "0.1.0",
       "testFlightBuildNumber": null,
       "highlights": [
         {
-          "id": "inbox-catch-up-scroll-responsiveness",
+          "id": "inbox-catch-up-background-preparation",
           "symbol": "arrow.down.circle",
-          "title": "Keep scrolling as Inbox catches up",
-          "detail": "Inbox prepares messages and conversation history in the background, helping it stay responsive as new updates arrive."
+          "title": "Prepare Inbox history in the background",
+          "detail": "Inbox prepares messages and conversation history in the background as it catches up."
+        },
+        {
+          "id": "inbox-deliveries-during-refresh",
+          "symbol": "tray.and.arrow.down",
+          "title": "Receive new messages during refresh",
+          "detail": "Inbox continues receiving new messages while its current view refreshes."
         }
       ]
     }

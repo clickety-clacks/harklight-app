@@ -15,11 +15,13 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Keep scrolling as Inbox catches up"].exists,
+        XCTAssertTrue(app.staticTexts["Prepare Inbox history in the background"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts[
-            "Inbox prepares messages and conversation history in the background, helping it stay responsive as new updates arrive."
+            "Inbox prepares messages and conversation history in the background as it catches up."
         ].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
+                      app.debugDescription)
         XCTAssertFalse(app.staticTexts["Keep track of replies across conversations"].exists,
                        "A fresh install shows only the current pending entry.")
         XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
@@ -124,11 +126,13 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(updateTitle.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       "The update sheet identifies the released build and version.")
-        XCTAssertTrue(app.staticTexts["Keep scrolling as Inbox catches up"].exists,
+        XCTAssertTrue(app.staticTexts["Prepare Inbox history in the background"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts[
-            "Inbox prepares messages and conversation history in the background, helping it stay responsive as new updates arrive."
+            "Inbox prepares messages and conversation history in the background as it catches up."
         ].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
+                      app.debugDescription)
         XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
                        "The stamped Build139 entry is future history at this synthetic build.")
         XCTAssertFalse(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
