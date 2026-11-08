@@ -891,6 +891,8 @@ final class NativeRelayLifecycle {
     private var foregroundDiagnosticOperationsAtStart: [UUID: NativeForegroundOperationDiagnostic] = [:]
     private var foregroundDiagnosticIntentIDs: [UUID: UUID] = [:]
     private var foregroundDiagnosticSnapshotAvailable = false
+    private var foregroundDiagnosticAttemptID = UUID()
+    private var foregroundDiagnosticOperations = NativeForegroundOperationSnapshot.unavailable
     private var configuration: (store: AttentionDomainStore,
                                 context: ProfileContext,
                                 relayURL: URL,
@@ -1030,6 +1032,8 @@ final class NativeRelayLifecycle {
         foregroundDiagnosticOperationsAtStart = [:]
         foregroundDiagnosticIntentIDs = [:]
         foregroundDiagnosticSnapshotAvailable = false
+        foregroundDiagnosticAttemptID = UUID()
+        foregroundDiagnosticOperations = .unavailable
         diagnosticJournal = nil
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
@@ -1128,6 +1132,9 @@ final class NativeRelayLifecycle {
             return failed
         }
         foregroundDiagnosticContext = expected
+        let diagnosticAttemptID = UUID()
+        foregroundDiagnosticAttemptID = diagnosticAttemptID
+        foregroundDiagnosticOperations = .unavailable
         if let configuration, configuration.context == expected {
             do {
                 let snapshot = try configuration.store.snapshot(context: expected)
@@ -1158,6 +1165,23 @@ final class NativeRelayLifecycle {
             foregroundDiagnosticIntentIDs = [:]
         }
         let epoch = refreshGeneration
+        // Prepare operation receipts away from the main actor before delivering
+        // each progress update. The UI's synchronous diagnostic accessor then
+        // reads this prepared value instead of waiting on the store writer.
+        var progressDelivery: Task<Void, Never>?
+        let deliverProgress: @MainActor (NativeForegroundConnectProgress) -> Void = { [weak self] progress in
+            let priorDelivery = progressDelivery
+            progressDelivery = Task { @MainActor [weak self] in
+                await priorDelivery?.value
+                guard let self, self.foregroundDiagnosticAttemptID == diagnosticAttemptID,
+                      self.context == expected else { return }
+                let operations = await self.prepareForegroundOperationDiagnostics(for: expected)
+                guard self.foregroundDiagnosticAttemptID == diagnosticAttemptID,
+                      self.context == expected else { return }
+                self.foregroundDiagnosticOperations = operations
+                onProgress(progress)
+            }
+        }
         var result = await foregroundDeadline.run(deadline: deadline, operation: { [weak self] in
             guard let self else { return false }
             let refresh = await self.refreshResultFromTrustedRelay(
@@ -1189,7 +1213,7 @@ final class NativeRelayLifecycle {
             self?.recordDiagnostic(.connection, .approvedConnection, .began,
                                    attemptID: foregroundAttemptID,
                                    transportAttemptID: self?.activeTransportAttemptID)
-        }, onProgress: onProgress)
+        }, onProgress: deliverProgress)
         if result.outcome == .timedOut, let attemptID = result.attemptID {
             let generationMatches = refreshGeneration == epoch
             let profileMatches = context == expected
@@ -1198,7 +1222,7 @@ final class NativeRelayLifecycle {
                 generationMatches: generationMatches, profileMatches: profileMatches,
                 relayContextMatches: relayContextMatches)
             result = foregroundDeadline.progress
-            onProgress(result)
+            deliverProgress(result)
 
             recordDiagnosticEvents(Self.foregroundTerminalDiagnosticEvents(
                 progress: result, confirmed: false, timedOut: true,
@@ -1218,45 +1242,58 @@ final class NativeRelayLifecycle {
                          attemptID: result.attemptID ?? activeTransportAttemptID,
                          transportAttemptID: result.transportAttemptID ?? activeTransportAttemptID,
                          receipt: nil)
+        await progressDelivery?.value
         return result
     }
 
     func foregroundOperationDiagnostics(for expected: ProfileContext) -> NativeForegroundOperationSnapshot {
+        guard foregroundDiagnosticContext == expected, context == expected else { return .unavailable }
+        return foregroundDiagnosticOperations
+    }
+
+    private func prepareForegroundOperationDiagnostics(for expected: ProfileContext) async -> NativeForegroundOperationSnapshot {
         guard foregroundDiagnosticContext == expected, context == expected,
               foregroundDiagnosticSnapshotAvailable,
               let configuration, configuration.context == expected else {
             return .unavailable
         }
-        let operations = foregroundDiagnosticOperationsAtStart.values.map { initial in
-            guard let intentID = foregroundDiagnosticIntentIDs[initial.operationID] else {
-                return NativeForegroundOperationDiagnostic(operationID: initial.operationID,
+        guard !foregroundDiagnosticOperationsAtStart.isEmpty else {
+            return NativeForegroundOperationSnapshot(available: true, operations: [])
+        }
+        let store = configuration.store
+        let initialOperations = foregroundDiagnosticOperationsAtStart
+        let intentIDs = foregroundDiagnosticIntentIDs
+        let transportAttemptID = activeTransportAttemptID
+        let (snapshot, failures) = await Task.detached(priority: .utility) {
+            var failures: [NativeClientDiagnosticEvent] = []
+            let operations = initialOperations.values.map { initial in
+                let unknown = NativeForegroundOperationDiagnostic(operationID: initial.operationID,
                     senderID: initial.senderID, messageID: initial.messageID,
                     requestRevision: initial.requestRevision, receiptState: "unknown_after_attempt")
-            }
-            do {
-                guard let submission = try configuration.store.lookupIntent(intentID, context: expected) else {
+                guard let intentID = intentIDs[initial.operationID] else { return unknown }
+                do {
+                    guard let submission = try store.lookupIntent(intentID, context: expected) else { return unknown }
                     return NativeForegroundOperationDiagnostic(operationID: initial.operationID,
                         senderID: initial.senderID, messageID: initial.messageID,
-                        requestRevision: initial.requestRevision, receiptState: "unknown_after_attempt")
+                        requestRevision: initial.requestRevision,
+                        receiptState: Self.receiptState(for: submission.disposition))
+                } catch {
+                    failures.append(NativeClientDiagnosticEvent(area: .localStore, phase: .projectionRefresh,
+                        transition: NativeDiagnosticCauseCode.failureTransition(for: error),
+                        causeCode: NativeDiagnosticCauseCode.forError(error),
+                        attemptID: transportAttemptID, transportAttemptID: transportAttemptID,
+                        operationID: initial.operationID, requestRevision: initial.requestRevision,
+                        receiptState: .unknown))
+                    return unknown
                 }
-                return NativeForegroundOperationDiagnostic(operationID: initial.operationID,
-                    senderID: initial.senderID, messageID: initial.messageID,
-                    requestRevision: initial.requestRevision,
-                    receiptState: Self.receiptState(for: submission.disposition))
-            } catch {
-                recordDiagnostic(.localStore, .projectionRefresh,
-                                 NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
-                                 attemptID: activeTransportAttemptID, operationID: initial.operationID,
-                                 revision: initial.requestRevision, receipt: .unknown)
-                return NativeForegroundOperationDiagnostic(operationID: initial.operationID,
-                    senderID: initial.senderID, messageID: initial.messageID,
-                    requestRevision: initial.requestRevision, receiptState: "unknown_after_attempt")
-            }
-        }.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
-        return NativeForegroundOperationSnapshot(available: true, operations: operations)
+            }.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
+            return (NativeForegroundOperationSnapshot(available: true, operations: operations), failures)
+        }.value
+        recordDiagnosticEvents(failures)
+        return snapshot
     }
 
-    private static func receiptState(for disposition: IntentDisposition) -> String {
+    nonisolated private static func receiptState(for disposition: IntentDisposition) -> String {
         switch disposition {
         case .pending: "pending_unconfirmed"
         case let .accepted(sequence): "relay_accepted_sequence_\(sequence.map { String($0) } ?? "unknown")_awaiting_terminal_state"
@@ -1605,7 +1642,10 @@ final class NativeRelayLifecycle {
                 case .nativeSyncResynced:
                     self.recordDiagnostic(.relay, .ordinaryReplay, .completed, attemptID: transportAttemptID)
                 case .nativeSyncAcknowledged:
-                    self.recordDiagnostic(.relay, .acknowledgement, .completed, attemptID: transportAttemptID)
+                    // The core emits the correlated acknowledgement diagnostic
+                    // at this same boundary. Keep progress without a second
+                    // identical journal rewrite for every successful ACK.
+                    break
                 case .postAckDrainBegan, .postAckDrainFinished(_):
                     break
                 }

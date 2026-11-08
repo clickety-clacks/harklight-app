@@ -153,6 +153,8 @@ public actor NativeRelayCore {
     private var inboxViewUnsupportedForConnection = false
     private var inboxViewFetchInProgress = false
     private var pendingInboxViewRevision: ExactText?
+    private var inboxViewNoticeTask: Task<Void, Never>?
+    private var latestInboxViewNotice: ExactText?
     private var messageOpenUnsupportedForConnection = false
     private var pendingMessageOpenDrainRequested = false
     private var postCheckpointAcknowledgementGateOpen = false
@@ -404,6 +406,9 @@ public actor NativeRelayCore {
 
     public func deactivate() {
         active = false
+        inboxViewNoticeTask?.cancel()
+        inboxViewNoticeTask = nil
+        latestInboxViewNotice = nil
         postCheckpointInboxConsumerTask?.cancel()
         postCheckpointInboxConsumerTask = nil
         postCheckpointAcknowledgementTask?.cancel()
@@ -1182,7 +1187,7 @@ public actor NativeRelayCore {
                 let frame = try await eventStream.nextPostCheckpointInboxEvent()
                 let update = try wire.decodeUpdate(frame)
                 if case let .viewChanged(revision) = update {
-                    await refreshInboxView(using: eventStream, noticedRevision: revision)
+                    scheduleInboxViewRefresh(using: eventStream, noticedRevision: revision)
                     continue
                 }
                 if case .ignoredUnsequenced = update { continue }
@@ -1236,6 +1241,27 @@ public actor NativeRelayCore {
         }
     }
 
+    private func scheduleInboxViewRefresh(using transport: any AuthenticatedInboxPagingSession,
+                                         noticedRevision: ExactText) {
+        guard active, !inboxViewUnsupportedForConnection else { return }
+        latestInboxViewNotice = noticedRevision
+        guard inboxViewNoticeTask == nil else { return }
+        // View replies share the socket reader with ordinary events. Keep its
+        // bounded inbox mailbox draining while a view request waits for a reply.
+        inboxViewNoticeTask = Task { [weak self] in
+            guard let self else { return }
+            await self.refreshNoticedInboxViews(using: transport)
+        }
+    }
+
+    private func refreshNoticedInboxViews(using transport: any AuthenticatedInboxPagingSession) async {
+        defer { inboxViewNoticeTask = nil }
+        while active, !Task.isCancelled, let revision = latestInboxViewNotice {
+            latestInboxViewNotice = nil
+            await refreshInboxView(using: transport, noticedRevision: revision)
+        }
+    }
+
     private func refreshInboxView(using transport: any AuthenticatedInboxPagingSession,
                                   noticedRevision: ExactText? = nil) async {
         guard !inboxViewUnsupportedForConnection else { return }
@@ -1257,6 +1283,7 @@ public actor NativeRelayCore {
             do {
                 let reply = try await transport.inboxRequest(
                     inboxWire.viewGet(knownRevision: knownRevision, ref: ref), ref: ref)
+                guard active else { return }
                 switch inboxWire.decodeViewGet(reply, ref: ref, knownRevision: knownRevision) {
                 case let .updated(view):
                     try store.setInboxView(view, context: context)
