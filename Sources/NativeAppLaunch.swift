@@ -1713,6 +1713,13 @@ final class LivePresentationStore {
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
     }
 
+    static func discussionRejectionMessage(for reason: ExactText) -> String {
+        guard reason.rawValue != "closed" else {
+            return "This request's chat is closed. Your message was not sent."
+        }
+        return "Not delivered: " + reason.rawValue + ". Draft and files retained."
+    }
+
     func sendDiscussion(for key: RequestKey, revision: UInt64,
                         onResult: ((Bool) -> Void)? = nil) {
         guard !isReadOnly, conversationUnavailableMessage == nil else { return }
@@ -1744,7 +1751,7 @@ final class LivePresentationStore {
                             conversationError = nil
                             onResult?(true)
                         case let .rejected(reason):
-                            conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
+                            conversationError = Self.discussionRejectionMessage(for: reason)
                             onResult?(false)
                         case .unresolved:
                             conversationError = "Submission unconfirmed. Retry uses the same saved operation."
