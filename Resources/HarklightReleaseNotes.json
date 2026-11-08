@@ -1,9 +1,46 @@
 {
   "entries": [
     {
-      "id": "fresh-release-notes-follow-up",
+      "id": "post-139-inbox-and-chat-updates",
       "marketingVersion": "0.1.0",
       "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "superseded-chat-history",
+          "symbol": "bubble.left.and.bubble.right",
+          "title": "Read chats after a request is replaced",
+          "detail": "You can still open a replaced request’s chat history, but you can’t send new messages there."
+        },
+        {
+          "id": "reply-text-clears-search",
+          "symbol": "magnifyingglass",
+          "title": "Keep replies clear of Search",
+          "detail": "On compact screens, the floating Search field no longer covers the end of a reply."
+        },
+        {
+          "id": "inbox-and-replied-refresh",
+          "symbol": "arrow.clockwise",
+          "title": "Refresh Inbox and Replied",
+          "detail": "Pull down on Inbox or Replied to refresh either list."
+        },
+        {
+          "id": "message-open-view-record",
+          "symbol": "eye",
+          "title": "Opening a message records your view",
+          "detail": "Opening a message records that you viewed it on your account."
+        },
+        {
+          "id": "new-section-spacing",
+          "symbol": "tray.full",
+          "title": "A more compact New section",
+          "detail": "There’s less extra space around the New section."
+        }
+      ]
+    },
+    {
+      "id": "fresh-release-notes-follow-up",
+      "marketingVersion": "0.1.0",
+      "testFlightBuildNumber": 139,
       "highlights": [
         {
           "id": "grouped-replies-and-retractions",

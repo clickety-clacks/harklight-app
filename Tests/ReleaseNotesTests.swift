@@ -106,17 +106,22 @@ final class ReleaseNotesTests: XCTestCase {
         let document = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         let entries = try XCTUnwrap(document["entries"] as? [[String: Any]])
-        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.count, 2)
         XCTAssertNil(entries.first { $0["id"] as? String == "fresh-release-notes" })
         let pendingIdentifier = "fresh-release-notes-follow-up"
-        let rawEntry = try XCTUnwrap(entries.first { $0["id"] as? String == pendingIdentifier })
-        XCTAssertTrue(rawEntry["testFlightBuildNumber"] is NSNull)
+        let pendingEntries = entries.filter { $0["testFlightBuildNumber"] is NSNull }
+        XCTAssertEqual(pendingEntries.compactMap { $0["id"] as? String }, [
+            "post-139-inbox-and-chat-updates"
+        ])
+        let rawStampedEntry = try XCTUnwrap(
+            entries.first { $0["id"] as? String == pendingIdentifier })
+        XCTAssertEqual(rawStampedEntry["testFlightBuildNumber"] as? Int, 139)
 
-        let note = try XCTUnwrap(HarklightReleaseNotes.numberedEntries(
+        let numberedEntries = HarklightReleaseNotes.numberedEntries(
             currentBuildIdentifier: "142", in: bundle)
-            .first { $0.id == pendingIdentifier })
-        XCTAssertEqual(note.buildIdentifier, 142)
-        XCTAssertEqual(note.highlights.map(\.id), [
+        let stampedNote = try XCTUnwrap(numberedEntries.first { $0.id == pendingIdentifier })
+        XCTAssertEqual(stampedNote.buildIdentifier, 139)
+        XCTAssertEqual(stampedNote.highlights.map(\.id), [
             "grouped-replies-and-retractions",
             "formatted-messages",
             "release-build-identification",
@@ -124,18 +129,38 @@ final class ReleaseNotesTests: XCTestCase {
             "responsive-chat-composer",
             "new-replies-across-conversations"
         ])
+        let pendingNote = try XCTUnwrap(
+            numberedEntries.first { $0.id == "post-139-inbox-and-chat-updates" })
+        XCTAssertEqual(pendingNote.buildIdentifier, 142)
+        XCTAssertEqual(pendingNote.highlights.map(\.id), [
+            "superseded-chat-history",
+            "reply-text-clears-search",
+            "inbox-and-replied-refresh",
+            "message-open-view-record",
+            "new-section-spacing"
+        ])
+        XCTAssertEqual(String(localized: pendingNote.highlights[0].detail),
+                       "You can still open a replaced request’s chat history, but you can’t send new messages there.")
+        XCTAssertEqual(String(localized: pendingNote.highlights[1].detail),
+                       "On compact screens, the floating Search field no longer covers the end of a reply.")
+        XCTAssertEqual(String(localized: pendingNote.highlights[2].detail),
+                       "Pull down on Inbox or Replied to refresh either list.")
+        XCTAssertEqual(String(localized: pendingNote.highlights[3].detail),
+                       "Opening a message records that you viewed it on your account.")
+        XCTAssertEqual(String(localized: pendingNote.highlights[4].detail),
+                       "There’s less extra space around the New section.")
 
-        let messageTextDetail = try XCTUnwrap(note.highlights.first {
+        let messageTextDetail = try XCTUnwrap(stampedNote.highlights.first {
             $0.id == "dynamic-type-message-text"
         })
         XCTAssertEqual(String(localized: messageTextDetail.detail),
                        "Message details and inbox rows use a readable standard size and adjust to your device’s text-size setting.")
-        let composerDetail = try XCTUnwrap(note.highlights.first {
+        let composerDetail = try XCTUnwrap(stampedNote.highlights.first {
             $0.id == "responsive-chat-composer"
         })
         XCTAssertEqual(String(localized: composerDetail.detail),
                        "Typing a message stays responsive while you work with attachments and other message controls.")
-        let repliesDetail = try XCTUnwrap(note.highlights.first {
+        let repliesDetail = try XCTUnwrap(stampedNote.highlights.first {
             $0.id == "new-replies-across-conversations"
         })
         XCTAssertEqual(String(localized: repliesDetail.detail),
