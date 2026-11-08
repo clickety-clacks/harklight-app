@@ -2658,9 +2658,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let publishedRequests = (state.replayPublishedRequests ?? state.requests).mapValues { original in
             effectiveRequest(for: original.key) ?? original
         }
-        let visibleKeys = Set(publishedRequests.keys)
-        let visibleDrafts = state.drafts.filter { visibleKeys.contains($0.key) }
-        let visibleSessions = state.fixtureSessions.filter { visibleKeys.contains($0.key) }
+        let visibleDrafts: [RequestKey: RequestDraft]
+        let visibleSessions: [RequestKey: RequestSession]
+        if state.replayPublishedRequests == nil {
+            // Outside replay, these maps are already scoped to accepted requests.
+            // A partial replay view is the only snapshot that needs to filter them.
+            visibleDrafts = state.drafts
+            visibleSessions = state.fixtureSessions
+        } else {
+            let visibleKeys = Set(publishedRequests.keys)
+            visibleDrafts = state.drafts.filter { visibleKeys.contains($0.key) }
+            visibleSessions = state.fixtureSessions.filter { visibleKeys.contains($0.key) }
+        }
         let sortedOutbox = state.outboxOrder.compactMap { state.intents[$0] }
         let inboxCurrentKeys: Set<RequestKey>?
         if state.replayBarrier != nil {
