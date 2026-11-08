@@ -74,6 +74,13 @@ final class ConversationPresentationTests: XCTestCase {
             current: "A later edit", currentEdit: 4), "A later edit")
     }
 
+    func testClosedDiscussionRefusalUsesExactClientCopy() {
+        XCTAssertEqual(LivePresentationStore.discussionRejectionMessage(for: ExactText("closed")),
+                       "This request's chat is closed. Your message was not sent.")
+        XCTAssertEqual(LivePresentationStore.discussionRejectionMessage(for: ExactText("stale_revision")),
+                       "Not delivered: stale_revision. Draft and files retained.")
+    }
+
     func testSentChatAgesToNotDeliveredYetAtTwoMinutesWithoutDeclaringFailure() {
         var facts = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
         let listening = ConversationAvailabilityObservation(
