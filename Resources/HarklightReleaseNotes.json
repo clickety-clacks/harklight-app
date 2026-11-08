@@ -3,7 +3,7 @@
     {
       "id": "post-139-inbox-and-chat-updates",
       "marketingVersion": "0.1.0",
-      "testFlightBuildNumber": null,
+      "testFlightBuildNumber": 144,
       "highlights": [
         {
           "id": "superseded-chat-history",
@@ -77,6 +77,19 @@
           "symbol": "bubble.left.and.bubble.right",
           "title": "Keep track of replies across conversations",
           "detail": "Reading a reply in one conversation does not mark new replies in other conversations as read."
+        }
+      ]
+    },
+    {
+      "id": "post-144-inbox-catch-up",
+      "marketingVersion": "0.1.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "inbox-catch-up-scroll-responsiveness",
+          "symbol": "arrow.down.circle",
+          "title": "Keep scrolling as Inbox catches up",
+          "detail": "Inbox prepares messages and conversation history in the background, helping it stay responsive as new updates arrive."
         }
       ]
     }

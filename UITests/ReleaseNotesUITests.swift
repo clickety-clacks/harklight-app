@@ -3,7 +3,7 @@ import XCTest
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
     func testCurrentReleaseOpensOnFirstInstallAndShowsItsBuildInSettings() {
-        let simulatedCurrentBuild = "142" // Synthetic metadata; no archive mapping is claimed.
+        let simulatedCurrentBuild = "9000" // Synthetic metadata; no archive mapping is claimed.
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
@@ -15,13 +15,15 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Read chats after a request is replaced"].exists,
+        XCTAssertTrue(app.staticTexts["Keep scrolling as Inbox catches up"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts[
-            "You can still open a replaced request’s chat history, but you can’t send new messages there."
+            "Inbox prepares messages and conversation history in the background, helping it stay responsive as new updates arrive."
         ].exists, app.debugDescription)
         XCTAssertFalse(app.staticTexts["Keep track of replies across conversations"].exists,
                        "A fresh install shows only the current pending entry.")
+        XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
+                       "A fresh install does not show highlights from an earlier release.")
 
         app.buttons["Done"].tap()
         let settings = app.buttons["inbox-settings"]
@@ -36,6 +38,10 @@ final class ReleaseNotesUITests: XCTestCase {
         revealHistoryElement(buildHeader, in: app)
         XCTAssertTrue(buildHeader.exists,
                       "Settings keeps the current release's build label.")
+        let build144Header = app.staticTexts["Version 0.1.0 · Build 144"]
+        revealHistoryElement(build144Header, in: app)
+        XCTAssertTrue(build144Header.exists,
+                      "Settings preserves the earlier entry's observed TestFlight build.")
         let shippedBuildHeader = app.staticTexts["Version 0.1.0 · Build 139"]
         revealHistoryElement(shippedBuildHeader, in: app)
         XCTAssertTrue(shippedBuildHeader.exists,
@@ -118,10 +124,10 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(updateTitle.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       "The update sheet identifies the released build and version.")
-        XCTAssertTrue(app.staticTexts["Read chats after a request is replaced"].exists,
+        XCTAssertTrue(app.staticTexts["Keep scrolling as Inbox catches up"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts[
-            "You can still open a replaced request’s chat history, but you can’t send new messages there."
+            "Inbox prepares messages and conversation history in the background, helping it stay responsive as new updates arrive."
         ].exists, app.debugDescription)
         XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
                        "The stamped Build139 entry is future history at this synthetic build.")
