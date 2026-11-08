@@ -99,29 +99,30 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(secondLaunch.notesToShow.isEmpty)
     }
 
-    func testBundledPendingReleaseNoteCoversCurrentMessageImprovements() throws {
+    func testBundledReleaseNotesPreserveBuild144AndAddPendingInboxCatchUpNote() throws {
         let bundle = Bundle(for: ReleaseNotesTests.self)
         let url = try XCTUnwrap(bundle.url(
             forResource: "HarklightReleaseNotes", withExtension: "json"))
         let document = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         let entries = try XCTUnwrap(document["entries"] as? [[String: Any]])
-        XCTAssertEqual(entries.count, 2)
+        XCTAssertEqual(entries.count, 3)
         XCTAssertNil(entries.first { $0["id"] as? String == "fresh-release-notes" })
-        let pendingIdentifier = "fresh-release-notes-follow-up"
+        let build139Identifier = "fresh-release-notes-follow-up"
         let pendingEntries = entries.filter { $0["testFlightBuildNumber"] is NSNull }
         XCTAssertEqual(pendingEntries.compactMap { $0["id"] as? String }, [
-            "post-139-inbox-and-chat-updates"
+            "post-144-inbox-catch-up"
         ])
         let rawStampedEntry = try XCTUnwrap(
-            entries.first { $0["id"] as? String == pendingIdentifier })
+            entries.first { $0["id"] as? String == build139Identifier })
         XCTAssertEqual(rawStampedEntry["testFlightBuildNumber"] as? Int, 139)
 
+        // This synthetic build exercises the pending-note fallback only; it is not a release attribution.
         let numberedEntries = HarklightReleaseNotes.numberedEntries(
-            currentBuildIdentifier: "142", in: bundle)
-        let stampedNote = try XCTUnwrap(numberedEntries.first { $0.id == pendingIdentifier })
-        XCTAssertEqual(stampedNote.buildIdentifier, 139)
-        XCTAssertEqual(stampedNote.highlights.map(\.id), [
+            currentBuildIdentifier: "9000", in: bundle)
+        let build139Note = try XCTUnwrap(numberedEntries.first { $0.id == build139Identifier })
+        XCTAssertEqual(build139Note.buildIdentifier, 139)
+        XCTAssertEqual(build139Note.highlights.map(\.id), [
             "grouped-replies-and-retractions",
             "formatted-messages",
             "release-build-identification",
@@ -129,38 +130,49 @@ final class ReleaseNotesTests: XCTestCase {
             "responsive-chat-composer",
             "new-replies-across-conversations"
         ])
-        let pendingNote = try XCTUnwrap(
+        let build144Note = try XCTUnwrap(
             numberedEntries.first { $0.id == "post-139-inbox-and-chat-updates" })
-        XCTAssertEqual(pendingNote.buildIdentifier, 142)
-        XCTAssertEqual(pendingNote.highlights.map(\.id), [
+        XCTAssertEqual(build144Note.buildIdentifier, 144)
+        XCTAssertEqual(build144Note.highlights.map(\.id), [
             "superseded-chat-history",
             "reply-text-clears-search",
             "inbox-and-replied-refresh",
             "message-open-view-record",
             "new-section-spacing"
         ])
-        XCTAssertEqual(String(localized: pendingNote.highlights[0].detail),
+        XCTAssertEqual(String(localized: build144Note.highlights[0].detail),
                        "You can still open a replaced request’s chat history, but you can’t send new messages there.")
-        XCTAssertEqual(String(localized: pendingNote.highlights[1].detail),
+        XCTAssertEqual(String(localized: build144Note.highlights[1].detail),
                        "On compact screens, the floating Search field no longer covers the end of a reply.")
-        XCTAssertEqual(String(localized: pendingNote.highlights[2].detail),
+        XCTAssertEqual(String(localized: build144Note.highlights[2].detail),
                        "Pull down on Inbox or Replied to refresh either list.")
-        XCTAssertEqual(String(localized: pendingNote.highlights[3].detail),
+        XCTAssertEqual(String(localized: build144Note.highlights[3].detail),
                        "Opening a message records that you viewed it on your account.")
-        XCTAssertEqual(String(localized: pendingNote.highlights[4].detail),
+        XCTAssertEqual(String(localized: build144Note.highlights[4].detail),
                        "There’s less extra space around the New section.")
 
-        let messageTextDetail = try XCTUnwrap(stampedNote.highlights.first {
+        let inboxCatchUpNote = try XCTUnwrap(
+            numberedEntries.first { $0.id == "post-144-inbox-catch-up" })
+        XCTAssertEqual(inboxCatchUpNote.buildIdentifier, 9000)
+        XCTAssertEqual(inboxCatchUpNote.highlights.map(\.id), [
+            "inbox-catch-up-scroll-responsiveness"
+        ])
+        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[0].title),
+                       "Keep scrolling as Inbox catches up")
+        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[0].detail),
+                       "Inbox prepares messages and conversation history in the background, helping it stay responsive as new updates arrive.")
+
+        let messageTextDetail = try XCTUnwrap(build139Note.highlights.first {
             $0.id == "dynamic-type-message-text"
         })
         XCTAssertEqual(String(localized: messageTextDetail.detail),
                        "Message details and inbox rows use a readable standard size and adjust to your device’s text-size setting.")
-        let composerDetail = try XCTUnwrap(stampedNote.highlights.first {
+        let composerDetail = try XCTUnwrap(build139Note.highlights.first {
             $0.id == "responsive-chat-composer"
         })
         XCTAssertEqual(String(localized: composerDetail.detail),
                        "Typing a message stays responsive while you work with attachments and other message controls.")
-        let repliesDetail = try XCTUnwrap(stampedNote.highlights.first {
+        let repliesDetail = try XCTUnwrap(build139Note.highlights.first {
             $0.id == "new-replies-across-conversations"
         })
         XCTAssertEqual(String(localized: repliesDetail.detail),
