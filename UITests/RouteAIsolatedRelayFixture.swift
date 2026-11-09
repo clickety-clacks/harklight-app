@@ -72,7 +72,6 @@ final class RouteAIsolatedRelayFixture {
             let credential = try ServerCredential.create()
             let tls = NWProtocolTLS.Options()
             guard let localIdentity = sec_identity_create(credential.identity) else {
-                credential.remove()
                 throw FixtureError.identityUnavailable
             }
             sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
@@ -81,10 +80,7 @@ final class RouteAIsolatedRelayFixture {
             let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
             parameters.allowLocalEndpointReuse = true
             parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)
-            let listener: NWListener
-            do {
-                listener = try NWListener(using: parameters, on: .any)
-            } catch { throw error }
+            let listener = try NWListener(using: parameters, on: .any)
             self.credential = credential
             self.rootDER = credential.certificateDER
             self.listener = listener
