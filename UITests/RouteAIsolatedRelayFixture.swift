@@ -224,8 +224,8 @@ final class RouteAIsolatedRelayFixture {
                       "request_revision": frame["request_revision"] as? Int ?? 1,
                       "opened": true], on: connection)
             case "view_get":
-                send(["v": 1, "type": "error", "ref": frame["ref"] as? String ?? "",
-                      "reason": "unknown_type"], on: connection)
+                send(["v": 1, "type": "ok", "ref": frame["ref"] as? String ?? "",
+                      "view_rev": "routea-ui-view-1", "entries": []], on: connection)
             case "answer":
                 acceptAnswer(frame, on: connection)
             default:
