@@ -405,10 +405,17 @@ final class RouteAIsolatedRelayFixture {
                 ]
             ]
             var keyError: Unmanaged<CFError>?
-            guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &keyError),
-                  let publicKey = SecKeyCopyPublicKey(privateKey),
-                  let publicKeyDER = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else {
-                throw FixtureError.keyCreation
+            guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &keyError) else {
+                let detail = keyError.map { String(describing: $0.takeRetainedValue()) } ?? "no Security error detail"
+                throw FixtureError.keyCreation(detail)
+            }
+            guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
+                throw FixtureError.publicKeyUnavailable
+            }
+            var publicKeyError: Unmanaged<CFError>?
+            guard let publicKeyDER = SecKeyCopyExternalRepresentation(publicKey, &publicKeyError) as Data? else {
+                let detail = publicKeyError.map { String(describing: $0.takeRetainedValue()) } ?? "no Security error detail"
+                throw FixtureError.publicKeyExport(detail)
             }
             let certificateDER = try Self.selfSignedLocalhostCertificate(
                 publicKeyDER: publicKeyDER, privateKey: privateKey)
@@ -536,11 +543,22 @@ final class RouteAIsolatedRelayFixture {
         }
     }
 
-    private enum FixtureError: Error {
+    private enum FixtureError: Error, LocalizedError {
         case identityUnavailable
         case listenerMissingPort
-        case keyCreation
+        case keyCreation(String)
+        case publicKeyUnavailable
+        case publicKeyExport(String)
         case certificateCreation
         case keychain(OSStatus)
+
+        var errorDescription: String? {
+            switch self {
+            case let .keyCreation(detail): "Temporary signing-key creation failed: \(detail)"
+            case .publicKeyUnavailable: "The temporary signing key had no public key."
+            case let .publicKeyExport(detail): "Temporary public-key export failed: \(detail)"
+            default: nil
+            }
+        }
     }
 }
