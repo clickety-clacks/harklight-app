@@ -54,7 +54,7 @@ final class RouteAIsolatedRelayFixture {
         private var receivedFrameTypes: [String: Int] = [:]
         private var answerFrameRejection: String?
         private var terminalPublished = false
-        private var acknowledgedHighWater: UInt64 = 0
+        private var terminalRefreshCount = 0
         private var stopped = false
 
         let rootDER: Data
@@ -71,13 +71,21 @@ final class RouteAIsolatedRelayFixture {
             return answerOperations.count
         }
 
+        var acknowledgementCount: Int {
+            condition.lock()
+            defer { condition.unlock() }
+            return (receivedFrameTypes["ack"] ?? 0) +
+                (receivedFrameTypes["conversation_ack"] ?? 0)
+        }
+
         var requestSummary: String {
             condition.lock()
             defer { condition.unlock() }
             let types = receivedFrameTypes.keys.sorted().map {
                 "\($0):\(receivedFrameTypes[$0] ?? 0)"
             }.joined(separator: ",")
-            return "types=[\(types)] answer_gate=\(answerFrameRejection ?? "not-rejected")"
+            return "types=[\(types)] answer_gate=\(answerFrameRejection ?? "not-rejected") " +
+                "terminal_refreshes=\(terminalRefreshCount)"
         }
 
         init() throws {
@@ -194,13 +202,10 @@ final class RouteAIsolatedRelayFixture {
             switch type {
             case "resync":
                 replyToResync(on: connection)
-            case "ack":
-                let sequence = (frame["seq"] as? NSNumber)?.uint64Value ?? 0
-                condition.lock()
-                acknowledgedHighWater = max(acknowledgedHighWater, sequence)
-                condition.broadcast()
-                condition.unlock()
-                send(["v": 1, "type": "ok", "ref": "native-ack", "seq": sequence], on: connection)
+            case "ack", "conversation_ack":
+                // Route A sends neither event nor conversation acknowledgments.
+                // The frame summary lets the UI test detect either violation.
+                break
             case "conversation_open":
                 send(["v": 1, "type": "ok", "ref": "native-conversation-sync",
                       "origin_https_port": 9443], on: connection)
@@ -233,6 +238,12 @@ final class RouteAIsolatedRelayFixture {
         private func replyToResync(on connection: NWConnection) {
             let events = currentEvents()
             let highWater = events.compactMap { ($0["seq"] as? NSNumber)?.uint64Value }.max() ?? 0
+            if events.contains(where: { ($0["type"] as? String) == "lifecycle" }) {
+                condition.lock()
+                terminalRefreshCount += 1
+                condition.broadcast()
+                condition.unlock()
+            }
             send(["v": 1, "type": "ok", "ref": "native-sync"], on: connection)
             for event in events { send(event, on: connection) }
             send(["v": 1, "type": "resynced", "seq": highWater], on: connection)
@@ -293,12 +304,12 @@ final class RouteAIsolatedRelayFixture {
             return acceptedOperationID
         }
 
-        func waitForTerminalAcknowledgement(timeout: TimeInterval) -> Bool {
+        func waitForTerminalLifecycleRefresh(timeout: TimeInterval) -> Bool {
             condition.lock()
             defer { condition.unlock() }
             let deadline = Date().addingTimeInterval(timeout)
-            while acknowledgedHighWater < 3, condition.wait(until: deadline) {}
-            return acknowledgedHighWater >= 3
+            while terminalRefreshCount == 0, condition.wait(until: deadline) {}
+            return terminalRefreshCount > 0
         }
 
         func stop() {

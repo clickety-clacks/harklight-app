@@ -163,18 +163,18 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(finish.isEnabled, app.debugDescription)
         finish.tap()
-        let acceptedOperationID = relay.waitForAcceptedAnswer(timeout: 10)
-        let deliveryWarningVisible = app.buttons["request-delivery-warning"]
-            .waitForExistence(timeout: 1)
-        let finishStillEnabled = finish.exists && finish.isEnabled
-        XCTAssertNotNil(acceptedOperationID,
-                        "The relay accepts only the explicit answer operation sent from this action. " +
-                            "\(relay.requestSummary) warning_visible=\(deliveryWarningVisible) " +
-                            "send_enabled_after_tap=\(finishStillEnabled)")
+        guard let acceptedOperationID = relay.waitForAcceptedAnswer(timeout: 10) else {
+            let warning = deliveryFailureClass(in: app)
+            XCTFail("No answer reached the relay after explicit Send. \(relay.requestSummary) " +
+                    "warning=\(warning) send_enabled_after_tap=\(finish.exists && finish.isEnabled)")
+            return
+        }
         XCTAssertEqual(relay.answerOperationCount, 1,
                        "The user's Send action produced one answer operation.")
-        XCTAssertTrue(relay.waitForTerminalAcknowledgement(timeout: 10),
-                      "The client applies and acknowledges the server's answered lifecycle frame.")
+        XCTAssertTrue(relay.waitForTerminalLifecycleRefresh(timeout: 10),
+                      "A correlated resync returns the server-confirmed answered lifecycle.")
+        XCTAssertEqual(relay.acknowledgementCount, 0,
+                       "Route A applies replay without sending acknowledgments.")
         showList(app)
         repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
@@ -185,7 +185,38 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertFalse(original.waitForExistence(timeout: 2),
                        "The server-confirmed answered request is absent from Inbox.")
         XCTAssertEqual(acceptedOperationID, relay.waitForAcceptedAnswer(timeout: 1),
-                       "The acknowledged lifecycle follows the same accepted answer operation.")
+                       "The refreshed lifecycle follows the same accepted answer operation.")
+    }
+
+    private func deliveryFailureClass(in app: XCUIApplication) -> String {
+        let warning = app.buttons["request-delivery-warning"]
+        guard warning.waitForExistence(timeout: 1) else { return "warning-absent" }
+        warning.tap()
+        let summary = app.staticTexts["failed-response-summary"]
+        let detail = app.staticTexts["failed-response-detail"]
+        guard summary.waitForExistence(timeout: 3), detail.waitForExistence(timeout: 3) else {
+            return "dialog-incomplete"
+        }
+        let summaryText = summary.label.lowercased()
+        let detailText = detail.label.lowercased()
+        let summaryClass = summaryText.contains("may not have gone through")
+            ? "unconfirmed" : "not-sent-or-other"
+        let detailClass: String
+        if detailText.contains("disconnected before the send frame") ||
+            detailText.contains("before the send frame was transmitted") {
+            detailClass = "relay-disconnected-before-transmit"
+        } else if detailText.contains("could not be saved before sending") {
+            detailClass = "draft-save-failed"
+        } else if detailText.contains("already bound to another response") {
+            detailClass = "operation-id-bound-to-other-response"
+        } else if detailText.contains("changed before the server accepted") {
+            detailClass = "request-revision-changed"
+        } else if detailText.contains("does not support this answer type") {
+            detailClass = "unsupported-answer"
+        } else {
+            detailClass = "other"
+        }
+        return "\(summaryClass)/\(detailClass)"
     }
 
     func testSubmittedRequestHistoryRemainsWhileLocalExamplesAreUsed() {
