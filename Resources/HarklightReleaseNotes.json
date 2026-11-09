@@ -96,6 +96,12 @@
           "symbol": "tray.and.arrow.down",
           "title": "Receive new messages during refresh",
           "detail": "Inbox continues receiving new messages while its current view refreshes."
+        },
+        {
+          "id": "separate-conversation-drafts",
+          "symbol": "bubble.left.and.bubble.right",
+          "title": "Keep drafts for each conversation",
+          "detail": "Each conversation keeps its own draft, and a message sends only when you tap Send while connected."
         }
       ]
     }

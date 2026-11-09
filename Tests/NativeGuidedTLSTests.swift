@@ -308,9 +308,10 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         func exchange(_ request: String) async -> String {
             await gate.enter()
-            defer { Task { await gate.leave() } }
             await channel.send(request)
-            return await channel.receive()
+            let reply = await channel.receive()
+            await gate.leave()
+            return reply
         }
 
         let acknowledgement = Task { await exchange("ack:seq:7") }

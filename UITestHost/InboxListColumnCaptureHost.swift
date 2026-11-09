@@ -11,11 +11,12 @@ struct InboxListColumnCaptureHost: View {
     @State private var selected: InboxSelection?
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
-    @State private var newMessageAreaStore: NewMessageAreaStore
+    @State private var sampleFixture: SampleFixtureDomain?
+    @State private var newMessageAreaStore: NewMessageAreaStore?
     @State private var replyItemAreaStore: ReplyItemAreaStore?
+    @State private var fixtureLoadError: String?
     private let captureState: InboxListColumnCaptureFixture.State
-    private let sampleFixture: SampleFixtureDomain
-    private let rows: [InboxItem]
+    @State private var rows: [InboxItem] = []
 
     init() {
         let argument = ProcessInfo.processInfo.arguments.first {
@@ -26,52 +27,53 @@ struct InboxListColumnCaptureHost: View {
         guard let state else {
             preconditionFailure("The isolated inbox capture host needs a known row state.")
         }
-        let sampleFixture: SampleFixtureDomain
-        do {
-            let fixture = try SampleFixtureDomain()
-            try fixture.populate()
-            sampleFixture = fixture
-        } catch {
-            preconditionFailure("The isolated inbox capture host could not load its local request: \(error)")
-        }
         captureState = state
-        self.sampleFixture = sampleFixture
-        let fixture = InboxListColumnCaptureFixture.make(for: state, sampleFixture: sampleFixture)
-        rows = fixture.rows.map(InboxItem.request)
-        _selected = State(initialValue: fixture.selected)
-        _newMessageAreaStore = State(initialValue: fixture.newMessageAreaStore)
-        _replyItemAreaStore = State(initialValue: fixture.replyItemAreaStore)
+        _selected = State(initialValue: nil)
+        _sampleFixture = State(initialValue: nil)
+        _newMessageAreaStore = State(initialValue: nil)
+        _replyItemAreaStore = State(initialValue: nil)
     }
 
     @ViewBuilder
     var body: some View {
-        if captureState == .fullWidthHigh || captureState == .replyItemFullWidth {
-            NavigationStack {
-                productionInboxList
-                    .navigationDestination(for: InboxSelection.self) { selection in
-                        selectedDetail(for: selection)
+        Group {
+            if sampleFixture != nil, newMessageAreaStore != nil {
+                if captureState == .fullWidthHigh || captureState == .replyItemFullWidth {
+                    NavigationStack {
+                        productionInboxList
+                            .navigationDestination(for: InboxSelection.self) { selection in
+                                selectedDetail(for: selection)
+                            }
                     }
-            }
-            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
-            .overlay(alignment: .topLeading) { accessibilityProbe }
-        } else {
-            NavigationSplitView {
-                productionInboxList
-                    .navigationSplitViewColumnWidth(min: 250, ideal: 250, max: 250)
-            } detail: {
-                NavigationStack {
-                    selectedDetail(for: selected)
+                    .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+                    .overlay(alignment: .topLeading) { accessibilityProbe }
+                } else {
+                    NavigationSplitView {
+                        productionInboxList
+                            .navigationSplitViewColumnWidth(min: 250, ideal: 250, max: 250)
+                    } detail: {
+                        NavigationStack {
+                            selectedDetail(for: selected)
+                        }
+                    }
+                    .navigationSplitViewStyle(.balanced)
+                    .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+                    .overlay(alignment: .topLeading) { accessibilityProbe }
                 }
+            } else if let fixtureLoadError {
+                ContentUnavailableView(fixtureLoadError, systemImage: "exclamationmark.triangle")
+            } else {
+                ProgressView()
+                    .accessibilityIdentifier("inbox-list-capture-loading")
             }
-            .navigationSplitViewStyle(.balanced)
-            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
-            .overlay(alignment: .topLeading) { accessibilityProbe }
         }
+        .task { await loadFixtureIfNeeded() }
     }
 
     @ViewBuilder
     private func selectedDetail(for selection: InboxSelection?) -> some View {
-        if let selection,
+        if let sampleFixture,
+           let selection,
            case let .request(key) = selection,
            let row = rows.compactMap({ item -> InboxRequestRow? in
                guard case let .request(row) = item else { return nil }
@@ -144,7 +146,7 @@ struct InboxListColumnCaptureHost: View {
                   row.key.messageID.rawValue == "sample-markdown-acceptance" else { return nil }
             return row
         }).first,
-              let entry = newMessageAreaStore.entries.first(where: { $0.key == row.key }) else {
+              let entry = newMessageAreaStore?.entries.first(where: { $0.key == row.key }) else {
             return "missing"
         }
         return entry.firstSeenAt.map { String($0.timeIntervalSince1970) } ?? "unseen"
@@ -170,39 +172,59 @@ struct InboxListColumnCaptureHost: View {
         }
     }
 
+    @ViewBuilder
     private var productionInboxList: some View {
-        InboxList(
-            tab: .inbox,
-            rows: rows,
-            warnings: [],
-            conversationStore: sampleFixture.viewModel,
-            newMessageAreaStore: newMessageAreaStore,
-            replyItemAreaStore: replyItemAreaStore,
-            openReplyItem: { _, _, _ in },
-            isWarningPresented: $isWarningPresented,
-            selected: $selected,
-            workspaceTab: $workspaceTab,
-            search: $search,
-            lastViewedSelection: nil,
-            restoreLastViewed: false,
-            didRestoreLastViewed: {},
-            showSettings: {},
-            markSeen: { _ in },
-            markNoComment: { _ in },
-            clearRetracted: { _ in },
-            fetchOlderInboxPage: nil,
-            notificationNavigation: nil,
-            triggerNotification: nil
-        )
-        .background {
-            GeometryReader { geometry in
-                Color.clear
-                    .frame(width: 1, height: 1)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(Text(verbatim: "Inbox list column width"))
-                    .accessibilityValue(Text(verbatim: String(Int(geometry.size.width.rounded()))))
-                    .accessibilityIdentifier("priority-capture-list-column-width")
+        if let sampleFixture, let newMessageAreaStore {
+            InboxList(
+                tab: .inbox,
+                rows: rows,
+                warnings: [],
+                conversationStore: sampleFixture.viewModel,
+                newMessageAreaStore: newMessageAreaStore,
+                replyItemAreaStore: replyItemAreaStore,
+                openReplyItem: { _, _, _ in },
+                isWarningPresented: $isWarningPresented,
+                selected: $selected,
+                workspaceTab: $workspaceTab,
+                search: $search,
+                lastViewedSelection: nil,
+                restoreLastViewed: false,
+                didRestoreLastViewed: {},
+                showSettings: {},
+                markSeen: { _ in },
+                markNoComment: { _ in },
+                clearRetracted: { _ in },
+                fetchOlderInboxPage: nil,
+                notificationNavigation: nil,
+                triggerNotification: nil
+            )
+            .background {
+                GeometryReader { geometry in
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(Text(verbatim: "Inbox list column width"))
+                        .accessibilityValue(Text(verbatim: String(Int(geometry.size.width.rounded()))))
+                        .accessibilityIdentifier("priority-capture-list-column-width")
+                }
             }
+        }
+    }
+
+    private func loadFixtureIfNeeded() async {
+        guard sampleFixture == nil, fixtureLoadError == nil else { return }
+        do {
+            let fixture = try await SampleFixtureDomain()
+            try await fixture.populate()
+            let contents = InboxListColumnCaptureFixture.make(for: captureState,
+                                                               sampleFixture: fixture)
+            sampleFixture = fixture
+            rows = contents.rows.map(InboxItem.request)
+            selected = contents.selected
+            newMessageAreaStore = contents.newMessageAreaStore
+            replyItemAreaStore = contents.replyItemAreaStore
+        } catch {
+            fixtureLoadError = "The isolated inbox capture host could not load its local request: \(error)"
         }
     }
 }

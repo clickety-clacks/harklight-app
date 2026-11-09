@@ -3346,7 +3346,7 @@ final class LivePresentationStore {
                     try? await composerDraftPersistence.remove(at: address)
                 } else {
                     draft.currentAttemptUnsettled = false
-                    draft.earlierVersionMayHaveBeenSent = false
+                    draft.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
                     draft.failure = nil
                     draft.failureOperationID = nil
                     try? await composerDraftPersistence.flush(draft, at: address)

@@ -319,7 +319,7 @@ private struct ConversationHistoryContent: View, Equatable {
                 LazyVStack(alignment: .leading, spacing: 18) {
                     if let earlier = earlierAnswerDraft,
                        !hasNotAcceptedCardForRetainedAnswer {
-                        DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
+                        DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft") {
                             HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
                         }.accessibilityIdentifier("conversation-earlier-answer")
                     }

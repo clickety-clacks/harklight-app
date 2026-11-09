@@ -540,7 +540,7 @@ final class ReplyEditorDraftSession {
                 hasLocalChanges = false
             } else {
                 deliveryDraft.currentAttemptUnsettled = false
-                deliveryDraft.earlierVersionMayHaveBeenSent = false
+                deliveryDraft.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
                 deliveryDraft.failure = nil
                 deliveryDraft.failureOperationID = nil
                 await flushCurrentDraft()
@@ -753,6 +753,7 @@ private struct ReplyChoiceCard: View {
                     .font(.body)
                     .foregroundStyle(Color.white)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
                     .background(replySurface, in: RoundedRectangle(cornerRadius: 12))
@@ -1956,6 +1957,25 @@ struct LiveRequestDetail: View {
         return Self.canEditSnapshot(request: request, store: store, context: context)
     }
 
+    private var closedAnswerDraftStatus: String? {
+        let lifecycleIsClosed = switch request.lifecycleStatus {
+        case .answered, .noComment, .cleared, .expired, .superseded: true
+        case .open, .pending: false
+        }
+        guard localExample == nil, fixtureStore == nil,
+              request.informationalSeenStatus == nil,
+              lifecycleIsClosed || store.isRetracted(request.key),
+              let session = localReplySession,
+              session.isDraftLoaded,
+              session.deliveryDraft.content.hasEdits else { return nil }
+        let deliveryDraft = session.deliveryDraft
+        let mayHaveBeenSent = deliveryDraft.currentAttemptUnsettled ||
+            deliveryDraft.earlierVersionMayHaveBeenSent
+        return mayHaveBeenSent
+            ? "This request is closed. This answer, or an earlier version, may have been sent."
+            : "This request is closed. This answer was not sent."
+    }
+
     private var submitLabel: String {
         if noCommentSelected && showsNoCommentUnavailable { return "Retry No comment" }
         if case let .sender(sender) = request.projection { return sender.submissionLabel.rawValue }
@@ -2167,6 +2187,18 @@ struct LiveRequestDetail: View {
                             if canOfferNoComment { noCommentChoice }
                         }
                     }
+                }
+                if controlsReadOnly, localReplySession?.noCommentSelected == true {
+                    Text("No comment")
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("closed-answer-draft-choice")
+                }
+                if let closedAnswerDraftStatus {
+                    Text(closedAnswerDraftStatus)
+                        .font(.caption)
+                        .foregroundStyle(detailColors.secondaryTextColor)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("closed-answer-draft-status")
                 }
                 if request.inboxStateIsCurrent {
                     if storePresentationSnapshot.isRetracted {
@@ -2650,7 +2682,7 @@ struct HistoricalAnswerDraftView: View {
             if let body = request.body {
                 Text(MessageMarkdown.attributed(body.rawValue)).font(.body)
             }
-            Text(retracted ? "Saved answer · request retracted. Its original wording and choices are retained." : "Not delivered · this selection belongs to the earlier question")
+            Text(retracted ? "Saved answer · request retracted. Its original wording and choices are retained." : "Saved answer draft for the earlier question.")
                 .font(.caption).foregroundStyle(.secondary)
             switch request.projection {
             case let .sender(sender):
@@ -2807,18 +2839,29 @@ private struct LiveProjectedInputView: View {
             switch input.kind {
             case let .response(actions):
                 ForEach(actions, id: \.id) { action in
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let artID = action.illustrationID,
-                           let illustration = sender.illustrations.first(where: { $0.id == artID }) {
-                            SenderIllustrationCanvas(illustration: illustration, point: nil,
-                                                     deliveredFiles: request.deliveredFiles,
-                                                     pictureLoader: senderPictureLoader(for: request, store: store))
+                    let selected = draft?.selectedActionID == action.id
+                    let responseText = draft?.textByActionID[action.id]?.rawValue ?? ""
+                    if selected || !responseText.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if let artID = action.illustrationID,
+                               let illustration = sender.illustrations.first(where: { $0.id == artID }) {
+                                SenderIllustrationCanvas(illustration: illustration, point: nil,
+                                                         deliveredFiles: request.deliveredFiles,
+                                                         pictureLoader: senderPictureLoader(for: request, store: store))
+                            }
+                            Text(action.label.rawValue)
+                            if !responseText.isEmpty {
+                                Text(responseText).textSelection(.enabled)
+                            }
                         }
-                        Text(action.label.rawValue)
                     }
                 }
             case .text:
-                EmptyView()
+                if let text = draft?.text?.rawValue, !text.isEmpty {
+                    Text(text)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             case let .point(illustrationID):
                 if let illustration = sender.illustrations.first(where: { $0.id == illustrationID }) {
                     SenderIllustrationCanvas(illustration: illustration, point: draft?.effectivePoint,
@@ -2826,6 +2869,7 @@ private struct LiveProjectedInputView: View {
                                              pictureLoader: senderPictureLoader(for: request, store: store))
                     if let point = draft?.effectivePoint {
                         Text("Horizontal \(point.x), vertical \(point.y)")
+                            .textSelection(.enabled)
                     }
                 }
             }
@@ -2946,7 +2990,7 @@ private struct LiveProjectedInputView: View {
     }
 
     var body: some View {
-        if hideAnswerControls {
+        if hideAnswerControls || readOnly {
             readOnlyContent
         } else {
             switch input.kind {
@@ -3224,7 +3268,17 @@ private struct LiveCompatibilityActions: View {
             if request.informationalSeenStatus == nil {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(actions, id: \.id) { action in
-                        Text(action.label.rawValue)
+                        let target = ReplyEditorTarget(inputID: nil, actionID: action.id.rawValue)
+                        let responseText = replyTextBinding(target).wrappedValue
+                        if selected == action.id || !responseText.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(action.label.rawValue)
+                                if !responseText.isEmpty {
+                                    Text(responseText)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
                     }
                 }
             }
