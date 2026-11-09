@@ -51,7 +51,7 @@ final class ConversationSubmissionTests: XCTestCase {
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult { .unresolved }
         func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {
             if failLimits { throw InstallationTransportError.unexpectedServerFrame }
-            ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: cap)
+            return ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: cap)
         }
         func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
                                     operationID: UUID, limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
