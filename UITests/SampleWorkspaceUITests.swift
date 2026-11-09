@@ -164,7 +164,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(finish.isEnabled, app.debugDescription)
         finish.tap()
         guard let acceptedOperationID = relay.waitForAcceptedAnswer(timeout: 10) else {
-            let warning = deliveryFailureClass(in: app)
+            let warning = deliveryFailureDetail(in: app)
             XCTFail("No answer reached the relay after explicit Send. \(relay.requestSummary) " +
                     "warning=\(warning) send_enabled_after_tap=\(finish.exists && finish.isEnabled)")
             return
@@ -188,7 +188,7 @@ final class SampleWorkspaceUITests: XCTestCase {
                        "The refreshed lifecycle follows the same accepted answer operation.")
     }
 
-    private func deliveryFailureClass(in app: XCUIApplication) -> String {
+    private func deliveryFailureDetail(in app: XCUIApplication) -> String {
         let warning = app.buttons["request-delivery-warning"]
         guard warning.waitForExistence(timeout: 1) else { return "warning-absent" }
         warning.tap()
@@ -197,26 +197,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         guard summary.waitForExistence(timeout: 3), detail.waitForExistence(timeout: 3) else {
             return "dialog-incomplete"
         }
-        let summaryText = summary.label.lowercased()
-        let detailText = detail.label.lowercased()
-        let summaryClass = summaryText.contains("may not have gone through")
-            ? "unconfirmed" : "not-sent-or-other"
-        let detailClass: String
-        if detailText.contains("disconnected before the send frame") ||
-            detailText.contains("before the send frame was transmitted") {
-            detailClass = "relay-disconnected-before-transmit"
-        } else if detailText.contains("could not be saved before sending") {
-            detailClass = "draft-save-failed"
-        } else if detailText.contains("already bound to another response") {
-            detailClass = "operation-id-bound-to-other-response"
-        } else if detailText.contains("changed before the server accepted") {
-            detailClass = "request-revision-changed"
-        } else if detailText.contains("does not support this answer type") {
-            detailClass = "unsupported-answer"
-        } else {
-            detailClass = "other"
-        }
-        return "\(summaryClass)/\(detailClass)"
+        return "summary=\(summary.label); detail=\(detail.label)"
     }
 
     func testSubmittedRequestHistoryRemainsWhileLocalExamplesAreUsed() {
