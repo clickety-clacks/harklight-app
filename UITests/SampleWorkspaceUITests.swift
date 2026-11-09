@@ -165,7 +165,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         finish.tap()
         let acceptedOperationID = relay.waitForAcceptedAnswer(timeout: 10)
         XCTAssertNotNil(acceptedOperationID,
-                        "The relay accepts only the explicit answer operation sent from this action.")
+                        "The relay accepts only the explicit answer operation sent from this action. " +
+                            relay.requestSummary)
         XCTAssertEqual(relay.answerOperationCount, 1,
                        "The user's Send action produced one answer operation.")
         XCTAssertTrue(relay.waitForTerminalAcknowledgement(timeout: 10),

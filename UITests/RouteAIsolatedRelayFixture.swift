@@ -26,6 +26,7 @@ final class RouteAIsolatedRelayFixture {
     }
 
     var answerOperationCount: Int { relay.answerOperationCount }
+    var requestSummary: String { relay.requestSummary }
 
     func waitForAcceptedAnswer(timeout: TimeInterval) -> String? {
         relay.waitForAcceptedAnswer(timeout: timeout)
@@ -50,6 +51,8 @@ final class RouteAIsolatedRelayFixture {
         private var connections: [ObjectIdentifier: NWConnection] = [:]
         private var acceptedOperationID: String?
         private var answerOperations: [String] = []
+        private var receivedFrameTypes: [String: Int] = [:]
+        private var answerFrameRejection: String?
         private var terminalPublished = false
         private var acknowledgedHighWater: UInt64 = 0
         private var stopped = false
@@ -66,6 +69,15 @@ final class RouteAIsolatedRelayFixture {
             condition.lock()
             defer { condition.unlock() }
             return answerOperations.count
+        }
+
+        var requestSummary: String {
+            condition.lock()
+            defer { condition.unlock() }
+            let types = receivedFrameTypes.keys.sorted().map {
+                "\($0):\(receivedFrameTypes[$0] ?? 0)"
+            }.joined(separator: ",")
+            return "types=[\(types)] answer_gate=\(answerFrameRejection ?? "not-rejected")"
         }
 
         init() throws {
@@ -176,6 +188,9 @@ final class RouteAIsolatedRelayFixture {
         private func handle(_ data: Data, on connection: NWConnection) {
             guard let frame = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let type = frame["type"] as? String else { return }
+            condition.lock()
+            receivedFrameTypes[type, default: 0] += 1
+            condition.unlock()
             switch type {
             case "resync":
                 replyToResync(on: connection)
@@ -211,11 +226,20 @@ final class RouteAIsolatedRelayFixture {
         }
 
         private func acceptAnswer(_ frame: [String: Any], on connection: NWConnection) {
-            guard let operationID = frame["op_id"] as? String,
-                  UUID(uuidString: operationID) != nil,
-                  frame["sender_id"] as? String == "routea-ui-author",
-                  frame["message_id"] as? String == "review-01" else {
-                send(["v": 1, "type": "error", "reason": "invalid_operation"], on: connection)
+            guard let operationID = frame["op_id"] as? String else {
+                rejectAnswer("missing-operation-id", on: connection)
+                return
+            }
+            guard UUID(uuidString: operationID) != nil else {
+                rejectAnswer("invalid-operation-id", on: connection)
+                return
+            }
+            guard frame["sender_id"] as? String == "routea-ui-author" else {
+                rejectAnswer("unexpected-sender", on: connection)
+                return
+            }
+            guard frame["message_id"] as? String == "review-01" else {
+                rejectAnswer("unexpected-message", on: connection)
                 return
             }
             condition.lock()
@@ -230,6 +254,13 @@ final class RouteAIsolatedRelayFixture {
                 condition.unlock()
                 send(["v": 1, "type": "error", "reason": "operation_conflict"], on: connection)
             }
+        }
+
+        private func rejectAnswer(_ reason: String, on connection: NWConnection) {
+            condition.lock()
+            answerFrameRejection = reason
+            condition.unlock()
+            send(["v": 1, "type": "error", "reason": "invalid_operation"], on: connection)
         }
 
         private func currentEvents() -> [[String: Any]] {
