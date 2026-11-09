@@ -5,7 +5,7 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
     func testUnsentChoiceSurvivesLeavingAndReopeningRequest() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
 
         let row = app.descendants(matching: .any)["request-row-review-01"]
@@ -38,7 +38,7 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
     func testTypedReplyContentsSurviveAppRelaunch() async throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture"]
         app.launch()
         XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 10), app.debugDescription)
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
@@ -58,7 +58,7 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
 
         try await Task.sleep(for: .milliseconds(700))
         app.terminate()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--attention-fixture"]
         app.launch()
         XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 10), app.debugDescription)
         let repliedTab = workspaceTab("Replied", in: app)
