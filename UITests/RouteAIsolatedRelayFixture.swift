@@ -84,10 +84,7 @@ final class RouteAIsolatedRelayFixture {
             let listener: NWListener
             do {
                 listener = try NWListener(using: parameters, on: .any)
-            } catch {
-                credential.remove()
-                throw error
-            }
+            } catch { throw error }
             self.credential = credential
             self.rootDER = credential.certificateDER
             self.listener = listener
@@ -276,7 +273,6 @@ final class RouteAIsolatedRelayFixture {
             condition.unlock()
             listener.cancel()
             activeConnections.forEach { $0.cancel() }
-            credential.remove()
         }
 
         private func send(_ object: [String: Any], on connection: NWConnection) {
@@ -388,21 +384,11 @@ final class RouteAIsolatedRelayFixture {
     private struct ServerCredential {
         let identity: SecIdentity
         let certificateDER: Data
-        private let keyTag: Data
-        private let label: String
 
         static func create() throws -> ServerCredential {
-            let keyTag = Data("routea-ui-relay-\(UUID().uuidString)".utf8)
-            let label = "Harklight Route A UI relay \(UUID().uuidString)"
             let attributes: [String: Any] = [
                 kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
-                kSecAttrKeySizeInBits as String: 2048,
-                kSecPrivateKeyAttrs as String: [
-                    kSecAttrIsPermanent as String: true,
-                    kSecAttrApplicationTag as String: keyTag,
-                    kSecAttrLabel as String: label,
-                    kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-                ]
+                kSecAttrKeySizeInBits as String: 2048
             ]
             var keyError: Unmanaged<CFError>?
             guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &keyError) else {
@@ -422,41 +408,10 @@ final class RouteAIsolatedRelayFixture {
             guard let certificate = SecCertificateCreateWithData(nil, certificateDER as CFData) else {
                 throw FixtureError.certificateCreation
             }
-            let certificateAttributes: [String: Any] = [
-                kSecClass as String: kSecClassCertificate,
-                kSecValueRef as String: certificate,
-                kSecAttrLabel as String: label,
-                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            ]
-            let certificateStatus = SecItemAdd(certificateAttributes as CFDictionary, nil)
-            guard certificateStatus == errSecSuccess else { throw FixtureError.keychain(certificateStatus) }
-            var result: CFTypeRef?
-            let identityQuery: [String: Any] = [
-                kSecClass as String: kSecClassIdentity,
-                kSecAttrLabel as String: label,
-                kSecReturnRef as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne
-            ]
-            let identityStatus = SecItemCopyMatching(identityQuery as CFDictionary, &result)
-            guard identityStatus == errSecSuccess,
-                  let result, CFGetTypeID(result) == SecIdentityGetTypeID() else {
-                SecItemDelete([kSecClass as String: kSecClassKey,
-                               kSecAttrApplicationTag as String: keyTag] as CFDictionary)
-                SecItemDelete([kSecClass as String: kSecClassCertificate,
-                               kSecAttrLabel as String: label] as CFDictionary)
-                throw FixtureError.keychain(identityStatus)
+            guard let identity = SecIdentityCreate(kCFAllocatorDefault, certificate, privateKey) else {
+                throw FixtureError.identityUnavailable
             }
-            return ServerCredential(identity: result as! SecIdentity,
-                                     certificateDER: certificateDER,
-                                     keyTag: keyTag,
-                                     label: label)
-        }
-
-        func remove() {
-            SecItemDelete([kSecClass as String: kSecClassKey,
-                           kSecAttrApplicationTag as String: keyTag] as CFDictionary)
-            SecItemDelete([kSecClass as String: kSecClassCertificate,
-                           kSecAttrLabel as String: label] as CFDictionary)
+            return ServerCredential(identity: identity, certificateDER: certificateDER)
         }
 
         private static func selfSignedLocalhostCertificate(publicKeyDER: Data,
@@ -550,7 +505,6 @@ final class RouteAIsolatedRelayFixture {
         case publicKeyUnavailable
         case publicKeyExport(String)
         case certificateCreation
-        case keychain(OSStatus)
 
         var errorDescription: String? {
             switch self {
