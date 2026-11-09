@@ -1,6 +1,8 @@
 import AttentionDomain
 import Foundation
 import HarklightNativeRelay
+import Network
+import Security
 import XCTest
 @testable import Harklight
 
@@ -14,6 +16,188 @@ private func assertThrowsAsync<T>(
         _ = try await expression()
         XCTFail("Expected expression to throw", file: file, line: line)
     } catch {}
+}
+
+/// Authenticated local Route A peer for the retained-answer retry test. The
+/// first answer is refused, while the second stays pending until the test
+/// explicitly releases its correlated acceptance.
+private final class LiveAnswerConfirmationRelay: @unchecked Sendable {
+    let rootDER: Data
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "Harklight.live-answer-confirmation-relay")
+    private var connections: [NWConnection] = []
+    private var answerFrames: [String] = []
+    private var answerWaiters: [Int: CheckedContinuation<String, Never>] = [:]
+    private var heldRetryConnection: NWConnection?
+    private var acceptedRetry = false
+
+    init(expectedDeviceID: String) throws {
+        let bundle = Bundle(for: LiveAnswerConfirmationTests.self)
+        guard let certificateURL = bundle.url(forResource: "guided-local-tls", withExtension: "pem"),
+              let identityURL = bundle.url(forResource: "guided-local-tls", withExtension: "p12"),
+              let root = NativeEnrollmentSettings.certificateDER(from:
+                try String(contentsOf: certificateURL, encoding: .utf8)) else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        var items: CFArray?
+        guard SecPKCS12Import(try Data(contentsOf: identityURL) as CFData,
+                              [kSecImportExportPassphrase as String: "public-fixture-only"] as CFDictionary,
+                              &items) == errSecSuccess,
+              let rawIdentity = (items as? [[String: Any]])?.first?[kSecImportItemIdentity as String],
+              let identity = rawIdentity as? SecIdentity,
+              let localIdentity = sec_identity_create(identity) else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        rootDER = root
+
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
+        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
+        sec_protocol_options_set_peer_authentication_required(tls.securityProtocolOptions, true)
+        sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, trust, complete in
+            let trust = sec_trust_copy_ref(trust).takeRetainedValue()
+            guard let certificate = SecTrustGetCertificateAtIndex(trust, 0) else {
+                complete(false)
+                return
+            }
+            complete(DeviceCertificateBinding.matches(SecCertificateCopyData(certificate) as Data,
+                                                       expectedDeviceID: expectedDeviceID))
+        }, queue)
+
+        let webSocket = NWProtocolWebSocket.Options()
+        webSocket.autoReplyPing = true
+        webSocket.setClientRequestHandler(queue) { _, _ in
+            NWProtocolWebSocket.Response(status: .accept, subprotocol: "attention-relay/1",
+                                         additionalHeaders: nil)
+        }
+        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+    }
+
+    func start() async throws -> UInt16 {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, any Error>) in
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    listener.stateUpdateHandler = nil
+                    guard let port = listener.port else {
+                        continuation.resume(throwing: NativeJoinError.unavailable)
+                        return
+                    }
+                    continuation.resume(returning: port.rawValue)
+                case let .failed(error):
+                    listener.stateUpdateHandler = nil
+                    continuation.resume(throwing: error)
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { connection.cancel(); return }
+                connections.append(connection)
+                connection.start(queue: queue)
+                receive(connection)
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    func waitForAnswer(attempt: Int) async -> String {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                if self.answerFrames.indices.contains(attempt - 1) {
+                    continuation.resume(returning: self.answerFrames[attempt - 1])
+                } else {
+                    self.answerWaiters[attempt] = continuation
+                }
+            }
+        }
+    }
+
+    func acceptHeldRetry() {
+        queue.async {
+            guard let connection = self.heldRetryConnection else { return }
+            self.acceptedRetry = true
+            self.heldRetryConnection = nil
+            self.send([#"{"v":1,"type":"ok","seq":2}"#], on: connection)
+        }
+    }
+
+    func close() {
+        queue.sync {
+            listener.cancel()
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
+
+    private func receive(_ connection: NWConnection) {
+        connection.receiveMessage { [weak self] data, context, _, error in
+            guard let self, error == nil, let data else {
+                connection.cancel()
+                return
+            }
+            let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
+                as? NWProtocolWebSocket.Metadata
+            if metadata?.opcode == .text, let text = String(data: data, encoding: .utf8) {
+                handle(text, on: connection)
+            }
+            receive(connection)
+        }
+    }
+
+    private func handle(_ text: String, on connection: NWConnection) {
+        guard let value = try? JSONValue.parse(Data(text.utf8)),
+              let type = value.uniqueValue(named: "type")?.stringValue?.rawValue else { return }
+        switch type {
+        case "resync":
+            var frames = [#"{"v":1,"type":"ok","ref":"native-sync"}"#,
+                #"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"retry","origin":"fixture-origin","as":"message","message":{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}}"#]
+            let high = acceptedRetry ? 2 : 1
+            if acceptedRetry {
+                frames.append(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"retry","origin":"another-device","state":"answered","at":2}"#)
+            }
+            frames.append(#"{"v":1,"type":"resynced","seq":\#(high)}"#)
+            send(frames, on: connection)
+        case "view_get":
+            let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue ?? ""
+            send([#"{"v":1,"type":"ok","ref":"\#(ref)","view_rev":"retry-fixture","entries":[]}"#],
+                 on: connection)
+        case "conversation_open":
+            send([#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#,
+                  #"{"v":1,"type":"conversation_resynced","conversation_seq":0}"#], on: connection)
+        case "ack":
+            let sequence = value.uniqueValue(named: "seq")?.integerValue ?? 0
+            send([#"{"v":1,"type":"ok","ref":"native-ack","seq":\#(sequence)}"#], on: connection)
+        case "conversation_ack":
+            let sequence = value.uniqueValue(named: "conversation_seq")?.integerValue ?? 0
+            send([#"{"v":1,"type":"ok","ref":"native-conversation-ack","conversation_seq":\#(sequence)}"#],
+                 on: connection)
+        case "answer":
+            answerFrames.append(text)
+            let attempt = answerFrames.count
+            answerWaiters.removeValue(forKey: attempt)?.resume(returning: text)
+            if attempt == 1 {
+                send([#"{"v":1,"type":"error","reason":"fixture_refusal"}"#], on: connection)
+            } else if attempt == 2 {
+                heldRetryConnection = connection
+            }
+        default:
+            break
+        }
+    }
+
+    private func send(_ frames: [String], on connection: NWConnection) {
+        for frame in frames {
+            let context = NWConnection.ContentContext(
+                identifier: "relay-frame", metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])
+            connection.send(content: Data(frame.utf8), contentContext: context, isComplete: true,
+                            completion: .idempotent)
+        }
+    }
 }
 
 @MainActor
@@ -315,16 +499,65 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testFailedResponseRetryUsesTheRetainedAnswerAndClearsWarningOnlyAfterAcceptance() async throws {
-        let (context, store, live, key) = try await setup()
+        let namespace = "Harklight.live-answer-confirmation-test." + UUID().uuidString
+        let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        let relay: LiveAnswerConfirmationRelay
+        do {
+            relay = try LiveAnswerConfirmationRelay(expectedDeviceID: installation.deviceID)
+        } catch {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: installation.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            throw error
+        }
+        let draftRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Harklight-live-answer-\(UUID().uuidString)", isDirectory: true)
+        let lifecycle = NativeRelayLifecycle.shared
+        addTeardownBlock {
+            await lifecycle.deactivate()
+            relay.close()
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: installation.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            try? FileManager.default.removeItem(at: draftRoot)
+        }
+
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("person-\(UUID().uuidString.lowercased())"),
+            deviceID: ExactText(installation.deviceID)), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: try XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: installation.value, trustedRootDER: relay.rootDER)
+        let readiness = await lifecycle.confirmForegroundProgress(for: context, deadline: .seconds(10))
+        XCTAssertEqual(readiness.outcome, .confirmed,
+                       "The test must establish an authenticated, replay-confirmed relay before sending.")
+        XCTAssertTrue(lifecycle.isOnline(for: context))
+
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("retry"))
+        let live = try LivePresentationStore(store: store, context: context,
+            composerDraftPersistence: ComposerDraftPersistence(rootDirectory: draftRoot))
+        try await live.refreshFromDurableStore()
         live.selectAction(ExactText("got-it"), input: nil, for: key)
-        let original = try await live.submit(key)
-        try await store.recordAnswerNotDelivered(original.intentID, operationID: original.opID,
-                                           context: context)
+        let initialSend = Task { @MainActor in await live.submitFromUser(key) }
+        let firstFrameText = await relay.waitForAnswer(attempt: 1)
+        let firstFrame = try JSONValue.parse(Data(firstFrameText.utf8))
+        let original = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        let originalFrameOperationID = try XCTUnwrap(firstFrame.uniqueValue(named: "op_id")?.stringValue)
+        XCTAssertEqual(originalFrameOperationID.rawValue, original.opID.uuidString.lowercased())
+        let initialSendSucceeded = await initialSend.value
+        XCTAssertFalse(initialSendSucceeded,
+                       "The fixture's correlated refusal should retain the answer for manual Retry.")
         try await live.refreshFromDurableStore()
 
         let warning = try XCTUnwrap(live.failedResponseWarning(for: key))
-        XCTAssertEqual(String(localized: warning.summary), "Your response was not delivered.")
-        XCTAssertEqual(String(localized: warning.detail), "No additional safe failure detail was retained.")
+        XCTAssertEqual(String(localized: warning.summary), "The response was not sent.")
         XCTAssertEqual(warning.submittedInputs, original.inputs)
         XCTAssertTrue(live.canRetryFailedResponse(for: key))
 
@@ -334,26 +567,34 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertFalse(failedRow.visibleStatus.contains("Open"))
         XCTAssertFalse(failedRow.visibleStatus.contains("not delivered"))
 
-        let retryStarted = await live.retryFailedResponse(for: key)
-        XCTAssertTrue(retryStarted)
+        let retryTask = Task { @MainActor in await live.retryFailedResponse(for: key) }
+        let retryFrameText = await relay.waitForAnswer(attempt: 2)
+        let retryFrame = try JSONValue.parse(Data(retryFrameText.utf8))
         let retried = try XCTUnwrap(live.request(for: key)?.intentReceipt)
-        XCTAssertNotEqual(retried.opID, original.opID,
-                          "An explicitly rejected operation is retried as a new operation.")
+        let retryFrameOperationID = try XCTUnwrap(retryFrame.uniqueValue(named: "op_id")?.stringValue)
+        XCTAssertEqual(retryFrameOperationID, originalFrameOperationID,
+                       "A correlated non-conflict refusal keeps the draft's operation id.")
+        XCTAssertEqual(retried.opID, original.opID,
+                       "Manual Retry reuses the original id after a correlated refusal.")
+        XCTAssertEqual(retryFrame.uniqueValue(named: "inputs"), firstFrame.uniqueValue(named: "inputs"),
+                       "The retry frame contains the exact original response.")
         XCTAssertEqual(retried.inputs, original.inputs,
                        "Retry uses the exact submitted response, not the editable draft.")
         XCTAssertEqual(live.failedResponseWarning(for: key)?.retryOperationID, retried.opID)
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning,
-                      "Queueing the retry does not clear the known-failure warning.")
+                      "The warning remains while the correlated acceptance is withheld.")
+        XCTAssertEqual(live.failedResponseWarning(for: key)?.submittedInputs, original.inputs)
 
-        try await store.recordAcceptedOperation(retried.intentID, operationID: retried.opID,
-                                          terminalSequence: 2, context: context)
-        _ = try await store.apply(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil)),
-                            context: context)
-        try await live.refreshFromDurableStore()
+        relay.acceptHeldRetry()
+        let retrySucceeded = await retryTask.value
+        XCTAssertTrue(retrySucceeded)
 
         XCTAssertNil(live.failedResponseWarning(for: key),
-                     "The warning clears only after the server accepts the retry.")
-        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning)
+                     "The warning clears only after correlated acceptance and authoritative refresh.")
+        let acceptedRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertFalse(acceptedRow.hasDeliveryWarning)
+        XCTAssertTrue(acceptedRow.belongsToReplied,
+                      "Replied membership comes from the terminal lifecycle event in the relay refresh.")
     }
 
     func testFailedNoCommentWarningRetriesTheSameNoCommentResponse() async throws {

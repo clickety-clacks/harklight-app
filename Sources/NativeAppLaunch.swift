@@ -3125,6 +3125,23 @@ final class LivePresentationStore {
             try await refreshFromDurableStore()
             inspected = try inspectedRequest(key, revision: requestRevision)
         }
+        if inspected.selector == nil {
+            let selectorSnapshot = try await port.inspect(context: port.context,
+                request: key, revision: inspected.requestRevision)
+            guard let refreshed = selectorSnapshot.requests.first(where: { $0.key == key }),
+                  refreshed.requestRevision == inspected.requestRevision,
+                  refreshed.lifecycleStatus == .open,
+                  refreshed.intentReceipt == nil,
+                  refreshed.selector != nil,
+                  let current = presentation.requests.first(where: { $0.key == key }),
+                  current.requestRevision == refreshed.requestRevision,
+                  current.lifecycleStatus == .open,
+                  current.intentReceipt == nil,
+                  !isRetracted(key) else {
+                throw LiveReplyError.notOpen
+            }
+            inspected = refreshed
+        }
         let revision = inspected.requestRevision
         let bufferKey = DraftBufferKey(request: key, revision: revision)
         let answerDraft = answerDraftOverride ?? pendingDrafts[bufferKey] ?? inspected.draft
