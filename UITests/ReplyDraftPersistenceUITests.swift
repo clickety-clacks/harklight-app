@@ -2,10 +2,13 @@ import XCTest
 
 @MainActor
 final class ReplyDraftPersistenceUITests: XCTestCase {
-    func testUnsentChoiceSurvivesLeavingAndReopeningRequest() {
+    func testUnsentChoiceSurvivesLeavingAndReopeningRequest() async throws {
         XCUIDevice.shared.orientation = .portrait
+        let relay = try RouteAIsolatedRelayFixture()
+        try await relay.start()
+        defer { relay.stop() }
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture"]
+        relay.configure(app)
         app.launch()
 
         let row = app.descendants(matching: .any)["request-row-review-01"]
@@ -33,12 +36,17 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
                       "An unsent choice survives leaving and reopening the request.")
         XCTAssertTrue(app.buttons["request-finish"].isEnabled,
                       "The retained choice remains ready for deliberate submission.")
+        XCTAssertEqual(relay.answerOperationCount, 0,
+                       "Restoring an unsent choice does not send an answer operation.")
     }
 
     func testTypedReplyContentsSurviveAppRelaunch() async throws {
         XCUIDevice.shared.orientation = .portrait
+        let relay = try RouteAIsolatedRelayFixture()
+        try await relay.start()
+        defer { relay.stop() }
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture"]
+        relay.configure(app)
         app.launch()
         XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 10), app.debugDescription)
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
@@ -58,7 +66,7 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
 
         try await Task.sleep(for: .milliseconds(700))
         app.terminate()
-        app.launchArguments = ["--attention-fixture"]
+        relay.configure(app)
         app.launch()
         XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 10), app.debugDescription)
         let repliedTab = workspaceTab("Replied", in: app)
@@ -75,6 +83,8 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         reveal(reopenedEditor, in: app)
         XCTAssertEqual(reopenedEditor.value as? String, longReply,
                        "An unsent typed reply survives app restart as a local draft.")
+        XCTAssertEqual(relay.answerOperationCount, 0,
+                       "Restoring an unsent reply does not send an answer operation.")
     }
 
     private func reveal(_ editor: XCUIElement, in app: XCUIApplication) {

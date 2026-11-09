@@ -574,8 +574,11 @@ final class NativeAppLaunch {
                  checkBlockedPush: checkBlockedPush)
          }) {
         #if DEBUG
-        let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
+        let isRouteAIsolatedRelayTest = arguments.contains("--harklight-routea-isolated-relay")
+        let fixture = isRouteAIsolatedRelayTest ||
+            arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
         #else
+        let isRouteAIsolatedRelayTest = false
         let fixture = false
         #endif
         let enrollment = enrollmentStore ?? NativeEnrollmentStore()
@@ -677,7 +680,7 @@ final class NativeAppLaunch {
             // it in this process without waiting for another launch.
             self.refreshArchivedAccounts()
         }
-        if fixture, initialState == nil {
+        if fixture, !isRouteAIsolatedRelayTest, initialState == nil {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.state = .fixture(await PrototypeStore.loadFromBundle())
@@ -689,6 +692,9 @@ final class NativeAppLaunch {
         guard !didRestore else { return }
         didRestore = true
         defer { didFinishRestoring = true }
+#if DEBUG
+        if await restoreRouteAIsolatedRelayTestLaunch() { return }
+#endif
         if case .fixture = state { return }
         if case .loadingFixture = state { return }
         refreshArchivedAccounts()
@@ -732,6 +738,49 @@ final class NativeAppLaunch {
         }
         await guidedJoin.restore()
     }
+
+#if DEBUG
+    /// UI tests can exercise the ordinary live projection and persistence path
+    /// against a private relay fixture without creating or reading an enrolled
+    /// account. The fixture supplies a per-run person scope, localhost port and
+    /// its self-signed trust anchor through the test process environment.
+    private func restoreRouteAIsolatedRelayTestLaunch() async -> Bool {
+        guard ProcessInfo.processInfo.arguments.contains("--harklight-routea-isolated-relay") else {
+            return false
+        }
+        do {
+            let environment = ProcessInfo.processInfo.environment
+            guard let personID = environment["HARKLIGHT_ROUTEA_TEST_PERSON_ID"],
+                  personID.hasPrefix("routea-ui-"),
+                  let rawPort = environment["HARKLIGHT_ROUTEA_TEST_RELAY_PORT"],
+                  let port = Int(rawPort), (1...65_535).contains(port),
+                  let rootValue = environment["HARKLIGHT_ROUTEA_TEST_ROOT_DER"],
+                  let rootDER = Data(base64Encoded: rootValue),
+                  SecCertificateCreateWithData(nil, rootDER as CFData) != nil,
+                  let relayURL = URL(string: "wss://localhost:\(port)/relay") else {
+                throw NativeEnrollmentError.invalidSettings
+            }
+            let installationIdentity = try NativeInstallationIdentityStore(
+                namespace: "co.clicketyclacks.Harklight.routea-ui-test").loadOrCreate()
+            let identity = ProfileIdentity(
+                trustedRelayAuthority: ExactText("localhost"),
+                personID: ExactText(personID),
+                deviceID: ExactText(installationIdentity.deviceID))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            try await activate(NativeInstallationMaterial(
+                context: context,
+                relayURL: relayURL,
+                keychainIdentity: installationIdentity.value,
+                trustedRootDER: rootDER))
+        } catch {
+            state = .enrollmentRequired
+            enrollmentMessage = "The isolated relay fixture could not be started."
+            diagnostics.record(area: .connection, phase: .approvedConnection,
+                               transition: .failed, causeCode: "routea_ui_fixture_setup_failed")
+        }
+        return true
+    }
+#endif
 
     func disconnectCurrentAccount() async {
         guard !isEndpointMigrationBusy, case let .live(presentation) = state,

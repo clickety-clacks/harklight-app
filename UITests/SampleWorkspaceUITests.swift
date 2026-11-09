@@ -122,24 +122,28 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Local examples"].exists)
     }
 
-    func testOrdinaryInboxKeepsRequestsAlongsideTestFixtures() {
+    func testSelectedChoiceReachesRepliedOnlyAfterCorrelatedServerConfirmation() async throws {
+        let relay = try RouteAIsolatedRelayFixture()
+        try await relay.start()
+        defer { relay.stop() }
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture"]
+        relay.configure(app)
         app.launch()
         let realRows = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
         XCTAssertTrue(realRows.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
         let original = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
-        let originalID = original.identifier
-        capture("ordinary-inbox-before-examples", app)
+        XCTAssertEqual(relay.answerOperationCount, 0,
+                       "The relay has received no answer before the user's Send action.")
+        capture("relay-inbox-before-send", app)
         original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
         let originalChoice = app.buttons["Cover A"]
         XCTAssertTrue(originalChoice.waitForExistence(timeout: 5), app.debugDescription)
         originalChoice.tap()
         XCTAssertTrue(originalChoice.isSelected)
-        capture("ordinary-request-card", app)
+        capture("relay-request-choice-selected", app)
         showList(app)
         let inboxTab = workspaceTab("Inbox", in: app)
         let repliedTab = workspaceTab("Replied", in: app)
@@ -149,6 +153,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         repliedTab.tap()
         XCTAssertFalse(original.waitForExistence(timeout: 1),
                        "An unsent choice does not appear in Replied.")
+        XCTAssertEqual(relay.answerOperationCount, 0,
+                       "An unsent choice has not reached the relay.")
         inboxTab.tap()
         original.tap()
         XCTAssertTrue(app.buttons["Cover A"].isSelected,
@@ -156,58 +162,25 @@ final class SampleWorkspaceUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(finish.isEnabled, app.debugDescription)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
-        let detail = app.scrollViews["message-card-scroll"]
         finish.tap()
-        if listVisibleAlongsideDetail {
-            XCTAssertTrue(detail.waitForExistence(timeout: 5),
-                          "Submitting in two-pane presentation keeps the detail visible.")
-        } else {
-            XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
-                          "Submitting returns the single-pane detail to the list before confirmation.")
-            XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
-        }
+        let acceptedOperationID = relay.waitForAcceptedAnswer(timeout: 10)
+        XCTAssertNotNil(acceptedOperationID,
+                        "The relay accepts only the explicit answer operation sent from this action.")
+        XCTAssertEqual(relay.answerOperationCount, 1,
+                       "The user's Send action produced one answer operation.")
+        XCTAssertTrue(relay.waitForTerminalAcknowledgement(timeout: 10),
+                      "The client applies and acknowledges the server's answered lifecycle frame.")
         showList(app)
-        XCTAssertTrue(inboxTab.isSelected,
-                      "Submitting an Inbox response keeps the Inbox tab selected.")
-        XCTAssertFalse(original.waitForExistence(timeout: 2),
-                       "A submitted response leaves the Inbox list.")
-        capture("choice-response-leaves-inbox-selected", app)
         repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
-        XCTAssertTrue(original.waitForExistence(timeout: 5),
-                      "A submitted answer appears in Replied after the user switches tabs.")
-        XCTAssertTrue(original.label.contains("Pending"),
-                      "The submitted answer remains pending until its outcome is confirmed.")
-        capture("choice-response-in-replied", app)
-        // The removed Settings action used to add examples only after the ordinary
-        // request flow. Reopen the persisted fixture with test-only examples now.
-        app.terminate()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
-        app.launch()
-        XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 10),
-                      app.debugDescription)
-        let row = app.descendants(matching: .any)["sample-approval-0"]
-        // Test fixtures remain in Inbox, so leave the submitted request's Replied tab first.
-        workspaceTab("Inbox", in: app).tap()
-        enterSearch("Archive", in: app)
-        XCTAssertTrue(row.waitForExistence(timeout: 5))
-        capture("ordinary-inbox-with-examples", app)
-        row.tap()
-        let keep = app.buttons.containing(.staticText, identifier: "Keep here").firstMatch
-        XCTAssertTrue(keep.waitForExistence(timeout: 5))
-        keep.tap()
-        app.descendants(matching: .any)["sample-finish"].tap()
-        XCTAssertTrue(app.staticTexts["Answered locally · nothing sent"].waitForExistence(timeout: 5))
-        capture("ordinary-example-card", app)
-        showList(app)
-        clearSearch(in: app)
-        selectMessageTab("Replied", in: app)
-        XCTAssertTrue(original.exists, app.debugDescription)
-        original.tap()
-        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Cover A"].isSelected, "An ordinary draft survives local example actions")
-        capture("ordinary-request-after-example", app)
+        XCTAssertTrue(original.waitForExistence(timeout: 10),
+                      "The server-confirmed answer appears in Replied after its lifecycle is applied.")
+        capture("server-confirmed-answer-in-replied", app)
+        inboxTab.tap()
+        XCTAssertFalse(original.waitForExistence(timeout: 2),
+                       "The server-confirmed answered request is absent from Inbox.")
+        XCTAssertEqual(acceptedOperationID, relay.waitForAcceptedAnswer(timeout: 1),
+                       "The acknowledged lifecycle follows the same accepted answer operation.")
     }
 
     func testSubmittedRequestHistoryRemainsWhileLocalExamplesAreUsed() {
