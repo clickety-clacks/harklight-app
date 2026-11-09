@@ -73,28 +73,34 @@ final class AttentionTierClientTests: XCTestCase {
                              "No comment is not an empty answer payload.")
     }
 
-    func testPreviouslyStoredDeliveryCanGainItsFirstExplicitTierOnReplay() throws {
+    func testPreviouslyStoredDeliveryCanGainItsFirstExplicitTierOnReplay() async throws {
         let profile = context()
         let persistence = MemoryAttentionStatePersistence()
         let store = try AttentionDomainStore(context: profile, persistence: persistence)
         let key = RequestKey(accountScope: profile.identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("legacy"))
         let payload = try JSONValue.parse(data(#"{"title":"Legacy"}"#))
-        try store.apply(RelayEvent(sequence: 1,
+        try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: profile)
 
         let restored = try AttentionDomainStore(context: profile, persistence: persistence)
-        try restored.apply(RelayEvent(sequence: 1,
+        try await restored.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             origin: ExactText("source"), attentionTier: .top), context: profile)
 
-        let state = try restored.snapshot(context: profile)
+        let state = try await restored.snapshot(context: profile)
         XCTAssertEqual(state.cursor, 1)
         XCTAssertEqual(state.remoteStates[key]?.attentionTier, .top)
         XCTAssertEqual(state.remoteStates[key]?.attentionTierOrigin, ExactText("source"))
-        XCTAssertThrowsError(try restored.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
-            origin: ExactText("source"), attentionTier: .low), context: profile))
+        var conflictingReplayError: Error?
+        do {
+            _ = try await restored.apply(RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+                origin: ExactText("source"), attentionTier: .low), context: profile)
+        } catch {
+            conflictingReplayError = error
+        }
+        XCTAssertNotNil(conflictingReplayError)
     }
 
     func testExistingSchemaTwoStateAndCheckpointDecodeWithoutTierFields() throws {
@@ -239,29 +245,30 @@ final class AttentionTierClientTests: XCTestCase {
         XCTAssertEqual(roundTrip, current)
     }
 
-    func testRelayTierChangeUpdatesTheExistingRequestWithoutAnotherDelivery() throws {
+    func testRelayTierChangeUpdatesTheExistingRequestWithoutAnotherDelivery() async throws {
         let profile = context()
         let store = try AttentionDomainStore(context: profile, persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: profile.identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request"))
         let payload = try JSONValue.parse(data(#"{"title":"Question"}"#))
-        try store.apply(RelayEvent(sequence: 1,
+        try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             origin: ExactText("source")), context: profile)
 
-        let result = store.applyRelayEvent(RelayEvent(sequence: 2,
+        let result = await store.applyRelayEvent(RelayEvent(sequence: 2,
             body: .attentionTierChange(key), origin: ExactText("source"), attentionTier: .low),
             context: profile)
         guard case .committed(let cursor, _) = result else {
             return XCTFail("Expected the contiguous tier fact to commit")
         }
         XCTAssertEqual(cursor, 2)
-        let snapshot = try store.snapshot(context: profile)
+        let snapshot = try await store.snapshot(context: profile)
         XCTAssertEqual(snapshot.cursor, 2)
         XCTAssertEqual(snapshot.requests.count, 1)
         XCTAssertEqual(snapshot.remoteStates[key]?.attentionTier, .low)
         let port = AttentionDomainPort(store: store)
-        XCTAssertEqual(try port.observe(context: port.context).requests.first?.attentionTier, .middle)
+        let presentation = try await port.observe(context: port.context)
+        XCTAssertEqual(presentation.requests.first?.attentionTier, .middle)
     }
 
     func testConversationTierChangeAllowsUnboundMessageWithoutInventingHandle() throws {
@@ -281,7 +288,7 @@ final class AttentionTierClientTests: XCTestCase {
         XCTAssertThrowsError(try wire.decodeEvent(invalid))
     }
 
-    func testInboxPlacementKeepsExistingRulesRegardlessOfTier() throws {
+    func testInboxPlacementKeepsExistingRulesRegardlessOfTier() async throws {
         let profile = context()
         let store = try AttentionDomainStore(context: profile, persistence: MemoryAttentionStatePersistence())
         let rows: [(String, AttentionTier)] = [
@@ -291,19 +298,19 @@ final class AttentionTierClientTests: XCTestCase {
             let key = RequestKey(accountScope: profile.identity.personID,
                 senderID: ExactText("sender"), messageID: ExactText(row.0))
             let payload = try JSONValue.parse(data("{\"title\":\"\(row.0)\"}"))
-            try store.apply(RelayEvent(sequence: UInt64(index + 1),
+            try await store.apply(RelayEvent(sequence: UInt64(index + 1),
                 body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
                 origin: ExactText("source-\(row.0)"), attentionTier: row.1), context: profile)
         }
 
         let port = AttentionDomainPort(store: store)
-        let presentation = try port.observe(context: port.context)
+        let presentation = try await port.observe(context: port.context)
         XCTAssertEqual(presentation.requests.map { $0.key.messageID.rawValue },
                        ["fourth", "third", "second", "first"])
         XCTAssertEqual(presentation.requests.map(\.attentionTier), [.middle, .middle, .middle, .middle])
     }
 
-    func testLiveTierChangeRedrawsPagedRowWithoutMovingIt() throws {
+    func testLiveTierChangeRedrawsPagedRowWithoutMovingIt() async throws {
         let profile = context()
         let persistence = MemoryAttentionStatePersistence()
         let store = try AttentionDomainStore(context: profile, persistence: persistence)
@@ -320,31 +327,32 @@ final class AttentionTierClientTests: XCTestCase {
         }
         let first = try item("first", sequence: 1, tier: .low)
         let second = try item("second", sequence: 2, tier: .top)
-        _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: profile)
-        try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+        _ = try await store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: profile)
+        try await store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
             items: [first, second], nextCursor: nil, receiptCursor: nil, context: profile)
-        _ = try store.prepareInboxCheckpointAcknowledgement(context: profile)
-        _ = try store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: profile)
+        _ = try await store.prepareInboxCheckpointAcknowledgement(context: profile)
+        _ = try await store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: profile)
 
         let restored = try AttentionDomainStore(context: profile, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
-        let initial = try port.observe(context: port.context)
+        let initial = try await port.observe(context: port.context)
         XCTAssertEqual(initial.requests.map { $0.key.messageID.rawValue }, ["first", "second"])
         XCTAssertEqual(initial.requests.map(\.attentionTier), [.middle, .middle])
 
         let firstKey = first.key
-        _ = restored.applyRelayEvent(RelayEvent(sequence: 3,
+        _ = await restored.applyRelayEvent(RelayEvent(sequence: 3,
             body: .attentionTierChange(firstKey), origin: ExactText("source-first"), attentionTier: .middle),
             context: profile)
-        let changed = try port.observe(context: port.context)
+        let changed = try await port.observe(context: port.context)
         XCTAssertEqual(changed.requests.map { $0.key.messageID.rawValue }, ["first", "second"])
         XCTAssertEqual(changed.requests.map(\.attentionTier), [.middle, .middle])
-        let checkpoint = try restored.snapshot(context: profile).inboxCheckpoint
+        let checkpoint = try await restored.snapshot(context: profile).inboxCheckpoint
         XCTAssertEqual(checkpoint?.highWater, 2, "The live tier fact must not move the frozen page high water.")
-        XCTAssertEqual(try restored.snapshot(context: profile).cursor, 3)
+        let finalSnapshot = try await restored.snapshot(context: profile)
+        XCTAssertEqual(finalSnapshot.cursor, 3)
     }
 
-    func testPendingInboxRefreshKeepsLastAcceptedRowsCurrentAndAnswerable() throws {
+    func testPendingInboxRefreshKeepsLastAcceptedRowsCurrentAndAnswerable() async throws {
         let profile = context()
         let store = try AttentionDomainStore(context: profile, persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: profile.identity.personID,
@@ -353,27 +361,31 @@ final class AttentionTierClientTests: XCTestCase {
         let acceptance = RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             origin: ExactText("origin"))
-        _ = try store.beginInboxCandidate(startupID: "first", since: 0, batches: [], context: profile)
-        try store.saveInboxInitialPage(snapshotID: "first-snapshot", highWater: 1,
+        _ = try await store.beginInboxCandidate(startupID: "first", since: 0, batches: [], context: profile)
+        try await store.saveInboxInitialPage(snapshotID: "first-snapshot", highWater: 1,
             items: [InboxSnapshotItem(acceptance: acceptance)], nextCursor: nil,
             receiptCursor: nil, context: profile)
-        _ = try store.prepareInboxCheckpointAcknowledgement(context: profile)
-        _ = try store.acceptInboxCheckpoint(snapshotID: "first-snapshot", highWater: 1, context: profile)
+        _ = try await store.prepareInboxCheckpointAcknowledgement(context: profile)
+        _ = try await store.acceptInboxCheckpoint(snapshotID: "first-snapshot", highWater: 1, context: profile)
 
-        _ = try store.beginInboxCandidate(startupID: "retry", since: 1, batches: [], context: profile)
-        XCTAssertEqual(try XCTUnwrap(store.snapshot(context: profile).inboxCurrentKeys), Set([key]))
+        _ = try await store.beginInboxCandidate(startupID: "retry", since: 1, batches: [], context: profile)
+        let pendingRefreshSnapshot = try await store.snapshot(context: profile)
+        XCTAssertEqual(try XCTUnwrap(pendingRefreshSnapshot.inboxCurrentKeys), Set([key]))
         let port = AttentionDomainPort(store: store)
-        let request = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        let inspection = try await port.inspect(context: port.context, request: key)
+        let request = try XCTUnwrap(inspection.requests.first)
         XCTAssertTrue(request.inboxStateIsCurrent,
                       "A pending refresh keeps the last accepted message set active.")
         let selector = try XCTUnwrap(request.selector)
-        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+        let receipt = try await port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         XCTAssertEqual(receipt.selector.requestRevision, 1)
-        XCTAssertEqual(try store.snapshot(context: profile).outbox.first?.requestRevision, 1)
+        let submittedSnapshot = try await store.snapshot(context: profile)
+        XCTAssertEqual(submittedSnapshot.outbox.first?.requestRevision, 1)
 
-        try store.beginReplay(through: 1, context: profile)
-        XCTAssertEqual(try XCTUnwrap(store.snapshot(context: profile).inboxCurrentKeys), Set([key]),
+        try await store.beginReplay(through: 1, context: profile)
+        let replaySnapshot = try await store.snapshot(context: profile)
+        XCTAssertEqual(try XCTUnwrap(replaySnapshot.inboxCurrentKeys), Set([key]),
                        "The replay barrier must publish the same accepted rows while the candidate recovers.")
     }
 }

@@ -4,6 +4,22 @@ import Foundation
 @testable import HarklightNativeRelay
 import XCTest
 
+@MainActor
+private func assertThrowsAsync<T>(
+    _ expression: @MainActor () async throws -> T,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    message: String = "Expected expression to throw",
+    onError: (@MainActor (Error) -> Void)? = nil
+) async {
+    do {
+        _ = try await expression()
+        XCTFail(message, file: file, line: line)
+    } catch {
+        onError?(error)
+    }
+}
+
 private final class InboxFreshnessDiagnosticCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [NativeClientDiagnosticEvent] = []
@@ -33,7 +49,7 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
     var conversationACKs: [Data] = []
     var conversationOpens: [Data] = []
     var conversationACKCountsAtOpen: [Int] = []
-    var readConversationCursor: (@Sendable () throws -> UInt64)?
+    var readConversationCursor: (@Sendable () async throws -> UInt64)?
     var conversationCursorsAtOpen: [UInt64] = []
     var rejectFirstConversationACK = false
     var conversationOpenErrors: [Int: InstallationTransportError] = [:]
@@ -58,6 +74,10 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
         return try await emptyInboxReply(request, ref: ref)
     }
 
+    func correlatedRequest(_ request: Data, ref: String) async throws -> Data {
+        try await inboxRequest(request, ref: ref)
+    }
+
     func acknowledge(_ request: Data) async throws {
         ordinaryACKs.append(request)
     }
@@ -71,7 +91,7 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
         conversationOpens.append(request)
         conversationACKCountsAtOpen.append(conversationACKs.count)
         if let readConversationCursor {
-            conversationCursorsAtOpen.append(try readConversationCursor())
+            conversationCursorsAtOpen.append(try await readConversationCursor())
         }
         let frames: [Data]
         if conversationFrameBatches.isEmpty {
@@ -149,7 +169,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             ]
             session.rejectFirstConversationACK = terminalIdentityIncluded
             let diagnostics = InboxFreshnessDiagnosticCollector()
-            let core = try NativeRelayCore(store: store, context: context, session: session,
+            let core = try await NativeRelayCore(store: store, context: context, session: session,
                 onDiagnostic: { diagnostics.append($0) })
             if !terminalIdentityIncluded {
                 let frames = session.conversationFrames
@@ -158,13 +178,15 @@ final class InboxFreshnessReplayTests: XCTestCase {
             }
             _ = try await core.resyncAndDrainOutbox()
             XCTAssertEqual(session.conversationACKs.count, terminalIdentityIncluded ? 2 : 1)
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+            let conversation = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(conversation.cursor, 2)
             if !terminalIdentityIncluded {
                 XCTAssertEqual(diagnostics.events.last { $0.conversationValidationRejection != nil }?
                     .conversationValidationRejection?.guardID, .referencedTurnExists)
             }
             let restored = try AttentionDomainStore(context: context, persistence: persistence)
-            XCTAssertEqual(try restored.snapshot(context: context).cursor, 4)
+            let restoredState = try await restored.snapshot(context: context)
+            XCTAssertEqual(restoredState.cursor, 4)
             let presentation = try LivePresentationStore(store: restored, context: context)
             func key(_ message: String) -> RequestKey {
                 RequestKey(accountScope: identity.personID, senderID: ExactText("author"), messageID: ExactText(message))
@@ -174,7 +196,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertNotNil(presentation.request(for: key("after-snapshot")))
             XCTAssertEqual(presentation.request(for: key("open"))?.title, ExactText("Current open question"))
             XCTAssertEqual(presentation.inboxRow(for: key("open"))?.requestRevision, 2)
-            XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key("answered")]?
+            let restoredConversation = try await restored.conversationSnapshot(context: context)
+            XCTAssertEqual(restoredConversation.threads[key("answered")]?
                 .facts[ExactText("2")]?.delivered, terminalIdentityIncluded ? true : nil)
             await core.deactivate()
         }
@@ -191,9 +214,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let store = try AttentionDomainStore(context: context, persistence: persistence)
             // Explicit synthetic missing-local-history precondition. The Server
             // sequence below produces a discussion followed by its origin ACK.
-            _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+            _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
             let session = InboxFreshnessRelaySession(identity: identity)
-            session.readConversationCursor = { try store.conversationSnapshot(context: context).cursor }
+            session.readConversationCursor = { try await store.conversationSnapshot(context: context).cursor }
             session.inboxStartHighWater = 3
             session.inboxStartItemsJSON = #"""
                 [{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"answered","origin":"origin","as":"message","message":{"title":"Answered question"},"session_handle":"closed-handle","request_revision":1,"event_id":"1"},
@@ -222,7 +245,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             if historyCase == "refused" { session.conversationOpenErrors[2] = .serverRejected }
             session.rejectFirstConversationACK = true
             let diagnostics = InboxFreshnessDiagnosticCollector()
-            let core = try NativeRelayCore(store: store, context: context, session: session,
+            let core = try await NativeRelayCore(store: store, context: context, session: session,
                 onDiagnostic: { diagnostics.append($0) })
             _ = try await core.resyncAndDrainOutbox()
             XCTAssertEqual(session.conversationACKCountsAtOpen, [0, 0, 0, 1])
@@ -246,7 +269,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 XCTAssertEqual(skipped.requestRevision, 1)
             }
             let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
-            let snapshot = try reloaded.conversationSnapshot(context: context)
+            let snapshot = try await reloaded.conversationSnapshot(context: context)
             func key(_ message: String) -> RequestKey {
                 RequestKey(accountScope: identity.personID, senderID: ExactText("author"),
                     messageID: ExactText(message))
@@ -298,11 +321,12 @@ final class InboxFreshnessReplayTests: XCTestCase {
             ]
             session.rejectFirstConversationACK = true
             let diagnostics = InboxFreshnessDiagnosticCollector()
-            let core = try NativeRelayCore(store: store, context: context, session: session,
+            let core = try await NativeRelayCore(store: store, context: context, session: session,
                 onDiagnostic: { diagnostics.append($0) })
             _ = try await core.resyncAndDrainOutbox()
             let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
-            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 2)
+            let conversation = try await reloaded.conversationSnapshot(context: context)
+            XCTAssertEqual(conversation.cursor, 2)
             let presentation = try LivePresentationStore(store: reloaded, context: context)
             XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Current wording"))
             XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 2)
@@ -312,7 +336,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertNotNil(diagnostics.events.first {
                 $0.phase == .conversationReplay && $0.transition == .observed && $0.conversationSequence == 1
             })
-            XCTAssertFalse(try reloaded.conversationSnapshot(context: context).threads[key]?.turns
+            let restoredConversation = try await reloaded.conversationSnapshot(context: context)
+            XCTAssertFalse(restoredConversation.threads[key]?.turns
                 .contains { $0.id == ExactText("bad") } ?? true)
             await core.deactivate()
         }
@@ -347,7 +372,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 session.conversationOpenErrors[1] = .unexpectedServerFrame
             }
             let diagnostics = InboxFreshnessDiagnosticCollector()
-            let core = try NativeRelayCore(store: store, context: context, session: session,
+            let core = try await NativeRelayCore(store: store, context: context, session: session,
                 onDiagnostic: { diagnostics.append($0) })
             do {
                 _ = try await core.resyncAndDrainOutbox()
@@ -366,8 +391,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertFalse(diagnostics.events.contains { $0.causeCode == "conversation_message_skipped" },
                 "Do not report a completed skip before its cursor is durable")
             let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
-            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 0)
-            XCTAssertTrue(try reloaded.conversationSnapshot(context: context).threads.isEmpty)
+            let restoredConversation = try await reloaded.conversationSnapshot(context: context)
+            XCTAssertEqual(restoredConversation.cursor, 0)
+            XCTAssertTrue(restoredConversation.threads.isEmpty)
             await core.deactivate()
         }
     }
@@ -386,8 +412,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 senderID: ExactText("author"), messageID: ExactText("open"))
             // Explicit missing-local-history precondition. The retained receipt
             // is already durable, but waits for its request's first loaded page.
-            _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
-            try store.applyConversation(ConversationEvent(sequence: 2,
+            _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+            try await store.applyConversation(ConversationEvent(sequence: 2,
                 binding: ConversationBinding(request: answered, revision: 1),
                 fact: .delivered(turn: ExactText("2"))), context: context)
             let session = InboxFreshnessRelaySession(identity: identity)
@@ -420,28 +446,31 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 }
             }
             let diagnostics = InboxFreshnessDiagnosticCollector()
-            let core = try NativeRelayCore(store: store, context: context, session: session,
+            let core = try await NativeRelayCore(store: store, context: context, session: session,
                 onDiagnostic: { diagnostics.append($0) })
             if mode == "write-failure" {
                 do { _ = try await core.resyncAndDrainOutbox(); XCTFail("Page commit must fail") }
                 catch let error as AttentionStoreError {
                     guard case .persistence = error else { return XCTFail("Unexpected error") }
                 }
-                XCTAssertNil(try store.conversationSnapshot(context: context).threads[answered])
-                XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+                let failedConversation = try await store.conversationSnapshot(context: context)
+                XCTAssertNil(failedConversation.threads[answered])
+                XCTAssertEqual(failedConversation.cursor, 2)
                 XCTAssertTrue(session.conversationACKs.isEmpty)
-                XCTAssertFalse(try store.snapshot(context: context).inboxCandidate?.hasInitialPage ?? true)
+                let failedState = try await store.snapshot(context: context)
+                XCTAssertFalse(failedState.inboxCandidate?.hasInitialPage ?? true)
                 XCTAssertFalse(diagnostics.events.contains { $0.causeCode == "conversation_message_skipped" })
                 session.beforeConversationFrame = nil
                 _ = try await core.resyncAndDrainOutbox()
-                XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
-                XCTAssertEqual(try store.conversationSnapshot(context: context).threads[answered]?
+                let retriedConversation = try await store.conversationSnapshot(context: context)
+                XCTAssertEqual(retriedConversation.cursor, 3)
+                XCTAssertEqual(retriedConversation.threads[answered]?
                     .facts[ExactText("2")]?.delivered, true,
                     "A failed page write must not consume restoration or erase the held receipt")
             } else {
                 _ = try await core.resyncAndDrainOutbox()
                 let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
-                let snapshot = try reloaded.conversationSnapshot(context: context)
+                let snapshot = try await reloaded.conversationSnapshot(context: context)
                 XCTAssertEqual(snapshot.cursor, 3)
                 XCTAssertEqual(snapshot.threads[answered]?.facts[ExactText("2")]?.delivered,
                     mode == "matching" ? true : nil)
@@ -459,7 +488,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
-    func testRecoveredDiscussionUsesConfirmedOriginFeedOrderAroundPagedTerminal() throws {
+    func testRecoveredDiscussionUsesConfirmedOriginFeedOrderAroundPagedTerminal() async throws {
         for targetID in ["2", "4"] {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("ordered-recovery"), deviceID: ExactText("reader"))
@@ -469,37 +498,40 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let key = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("author"), messageID: ExactText("request"))
             let binding = ConversationBinding(request: key, revision: 1)
-            _ = store.applyRelayEvent(RelayEvent(sequence: 1,
+            _ = await store.applyRelayEvent(RelayEvent(sequence: 1,
                 body: .delivery(StoredRequest(key: key, originalPayload: .null), .message),
                 conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"),
                     eventID: ExactText("1")), origin: ExactText("origin")), context: context)
-            _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
+            _ = await store.applyRelayEvent(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
                 conversation: RelayConversationMetadata(revision: 1, eventID: ExactText("3"), author: .person),
                 origin: ExactText("origin")), context: context)
-            _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+            _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
             let target = ConversationEvent(sequence: 1, binding: binding, fact: .turn(
                 ConversationTurn(id: ExactText(targetID), binding: binding, author: .person,
                     sessionHandle: ExactText("handle"), text: ExactText("Discussion"),
                     kind: .discussion, conversationSequence: 1)))
             let receipt = ConversationEvent(sequence: 2, binding: binding,
                 fact: .delivered(turn: ExactText(targetID)))
-            XCTAssertThrowsError(try store.restoreReferencedConversationTurn(target, for: receipt,
-                origin: ExactText("different-origin"), context: context))
-            try store.restoreReferencedConversationTurn(target, for: receipt,
+            await assertThrowsAsync {
+                try await store.restoreReferencedConversationTurn(target, for: receipt,
+                    origin: ExactText("different-origin"), context: context)
+            }
+            try await store.restoreReferencedConversationTurn(target, for: receipt,
                 origin: ExactText("origin"), context: context)
-            try store.applyConversation(receipt, context: context)
+            try await store.applyConversation(receipt, context: context)
             let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
-            let thread = try XCTUnwrap(reloaded.conversationSnapshot(context: context).threads[key])
+            let reloadedConversation = try await reloaded.conversationSnapshot(context: context)
+            let thread = try XCTUnwrap(reloadedConversation.threads[key])
             XCTAssertEqual(thread.turns.map(\.id), targetID == "2"
                 ? [ExactText("1"), ExactText("2"), ExactText("3")]
                 : [ExactText("1"), ExactText("3"), ExactText("4")])
             XCTAssertEqual(thread.terminalTurn, ExactText("3"))
-            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 2)
+            XCTAssertEqual(reloadedConversation.cursor, 2)
         }
     }
 
     @MainActor
-    func testRecoveredOriginDiscussionKeepsRedactedContentAndRejectsContradictoryRepeat() throws {
+    func testRecoveredOriginDiscussionKeepsRedactedContentAndRejectsContradictoryRepeat() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("redacted-recovery"), deviceID: ExactText("origin"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -509,30 +541,35 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let binding = ConversationBinding(request: key, revision: 1)
         // The existing request is retained; its discussion dependency alone is
         // absent. This constructed local state is not a claimed normal loss path.
-        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: ExactText("handle"), payload: .null)), context: context)
-        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 2, context: context)
+        _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: 2, context: context)
         let wire = try ConversationWire(profile: context)
         let target = try wire.decodeEvent(data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":1,"kind":"discussion","author":"person","event_id":"2"}"#))
         let receipt = try wire.decodeEvent(data(#"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":1,"kind":"receipt","author":"origin","event_id":"2","delivered":true}"#))
-        XCTAssertThrowsError(try store.applyConversation(receipt, context: context))
-        try store.restoreReferencedConversationTurn(target, for: receipt, context: context)
-        try store.applyConversation(receipt, context: context)
-        let turn = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key]?.turns.first)
+        await assertThrowsAsync { try await store.applyConversation(receipt, context: context) }
+        try await store.restoreReferencedConversationTurn(target, for: receipt, context: context)
+        try await store.applyConversation(receipt, context: context)
+        let conversation = try await store.conversationSnapshot(context: context)
+        let turn = try XCTUnwrap(conversation.threads[key]?.turns.first)
         XCTAssertEqual(turn.contentRedacted, true)
         XCTAssertEqual(turn.text, ExactText(""))
         XCTAssertTrue(turn.files.isEmpty)
-        XCTAssertEqual(try store.applyConversation(target, context: context), 3)
+        let targetCursor = try await store.applyConversation(target, context: context)
+        XCTAssertEqual(targetCursor, 3)
         let contradiction = ConversationTurn(id: turn.id, binding: binding, author: .origin,
             sessionHandle: turn.sessionHandle, text: turn.text, contentRedacted: true,
             kind: .discussion, conversationSequence: 2)
-        XCTAssertThrowsError(try store.applyConversation(ConversationEvent(sequence: 2,
-            binding: binding, fact: .turn(contradiction)), context: context))
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+        await assertThrowsAsync {
+            try await store.applyConversation(ConversationEvent(sequence: 2,
+                binding: binding, fact: .turn(contradiction)), context: context)
+        }
+        let conversationAfterContradiction = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(conversationAfterContradiction.cursor, 3)
     }
 
     @MainActor
-    func testMissingDiscussionRestorationPreservesAnsweredRowAndDurableCursor() throws {
+    func testMissingDiscussionRestorationPreservesAnsweredRowAndDurableCursor() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("recovery-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -542,34 +579,37 @@ final class InboxFreshnessReplayTests: XCTestCase {
             senderID: ExactText("author"), messageID: ExactText("answered-request"))
         let binding = ConversationBinding(request: key, revision: 1)
         let handle = ExactText("session")
-        _ = store.applyRelayEvent(RelayEvent(sequence: 1,
+        _ = await store.applyRelayEvent(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: .null), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: handle,
                 eventID: ExactText("initial-question"))), context: context)
         // Synthetic recovery precondition, not a claimed normal loss path:
         // the local cursor passed a discussion whose turn and event are absent.
-        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+        _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
         let discussion = ConversationTurn(id: ExactText("discussion"), binding: binding,
             author: .person, sessionHandle: handle, text: ExactText("Before answering"),
             kind: .discussion, conversationSequence: 1)
         var historical = ConversationEvent(sequence: 1, binding: binding, fact: .turn(discussion))
         let receipt = ConversationEvent(sequence: 2, binding: binding,
             fact: .delivered(turn: discussion.id))
-        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
+        _ = await store.applyRelayEvent(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
             conversation: RelayConversationMetadata(revision: 1,
                 eventID: ExactText("terminal"), author: .person),
             accountAnswerOutcome: .noComment), context: context)
         let draft = ConversationDraft(binding: binding, text: discussion.text)
-        try store.saveConversationDraft(draft, context: context)
-        let operation = try store.prepareDiscussion(binding, context: context)
-        let pendingDraft = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key]?.drafts[1])
+        try await store.saveConversationDraft(draft, context: context)
+        let operation = try await store.prepareDiscussion(binding, context: context)
+        let pendingConversation = try await store.conversationSnapshot(context: context)
+        let pendingDraft = try XCTUnwrap(pendingConversation.threads[key]?.drafts[1])
         historical = ConversationEvent(sequence: 1, binding: binding, fact: .turn(
             ConversationTurn(id: discussion.id, binding: binding, author: .person,
                 sessionHandle: handle, text: discussion.text, operationID: operation,
                 kind: .discussion, conversationSequence: 1)))
         var rejection: ConversationValidationRejection?
-        XCTAssertThrowsError(try store.applyConversation(receipt, context: context,
-            validationRejection: &rejection))
+        await assertThrowsAsync {
+            try await store.applyConversation(receipt, context: context,
+                validationRejection: &rejection)
+        }
         XCTAssertEqual(rejection?.guardID, .referencedTurnExists)
         let beforeRecovery = try persistence.load(identity: identity)
         let otherRequest = RequestKey(accountScope: identity.personID,
@@ -583,39 +623,47 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let wrongTurn = ConversationTurn(id: target, binding: wrongBinding,
                 author: .person, sessionHandle: session, text: discussion.text,
                 kind: .discussion, conversationSequence: 1)
-            XCTAssertThrowsError(try store.restoreReferencedConversationTurn(
-                ConversationEvent(sequence: 1, binding: wrongBinding, fact: .turn(wrongTurn)),
-                for: receipt, context: context))
+            await assertThrowsAsync {
+                try await store.restoreReferencedConversationTurn(
+                    ConversationEvent(sequence: 1, binding: wrongBinding, fact: .turn(wrongTurn)),
+                    for: receipt, context: context)
+            }
             XCTAssertEqual(try persistence.load(identity: identity), beforeRecovery)
         }
         persistence.failNextCommit()
-        XCTAssertThrowsError(try store.restoreReferencedConversationTurn(historical,
-            for: receipt, context: context))
-        XCTAssertFalse(try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
+        await assertThrowsAsync {
+            try await store.restoreReferencedConversationTurn(historical,
+                for: receipt, context: context)
+        }
+        let conversationBeforeRestore = try await store.conversationSnapshot(context: context)
+        XCTAssertFalse(try XCTUnwrap(conversationBeforeRestore.threads[key])
             .turns.contains { $0.id == discussion.id })
-        try store.restoreReferencedConversationTurn(historical, for: receipt, context: context)
+        try await store.restoreReferencedConversationTurn(historical, for: receipt, context: context)
         let repaired = try AttentionDomainStore(context: context, persistence: persistence)
-        XCTAssertEqual(try repaired.conversationSnapshot(context: context).cursor, 1)
+        let repairedConversation = try await repaired.conversationSnapshot(context: context)
+        XCTAssertEqual(repairedConversation.cursor, 1)
         // An exact repeat compares to the restored turn without adding history
         // or advancing its already-durable cursor.
-        XCTAssertEqual(try repaired.applyConversation(historical, context: context), 1)
-        try repaired.applyConversation(receipt, context: context)
+        let repeatedHistoricalCursor = try await repaired.applyConversation(historical, context: context)
+        XCTAssertEqual(repeatedHistoricalCursor, 1)
+        try await repaired.applyConversation(receipt, context: context)
         let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
-        let snapshot = try reloaded.conversationSnapshot(context: context)
+        let snapshot = try await reloaded.conversationSnapshot(context: context)
         let thread = try XCTUnwrap(snapshot.threads[key])
         XCTAssertEqual(snapshot.cursor, 2)
         XCTAssertEqual(thread.facts[discussion.id]?.delivered, true)
         XCTAssertEqual(thread.drafts[1], pendingDraft)
         XCTAssertEqual(thread.drafts[1]?.disposition, .submitting(operation))
         XCTAssertEqual(thread.terminal, .answered)
-        XCTAssertEqual(try reloaded.snapshot(context: context).cursor, 2)
+        let reloadedState = try await reloaded.snapshot(context: context)
+        XCTAssertEqual(reloadedState.cursor, 2)
         let presentation = try LivePresentationStore(store: reloaded, context: context)
         XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: key)).belongsToReplied)
         XCTAssertEqual(presentation.inboxRow(for: key)?.requestRevision, 1)
     }
 
     @MainActor
-    func testPagedTerminalRecoversLiveAndHeldReceiptsWithCurrentRevision() throws {
+    func testPagedTerminalRecoversLiveAndHeldReceiptsWithCurrentRevision() async throws {
         for receiptHeld in [false, true] {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
@@ -630,7 +678,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 let binding = ConversationBinding(request: key, revision: revision)
                 let turn = ConversationTurn(id: ExactText("revision-\(revision)"), binding: binding,
                     author: .origin, sessionHandle: handle, text: ExactText(""), kind: .revision)
-                try store.applyConversation(ConversationEvent(sequence: revision - 1, binding: binding,
+                try await store.applyConversation(ConversationEvent(sequence: revision - 1, binding: binding,
                     fact: .revision(turn, payload: try JSONValue.parse(data("{\"title\":\"Revision \(revision)\"}")))),
                     context: context)
             }
@@ -638,14 +686,14 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let currentBinding = ConversationBinding(request: key, revision: 3)
             let discussion = ConversationTurn(id: discussionID, binding: currentBinding,
                 author: .person, sessionHandle: handle, text: ExactText("Before answering"), kind: .discussion)
-            try store.applyConversation(ConversationEvent(sequence: 3, binding: currentBinding,
+            try await store.applyConversation(ConversationEvent(sequence: 3, binding: currentBinding,
                 fact: .turn(discussion)), context: context)
             // The origin acknowledges the person-authored terminal, not revision 1.
             let receipt = ConversationEvent(sequence: 4,
                 binding: ConversationBinding(request: key, revision: 3),
                 fact: .delivered(turn: terminalID))
-            if receiptHeld { try store.applyConversation(receipt, context: context) }
-            _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
+            if receiptHeld { try await store.applyConversation(receipt, context: context) }
+            _ = try await store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
             let acceptance = RelayEvent(sequence: 1,
                 body: .delivery(StoredRequest(key: key,
                     originalPayload: try JSONValue.parse(data(#"{"title":"Original question"}"#))), .message),
@@ -657,21 +705,26 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 accountAnswerOutcome: .noComment)
             let item = InboxSnapshotItem(acceptance: acceptance, terminal: terminal)
             persistence.failNextCommit()
-            XCTAssertThrowsError(try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
-                items: [item], nextCursor: nil, receiptCursor: nil, context: context))
+            await assertThrowsAsync {
+                try await store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+                    items: [item], nextCursor: nil, receiptCursor: nil, context: context)
+            }
             let restored = try AttentionDomainStore(context: context, persistence: persistence)
-            XCTAssertNil(try restored.conversationSnapshot(context: context).threads[key])
-            XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, receiptHeld ? 4 : 3)
-            XCTAssertNil(try restored.snapshot(context: context).requests[key])
-            XCTAssertFalse(try XCTUnwrap(restored.snapshot(context: context).inboxCandidate).hasInitialPage)
+            let restoredConversation = try await restored.conversationSnapshot(context: context)
+            let restoredState = try await restored.snapshot(context: context)
+            XCTAssertNil(restoredConversation.threads[key])
+            XCTAssertEqual(restoredConversation.cursor, receiptHeld ? 4 : 3)
+            XCTAssertNil(restoredState.requests[key])
+            XCTAssertFalse(try XCTUnwrap(restoredState.inboxCandidate).hasInitialPage)
 
-            try restored.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+            try await restored.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
                 items: [item], nextCursor: nil, receiptCursor: nil, context: context)
-            _ = try restored.prepareInboxCheckpointAcknowledgement(context: context)
-            _ = try restored.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
-            if !receiptHeld { try restored.applyConversation(receipt, context: context) }
+            _ = try await restored.prepareInboxCheckpointAcknowledgement(context: context)
+            _ = try await restored.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
+            if !receiptHeld { try await restored.applyConversation(receipt, context: context) }
             let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
-            let thread = try XCTUnwrap(reloaded.conversationSnapshot(context: context).threads[key])
+            let reloadedConversation = try await reloaded.conversationSnapshot(context: context)
+            let thread = try XCTUnwrap(reloadedConversation.threads[key])
             XCTAssertEqual(thread.terminalTurn, terminalID)
             XCTAssertEqual(thread.facts[terminalID]?.delivered, true)
             XCTAssertEqual(thread.currentRevision, 3)
@@ -683,8 +736,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
             }
             let discussionIndex = try XCTUnwrap(thread.turns.firstIndex { $0.id == discussionID })
             XCTAssertLessThan(discussionIndex, terminalIndex)
-            XCTAssertEqual(try reloaded.snapshot(context: context).cursor, 2)
-            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 4)
+            let reloadedState = try await reloaded.snapshot(context: context)
+            XCTAssertEqual(reloadedState.cursor, 2)
+            XCTAssertEqual(reloadedConversation.cursor, 4)
             let presentation = try LivePresentationStore(store: reloaded, context: context)
             let row = try XCTUnwrap(presentation.inboxRow(for: key))
             XCTAssertEqual(row.requestRevision, 3)
@@ -693,7 +747,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         }
     }
 
-    func testPagedTerminalWithoutMatchingReceiptIdentityRemainsFatal() throws {
+    func testPagedTerminalWithoutMatchingReceiptIdentityRemainsFatal() async throws {
         for suppliedID in [nil, ExactText("different-terminal")] as [ExactText?] {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
@@ -701,10 +755,10 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
             let key = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("author"), messageID: ExactText("answered-request"))
-            try store.applyConversation(ConversationEvent(sequence: 1,
+            try await store.applyConversation(ConversationEvent(sequence: 1,
                 binding: ConversationBinding(request: key, revision: 1),
                 fact: .delivered(turn: ExactText("answer-terminal"))), context: context)
-            _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
+            _ = try await store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
             let item = InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
                 body: .delivery(StoredRequest(key: key, originalPayload: .null), .message),
                 conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"),
@@ -712,15 +766,19 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 terminal: RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
                     conversation: suppliedID.map { RelayConversationMetadata(revision: 1, eventID: $0, author: .person) }))
             var rejection: ConversationValidationRejection?
-            XCTAssertThrowsError(try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
-                items: [item], nextCursor: nil, receiptCursor: nil, context: context,
-                validationRejection: &rejection)) {
-                XCTAssertEqual($0 as? ConversationError, .invalidBinding)
-            }
+            await assertThrowsAsync({
+                try await store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+                    items: [item], nextCursor: nil, receiptCursor: nil, context: context,
+                    validationRejection: &rejection)
+            }, onError: { error in
+                XCTAssertEqual(error as? ConversationError, .invalidBinding)
+            })
             XCTAssertEqual(rejection?.guardID, .referencedTurnExists)
-            XCTAssertEqual(try store.snapshot(context: context).cursor, 0)
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
-            XCTAssertNil(try store.conversationSnapshot(context: context).threads[key])
+            let snapshot = try await store.snapshot(context: context)
+            let conversation = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(snapshot.cursor, 0)
+            XCTAssertEqual(conversation.cursor, 1)
+            XCTAssertNil(conversation.threads[key])
         }
     }
 
@@ -753,7 +811,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         ]
 
         let diagnostics = InboxFreshnessDiagnosticCollector()
-        let core = try NativeRelayCore(store: store, context: context, session: session,
+        let core = try await NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: { diagnostics.append($0) })
         _ = try await core.resyncAndDrainOutbox()
 
@@ -781,7 +839,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
                        "A valid revision follows the rejected event in the synthetic stream.")
         XCTAssertEqual(session.consumedConversationFrames.count, 8,
                        "Replay accounts for the rejected event, recovers after an ACK-behind response, then consumes the history again.")
-        let snapshot = try store.conversationSnapshot(context: context)
+        let snapshot = try await store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 2)
         XCTAssertEqual(snapshot.threads[key]?.currentRevision, 3)
         XCTAssertEqual(snapshot.threads[key]?.revisionNumbers, [1, 3],
@@ -801,21 +859,24 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let lowerBinding = ConversationBinding(request: key, revision: 2)
         let lowerRequest = ConversationEvent(sequence: 3, binding: lowerBinding,
             fact: .request(sessionHandle: ExactText("handle"), payload: lowerPayload))
-        XCTAssertThrowsError(try store.applyConversation(lowerRequest, context: context)) {
-            XCTAssertEqual($0 as? ConversationError, .staleRevision(current: 3))
-        }
+        await assertThrowsAsync({ try await store.applyConversation(lowerRequest, context: context) },
+            onError: { error in
+                XCTAssertEqual(error as? ConversationError, .staleRevision(current: 3))
+            })
         let lowerTurn = ConversationTurn(id: ExactText("lower-revision"), binding: lowerBinding,
             author: .origin, sessionHandle: ExactText("handle"), text: ExactText("Older wording"),
             kind: .revision)
         let lowerRevision = ConversationEvent(sequence: 3, binding: lowerBinding,
             fact: .revision(lowerTurn, payload: lowerPayload))
-        XCTAssertThrowsError(try store.applyConversation(lowerRevision, context: context)) {
-            XCTAssertEqual($0 as? ConversationError, .staleRevision(current: 3))
-        }
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+        await assertThrowsAsync({ try await store.applyConversation(lowerRevision, context: context) },
+            onError: { error in
+                XCTAssertEqual(error as? ConversationError, .staleRevision(current: 3))
+            })
+        let conversation = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(conversation.cursor, 2)
 
         let restoredStore = try AttentionDomainStore(context: context, persistence: persistence)
-        let restored = try restoredStore.conversationSnapshot(context: context)
+        let restored = try await restoredStore.conversationSnapshot(context: context)
         XCTAssertEqual(restored.cursor, 2)
         XCTAssertEqual(restored.threads[key]?.currentRevision, 3,
                        "The cursor and later revision survive reload without a stored rejection record.")
@@ -828,7 +889,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             personID: ExactText("freshness-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
-        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
+        _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
 
         let session = InboxFreshnessRelaySession(identity: identity)
         session.rejectFirstConversationACK = true
@@ -848,16 +909,17 @@ final class InboxFreshnessReplayTests: XCTestCase {
             ]
         ]
 
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(session.conversationACKs.count, 2)
-        XCTAssertTrue(try store.conversationSnapshot(context: context).threads.isEmpty)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+        let conversation = try await store.conversationSnapshot(context: context)
+        XCTAssertTrue(conversation.threads.isEmpty)
+        XCTAssertEqual(conversation.cursor, 1)
         await core.deactivate()
     }
 
     @MainActor
-    func testMissingContentRedactedBitIsRecognizedForAccountedRedelivery() throws {
+    func testMissingContentRedactedBitIsRecognizedForAccountedRedelivery() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-missing-redaction"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -865,9 +927,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
         let firstPayload = try JSONValue.parse(data(#"{"title":"First wording"}"#))
-        try store.apply(RelayEvent(sequence: 1,
+        try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: firstPayload), .message)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: 1,
+        try await store.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("handle"), payload: firstPayload)), context: context)
 
@@ -877,24 +939,29 @@ final class InboxFreshnessReplayTests: XCTestCase {
             text: ExactText(""), contentRedacted: nil, kind: .revision)
         let event = ConversationEvent(sequence: 2, binding: binding, fact: .redactedRevision(turn))
         var firstPassRejection: ConversationValidationRejection?
-        XCTAssertThrowsError(try store.applyConversation(event, context: context,
-            validationRejection: &firstPassRejection)) {
-            XCTAssertEqual($0 as? ConversationError, .invalidBinding)
-        }
+        await assertThrowsAsync({
+            try await store.applyConversation(event, context: context,
+                validationRejection: &firstPassRejection)
+        }, onError: { error in
+            XCTAssertEqual(error as? ConversationError, .invalidBinding)
+        })
         let firstRejection = try XCTUnwrap(firstPassRejection)
         XCTAssertEqual(firstRejection.guardID, .redactedRevisionBinding)
         XCTAssertEqual(firstRejection.facts.sessionHandleMatchesThread, true)
         XCTAssertEqual(firstRejection.facts.contentRedactedPresent, false)
         XCTAssertEqual(firstRejection.facts.contentRedactedIsTrue, false)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+        let conversationBeforeReplay = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(conversationBeforeReplay.cursor, 1)
 
         // Cursor advancement is the durable accounting for the rejected sequence.
-        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 2, context: context)
-        let replayRejection = try XCTUnwrap(
-            try store.redactedRevisionRejectionForAccountedRedelivery(event, context: context))
+        _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: 2, context: context)
+        let accountedRejection = try await store.redactedRevisionRejectionForAccountedRedelivery(
+            event, context: context)
+        let replayRejection = try XCTUnwrap(accountedRejection)
         XCTAssertEqual(replayRejection, firstRejection,
                        "ACK-behind replay recognizes the same guard without requiring contentRedacted==true.")
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+        let conversationAfterReplay = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(conversationAfterReplay.cursor, 2)
     }
 
     @MainActor
@@ -920,7 +987,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         ]
 
         let diagnostics = InboxFreshnessDiagnosticCollector()
-        let core = try NativeRelayCore(store: store, context: context, session: session,
+        let core = try await NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: { diagnostics.append($0) })
         _ = try await core.resyncAndDrainOutbox()
         let failure = try XCTUnwrap(diagnostics.events.first {
@@ -930,17 +997,18 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let rejection = try XCTUnwrap(failure.conversationValidationRejection)
         XCTAssertEqual(rejection.guardID, .redactedRevisionBinding)
         XCTAssertEqual(rejection.facts.sessionHandleMatchesThread, false)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+        let conversation = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(conversation.cursor, 2)
         XCTAssertEqual(session.conversationACKs.count, 1)
         let presentation = try LivePresentationStore(store: store, context: context)
         XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Current wording"))
-        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.sessionHandle,
+        XCTAssertEqual(conversation.threads[key]?.sessionHandle,
             ExactText("handle"))
         await core.deactivate()
     }
 
     @MainActor
-    func testRequestAndRedactedRevisionForwardJumpsPreserveRedactedProjection() throws {
+    func testRequestAndRedactedRevisionForwardJumpsPreserveRedactedProjection() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-advance"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -949,12 +1017,12 @@ final class InboxFreshnessReplayTests: XCTestCase {
             senderID: ExactText("author"), messageID: ExactText("request"))
         let first = try JSONValue.parse(data(#"{"title":"First wording"}"#))
         let third = try JSONValue.parse(data(#"{"title":"Third wording"}"#))
-        try store.apply(RelayEvent(sequence: 1,
+        try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: 1,
+        try await store.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("handle"), payload: first)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: 2,
+        try await store.applyConversation(ConversationEvent(sequence: 2,
             binding: ConversationBinding(request: key, revision: 3),
             fact: .request(sessionHandle: ExactText("handle"), payload: third)), context: context)
 
@@ -962,10 +1030,11 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let redacted = ConversationTurn(id: ExactText("redacted-revision-five"),
             binding: redactedBinding, author: .origin, sessionHandle: ExactText("handle"),
             text: ExactText(""), contentRedacted: true, kind: .revision)
-        try store.applyConversation(ConversationEvent(sequence: 3, binding: redactedBinding,
+        try await store.applyConversation(ConversationEvent(sequence: 3, binding: redactedBinding,
             fact: .redactedRevision(redacted)), context: context)
 
-        let thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
+        let conversation = try await store.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(conversation.threads[key])
         XCTAssertEqual(thread.currentRevision, 5)
         XCTAssertEqual(thread.revisionNumbers, [1, 3, 5])
         XCTAssertTrue(thread.currentContentRedacted)
@@ -979,8 +1048,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
         XCTAssertEqual(presented.title, ExactText("Question content unavailable on this device"))
         XCTAssertNil(presented.selector,
                      "A redacted current revision must not expose an answer selector.")
-        XCTAssertThrowsError(try store.selector(for: key, requestRevision: 5, context: context),
-                             "Revision-bound actions remain unavailable for redacted content.")
+        await assertThrowsAsync(
+            { try await store.selector(for: key, requestRevision: 5, context: context) },
+            message: "Revision-bound actions remain unavailable for redacted content.")
     }
 
     @MainActor
@@ -993,9 +1063,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
         let firstPayload = try JSONValue.parse(data(#"{"title":"First wording"}"#))
-        try store.apply(RelayEvent(sequence: 1,
+        try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: firstPayload), .message)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: 1,
+        try await store.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("handle"), payload: firstPayload)), context: context)
 
@@ -1017,7 +1087,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let revision = ConversationTurn(id: ExactText("revision-two"), binding: binding,
             author: .origin, sessionHandle: ExactText("handle"),
             text: ExactText("Second wording"), kind: .revision)
-        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .revision(revision, payload: secondPayload)), context: context)
 
         XCTAssertEqual(presentation.request(for: key)?.requestRevision, 1,

@@ -15,10 +15,10 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Prepare Inbox history in the background"].exists,
+        XCTAssertTrue(app.staticTexts["Keep drafts for each conversation"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts[
-            "Inbox prepares messages and conversation history in the background as it catches up."
+            "Drafts are kept per chat. Send needs a connection. A failed send is not retried automatically; tap Send again."
         ].exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
                       app.debugDescription)
@@ -126,10 +126,10 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(updateTitle.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                       "The update sheet identifies the released build and version.")
-        XCTAssertTrue(app.staticTexts["Prepare Inbox history in the background"].exists,
+        XCTAssertTrue(app.staticTexts["Keep drafts for each conversation"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts[
-            "Inbox prepares messages and conversation history in the background as it catches up."
+            "Drafts are kept per chat. Send needs a connection. A failed send is not retried automatically; tap Send again."
         ].exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
                       app.debugDescription)

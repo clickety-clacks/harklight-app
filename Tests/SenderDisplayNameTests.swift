@@ -11,7 +11,7 @@ final class SenderDisplayNameTests: XCTestCase {
             deviceID: ExactText("reader")), transportMode: .relay)
     }
 
-    func testFeedProjectionPreservesArbitraryAndEmptyNamesWithoutChangingSenderIdentity() throws {
+    func testFeedProjectionPreservesArbitraryAndEmptyNamesWithoutChangingSenderIdentity() async throws {
         let profile = context()
         let store = try AttentionDomainStore(context: profile,
             persistence: MemoryAttentionStatePersistence())
@@ -51,11 +51,11 @@ final class SenderDisplayNameTests: XCTestCase {
 
             XCTAssertEqual(request.key.senderID, senderID)
             XCTAssertEqual(request.senderDisplayName, testCase.displayName.map(ExactText.init))
-            try store.apply(event, context: profile)
+            try await store.apply(event, context: profile)
         }
 
         let port = AttentionDomainPort(store: store)
-        let projected = try port.observe(context: port.context).requests
+        let projected = try await port.observe(context: port.context).requests
         XCTAssertEqual(projected.map(\.acceptanceOrder), [UInt64(3), 2, 1],
                        "The feed presents the newest accepted request first.")
         for testCase in cases {

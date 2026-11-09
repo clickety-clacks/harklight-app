@@ -37,11 +37,11 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
 
     @MainActor
     private func deliverTextRequest(to store: AttentionDomainStore,
-                                    context: ProfileContext) throws -> RequestKey {
+                                    context: ProfileContext) async throws -> RequestKey {
         let payload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"m1","created_at":1,"title":"Needs a reply","body":"Reply requested"}"#.utf8))
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: ExactText("app:test"), messageID: ExactText("m1"))
-        _ = try store.apply(RelayEvent(sequence: 1,
+        _ = try await store.apply(RelayEvent(sequence: 1,
                                        body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)),
                             context: context)
         return key
@@ -53,10 +53,11 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         let persistence = CountingAttentionStatePersistence()
         let domain = try AttentionDomainStore(context: context,
                                               persistence: persistence)
-        let key = try deliverTextRequest(to: domain, context: context)
+        let key = try await deliverTextRequest(to: domain, context: context)
         let visible = try LivePresentationStore(store: domain, context: context)
         let writesBeforeEditing = persistence.writeCount
-        let draftBeforeEditing = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
+        let initialSnapshot = try await domain.snapshot(context: context)
+        let draftBeforeEditing = try XCTUnwrap(initialSnapshot.drafts[key])
 
         let request = try XCTUnwrap(visible.request(for: key))
         guard case let .compatibility(actions) = request.projection,
@@ -75,7 +76,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                        ExactText("Typed locally"),
                        "Leaving and reopening a request in this app session keeps its unsent Reply.")
 
-        let beforePause = try domain.snapshot(context: context)
+        let beforePause = try await domain.snapshot(context: context)
         XCTAssertEqual(beforePause.drafts[key], draftBeforeEditing,
                        "Reply edits do not change the empty draft seeded when the request arrived.")
         XCTAssertTrue(beforePause.outbox.isEmpty, "Typing does not create an answer operation.")
@@ -83,17 +84,18 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                        "Selections and text stay out of durable storage.")
 
         try await Task.sleep(for: .milliseconds(600))
-        let afterPause = try domain.snapshot(context: context)
+        let afterPause = try await domain.snapshot(context: context)
         XCTAssertEqual(afterPause.drafts[key], draftBeforeEditing,
                        "Pausing does not save Reply contents over the request's empty baseline.")
         XCTAssertTrue(afterPause.outbox.isEmpty, "Pausing does not submit an answer.")
         XCTAssertEqual(persistence.writeCount, writesBeforeEditing,
                        "A typing pause does not write Reply state.")
 
-        XCTAssertTrue(visible.submitFromUser(key,
-                                            answerDraft: reopenedSession.draft,
-                                            requestRevision: reopenedSession.requestRevision))
-        let committed = try domain.snapshot(context: context)
+        let submissionStarted = await visible.submitFromUser(key,
+            answerDraft: reopenedSession.draft,
+            requestRevision: reopenedSession.requestRevision)
+        XCTAssertTrue(submissionStarted)
+        let committed = try await domain.snapshot(context: context)
         XCTAssertNil(committed.drafts[key], "Submitting does not create a resumable draft.")
         let submission = try XCTUnwrap(committed.outbox.first)
         XCTAssertEqual(submission.requestRevision, request.requestRevision)
@@ -108,7 +110,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
     }
 
     @MainActor
-    func testSenderReplyCommitsTextAndPointTogetherWithoutSavingDraft() throws {
+    func testSenderReplyCommitsTextAndPointTogetherWithoutSavingDraft() async throws {
         let context = makeContext()
         let persistence = CountingAttentionStatePersistence()
         let domain = try AttentionDomainStore(context: context, persistence: persistence)
@@ -119,14 +121,15 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: fixture.key.senderID,
                              messageID: fixture.key.messageID)
-        _ = try domain.apply(RelayEvent(sequence: 1,
+        _ = try await domain.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: fixture.originalPayload), .message)),
             context: context)
         let visible = try LivePresentationStore(store: domain, context: context)
         let writesBeforeEditing = persistence.writeCount
         let request = try XCTUnwrap(visible.request(for: key))
         let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
-        let draftBeforeEditing = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
+        let initialSnapshot = try await domain.snapshot(context: context)
+        let draftBeforeEditing = try XCTUnwrap(initialSnapshot.drafts[key])
         let point = PointValue(x: 140, y: 625)
 
         session.setPoint(point, inputID: ExactText("location"))
@@ -134,14 +137,17 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                            target: ReplyEditorTarget(inputID: "note", actionID: "input-text",
                                                      isInputText: true))
 
-        XCTAssertEqual(try domain.snapshot(context: context).drafts[key], draftBeforeEditing,
+        let beforeCommitSnapshot = try await domain.snapshot(context: context)
+        XCTAssertEqual(beforeCommitSnapshot.drafts[key], draftBeforeEditing,
                        "Local sender-field edits leave the request's empty draft baseline unchanged.")
         XCTAssertEqual(persistence.writeCount, writesBeforeEditing)
-        XCTAssertTrue(visible.submitFromUser(key,
-                                             answerDraft: session.draft,
-                                             requestRevision: session.requestRevision))
+        let submissionStarted = await visible.submitFromUser(key,
+            answerDraft: session.draft,
+            requestRevision: session.requestRevision)
+        XCTAssertTrue(submissionStarted)
 
-        let submission = try XCTUnwrap(domain.snapshot(context: context).outbox.first)
+        let submittedSnapshot = try await domain.snapshot(context: context)
+        let submission = try XCTUnwrap(submittedSnapshot.outbox.first)
         XCTAssertEqual(submission.typedInputs,
                        [.point(input: ExactText("location"), point: point),
                         .text(input: ExactText("note"), text: ExactText("Please check the partition."))],
@@ -150,49 +156,55 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         XCTAssertEqual(submittedAnswer.inputs[ExactText("location")]?.effectivePoint, point)
         XCTAssertEqual(submittedAnswer.inputs[ExactText("note")]?.text,
                        ExactText("Please check the partition."))
-        XCTAssertNil(try domain.snapshot(context: context).drafts[key],
+        let finalSnapshot = try await domain.snapshot(context: context)
+        XCTAssertNil(finalSnapshot.drafts[key],
                      "Submitting does not leave a resumable Reply draft.")
     }
 
     @MainActor
-    func testCheckmarkKeepsTheDisplayedRevisionAndRejectsAnUpdatedRequest() throws {
+    func testCheckmarkKeepsTheDisplayedRevisionAndRejectsAnUpdatedRequest() async throws {
         let context = makeContext()
         let persistence = CountingAttentionStatePersistence()
         let domain = try AttentionDomainStore(context: context, persistence: persistence)
-        let key = try deliverTextRequest(to: domain, context: context)
+        let key = try await deliverTextRequest(to: domain, context: context)
         let firstPayload = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         let revisedPayload = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         let binding = ConversationBinding(request: key, revision: 1)
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: ExactText("origin"), payload: firstPayload)), context: context)
         let live = try LivePresentationStore(store: domain, context: context)
         let displayed = try XCTUnwrap(live.request(for: key))
-        let draftBeforeEditing = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
+        let initialSnapshot = try await domain.snapshot(context: context)
+        let draftBeforeEditing = try XCTUnwrap(initialSnapshot.drafts[key])
         let writesBeforeEditing = persistence.writeCount
         let session = live.replyEditorSession(for: displayed)
         session.selectAction(ExactText("reply"), inputID: nil)
         session.updateText("Answer for the first wording",
                            target: ReplyEditorTarget(inputID: nil, actionID: "reply"))
-        XCTAssertEqual(try domain.snapshot(context: context).drafts[key], draftBeforeEditing,
+        let beforeUpdateSnapshot = try await domain.snapshot(context: context)
+        XCTAssertEqual(beforeUpdateSnapshot.drafts[key], draftBeforeEditing,
                        "Editing remains local before the request changes.")
         XCTAssertEqual(persistence.writeCount, writesBeforeEditing,
                        "Editing does not write the persisted draft.")
 
-        try domain.applyConversation(ConversationEvent(sequence: 2,
+        try await domain.applyConversation(ConversationEvent(sequence: 2,
             binding: ConversationBinding(request: key, revision: 2),
             fact: .request(sessionHandle: ExactText("origin"), payload: revisedPayload)), context: context)
         let beforeCheckmark = persistence.writeCount
-        let draftAtCurrentRevision = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
+        let currentSnapshot = try await domain.snapshot(context: context)
+        let draftAtCurrentRevision = try XCTUnwrap(currentSnapshot.drafts[key])
         XCTAssertEqual(draftAtCurrentRevision, draftBeforeEditing,
                        "The request update does not carry locally edited Reply text into durable state.")
 
-        XCTAssertFalse(live.submitFromUser(key, answerDraft: session.draft,
-                                           requestRevision: session.requestRevision),
+        let submissionStarted = await live.submitFromUser(key, answerDraft: session.draft,
+            requestRevision: session.requestRevision)
+        XCTAssertFalse(submissionStarted,
                        "The checkmark validates the original revision and does not send its answer for newer wording.")
         XCTAssertEqual(persistence.writeCount, beforeCheckmark,
                        "A stale checkmark does not persist an editable draft or answer operation.")
-        XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try domain.snapshot(context: context).drafts[key], draftAtCurrentRevision,
+        let rejectedSnapshot = try await domain.snapshot(context: context)
+        XCTAssertTrue(rejectedSnapshot.outbox.isEmpty)
+        XCTAssertEqual(rejectedSnapshot.drafts[key], draftAtCurrentRevision,
                        "Rejecting a stale checkmark leaves the request's unedited baseline intact.")
         XCTAssertEqual(live.request(for: key)?.requestRevision, 2,
                        "The latest wording is shown after the failed checkmark.")

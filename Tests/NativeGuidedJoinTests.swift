@@ -990,17 +990,18 @@ final class NativeGuidedJoinTests: XCTestCase {
                                 senderID: ExactText("previous-server"), messageID: ExactText("saved-message"))
         let oldPayload = try JSONValue.parse(Data(#"{"sender_id":"previous-server","message_id":"saved-message","title":"Old account message","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         let oldRequest = StoredRequest(key: oldKey, originalPayload: oldPayload)
-        _ = try oldDomain.apply(RelayEvent(sequence: 1, body: .delivery(oldRequest, .message)),
+        _ = try await oldDomain.apply(RelayEvent(sequence: 1, body: .delivery(oldRequest, .message)),
                                 context: oldContext)
-        let oldSelector = try oldDomain.selector(for: oldKey, context: oldContext)
-        try oldDomain.saveDraft(RequestDraft(interface: oldRequest.interface), selector: oldSelector,
+        let oldSelector = try await oldDomain.selector(for: oldKey, context: oldContext)
+        try await oldDomain.saveDraft(RequestDraft(interface: oldRequest.interface), selector: oldSelector,
                                 context: oldContext)
         let oldAnswerID = UUID()
-        _ = try oldDomain.submitNoComment(intentID: oldAnswerID, selector: oldSelector, context: oldContext)
-        XCTAssertNotNil(try oldDomain.lookupIntent(oldAnswerID, context: oldContext))
+        _ = try await oldDomain.submitNoComment(intentID: oldAnswerID, selector: oldSelector, context: oldContext)
+        let oldIntent = try await oldDomain.lookupIntent(oldAnswerID, context: oldContext)
+        XCTAssertNotNil(oldIntent)
 
         let oldPresentation = try LivePresentationStore(store: oldDomain, context: oldContext)
-        try oldPresentation.refreshFromDurableStore()
+        try await oldPresentation.refreshFromDurableStore()
         XCTAssertNotNil(oldPresentation.request(for: oldKey))
         XCTAssertNotNil(oldPresentation.draft(for: oldKey), "The old account draft stays with its message")
 
@@ -1013,7 +1014,8 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertTrue(newPresentation.presentation.requests.isEmpty,
                       "The new account cannot see messages stored under the prior device identity")
         XCTAssertNil(newPresentation.draft(for: oldKey))
-        XCTAssertNil(try newDomain.lookupIntent(oldAnswerID, context: newContext),
+        let newIntent = try await newDomain.lookupIntent(oldAnswerID, context: newContext)
+        XCTAssertNil(newIntent,
                      "A pending answer cannot enter the new account's outbox")
 
         let connectedApp = NativeAppLaunch(arguments: [],

@@ -256,7 +256,7 @@ final class ReplyItemAreaTests: XCTestCase {
         XCTFail("The reply ledger was not persisted.")
     }
 
-    func testNormalReplyProjectionUsesServerQuoteAndOpenTargets() throws {
+    func testNormalReplyProjectionUsesServerQuoteAndOpenTargets() async throws {
         let key = parent("message")
         func turn(_ id: String, sequence: UInt64, text: String) -> ConversationTurn {
             ConversationTurn(id: ExactText(id),
@@ -272,12 +272,12 @@ final class ReplyItemAreaTests: XCTestCase {
                                              persistence: MemoryAttentionStatePersistence())
         let binding = ConversationBinding(request: key, revision: 1)
         let session = ExactText("session")
-        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: session, payload: .null)), context: context)
         let discussion = ConversationTurn(id: ExactText("question"), binding: binding,
             author: .person, sessionHandle: session, text: ExactText("Question"),
             kind: .discussion, conversationSequence: 2)
-        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .turn(discussion)), context: context)
         let earliest = ConversationTurn(id: ExactText("reply-7"), binding: binding,
             author: .origin, sessionHandle: session, text: ExactText("Earliest unseen"),
@@ -285,11 +285,12 @@ final class ReplyItemAreaTests: XCTestCase {
         let quote = ConversationTurn(id: ExactText("reply-9"), binding: binding,
             author: .origin, sessionHandle: session, text: ExactText("Newest quote"),
             inReplyTo: discussion.id, kind: .reply, conversationSequence: 4)
-        try store.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 3, binding: binding,
             fact: .turn(earliest)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
             fact: .turn(quote)), context: context)
-        var thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
+        let conversation = try await store.conversationSnapshot(context: context)
+        var thread = try XCTUnwrap(conversation.threads[key])
         XCTAssertEqual(thread.turns.map(\.id.rawValue), ["question", "reply-7", "reply-9"])
         XCTAssertEqual(thread.turns.compactMap(\.conversationSequence), [2, 3, 4])
         thread.facts[quote.id] = ConversationTurnFacts(
@@ -325,7 +326,7 @@ final class ReplyItemAreaTests: XCTestCase {
                      "The client waits for existing conversation content instead of fabricating a quote.")
     }
 
-    func testLiveReplyReceiptTimeIsRetainedOnceAndHistoryHasNoTime() throws {
+    func testLiveReplyReceiptTimeIsRetainedOnceAndHistoryHasNoTime() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"),
                                        deviceID: ExactText("device"))
@@ -337,41 +338,41 @@ final class ReplyItemAreaTests: XCTestCase {
                              messageID: ExactText("receipt-time"))
         let binding = ConversationBinding(request: key, revision: 1)
         let session = ExactText("origin-session")
-        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: session, payload: .null)), context: context)
 
         let discussion = ConversationTurn(id: ExactText("person-turn"), binding: binding,
             author: .person, sessionHandle: session, text: ExactText("Question"),
             kind: .discussion, conversationSequence: 2)
-        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .turn(discussion)), context: context)
 
         let liveReply = ConversationTurn(id: ExactText("live-reply"), binding: binding,
             author: .origin, sessionHandle: session, text: ExactText("Answer"),
             inReplyTo: discussion.id, kind: .reply, conversationSequence: 3)
         let liveEvent = ConversationEvent(sequence: 3, binding: binding, fact: .turn(liveReply))
-        try store.applyConversation(liveEvent, context: context,
+        try await store.applyConversation(liveEvent, context: context,
                                     locallyReceivedAtMilliseconds: 1_800_000_123_000)
-        try store.applyConversation(liveEvent, context: context,
+        try await store.applyConversation(liveEvent, context: context,
                                     locallyReceivedAtMilliseconds: 1_800_000_456_000)
-        let liveFacts = try XCTUnwrap(store.conversationSnapshot(context: context)
-            .threads[key]?.facts[liveReply.id])
+        let liveSnapshot = try await store.conversationSnapshot(context: context)
+        let liveFacts = try XCTUnwrap(liveSnapshot.threads[key]?.facts[liveReply.id])
         XCTAssertEqual(liveFacts.localLiveArrivalAtMilliseconds, 1_800_000_123_000,
                        "A duplicate stream event cannot replace the receipt time recorded at first application.")
 
         let historyReply = ConversationTurn(id: ExactText("history-reply"), binding: binding,
             author: .origin, sessionHandle: session, text: ExactText("Fetched history"),
             inReplyTo: discussion.id, kind: .reply, conversationSequence: 4)
-        try store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 4, binding: binding,
             fact: .turn(historyReply)), context: context)
         let personTurn = ConversationTurn(id: ExactText("person-turn-5"), binding: binding,
             author: .person, sessionHandle: session, text: ExactText("Follow-up"),
             kind: .discussion, conversationSequence: 5)
-        try store.applyConversation(ConversationEvent(sequence: 5, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 5, binding: binding,
             fact: .turn(personTurn)), context: context,
             locallyReceivedAtMilliseconds: 1_800_000_789_000)
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
-        let snapshot = try restored.conversationSnapshot(context: context)
+        let snapshot = try await restored.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.threads[key]?.facts[liveReply.id]?.localLiveArrivalAtMilliseconds,
                        1_800_000_123_000,
                        "The local reply receipt survives an app-store reload.")
@@ -427,7 +428,7 @@ final class ReplyItemAreaTests: XCTestCase {
             message: { $0.0 }, reply: { $0.0 }), ["message-30", "message-10"])
     }
 
-    func testInboxReplyScoresComeFromTheViewAndSurviveTheParentResolving() throws {
+    func testInboxReplyScoresComeFromTheViewAndSurviveTheParentResolving() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"),
                                        deviceID: ExactText("device"))
@@ -439,7 +440,7 @@ final class ReplyItemAreaTests: XCTestCase {
         let other = RequestKey(accountScope: identity.personID,
                                senderID: ExactText("agent"), messageID: ExactText("other"))
         let payload = try JSONValue.parse(Data(#"{"title":"Parent","answer_ui":null}"#.utf8))
-        try store.apply(RelayEvent(sequence: 1,
+        try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)),
             context: context)
         let listItems = [
@@ -448,7 +449,7 @@ final class ReplyItemAreaTests: XCTestCase {
                 unseenCount: 2, score: 0.93, scoreKind: .current),
             InboxViewListItem(kind: .message, key: key)
         ]
-        try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+        try await store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
             InboxViewEntry(key: key, score: 0.4)
         ], replies: [
             InboxViewReply(key: key, conversationSequence: 7, score: 0.93),
@@ -457,17 +458,19 @@ final class ReplyItemAreaTests: XCTestCase {
         ], listItems: listItems), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let snapshot = try port.observe(context: port.context)
+        let snapshot = try await port.observe(context: port.context)
         let presented = try XCTUnwrap(snapshot.requests.first)
         XCTAssertEqual(snapshot.inboxViewListItems, listItems)
-        XCTAssertEqual(try port.inspect(context: port.context, request: key).inboxViewListItems,
+        let inspection = try await port.inspect(context: port.context, request: key)
+        XCTAssertEqual(inspection.inboxViewListItems,
                        listItems, "Detail filtering keeps the account-wide normal order available to its list.")
         XCTAssertEqual(presented.inboxReplyScores, [7: 0.93],
                        "Scores keep their sequence, skip unscored replies and never cross parents.")
 
-        try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil)),
+        try await store.apply(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil)),
                         context: context)
-        let resolved = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        let resolvedSnapshot = try await port.observe(context: port.context)
+        let resolved = try XCTUnwrap(resolvedSnapshot.requests.first)
         XCTAssertNil(resolved.inboxScore,
                      "Row-level view fields stay gated to open or pending requests.")
         XCTAssertEqual(resolved.inboxReplyScores, [7: 0.93],

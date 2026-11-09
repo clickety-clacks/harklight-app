@@ -75,9 +75,9 @@ final class InboxBadgeCountTests: XCTestCase {
                                         showsLocalExamples: true), 0)
     }
 
-    func testBadgeMatchesTheInboxTabListMinusRetractedRows() {
+    func testBadgeMatchesTheInboxTabListMinusRetractedRows() async {
         let samples = SampleLibrary()
-        samples.populate()
+        await samples.populate()
         let requests = [
             row("open"),
             row("answered", status: "Answered", hasUserAction: true),
@@ -97,9 +97,9 @@ final class InboxBadgeCountTests: XCTestCase {
         }
     }
 
-    func testLocalExamplesCountWhileShownAndLeaveWhenTheyMoveToReplied() throws {
+    func testLocalExamplesCountWhileShownAndLeaveWhenTheyMoveToReplied() async throws {
         let samples = SampleLibrary()
-        samples.populate()
+        await samples.populate()
         let shown = InboxBadge.count(requests: [], samples: samples, showsLocalExamples: true)
         XCTAssertGreaterThan(shown, 0)
         XCTAssertEqual(InboxBadge.count(requests: [], samples: samples,

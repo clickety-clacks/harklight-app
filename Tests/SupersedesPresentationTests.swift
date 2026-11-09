@@ -9,13 +9,13 @@ final class SupersedesPresentationTests: XCTestCase {
             personID: ExactText("person"), deviceID: ExactText("reader")), transportMode: .relay)
     }
 
-    func testDeliveryIDsAreOrderedDeduplicatedAndUnaffectedByLaterRevisionPayloads() throws {
+    func testDeliveryIDsAreOrderedDeduplicatedAndUnaffectedByLaterRevisionPayloads() async throws {
         let context = profile()
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("agent"), messageID: ExactText("new"))
         let original = try JSONValue.parse(Data(#"{"title":"New message","supersedes":["old",7,"older","old"]}"#.utf8))
-        try domain.apply(RelayEvent(sequence: 1,
+        try await domain.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: original), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("origin"),
                                                      eventID: ExactText("delivery-event"))), context: context)
@@ -27,9 +27,9 @@ final class SupersedesPresentationTests: XCTestCase {
         let revision = ConversationTurn(id: ExactText("revision-event"), binding: revisionKey,
             author: .origin, sessionHandle: ExactText("origin"), text: ExactText("Updated wording"), kind: .revision)
         let revisedPayload = try JSONValue.parse(Data(#"{"title":"Updated wording","supersedes":["revision-only"]}"#.utf8))
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: revisionKey,
+        try await domain.applyConversation(ConversationEvent(sequence: 1, binding: revisionKey,
             fact: .revision(revision, payload: revisedPayload)), context: context)
-        try model.refreshFromDurableStore()
+        try await model.refreshFromDurableStore()
         XCTAssertEqual(model.request(for: key)?.requestRevision, 2)
         XCTAssertEqual(model.request(for: key)?.supersedesMessageIDs.map(\.rawValue), ["old", "older"])
 
@@ -38,7 +38,7 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(malformedRequest.supersedesMessageIDs, [])
     }
 
-    func testSupersededTargetIsHiddenFromListProjectionsButRemainsReadableByKey() throws {
+    func testSupersededTargetIsHiddenFromListProjectionsButRemainsReadableByKey() async throws {
         let context = profile()
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let target = RequestKey(accountScope: context.identity.personID,
@@ -47,11 +47,11 @@ final class SupersedesPresentationTests: XCTestCase {
             senderID: ExactText("agent"), messageID: ExactText("new"))
         let targetPayload = try JSONValue.parse(Data(#"{"title":"Message","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
         let replacementPayload = try JSONValue.parse(Data(#"{"title":"Replacement","supersedes":["old"],"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
-        try domain.apply(RelayEvent(sequence: 1,
+        try await domain.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: target, originalPayload: targetPayload), .message)), context: context)
-        try domain.apply(RelayEvent(sequence: 2,
+        try await domain.apply(RelayEvent(sequence: 2,
             body: .delivery(StoredRequest(key: replacement, originalPayload: replacementPayload), .message)), context: context)
-        try domain.apply(RelayEvent(sequence: 3,
+        try await domain.apply(RelayEvent(sequence: 3,
             body: .terminal(target, .superseded, nil)), context: context)
 
         let model = try LivePresentationStore(store: domain, context: context)
@@ -62,7 +62,7 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(model.request(for: replacement)?.supersedesMessageIDs.map(\.rawValue), ["old"])
     }
 
-    func testSupersededTargetKeepsEveryReplacementIdentity() throws {
+    func testSupersededTargetKeepsEveryReplacementIdentity() async throws {
         let context = profile()
         let store = try AttentionDomainStore(context: context,
                                              persistence: MemoryAttentionStatePersistence())
@@ -81,20 +81,20 @@ final class SupersedesPresentationTests: XCTestCase {
         let target = key("old")
         let firstReplacement = key("replacement-one")
         let secondReplacement = key("replacement-two")
-        try store.apply(RelayEvent(sequence: 1, body: .delivery(
+        try await store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: target, originalPayload: try payload("Old")), .message)),
             context: context)
-        try store.apply(RelayEvent(sequence: 2, body: .delivery(
+        try await store.apply(RelayEvent(sequence: 2, body: .delivery(
             StoredRequest(key: firstReplacement,
                 originalPayload: try payload("Replacement one", supersedes: "old")), .message)),
             context: context)
-        try store.apply(RelayEvent(sequence: 3, body: .terminal(target, .superseded, nil)),
+        try await store.apply(RelayEvent(sequence: 3, body: .terminal(target, .superseded, nil)),
             context: context)
-        try store.apply(RelayEvent(sequence: 4, body: .delivery(
+        try await store.apply(RelayEvent(sequence: 4, body: .delivery(
             StoredRequest(key: secondReplacement,
                 originalPayload: try payload("Replacement two", supersedes: "old")), .message)),
             context: context)
-        try store.apply(RelayEvent(sequence: 5, body: .terminal(target, .superseded, nil)),
+        try await store.apply(RelayEvent(sequence: 5, body: .terminal(target, .superseded, nil)),
             context: context)
 
         let live = try LivePresentationStore(store: store, context: context)
@@ -103,7 +103,7 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(live.request(for: target)?.lifecycleStatus, .superseded)
     }
 
-    func testOneForwardSupersedingSeveralTargetsLinksAllAndKeepsFirstOriginLiveAndReplay() throws {
+    func testOneForwardSupersedingSeveralTargetsLinksAllAndKeepsFirstOriginLiveAndReplay() async throws {
         let context = profile()
         func key(_ message: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID,
@@ -136,8 +136,8 @@ final class SupersedesPresentationTests: XCTestCase {
 
         let liveStore = try AttentionDomainStore(context: context,
                                                  persistence: MemoryAttentionStatePersistence())
-        for event in events { try liveStore.apply(event, context: context) }
-        let liveSnapshot = try liveStore.snapshot(context: context)
+        for event in events { try await liveStore.apply(event, context: context) }
+        let liveSnapshot = try await liveStore.snapshot(context: context)
         XCTAssertEqual(liveSnapshot.cursor, 5, "Both live terminals must commit so sync can continue.")
         XCTAssertEqual(liveSnapshot.remoteStates[firstTarget]?.supersededByMessageKeys, [replacement])
         XCTAssertEqual(liveSnapshot.remoteStates[secondTarget]?.supersededByMessageKeys, [replacement])
@@ -146,10 +146,10 @@ final class SupersedesPresentationTests: XCTestCase {
 
         let replayStore = try AttentionDomainStore(context: context,
                                                    persistence: MemoryAttentionStatePersistence())
-        try replayStore.beginReplay(through: 5, context: context)
-        for event in events { try replayStore.apply(event, context: context) }
-        try replayStore.finishReplay(at: 5, context: context)
-        let replaySnapshot = try replayStore.snapshot(context: context)
+        try await replayStore.beginReplay(through: 5, context: context)
+        for event in events { try await replayStore.apply(event, context: context) }
+        try await replayStore.finishReplay(at: 5, context: context)
+        let replaySnapshot = try await replayStore.snapshot(context: context)
         XCTAssertEqual(replaySnapshot.cursor, 5, "Both replayed terminals must commit.")
         XCTAssertEqual(replaySnapshot.remoteStates[firstTarget]?.supersededByMessageKeys, [replacement])
         XCTAssertEqual(replaySnapshot.remoteStates[secondTarget]?.supersededByMessageKeys, [replacement])
@@ -157,7 +157,7 @@ final class SupersedesPresentationTests: XCTestCase {
                        "Replay must retain the first target as the forward origin.")
     }
 
-    func testReplacementIdentityRemainsNavigableBeforeItsContentLoads() throws {
+    func testReplacementIdentityRemainsNavigableBeforeItsContentLoads() async throws {
         let context = profile()
         let store = try AttentionDomainStore(context: context,
                                              persistence: MemoryAttentionStatePersistence())
@@ -166,12 +166,12 @@ final class SupersedesPresentationTests: XCTestCase {
         let replacement = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("agent"), messageID: ExactText("new"))
         let payload = try JSONValue.parse(Data(#"{"title":"Message"}"#.utf8))
-        _ = store.applyRelayEvent(RelayEvent(sequence: 1,
+        _ = await store.applyRelayEvent(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: target, originalPayload: payload), .message)),
             context: context)
-        _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .originReference(replacement)),
+        _ = await store.applyRelayEvent(RelayEvent(sequence: 2, body: .originReference(replacement)),
             context: context)
-        _ = store.applyRelayEvent(RelayEvent(sequence: 3,
+        _ = await store.applyRelayEvent(RelayEvent(sequence: 3,
             body: .terminal(target, .superseded, nil)), context: context)
 
         let live = try LivePresentationStore(store: store, context: context)
@@ -180,7 +180,7 @@ final class SupersedesPresentationTests: XCTestCase {
                        "The accepted replacement identity remains available for a graceful destination.")
     }
 
-    func testLoadingOlderAccountStateBackfillsReplacementIdentity() throws {
+    func testLoadingOlderAccountStateBackfillsReplacementIdentity() async throws {
         let context = profile()
         let persistence = MemoryAttentionStatePersistence()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
@@ -190,13 +190,13 @@ final class SupersedesPresentationTests: XCTestCase {
             senderID: ExactText("agent"), messageID: ExactText("new"))
         let targetPayload = try JSONValue.parse(Data(#"{"title":"Message"}"#.utf8))
         let replacementPayload = try JSONValue.parse(Data(#"{"title":"Replacement","supersedes":["old"]}"#.utf8))
-        try store.apply(RelayEvent(sequence: 1,
+        try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: target, originalPayload: targetPayload), .message)),
             context: context)
-        try store.apply(RelayEvent(sequence: 2,
+        try await store.apply(RelayEvent(sequence: 2,
             body: .delivery(StoredRequest(key: replacement, originalPayload: replacementPayload), .message)),
             context: context)
-        try store.apply(RelayEvent(sequence: 3,
+        try await store.apply(RelayEvent(sequence: 3,
             body: .terminal(target, .superseded, nil)), context: context)
 
         let encoded = try XCTUnwrap(persistence.load(identity: context.identity))
@@ -222,7 +222,7 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(restored.request(for: target)?.supersededByMessageKeys, [replacement])
     }
 
-    func testCrossIDSupersedesKeepsTheTargetSlotAndThreadAcrossAChain() throws {
+    func testCrossIDSupersedesKeepsTheTargetSlotAndThreadAcrossAChain() async throws {
         let context = profile()
         let store = try AttentionDomainStore(context: context,
                                              persistence: MemoryAttentionStatePersistence())
@@ -247,11 +247,11 @@ final class SupersedesPresentationTests: XCTestCase {
         let replacementTwo = key("agent", "replacement-two")
         for (sequence, requestKey, title) in [(1, earlier, "Earlier"), (2, target, "Target"),
                                                (3, later, "Later")] {
-            try store.apply(RelayEvent(sequence: UInt64(sequence), body: .delivery(
+            try await store.apply(RelayEvent(sequence: UInt64(sequence), body: .delivery(
                 StoredRequest(key: requestKey, originalPayload: try payload(title)), .message)),
                 context: context)
         }
-        try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+        try await store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
             InboxViewEntry(key: earlier, priority: .normal, thread: ExactText("release"),
                            dueAtMilliseconds: 1000),
             InboxViewEntry(key: target, priority: .high, thread: ExactText("release"),
@@ -260,11 +260,11 @@ final class SupersedesPresentationTests: XCTestCase {
                            dueAtMilliseconds: 3000)
         ]), context: context)
 
-        try store.apply(RelayEvent(sequence: 4, body: .delivery(
+        try await store.apply(RelayEvent(sequence: 4, body: .delivery(
             StoredRequest(key: replacementOne,
                 originalPayload: try payload("Replacement one", supersedes: "target", byWhen: 4000)),
             .message)), context: context)
-        try store.apply(RelayEvent(sequence: 5, body: .terminal(target, .superseded, nil)), context: context)
+        try await store.apply(RelayEvent(sequence: 5, body: .terminal(target, .superseded, nil)), context: context)
         let live = try LivePresentationStore(store: store, context: context)
         let firstReplacement = try XCTUnwrap(live.request(for: replacementOne))
         XCTAssertEqual(live.request(for: target)?.supersededByMessageKeys, [replacementOne])
@@ -279,13 +279,13 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(thread, ExactText("release"))
         XCTAssertEqual(members.map(\.id), [.request(earlier), .request(replacementOne)])
 
-        try store.apply(RelayEvent(sequence: 6, body: .delivery(
+        try await store.apply(RelayEvent(sequence: 6, body: .delivery(
             StoredRequest(key: replacementTwo,
                 originalPayload: try payload("Replacement two", supersedes: "replacement-one", byWhen: 5000)),
             .message)), context: context)
-        try store.apply(RelayEvent(sequence: 7,
+        try await store.apply(RelayEvent(sequence: 7,
             body: .terminal(replacementOne, .superseded, nil)), context: context)
-        try live.refreshFromDurableStore()
+        try await live.refreshFromDurableStore()
 
         let secondReplacement = try XCTUnwrap(live.request(for: replacementTwo))
         XCTAssertEqual(live.request(for: replacementOne)?.supersededByMessageKeys, [replacementTwo])
@@ -299,21 +299,22 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(chainedThread, ExactText("release"))
         XCTAssertEqual(chainedMembers.map(\.id), [.request(earlier), .request(replacementTwo)])
 
-        let cursor = try store.relayCursor(context: context)
-        _ = try store.beginInboxCandidate(startupID: "page-refresh", since: cursor,
+        let cursor = try await store.relayCursor(context: context)
+        _ = try await store.beginInboxCandidate(startupID: "page-refresh", since: cursor,
                                           batches: [], context: context)
         let replacementAcceptance = RelayEvent(sequence: 6,
             body: .delivery(StoredRequest(key: replacementTwo,
                 originalPayload: try payload("Replacement two", supersedes: "replacement-one", byWhen: 5000)),
                 .message))
-        try store.saveInboxInitialPage(snapshotID: "page-refresh-snapshot", highWater: 7,
+        try await store.saveInboxInitialPage(snapshotID: "page-refresh-snapshot", highWater: 7,
             items: [InboxSnapshotItem(acceptance: replacementAcceptance)], nextCursor: nil,
             receiptCursor: nil, context: context)
-        XCTAssertEqual(try store.snapshot(context: context).remoteStates[replacementTwo]?.supersedesOriginTarget,
+        let refreshedSnapshot = try await store.snapshot(context: context)
+        XCTAssertEqual(refreshedSnapshot.remoteStates[replacementTwo]?.supersedesOriginTarget,
                        target, "Refreshing a page must retain the slot relation learned from relay events.")
     }
 
-    func testSupersedesOriginTargetDoesNotCrossSenderIdentity() throws {
+    func testSupersedesOriginTargetDoesNotCrossSenderIdentity() async throws {
         let context = profile()
         let store = try AttentionDomainStore(context: context,
                                              persistence: MemoryAttentionStatePersistence())
@@ -331,17 +332,17 @@ final class SupersedesPresentationTests: XCTestCase {
 
         let differentSenderTarget = key("other-agent", "same-id")
         let replacement = key("agent", "replacement")
-        try store.apply(RelayEvent(sequence: 1, body: .delivery(
+        try await store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: differentSenderTarget, originalPayload: try payload("Other sender")), .message)),
             context: context)
-        try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+        try await store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
             InboxViewEntry(key: differentSenderTarget, priority: .now, thread: ExactText("other-thread"))
         ]), context: context)
-        try store.apply(RelayEvent(sequence: 2, body: .delivery(
+        try await store.apply(RelayEvent(sequence: 2, body: .delivery(
             StoredRequest(key: replacement,
                 originalPayload: try payload("Replacement", supersedes: "same-id")), .message)),
             context: context)
-        try store.apply(RelayEvent(sequence: 3,
+        try await store.apply(RelayEvent(sequence: 3,
             body: .terminal(differentSenderTarget, .superseded, nil)), context: context)
 
         let live = try LivePresentationStore(store: store, context: context)
@@ -350,7 +351,7 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertNil(presented.inboxThread)
     }
 
-    func testCrossIDSupersedesOriginTargetCanBeRecoveredFromSnapshotSequences() throws {
+    func testCrossIDSupersedesOriginTargetCanBeRecoveredFromSnapshotSequences() async throws {
         let context = profile()
         let store = try AttentionDomainStore(context: context,
                                              persistence: MemoryAttentionStatePersistence())
@@ -374,12 +375,12 @@ final class SupersedesPresentationTests: XCTestCase {
             StoredRequest(key: replacement,
                 originalPayload: try payload("Replacement", supersedes: "target")), .message))
         let targetTerminal = RelayEvent(sequence: 11, body: .terminal(target, .superseded, nil))
-        try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+        try await store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
             InboxViewEntry(key: target, priority: .high, thread: ExactText("release"))
         ]), context: context)
-        _ = try store.beginInboxCandidate(startupID: "snapshot", since: 0,
+        _ = try await store.beginInboxCandidate(startupID: "snapshot", since: 0,
                                           batches: [], context: context)
-        try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 11,
+        try await store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 11,
             items: [
                 InboxSnapshotItem(acceptance: replacementAcceptance),
                 InboxSnapshotItem(acceptance: targetAcceptance, terminal: targetTerminal)
@@ -392,7 +393,7 @@ final class SupersedesPresentationTests: XCTestCase {
                        "A paged target also retains its forward replacement link.")
     }
 
-    func testPageBackfillsEveryReplacementLoadedAfterTargetTerminal() throws {
+    func testPageBackfillsEveryReplacementLoadedAfterTargetTerminal() async throws {
         let context = profile()
         let store = try AttentionDomainStore(context: context,
                                              persistence: MemoryAttentionStatePersistence())
@@ -411,9 +412,9 @@ final class SupersedesPresentationTests: XCTestCase {
         let target = key("target")
         let first = key("replacement-one")
         let second = key("replacement-two")
-        _ = try store.beginInboxCandidate(startupID: "snapshot", since: 0,
+        _ = try await store.beginInboxCandidate(startupID: "snapshot", since: 0,
                                           batches: [], context: context)
-        try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 5,
+        try await store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 5,
             items: [
                 InboxSnapshotItem(acceptance: RelayEvent(sequence: 1, body: .delivery(
                     StoredRequest(key: target, originalPayload: try payload("Target")), .message)),
@@ -431,7 +432,7 @@ final class SupersedesPresentationTests: XCTestCase {
                        "A page without full event history retains all accepted replacements.")
     }
 
-    func testInboxPageAppliesOneForwardForSeveralTargetsInFirstTerminalOrder() throws {
+    func testInboxPageAppliesOneForwardForSeveralTargetsInFirstTerminalOrder() async throws {
         let context = profile()
         let store = try AttentionDomainStore(context: context,
                                              persistence: MemoryAttentionStatePersistence())
@@ -451,7 +452,7 @@ final class SupersedesPresentationTests: XCTestCase {
         let firstTarget = key("first")
         let secondTarget = key("second")
         let replacement = key("replacement")
-        _ = try store.beginInboxCandidate(startupID: "multi-target-page", since: 0,
+        _ = try await store.beginInboxCandidate(startupID: "multi-target-page", since: 0,
                                           batches: [], context: context)
         let firstAcceptance = RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: firstTarget, originalPayload: try payload("First")), .message))
@@ -463,7 +464,7 @@ final class SupersedesPresentationTests: XCTestCase {
             .message))
 
         // Inbox display order is newest first, opposite the terminal sequence.
-        try store.saveInboxInitialPage(snapshotID: "multi-target-snapshot", highWater: 5,
+        try await store.saveInboxInitialPage(snapshotID: "multi-target-snapshot", highWater: 5,
             items: [
                 InboxSnapshotItem(acceptance: replacementAcceptance),
                 InboxSnapshotItem(acceptance: secondAcceptance,
@@ -474,7 +475,7 @@ final class SupersedesPresentationTests: XCTestCase {
                         body: .terminal(firstTarget, .superseded, nil)))
             ], nextCursor: nil, receiptCursor: nil, context: context)
 
-        let snapshot = try store.snapshot(context: context)
+        let snapshot = try await store.snapshot(context: context)
         XCTAssertEqual(snapshot.remoteStates[firstTarget]?.supersededByMessageKeys, [replacement])
         XCTAssertEqual(snapshot.remoteStates[secondTarget]?.supersededByMessageKeys, [replacement])
         XCTAssertEqual(snapshot.remoteStates[replacement]?.supersedesOriginTarget, firstTarget,

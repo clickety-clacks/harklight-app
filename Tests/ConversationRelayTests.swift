@@ -30,9 +30,9 @@ final class ConversationRelayTests: XCTestCase {
         var conversationReadPositionRequests: [Data] = []
         var conversationReadPositionResults: [ConversationReadPositionResult] = []
         var supportsPostCheckpointInboxEvents = false
-        var onOrdinaryACK: (() throws -> Void)?
-        var onConversationACK: (() throws -> Void)?
-        var onConversationOpen: (() -> Void)?
+        var onOrdinaryACK: (() async throws -> Void)?
+        var onConversationACK: (() async throws -> Void)?
+        var onConversationOpen: (() async -> Void)?
         var conversationOpenError: InstallationTransportError?
         var rejectFirstConversationACK = false
         var onLiveConversationWait: (() -> Void)?
@@ -61,8 +61,11 @@ final class ConversationRelayTests: XCTestCase {
         func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             for frame in ordinary { try await consume(frame) }
         }
+        func correlatedRequest(_ request: Data, ref: String) async throws -> Data {
+            try await inboxRequest(request, ref: ref)
+        }
         func acknowledge(_ request: Data) async throws {
-            try onOrdinaryACK?()
+            try await onOrdinaryACK?()
             ordinaryACKs.append(request)
         }
         func inboxRequest(_ request: Data, ref: String) async throws -> Data {
@@ -110,7 +113,7 @@ final class ConversationRelayTests: XCTestCase {
             waiters.forEach { $0.resume(throwing: CancellationError()) }
         }
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
-            onConversationOpen?()
+            await onConversationOpen?()
             if let conversationOpenError { throw conversationOpenError }
             for frame in conversation {
                 consumedConversationFrames.append(frame)
@@ -118,7 +121,7 @@ final class ConversationRelayTests: XCTestCase {
             }
         }
         func acknowledgeConversation(_ request: Data) async throws {
-            try onConversationACK?()
+            try await onConversationACK?()
             conversationACKs.append(request)
             if rejectFirstConversationACK {
                 rejectFirstConversationACK = false
@@ -153,14 +156,15 @@ final class ConversationRelayTests: XCTestCase {
         session.conversationOpenError = .conversationsUnavailable
         var opens = 0
         session.onConversationOpen = { opens += 1 }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         let firstHigh = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(firstHigh, 1)
         let unavailable = await core.conversationsUnavailable
         XCTAssertTrue(unavailable)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         XCTAssertTrue(session.conversationACKs.isEmpty)
-        XCTAssertEqual(try store.snapshot(context: context).requests.count, 1)
+        let assertionSnapshot166_165 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot166_165.requests.count, 1)
 
         // A later inbox delivery uses the same connection after chat refusal.
         session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
@@ -168,7 +172,8 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"resynced","seq":2}"#)]
         let secondHigh = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(secondHigh, 2)
-        XCTAssertEqual(try store.snapshot(context: context).requests.count, 2)
+        let assertionSnapshot174_174 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot174_174.requests.count, 2)
         XCTAssertEqual(session.ordinaryACKs.count, 2)
         XCTAssertEqual(opens, 1)
         await core.deactivate()
@@ -178,7 +183,7 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"resynced","seq":2}"#)]
         supported.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0}"#)]
-        let replacement = try NativeRelayCore(store: store, context: context, session: supported)
+        let replacement = try await NativeRelayCore(store: store, context: context, session: supported)
         _ = try await replacement.resyncAndDrainOutbox()
         let stillUnavailable = await replacement.conversationsUnavailable
         XCTAssertFalse(stillUnavailable)
@@ -190,7 +195,7 @@ final class ConversationRelayTests: XCTestCase {
         let (context, persistence, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
-        try store.applyConversation(ConversationEvent(sequence: 1,
+        try await store.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("handle"), payload: .object([
                 JSONMember("title", .string(ExactText("Question")))
@@ -203,7 +208,7 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
         ]
         session.onConversationOpen = { persistence.failNextCommit() }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
 
         do {
             _ = try await core.resyncAndDrainOutbox()
@@ -212,7 +217,7 @@ final class ConversationRelayTests: XCTestCase {
             guard case .persistence = error else { return XCTFail("Unexpected store error: \(error)") }
         }
 
-        let snapshot = try store.conversationSnapshot(context: context)
+        let snapshot = try await store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 1,
             "A failed cursor commit must leave the prior durable cursor unchanged.")
         XCTAssertEqual(session.consumedConversationFrames.count, 2,
@@ -226,7 +231,7 @@ final class ConversationRelayTests: XCTestCase {
         let (context, _, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
-        try store.applyConversation(ConversationEvent(sequence: 1,
+        try await store.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("handle"), payload: .object([
                 JSONMember("title", .string(ExactText("Question")))
@@ -238,11 +243,12 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
         ]
         let diagnostics = DiagnosticCollector()
-        let core = try NativeRelayCore(store: store, context: context, session: session,
+        let core = try await NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: diagnostics.append)
 
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+        let assertionSnapshot248_249 = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot248_249.cursor, 2)
         XCTAssertEqual(session.conversationACKs.count, 1)
         XCTAssertNotNil(diagnostics.events.first {
             $0.area == .conversation && $0.phase == .conversationReplay &&
@@ -256,8 +262,8 @@ final class ConversationRelayTests: XCTestCase {
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             event("discussion", sequence: 1, fields: #""author":"person","event_id":"turn","text":"Question""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
-        session.onConversationOpen = { store.invalidate() }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        session.onConversationOpen = { await store.invalidate() }
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
 
         do {
             _ = try await core.resyncAndDrainOutbox()
@@ -277,7 +283,7 @@ final class ConversationRelayTests: XCTestCase {
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             event("discussion", sequence: 1, fields: #""author":"person","event_id":"turn","text":"Question""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
 
         do {
             _ = try await core.resyncAndDrainOutbox()
@@ -286,7 +292,7 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertEqual(error, .invalidReplay)
         }
 
-        let snapshot = try store.conversationSnapshot(context: context)
+        let snapshot = try await store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 1,
             "The already committed event remains the last durable cursor.")
         XCTAssertTrue(session.conversationACKs.isEmpty,
@@ -308,7 +314,7 @@ final class ConversationRelayTests: XCTestCase {
             persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
-        try store.applyConversation(ConversationEvent(sequence: 1,
+        try await store.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .delivered(turn: ExactText("missing-turn"))), context: context)
 
@@ -317,7 +323,7 @@ final class ConversationRelayTests: XCTestCase {
         session.conversationOpenError = .conversationsUnavailable
         session.ordinary = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
         let diagnostics = DiagnosticCollector()
-        let core = try NativeRelayCore(store: store, context: context, session: session,
+        let core = try await NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: { diagnostics.append($0) })
 
         _ = try await core.resyncAndDrainOutbox()
@@ -327,8 +333,9 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(event.causeCode, "conversation_invalid_binding")
         XCTAssertEqual(event.conversationValidationRejection?.guardID, .referencedTurnExists)
         XCTAssertEqual(event.conversationValidationRejection?.eventKind, .receipt)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        let conversationSnapshot = try store.conversationSnapshot(context: context)
+        let assertionSnapshot333_335 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot333_335.cursor, 1)
+        let conversationSnapshot = try await store.conversationSnapshot(context: context)
         XCTAssertEqual(conversationSnapshot.cursor, 1)
         XCTAssertNotNil(conversationSnapshot.threads[key])
         XCTAssertNotNil(diagnostics.events.first { $0.causeCode == "conversation_message_skipped" })
@@ -360,15 +367,16 @@ final class ConversationRelayTests: XCTestCase {
         session.onConversationACK = {
             conversationACKCount += 1
             guard conversationACKCount == 2 else { return }
-            let snapshot = try store.conversationSnapshot(context: context)
+            let snapshot = try await store.conversationSnapshot(context: context)
             XCTAssertFalse(snapshot.threads[first]?.hasUnreadAgentReply ?? true)
             XCTAssertTrue(snapshot.threads[second]?.hasUnreadAgentReply ?? false)
             appliedBeforeACK.fulfill()
         }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[first]).hasUnreadAgentReply)
-        XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[second]).hasUnreadAgentReply)
+        let initialConversation = try await store.conversationSnapshot(context: context)
+        XCTAssertTrue(try XCTUnwrap(initialConversation.threads[first]).hasUnreadAgentReply)
+        XCTAssertTrue(try XCTUnwrap(initialConversation.threads[second]).hasUnreadAgentReply)
         await fulfillment(of: [liveSignal], timeout: 2)
 
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
@@ -376,7 +384,8 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
         await session.pushLiveConversation()
         await fulfillment(of: [appliedBeforeACK], timeout: 2)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+        let assertionSnapshot382_385 = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot382_385.cursor, 3)
         XCTAssertEqual(session.conversationACKs.count, 2)
         await core.deactivate()
     }
@@ -396,17 +405,19 @@ final class ConversationRelayTests: XCTestCase {
             event("reply", sequence: 2, fields: #""author":"origin","event_id":"reply-2","text":"Second reply""#,
                 messageID: "second", sessionHandle: "second-handle"),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
 
-        XCTAssertNil(try store.markConversationRead(first, context: context),
+        let localReadResult = try await store.markConversationRead(first, context: context)
+        XCTAssertNil(localReadResult,
                      "An older server keeps the existing local read marker and receives no read-position write.")
         XCTAssertTrue(session.conversationReadPositionRequests.isEmpty)
-        let locallyRead = try XCTUnwrap(store.conversationSnapshot(context: context).threads[first])
+        let localConversation = try await store.conversationSnapshot(context: context)
+        let locallyRead = try XCTUnwrap(localConversation.threads[first])
         XCTAssertEqual(locallyRead.latestAgentReply?.id, ExactText("reply-1"))
         XCTAssertEqual(locallyRead.readThroughTurn, ExactText("reply-1"))
         XCTAssertFalse(locallyRead.hasUnreadAgentReply)
-        XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[second]).hasUnreadAgentReply)
+        XCTAssertTrue(try XCTUnwrap(localConversation.threads[second]).hasUnreadAgentReply)
 
         // The inbox replay is already at high water 2; this subsequent open
         // returns only the accepted frame and its matching checkpoint.
@@ -418,7 +429,7 @@ final class ConversationRelayTests: XCTestCase {
             .accepted(position: 1, eventSequence: 3, eventID: ExactText("read-3"), duplicate: false)]
         _ = try await core.resyncAndDrainOutbox()
 
-        let migrated = try store.conversationSnapshot(context: context)
+        let migrated = try await store.conversationSnapshot(context: context)
         XCTAssertEqual(migrated.chatReadPositionSupport, true)
         XCTAssertEqual(migrated.chatReadPositions?[first], 1)
         XCTAssertEqual(migrated.pendingChatReadPositions.first?.readThroughConversationSequence, 1)
@@ -432,11 +443,13 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertNil(firstFrame.uniqueValue(named: "person_id"))
         XCTAssertNil(firstFrame.uniqueValue(named: "device_id"))
 
+        let beforeRelaunchConversation = try await store.conversationSnapshot(context: context)
         let pendingBeforeRelaunch = try XCTUnwrap(
-            store.conversationSnapshot(context: context).pendingChatReadPositions.first)
+            beforeRelaunchConversation.pendingChatReadPositions.first)
         let relaunchedStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let relaunchedConversation = try await relaunchedStore.conversationSnapshot(context: context)
         let persistedPending = try XCTUnwrap(
-            relaunchedStore.conversationSnapshot(context: context).pendingChatReadPositions.first)
+            relaunchedConversation.pendingChatReadPositions.first)
         XCTAssertEqual(persistedPending.operationID, pendingBeforeRelaunch.operationID,
                        "The unresolved read operation and its identity survive a relaunch.")
         await core.deactivate()
@@ -457,7 +470,7 @@ final class ConversationRelayTests: XCTestCase {
                 self.data(#"{"v":1,"type":"conversation","event_id":"read-3","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","kind":"read_position","read_through_conversation_seq":1}"#),
                 self.data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
         }
-        let retryCore = try NativeRelayCore(store: relaunchedStore, context: context, session: retrySession)
+        let retryCore = try await NativeRelayCore(store: relaunchedStore, context: context, session: retrySession)
         _ = try await retryCore.resyncAndDrainOutbox()
 
         XCTAssertEqual(retrySession.conversationReadPositionRequests.count, 1)
@@ -465,7 +478,7 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(retryFrame.uniqueValue(named: "op_id")?.stringValue,
                        firstFrame.uniqueValue(named: "op_id")?.stringValue,
                        "A retry of the same logical read reuses its durable operation identity.")
-        let snapshot = try relaunchedStore.conversationSnapshot(context: context)
+        let snapshot = try await relaunchedStore.conversationSnapshot(context: context)
         XCTAssertTrue(snapshot.pendingChatReadPositions.isEmpty)
         XCTAssertEqual(snapshot.chatReadPositions?[first], 1)
         XCTAssertFalse(try XCTUnwrap(snapshot.threads[first]).hasUnreadAgentReply)
@@ -473,7 +486,7 @@ final class ConversationRelayTests: XCTestCase {
         await retryCore.deactivate()
     }
 
-    func testReadPositionWireDoesNotRequireRevisionOrSessionHandle() throws {
+    func testReadPositionWireDoesNotRequireRevisionOrSessionHandle() async throws {
         let (context, _, _, _) = try setup()
         let wire = try ConversationWire(profile: context)
         let valid = try wire.decodeUpdate(data(#"{"v":1,"type":"conversation","event_id":"read-7","conversation_seq":7,"sender_id":"author","message_id":"request","origin":"origin","kind":"read_position","read_through_conversation_seq":4}"#))
@@ -491,7 +504,7 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertThrowsError(try wire.decodeUpdate(data(#"{"v":1,"type":"conversation","event_id":"","conversation_seq":7,"sender_id":"author","message_id":"request","kind":"read_position","read_through_conversation_seq":4}"#)))
     }
 
-    func testOlderSavedConversationTurnSequenceIsRecoveredForDuplicateReplay() throws {
+    func testOlderSavedConversationTurnSequenceIsRecoveredForDuplicateReplay() async throws {
         let request = RequestKey(accountScope: ExactText("person"),
             senderID: ExactText("author"), messageID: ExactText("request"))
         let binding = ConversationBinding(request: request, revision: 1)
@@ -519,7 +532,7 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(savedTurn.conversationSequence, 1)
     }
 
-    func testResyncSnapshotDistinguishesOldServerFromEmptyReadMap() throws {
+    func testResyncSnapshotDistinguishesOldServerFromEmptyReadMap() async throws {
         let (context, _, _, _) = try setup()
         let wire = try ConversationWire(profile: context)
         let oldServer = try wire.decodeResyncedSnapshot(
@@ -536,11 +549,11 @@ final class ConversationRelayTests: XCTestCase {
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             event("reply", sequence: 1, fields: #""author":"origin","event_id":"reply-1","text":"Reply""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":2}]}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session,
+        let core = try await NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: diagnostics.append)
         _ = try await core.resyncAndDrainOutbox()
 
-        let snapshot = try store.conversationSnapshot(context: context)
+        let snapshot = try await store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 1)
         XCTAssertEqual(snapshot.chatReadPositionSupport, false)
         XCTAssertTrue(snapshot.threads.values.contains { $0.latestAgentReply?.id == ExactText("reply-1") })
@@ -552,7 +565,7 @@ final class ConversationRelayTests: XCTestCase {
     func testOtherConversationRefusalsStillFailTheDrain() async throws {
         let (context, _, store, session) = try setup()
         session.conversationOpenError = .serverRejected
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         do {
             _ = try await core.resyncAndDrainOutbox()
             XCTFail("An ordinary rejection must not be treated as missing chat support.")
@@ -569,15 +582,18 @@ final class ConversationRelayTests: XCTestCase {
             event("receipt", sequence: 2, fields: #""event_id":"2","delivered":true"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
         session.onConversationACK = {
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
-            XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+            let assertionSnapshot575_580 = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(assertionSnapshot575_580.cursor, 2)
+            let assertionSnapshot576_582 = try await store.snapshot(context: context)
+            XCTAssertEqual(assertionSnapshot576_582.cursor, 1)
         }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         let high = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(high, 1)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         XCTAssertEqual(session.conversationACKs.count, 1)
-        let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+        let assertionSnapshot583_590 = try await store.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(assertionSnapshot583_590.threads.values.first)
         XCTAssertEqual(thread.turns.first?.id, ExactText("2"))
         XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
         XCTAssertNil(thread.facts[ExactText("2")]?.actedBy)
@@ -590,7 +606,7 @@ final class ConversationRelayTests: XCTestCase {
         let listening = expectation(description: "listening for live conversation entries")
         listening.assertForOverFulfill = false
         session.onLiveConversationWait = { listening.fulfill() }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
         await fulfillment(of: [listening], timeout: 5)
         XCTAssertEqual(session.conversationACKs.count, 1)
@@ -606,7 +622,8 @@ final class ConversationRelayTests: XCTestCase {
         let receivedAtMilliseconds: UInt64 = 1_800_000_456_000
         let acknowledged = expectation(description: "live entries acknowledged")
         session.onConversationACK = {
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+            let assertionSnapshot612_620 = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(assertionSnapshot612_620.cursor, 3)
             acknowledged.fulfill()
         }
         session.pushLiveConversation(replyEvent: replyEvent,
@@ -614,7 +631,8 @@ final class ConversationRelayTests: XCTestCase {
         await fulfillment(of: [acknowledged], timeout: 5)
 
         XCTAssertEqual(session.conversationACKs.count, 2)
-        let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+        let assertionSnapshot620_629 = try await store.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(assertionSnapshot620_629.threads.values.first)
         let reply = try XCTUnwrap(thread.turns.first { $0.id == ExactText("4") })
         XCTAssertEqual(reply.author, .origin)
         XCTAssertEqual(reply.text, ExactText("Here is why"))
@@ -623,12 +641,14 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(liveReceiptTime, receivedAtMilliseconds,
                        "The reply keeps the receive time of its own live frame.")
         XCTAssertEqual(thread.facts[ExactText("2")]?.delivered, true)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        let assertionSnapshot629_639 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot629_639.cursor, 1)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         await core.deactivate()
 
         let restarted = try AttentionDomainStore(context: context, persistence: persistence)
-        XCTAssertEqual(try restarted.conversationSnapshot(context: context)
+        let assertionSnapshot634_645 = try await restarted.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot634_645
             .threads.values.first?.facts[reply.id]?.localLiveArrivalAtMilliseconds,
             liveReceiptTime, "The genuinely live receipt time survives store restart.")
     }
@@ -642,7 +662,7 @@ final class ConversationRelayTests: XCTestCase {
 
         let listening = expectation(description: "listening after initial replay")
         session.onLiveConversationWait = { listening.fulfill() }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
         await fulfillment(of: [listening], timeout: 5)
 
@@ -664,14 +684,16 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)]
         let acknowledged = expectation(description: "later live replay committed and acknowledged")
         session.onConversationACK = {
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
+            let assertionSnapshot670_682 = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(assertionSnapshot670_682.cursor, 3)
             acknowledged.fulfill()
         }
         session.pushLiveConversation(replyEvent: newerReply,
                                     receivedAtMilliseconds: newerArrival)
         await fulfillment(of: [acknowledged], timeout: 5)
 
-        let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+        let assertionSnapshot677_690 = try await store.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(assertionSnapshot677_690.threads.values.first)
         XCTAssertNil(thread.facts[ExactText("reply-2")]?.localLiveArrivalAtMilliseconds,
                      "An older replayed reply has no later reply's live receive time.")
         XCTAssertEqual(thread.facts[ExactText("reply-3")]?.localLiveArrivalAtMilliseconds,
@@ -688,10 +710,11 @@ final class ConversationRelayTests: XCTestCase {
                 fields: #""author":"origin","event_id":"historical-reply","text":"An older reply""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
 
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
 
-        let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        let assertionSnapshot697_711 = try await store.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(assertionSnapshot697_711.threads[key])
         let reply = try XCTUnwrap(thread.turns.first { $0.id == ExactText("historical-reply") })
         let replySequence = try XCTUnwrap(reply.conversationSequence)
         XCTAssertNil(thread.facts[reply.id]?.localLiveArrivalAtMilliseconds,
@@ -712,7 +735,7 @@ final class ConversationRelayTests: XCTestCase {
         let (context, _, store, session) = try setup()
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0,"chat_read_positions":[]}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
 
         let key = RequestKey(accountScope: context.identity.personID,
@@ -728,24 +751,28 @@ final class ConversationRelayTests: XCTestCase {
             author: .origin, sessionHandle: handle, text: ExactText("Later offscreen reply"),
             inReplyTo: discussion.id, kind: .reply)
         for (sequence, turn) in [(1, discussion), (2, earliest), (3, later)] {
-            try store.applyConversation(ConversationEvent(sequence: UInt64(sequence),
+            try await store.applyConversation(ConversationEvent(sequence: UInt64(sequence),
                 binding: binding, fact: .turn(turn)), context: context)
         }
-        try store.finishConversationReplay(at: 3, chatReadPositions: [], context: context)
+        try await store.finishConversationReplay(at: 3, chatReadPositions: [], context: context)
 
-        let firstPending = try XCTUnwrap(store.markConversationRead(key, through: earliest.id,
-            context: context))
+        let firstReadResult = try await store.markConversationRead(key, through: earliest.id,
+            context: context)
+        let firstPending = try XCTUnwrap(firstReadResult)
         XCTAssertEqual(firstPending.readThroughConversationSequence, 2)
-        var thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        let assertionSnapshot742_757 = try await store.conversationSnapshot(context: context)
+        var thread = try XCTUnwrap(assertionSnapshot742_757.threads[key])
         XCTAssertEqual(thread.accountReadThroughConversationSequence, 2)
         XCTAssertEqual(thread.readThroughTurn, earliest.id)
         XCTAssertTrue(thread.hasUnreadAgentReply,
                       "The later reply remains unread until its own row is shown.")
 
-        let laterPending = try XCTUnwrap(store.markConversationRead(key, through: later.id,
-            context: context))
+        let laterReadResult = try await store.markConversationRead(key, through: later.id,
+            context: context)
+        let laterPending = try XCTUnwrap(laterReadResult)
         XCTAssertEqual(laterPending.readThroughConversationSequence, 3)
-        thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        let assertionSnapshot751_767 = try await store.conversationSnapshot(context: context)
+        thread = try XCTUnwrap(assertionSnapshot751_767.threads[key])
         XCTAssertEqual(thread.accountReadThroughConversationSequence, 3)
         XCTAssertFalse(thread.hasUnreadAgentReply)
         await core.deactivate()
@@ -773,13 +800,14 @@ final class ConversationRelayTests: XCTestCase {
             event("acted", sequence: 7, fields: #""author":"origin","event_id":"5","acting_event_id":"6""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":7}"#)]
         session.onConversationACK = {
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 7)
+            let assertionSnapshot779_796 = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(assertionSnapshot779_796.cursor, 7)
         }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
 
         XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":7,"ref":"native-conversation-ack"}"# + "\n")])
-        let threads = try store.conversationSnapshot(context: context).threads
+        let threads = try await store.conversationSnapshot(context: context).threads
         XCTAssertEqual(threads[earlier]?.isRetracted, true)
         XCTAssertEqual(threads[earlier]?.retraction?.retractedAtMilliseconds, 1792643952343)
         let thread = try XCTUnwrap(threads[request])
@@ -790,7 +818,8 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(reply.inReplyTo, ExactText("5"))
         XCTAssertEqual(thread.facts[ExactText("5")]?.delivered, true)
         XCTAssertEqual(thread.facts[ExactText("5")]?.actedBy, ExactText("6"))
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        let assertionSnapshot796_814 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot796_814.cursor, 2)
         await core.deactivate()
     }
     func testRetractionForAnUnloadedRequestDoesNotBlockLaterChatAndAppliesWhenItsDeliveryArrives() async throws {
@@ -807,11 +836,11 @@ final class ConversationRelayTests: XCTestCase {
             event("receipt", sequence: 3, fields: #""author":"origin","event_id":"5","delivered":true"#),
             event("reply", sequence: 4, fields: #""author":"origin","event_id":"6","in_reply_to":"5","op_id":"7d76be3a-c45d-4cef-87c7-248982fe3b0d","text":"Hello""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
 
         XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":4,"ref":"native-conversation-ack"}"# + "\n")])
-        var threads = try store.conversationSnapshot(context: context).threads
+        var threads = try await store.conversationSnapshot(context: context).threads
         XCTAssertNil(threads[earlier])
         let thread = try XCTUnwrap(threads[request])
         let reply = try XCTUnwrap(thread.turns.first { $0.id == ExactText("6") })
@@ -826,10 +855,11 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#)]
         _ = try await core.resyncAndDrainOutbox()
 
-        threads = try store.conversationSnapshot(context: context).threads
+        threads = try await store.conversationSnapshot(context: context).threads
         XCTAssertEqual(threads[earlier]?.isRetracted, true)
         XCTAssertEqual(threads[earlier]?.retraction?.retractedAtMilliseconds, 1792643952343)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 4)
+        let assertionSnapshot835_854 = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot835_854.cursor, 4)
         await core.deactivate()
     }
     func testThreadFactsForAnUnloadedRequestAreHeldWhileLaterChatIsAppliedAndACKed() async throws {
@@ -858,14 +888,17 @@ final class ConversationRelayTests: XCTestCase {
                 fields: #""author":"origin","event_id":"8","in_reply_to":"7","text":"Current reply""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":8}"#)]
         session.onConversationACK = {
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 8)
-            XCTAssertNil(try store.conversationSnapshot(context: context).threads[earlier])
-            let current = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+            let assertionSnapshot864_884 = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(assertionSnapshot864_884.cursor, 8)
+            let assertionSnapshot865_886 = try await store.conversationSnapshot(context: context)
+            XCTAssertNil(assertionSnapshot865_886.threads[earlier])
+            let assertionSnapshot866_888 = try await store.conversationSnapshot(context: context)
+            let current = try XCTUnwrap(assertionSnapshot866_888.threads.values.first)
             XCTAssertEqual(current.facts[ExactText("7")]?.delivered, true)
             XCTAssertEqual(current.turns.first { $0.id == ExactText("8") }?.text, ExactText("Current reply"))
         }
 
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":8,"ref":"native-conversation-ack"}"# + "\n")])
         await core.deactivate()
@@ -879,10 +912,10 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"resynced","seq":2}"#)]
         later.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":8}"#)]
-        let resumed = try NativeRelayCore(store: restored, context: context, session: later)
+        let resumed = try await NativeRelayCore(store: restored, context: context, session: later)
         _ = try await resumed.resyncAndDrainOutbox()
 
-        let threads = try restored.conversationSnapshot(context: context).threads
+        let threads = try await restored.conversationSnapshot(context: context).threads
         let thread = try XCTUnwrap(threads[earlier])
         XCTAssertEqual(thread.availability, .listening)
         XCTAssertEqual(thread.latestAvailabilityObservation,
@@ -892,7 +925,8 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(thread.facts[ExactText("5")]?.delivered, true)
         XCTAssertEqual(thread.facts[ExactText("5")]?.actedBy, ExactText("6"))
         XCTAssertEqual(thread.turns.first { $0.id == ExactText("6") }?.text, ExactText("Hello"))
-        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 8)
+        let assertionSnapshot898_921 = try await restored.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot898_921.cursor, 8)
         XCTAssertEqual(later.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":8,"ref":"native-conversation-ack"}"# + "\n")])
         await resumed.deactivate()
     }
@@ -904,30 +938,33 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"future","origin":"future-origin","request_revision":1,"kind":"attention_tier","event_id":"tier-change","attention_tier":"low"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
         session.onConversationACK = {
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
-            XCTAssertEqual(try store.snapshot(context: context).cursor, 1,
+            let assertionSnapshot910_934 = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(assertionSnapshot910_934.cursor, 1)
+            let assertionSnapshot911_936 = try await store.snapshot(context: context)
+            XCTAssertEqual(assertionSnapshot911_936.cursor, 1,
                            "Conversation replay must not advance the ordinary cursor.")
-            let snapshot = try store.snapshot(context: context)
+            let snapshot = try await store.snapshot(context: context)
             XCTAssertNil(snapshot.requests[key], "A tier fact must not create a duplicate message row.")
             XCTAssertNil(snapshot.remoteStates[key])
             XCTAssertEqual(snapshot.inboxReferences[key]?.attentionTier, .low,
                            "The tier fact must be durable before the conversation cursor is acknowledged.")
             XCTAssertEqual(snapshot.inboxReferences[key]?.attentionTierFeed, .conversation)
             let restored = try AttentionDomainStore(context: context, persistence: persistence)
-            XCTAssertEqual(try restored.snapshot(context: context).inboxReferences[key]?.attentionTier, .low)
+            let assertionSnapshot920_946 = try await restored.snapshot(context: context)
+            XCTAssertEqual(assertionSnapshot920_946.inboxReferences[key]?.attentionTier, .low)
         }
 
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(session.conversationACKs.count, 1)
 
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
         let payload = try JSONValue.parse(data(#"{"title":"Arrived later"}"#))
-        try restored.apply(RelayEvent(sequence: 2,
+        try await restored.apply(RelayEvent(sequence: 2,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             origin: ExactText("future-origin"), attentionTier: .top), context: context)
         let port = AttentionDomainPort(store: restored)
-        let rows = try port.observe(context: port.context).requests.filter { $0.key == key }
+        let rows = try await port.observe(context: port.context).requests.filter { $0.key == key }
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows.first?.attentionTier, .middle,
                        "A stored attention tier is not presented by the client.")
@@ -941,7 +978,8 @@ final class ConversationRelayTests: XCTestCase {
             event("result", sequence: 1, fields: #""author":"origin","event_id":"source-result-3","in_reply_to":"answer-2","op_id":"83b3fc92-6f10-4d94-9fd5-62f9572e4f1a","status":"applied""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
         session.onOrdinaryACK = {
-            let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
+            let assertionSnapshot947_974 = try await store.conversationSnapshot(context: context)
+            let thread = try XCTUnwrap(assertionSnapshot947_974.threads.values.first)
             XCTAssertEqual(thread.terminal, .answered)
             XCTAssertEqual(thread.terminalTurn, ExactText("answer-2"))
             XCTAssertEqual(thread.terminalAuthor, .agent)
@@ -949,10 +987,11 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertEqual(thread.turns.first?.kind, .terminal, "The ordinary lifecycle is durably committed before its ACK.")
         }
         session.onConversationACK = {
-            let snapshot = try store.conversationSnapshot(context: context)
+            let snapshot = try await store.conversationSnapshot(context: context)
             let thread = try XCTUnwrap(snapshot.threads.values.first)
             XCTAssertEqual(snapshot.cursor, 1)
-            XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+            let assertionSnapshot958_986 = try await store.snapshot(context: context)
+            XCTAssertEqual(assertionSnapshot958_986.cursor, 2)
             XCTAssertEqual(thread.terminal, .answered, "The conversation result must not create another closure.")
             XCTAssertEqual(thread.terminalAuthor, .agent)
             XCTAssertEqual(thread.turns.filter { $0.kind == .terminal }.count, 1)
@@ -966,7 +1005,7 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertEqual(result.resultStatus, ExactText("applied"))
         }
 
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         let high = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(high, 2)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
@@ -985,9 +1024,10 @@ final class ConversationRelayTests: XCTestCase {
         var conversationACKCount = 0
         session.onOrdinaryACK = {
             ordinaryACKCount += 1
-            let snapshot = try store.conversationSnapshot(context: context)
+            let snapshot = try await store.conversationSnapshot(context: context)
             let thread = try XCTUnwrap(snapshot.threads.values.first)
-            XCTAssertEqual(try store.snapshot(context: context).cursor, ordinaryACKCount == 1 ? 1 : 2)
+            let assertionSnapshot993_1022 = try await store.snapshot(context: context)
+            XCTAssertEqual(assertionSnapshot993_1022.cursor, ordinaryACKCount == 1 ? 1 : 2)
             if ordinaryACKCount == 1 {
                 XCTAssertNil(thread.terminal)
             } else {
@@ -1004,8 +1044,10 @@ final class ConversationRelayTests: XCTestCase {
         }
         session.onConversationACK = {
             conversationACKCount += 1
-            let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads.values.first)
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
+            let assertionSnapshot1010_1040 = try await store.conversationSnapshot(context: context)
+            let thread = try XCTUnwrap(assertionSnapshot1010_1040.threads.values.first)
+            let assertionSnapshot1011_1042 = try await store.conversationSnapshot(context: context)
+            XCTAssertEqual(assertionSnapshot1011_1042.cursor, 1)
             XCTAssertEqual(thread.terminal, conversationACKCount == 1 ? nil : .answered)
             XCTAssertEqual(thread.turns.count, conversationACKCount == 1 ? 1 : 2)
             let result = try XCTUnwrap(thread.turns.first { $0.id == ExactText("source-result-3") })
@@ -1014,10 +1056,11 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertEqual(result.operationID, operationID)
             XCTAssertEqual(result.inReplyTo, ExactText("answer-2"))
             XCTAssertEqual(result.resultStatus, ExactText("received"))
-            XCTAssertEqual(try store.snapshot(context: context).cursor, UInt64(ordinaryACKCount))
+            let assertionSnapshot1020_1052 = try await store.snapshot(context: context)
+            XCTAssertEqual(assertionSnapshot1020_1052.cursor, UInt64(ordinaryACKCount))
         }
 
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         let firstHigh = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(firstHigh, 1)
         XCTAssertEqual(ordinaryACKCount, 1)
@@ -1037,10 +1080,11 @@ final class ConversationRelayTests: XCTestCase {
     func testLegacyDeliveryNeedsNoConversationProjection() async throws {
         let (context, _, store, session) = try setup()
         session.ordinary[1] = data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Legacy question"}}"#)
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         let high = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(high, 1)
-        XCTAssertTrue(try store.conversationSnapshot(context: context).threads.isEmpty)
+        let assertionSnapshot1046_1079 = try await store.conversationSnapshot(context: context)
+        XCTAssertTrue(assertionSnapshot1046_1079.threads.isEmpty)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         XCTAssertTrue(session.conversationACKs.isEmpty)
     }
@@ -1057,14 +1101,15 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation","conversation_seq":1,"kind":"future_fact"}"#),
             event("discussion", sequence: 2, fields: #""author":"agent","event_id":"2","text":"Reply""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session,
+        let core = try await NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: diagnostics.append)
         _ = try await core.resyncAndDrainOutbox()
-        let snapshot = try store.conversationSnapshot(context: context)
+        let snapshot = try await store.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 2)
         XCTAssertTrue(snapshot.threads.values.contains { $0.turns.contains { $0.id == ExactText("2") } })
         XCTAssertTrue(diagnostics.events.contains { $0.causeCode == "unknown_update_kind" })
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        let assertionSnapshot1070_1104 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1070_1104.cursor, 1)
         XCTAssertEqual(session.conversationACKs.count, 1)
 
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
@@ -1073,8 +1118,10 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#)]
         await session.pushLiveConversation()
         await fulfillment(of: [liveACK], timeout: 2)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 4)
-        XCTAssertTrue(try store.conversationSnapshot(context: context).threads.values
+        let assertionSnapshot1079_1114 = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1079_1114.cursor, 4)
+        let assertionSnapshot1080_1116 = try await store.conversationSnapshot(context: context)
+        XCTAssertTrue(assertionSnapshot1080_1116.threads.values
             .contains { $0.turns.contains { $0.id == ExactText("4") } })
         await core.deactivate()
     }
@@ -1086,11 +1133,12 @@ final class ConversationRelayTests: XCTestCase {
             data(#"{"v":1,"type":"future_relay_update","seq":1}"#),
             data(#"{"v":1,"type":"lifecycle","seq":2,"state":"future_terminal"}"#),
             data(#"{"v":1,"type":"resynced","seq":2}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session,
+        let core = try await NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: diagnostics.append)
         let high = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(high, 2)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        let assertionSnapshot1096_1133 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1096_1133.cursor, 2)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         XCTAssertTrue(diagnostics.events.contains { $0.causeCode == "unknown_update_kind" })
         await core.deactivate()
@@ -1101,14 +1149,15 @@ final class ConversationRelayTests: XCTestCase {
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             data(#"{"v":1,"type":"conversation","kind":"future_fact"}"#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         do {
             _ = try await core.resyncAndDrainOutbox()
             XCTFail("An unknown update without a usable sequence cannot advance replay")
         } catch {
             XCTAssertEqual(error as? RelayWireError, .invalidFrame)
         }
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0)
+        let assertionSnapshot1114_1152 = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1114_1152.cursor, 0)
         XCTAssertTrue(session.conversationACKs.isEmpty)
         await core.deactivate()
     }
@@ -1124,12 +1173,13 @@ final class ConversationRelayTests: XCTestCase {
             ordinaryACKCount += 1
             if ordinaryACKCount == 2 { postCheckpointACK.fulfill() }
         }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         session.pushPostCheckpointInboxEvent(data(#"{"v":1,"type":"future_relay_update","seq":2}"#))
         await fulfillment(of: [postCheckpointACK], timeout: 2)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        let assertionSnapshot1135_1174 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1135_1174.cursor, 2)
         XCTAssertEqual(session.ordinaryACKs.count, 2)
         await core.deactivate()
         session.finishPostCheckpointInboxEvents()
@@ -1152,10 +1202,10 @@ final class ConversationRelayTests: XCTestCase {
             }
             session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#)] + events +
                 [data(#"{"v":1,"type":"conversation_resynced","conversation_seq":\#(barrierHighWater)}"#)]
-            let core = try NativeRelayCore(store: store, context: context, session: session)
+            let core = try await NativeRelayCore(store: store, context: context, session: session)
             do { _ = try await core.resyncAndDrainOutbox(); XCTFail("Noncontiguous replay must fail") }
             catch { XCTAssertEqual(error as? NativeRelayCoreError, .invalidReplay) }
-            let snapshot = try store.conversationSnapshot(context: context)
+            let snapshot = try await store.conversationSnapshot(context: context)
             if failure == "gap" {
                 XCTAssertEqual(snapshot.cursor, 0)
             } else if failure == "wrong-high-water-after-rejection" {
@@ -1174,11 +1224,13 @@ final class ConversationRelayTests: XCTestCase {
             event("discussion", sequence: 1, fields: #""author":"person","event_id":"2","text":"Explain""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
         session.onConversationOpen = { persistence.failNextCommit() }
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         do { _ = try await core.resyncAndDrainOutbox(); XCTFail("Failed durability must stop ACK") }
         catch {}
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 0)
+        let assertionSnapshot1183_1223 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1183_1223.cursor, 1)
+        let assertionSnapshot1184_1225 = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1184_1225.cursor, 0)
         XCTAssertTrue(session.conversationACKs.isEmpty)
     }
     func testLostConversationACKReplaysExactHistoryWithoutChangingOrdinaryCursor() async throws {
@@ -1187,15 +1239,18 @@ final class ConversationRelayTests: XCTestCase {
             event("discussion", sequence: 1, fields: #""author":"person","event_id":"2","text":"Explain""#),
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
         session.rejectFirstConversationACK = true
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(session.conversationACKs.count, 2)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).threads.values.first?.turns.count, 1)
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
+        let assertionSnapshot1196_1238 = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1196_1238.cursor, 1)
+        let assertionSnapshot1197_1240 = try await store.conversationSnapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1197_1240.threads.values.first?.turns.count, 1)
+        let assertionSnapshot1198_1242 = try await store.snapshot(context: context)
+        XCTAssertEqual(assertionSnapshot1198_1242.cursor, 1)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
     }
-    func testInlineOriginalBytesAndIndependentFileFactsDecodeWithoutInferringUse() throws {
+    func testInlineOriginalBytesAndIndependentFileFactsDecodeWithoutInferringUse() async throws {
         let (context, _, _, _) = try setup()
         let wire = try ConversationWire(profile: context)
         let bytes = Data([0, 255, 0, 2])
@@ -1212,7 +1267,7 @@ final class ConversationRelayTests: XCTestCase {
             fields: fields.replacingOccurrences(of: digest, with: String(repeating: "0", count: 64)))))
     }
 
-    func testDeliveryAckFramesDecodeTheContractMarkerStagesAndRerouteBit() throws {
+    func testDeliveryAckFramesDecodeTheContractMarkerStagesAndRerouteBit() async throws {
         let (context, _, _, _) = try setup()
         let wire = try ConversationWire(profile: context)
         let discussion = try wire.decodeEvent(event("discussion", sequence: 1,
@@ -1263,7 +1318,7 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertNil(agent)
     }
 
-    func testSupportProvenanceAndOriginRedactionAreExplicitAndClosureIsNotConversation() throws {
+    func testSupportProvenanceAndOriginRedactionAreExplicitAndClosureIsNotConversation() async throws {
         let (context, _, _, _) = try setup()
         let wire = try ConversationWire(profile: context)
         let status = try wire.decodeEvent(event("availability", sequence: 1,

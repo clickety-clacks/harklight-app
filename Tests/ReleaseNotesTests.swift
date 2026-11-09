@@ -99,7 +99,7 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(secondLaunch.notesToShow.isEmpty)
     }
 
-    func testBundledReleaseNotesPreserveBuild144AndAddPendingInboxLiveUpdatesNote() throws {
+    func testBundledReleaseNotesPreserveBuild144AndAddPendingClientServerTruthNote() throws {
         let bundle = Bundle(for: ReleaseNotesTests.self)
         let url = try XCTUnwrap(bundle.url(
             forResource: "HarklightReleaseNotes", withExtension: "json"))
@@ -110,8 +110,9 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertNil(entries.first { $0["id"] as? String == "fresh-release-notes" })
         let build139Identifier = "fresh-release-notes-follow-up"
         let pendingEntries = entries.filter { $0["testFlightBuildNumber"] is NSNull }
+        XCTAssertEqual(pendingEntries.count, 1)
         XCTAssertEqual(pendingEntries.compactMap { $0["id"] as? String }, [
-            "post-144-inbox-live-updates"
+            "post-144-client-server-truth"
         ])
         let rawStampedEntry = try XCTUnwrap(
             entries.first { $0["id"] as? String == build139Identifier })
@@ -151,21 +152,22 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertEqual(String(localized: build144Note.highlights[4].detail),
                        "There’s less extra space around the New section.")
 
-        let inboxCatchUpNote = try XCTUnwrap(
-            numberedEntries.first { $0.id == "post-144-inbox-live-updates" })
-        XCTAssertEqual(inboxCatchUpNote.buildIdentifier, 9000)
-        XCTAssertEqual(inboxCatchUpNote.highlights.map(\.id), [
-            "inbox-catch-up-background-preparation",
-            "inbox-deliveries-during-refresh"
+        let clientServerTruthNote = try XCTUnwrap(
+            numberedEntries.first { $0.id == "post-144-client-server-truth" })
+        XCTAssertEqual(clientServerTruthNote.buildIdentifier, 9000)
+        XCTAssertEqual(clientServerTruthNote.highlights.map(\.id), [
+            "inbox-deliveries-during-refresh",
+            "separate-conversation-drafts"
         ])
-        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[0].title),
-                       "Prepare Inbox history in the background")
-        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[0].detail),
-                       "Inbox prepares messages and conversation history in the background as it catches up.")
-        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[1].title),
+        XCTAssertFalse(clientServerTruthNote.highlights.contains {
+            $0.id == "inbox-catch-up-background-preparation"
+        })
+        XCTAssertEqual(String(localized: clientServerTruthNote.highlights[0].title),
                        "Receive new messages during refresh")
-        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[1].detail),
+        XCTAssertEqual(String(localized: clientServerTruthNote.highlights[0].detail),
                        "Inbox continues receiving new messages while its current view refreshes.")
+        XCTAssertEqual(String(localized: clientServerTruthNote.highlights[1].detail),
+                       "Drafts are kept per chat. Send needs a connection. A failed send is not retried automatically; tap Send again.")
 
         let messageTextDetail = try XCTUnwrap(build139Note.highlights.first {
             $0.id == "dynamic-type-message-text"

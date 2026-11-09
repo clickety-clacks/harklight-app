@@ -52,6 +52,10 @@ private actor InboxViewProgressSession: AuthenticatedInboxEventStreamSession {
         return Data(#"{"v":1,"type":"error","ref":"\#(ref)","reason":"temporarily_unavailable"}"#.utf8)
     }
 
+    func correlatedRequest(_ request: Data, ref: String) async throws -> Data {
+        try await inboxRequest(request, ref: ref)
+    }
+
     func acknowledge(_ request: Data) async throws {
         let value = try JSONValue.parse(request)
         if value.uniqueValue(named: "seq")?.integerValue == 1, !acknowledgementReported {
@@ -118,7 +122,7 @@ final class InboxViewLiveProgressTests: XCTestCase {
         let viewReturned = expectation(description: "The pending view response completes")
         let session = InboxViewProgressSession(identity: identity, acknowledged: acknowledged,
                                                viewReturned: viewReturned)
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let core = try await NativeRelayCore(store: store, context: context, session: session)
         addTeardownBlock {
             await session.stop()
             await core.deactivate()
@@ -127,7 +131,7 @@ final class InboxViewLiveProgressTests: XCTestCase {
         await session.publishNoticeBeforeDelivery()
         await fulfillment(of: [acknowledged, viewReturned], timeout: 2)
 
-        let snapshot = try store.snapshot(context: context)
+        let snapshot = try await store.snapshot(context: context)
         XCTAssertEqual(snapshot.cursor, 1)
         let request = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
                                  messageID: ExactText("request"))

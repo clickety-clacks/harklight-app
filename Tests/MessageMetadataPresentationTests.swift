@@ -44,7 +44,7 @@ final class MessageMetadataPresentationTests: XCTestCase {
     }
 
     @MainActor
-    func testPortProjectsMetadataWithoutChangingSeenOrReplyControls() throws {
+    func testPortProjectsMetadataWithoutChangingSeenOrReplyControls() async throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("metadata-reader"),
@@ -59,15 +59,15 @@ final class MessageMetadataPresentationTests: XCTestCase {
                                   messageID: ExactText("typed-request"))
         let seenPayload = try JSONValue.parse(Data(#"{"title":"Work complete","message_type":"fyi","message_kind":"success","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
         let replyPayload = try JSONValue.parse(Data(#"{"title":"Please decide","message_type":"request","message_kind":"blocker","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
-        try store.apply(RelayEvent(sequence: 1,
+        try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: seenKey, originalPayload: seenPayload), .message)),
             context: context)
-        try store.apply(RelayEvent(sequence: 2,
+        try await store.apply(RelayEvent(sequence: 2,
             body: .delivery(StoredRequest(key: replyKey, originalPayload: replyPayload), .message)),
             context: context)
 
         let port = AttentionDomainPort(store: store)
-        let requests = try port.observe(context: port.context).requests
+        let requests = try await port.observe(context: port.context).requests
         XCTAssertEqual(requests.map(\.key), [replyKey, seenKey],
                        "Metadata does not affect the established request order.")
 

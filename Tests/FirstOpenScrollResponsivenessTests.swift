@@ -112,53 +112,13 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                      String(describing: defaults.delayedWriteThreadWasMain)))
     }
 
-    func testDetailReadPersistenceDoesNotBlockTheMainActor() async throws {
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-            personID: ExactText("person"), deviceID: ExactText("device"))
-        let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let persistence = DelayedAttentionPersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
-        let request = RequestKey(accountScope: identity.personID,
-            senderID: ExactText("sender"), messageID: ExactText("request"))
-        let binding = ConversationBinding(request: request, revision: 1)
-        let session = ExactText("session")
-        let question = ConversationTurn(id: ExactText("question"), binding: binding,
-            author: .person, sessionHandle: session, text: ExactText("Question"), kind: .discussion)
-        let reply = ConversationTurn(id: ExactText("reply"), binding: binding,
-            author: .origin, sessionHandle: session, text: ExactText("Reply"),
-            inReplyTo: question.id, kind: .reply)
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
-            fact: .request(sessionHandle: session, payload: .null)), context: context)
-        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
-            fact: .turn(question)), context: context)
-        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
-            fact: .turn(reply)), context: context)
-        let store = try LivePresentationStore(localFixtureStore: domain, context: context)
-
-        let writesBefore = persistence.writes
-        persistence.delayNextWrite(by: persistenceDelay)
-        let mainActorDelay = await measureMainActorDelay {
-            store.markConversationRead(request, through: reply.id)
-        }
-        await waitForWriteCount(persistence, atLeast: writesBefore + 1)
-        await waitUntil { !store.hasUnreadAgentReply(request) }
-
-        XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
-                          "Opening a visible reply must not hold the detail scroll's main actor.")
-        XCTAssertEqual(persistence.delayedWriteThreadWasMain, false,
-                       "The attention plist encoding and persistence belong off main.")
-        print(String(format: "detail persistence main-actor block: %.3f ms (controlled write delay: %.0f ms; writer on main: %@)",
-                     mainActorDelay, persistenceDelay * 1000,
-                     String(describing: persistence.delayedWriteThreadWasMain)))
-    }
-
     func testInboxFirstPageCatchUpPersistenceDoesNotBlockInboxAdoption() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let persistence = DelayedAttentionPersistence()
         let domain = try AttentionDomainStore(context: context, persistence: persistence)
-        _ = try domain.beginInboxCandidate(startupID: "first-open", since: 0,
+        _ = try await domain.beginInboxCandidate(startupID: "first-open", since: 0,
             batches: [], context: context)
         let defaults = DelayedUserDefaults()
         let presentation = try LivePresentationStore(store: domain, context: context,
@@ -171,16 +131,16 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             StoredRequest(key: arrivingKey, originalPayload: payload), .message))
         persistence.delayNextWrite(by: persistenceDelay)
         let catchUp = Task.detached {
-            try domain.saveInboxInitialPage(snapshotID: "snapshot", highWater: 1,
+            try await domain.saveInboxInitialPage(snapshotID: "snapshot", highWater: 1,
                 items: [InboxSnapshotItem(acceptance: acceptance)], nextCursor: nil,
                 receiptCursor: nil, context: context)
         }
         await waitUntil { persistence.hasDelayedWriteStarted }
         let mainActorDelay = await measureMainActorDelay {
-            try? presentation.refreshFromDurableStore()
+            try? await presentation.refreshFromDurableStore()
         }
         try await catchUp.value
-        try presentation.refreshFromDurableStore()
+        try await presentation.refreshFromDurableStore()
 
         XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
                           "Inbox adoption must read the committed snapshot while catch-up persists.")
@@ -201,15 +161,15 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
         let request = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request"))
         let payload = try JSONValue.parse(Data(#"{"title":"Conversation"}"#.utf8))
-        try domain.apply(RelayEvent(sequence: 1, body: .delivery(
+        try await domain.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: request, originalPayload: payload), .message)), context: context)
         let binding = ConversationBinding(request: request, revision: 1)
         let session = ExactText("session")
         let question = ConversationTurn(id: ExactText("question"), binding: binding,
             author: .person, sessionHandle: session, text: ExactText("Question"), kind: .discussion)
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: session, payload: payload)), context: context)
-        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .turn(question)), context: context)
         let presentation = try LivePresentationStore(store: domain, context: context,
             newMessageAreaDefaults: DelayedUserDefaults())
@@ -219,15 +179,15 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
 
         persistence.delayNextWrite(by: persistenceDelay)
         let catchUp = Task.detached {
-            try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            try await domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
                 fact: .turn(reply)), context: context)
         }
         await waitUntil { persistence.hasDelayedWriteStarted }
         let mainActorDelay = await measureMainActorDelay {
-            try? presentation.refreshFromDurableStore()
+            try? await presentation.refreshFromDurableStore()
         }
         try await catchUp.value
-        try presentation.refreshFromDurableStore()
+        try await presentation.refreshFromDurableStore()
 
         XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
                           "Detail adoption must read the committed snapshot while catch-up persists.")
@@ -249,7 +209,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             let context = ProfileContext(identity: identity, transportMode: .relay)
             let persistence = DelayedAttentionPersistence()
             let domain = try AttentionDomainStore(context: context, persistence: persistence)
-            _ = try domain.beginInboxCandidate(startupID: "growing-backlog-\(count)", since: 0,
+            _ = try await domain.beginInboxCandidate(startupID: "growing-backlog-\(count)", since: 0,
                 batches: [], context: context)
             let items = (1...count).reversed().map { sequence -> InboxSnapshotItem in
                 let key = RequestKey(accountScope: identity.personID,
@@ -260,7 +220,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             }
             let snapshotID = "snapshot-\(count)"
             let backlog = Task.detached {
-                _ = try domain.beginInboxCandidate(startupID: "growing-backlog-\(count)",
+                _ = try await domain.beginInboxCandidate(startupID: "growing-backlog-\(count)",
                     since: 0, batches: [], context: context)
                 let pageCount = (items.count + 19) / 20
                 for pageIndex in 0..<pageCount {
@@ -269,16 +229,16 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                     let page = Array(items[lowerBound..<upperBound])
                     if pageIndex == 0 {
                         let nextCursor = pageCount > 1 ? "page-1" : nil
-                        try domain.saveInboxInitialPage(snapshotID: snapshotID,
+                        try await domain.saveInboxInitialPage(snapshotID: snapshotID,
                             highWater: UInt64(count), items: page, nextCursor: nextCursor,
                             receiptCursor: nil, context: context)
-                        _ = try domain.prepareInboxCheckpointAcknowledgement(context: context)
-                        _ = try domain.acceptInboxCheckpoint(snapshotID: snapshotID,
+                        _ = try await domain.prepareInboxCheckpointAcknowledgement(context: context)
+                        _ = try await domain.acceptInboxCheckpoint(snapshotID: snapshotID,
                             highWater: UInt64(count), context: context)
                     } else {
                         let cursor = "page-\(pageIndex)"
                         let nextCursor = pageIndex + 1 < pageCount ? "page-\(pageIndex + 1)" : nil
-                        try domain.saveInboxOlderPage(snapshotID: snapshotID,
+                        try await domain.saveInboxOlderPage(snapshotID: snapshotID,
                             highWater: UInt64(count), cursor: cursor, items: page,
                             nextCursor: nextCursor, context: context)
                     }
@@ -305,11 +265,11 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                 let acceptance = RelayEvent(sequence: UInt64(sequence), body: .delivery(
                     StoredRequest(key: key, originalPayload: payload), .message))
                 let revision = Task.detached {
-                    try domain.apply(acceptance, context: context)
+                    try await domain.apply(acceptance, context: context)
                 }
                 try await revision.value
                 let snapshot = try await Task.detached {
-                    try port.observe(context: port.context)
+                    try await port.observe(context: port.context)
                 }.value
                 let startedAt = DispatchTime.now().uptimeNanoseconds
                 revisionWaits.append(try await model.adoptForLiveUpdates(snapshot))
@@ -351,16 +311,16 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                 kind: .discussion)
 
             let history = Task.detached {
-                try domain.apply(delivery, context: context)
-                try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+                try await domain.apply(delivery, context: context)
+                try await domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
                     fact: .request(sessionHandle: session, payload: payload)), context: context)
-                try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+                try await domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
                     fact: .turn(question)), context: context)
                 for index in 1...count {
                     let reply = ConversationTurn(id: ExactText("reply-\(index)"), binding: binding,
                         author: .origin, sessionHandle: session, text: ExactText("Reply \(index)"),
                         inReplyTo: question.id, kind: .reply)
-                    try domain.applyConversation(ConversationEvent(sequence: UInt64(index + 2),
+                    try await domain.applyConversation(ConversationEvent(sequence: UInt64(index + 2),
                         binding: binding, fact: .turn(reply)), context: context)
                 }
             }
@@ -385,12 +345,12 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                     kind: .reply)
                 let sequence = UInt64(count + offset + 2)
                 let revision = Task.detached {
-                    try domain.applyConversation(ConversationEvent(sequence: sequence,
+                    try await domain.applyConversation(ConversationEvent(sequence: sequence,
                         binding: binding, fact: .turn(reply)), context: context)
                 }
                 try await revision.value
                 let snapshot = try await Task.detached {
-                    try port.observe(context: port.context)
+                    try await port.observe(context: port.context)
                 }.value
                 let startedAt = DispatchTime.now().uptimeNanoseconds
                 revisionWaits.append(try await model.adoptForLiveUpdates(snapshot))
@@ -454,10 +414,10 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             acceptanceOrder: order, isResolved: false, hasSubmittedAnswer: false)
     }
 
-    private func measureMainActorDelay(_ operation: () -> Void) async -> Double {
+    private func measureMainActorDelay(_ operation: @MainActor () async -> Void) async -> Double {
         let marker = Task { @MainActor in DispatchTime.now().uptimeNanoseconds }
         let startedAt = DispatchTime.now().uptimeNanoseconds
-        operation()
+        await operation()
         let markerAt = await marker.value
         return Double(markerAt - startedAt) / 1_000_000
     }

@@ -2210,8 +2210,10 @@ final class LivePresentationStore {
                             flushImmediately: Bool = false) -> Bool {
         guard !isReadOnly else { return false }
         let binding = ConversationBinding(request: key, revision: revision)
+        // The close transition flushes text staged before closure; ordinary edits stay blocked.
+        guard var thread = conversationThreads[key],
+              thread.allowsDiscussion || flushImmediately else { return false }
         editedConversationDrafts.insert(binding)
-        guard var thread = conversationThreads[key] else { return false }
         var draft = thread.drafts[revision] ?? ConversationDraft(binding: binding)
         if let text { draft.text = ExactText(text) }
         if let files { draft.files = files }

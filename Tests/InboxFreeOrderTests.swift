@@ -134,7 +134,7 @@ final class InboxFreeOrderTests: XCTestCase {
     }
 
     @MainActor
-    func testPartialFreeReferencesPreserveLoadedMessageAndHistoryAccessAfterRestart() throws {
+    func testPartialFreeReferencesPreserveLoadedMessageAndHistoryAccessAfterRestart() async throws {
         let persistence = MemoryAttentionStatePersistence()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
         var loadedRows: [InboxItem] = []
@@ -142,7 +142,7 @@ final class InboxFreeOrderTests: XCTestCase {
             let key = RequestKey(accountScope: context.identity.personID,
                 senderID: ExactText("agent"), messageID: ExactText(id))
             let payload = try JSONValue.parse(Data("{\"title\":\"\(id)\"}".utf8))
-            try store.apply(RelayEvent(sequence: UInt64(index + 1),
+            try await store.apply(RelayEvent(sequence: UInt64(index + 1),
                 body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
             loadedRows.append(.request(InboxRequestRow(key: key, title: id, sender: "Assistant", status: "",
                 isResolved: id == "omitted-history", hasUserAction: id == "omitted-history")))
@@ -150,10 +150,10 @@ final class InboxFreeOrderTests: XCTestCase {
         var malformedReply = reference("omitted-history", kind: "reply", state: "history")
         malformedReply.removeValue(forKey: "open_at_conversation_seq")
         let view = try decode([reference("valid"), reference("omitted-open", kind: "future"), malformedReply])
-        try store.setInboxView(view, context: context)
+        try await store.setInboxView(view, context: context)
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
-        let presentation = try port.observe(context: port.context)
+        let presentation = try await port.observe(context: port.context)
         XCTAssertEqual(presentation.requests.count, 3)
         XCTAssertNil(presentation.inboxViewListItems)
         XCTAssertNil(presentation.inboxFreeOrderVersion)
@@ -202,21 +202,21 @@ final class InboxFreeOrderTests: XCTestCase {
             knownRevision: views[0].revision), .unchanged(views[0].revision))
     }
 
-    func testSectionTransitionReplacesPersistedViewAndReachesPresentationAtomically() throws {
+    func testSectionTransitionReplacesPersistedViewAndReachesPresentationAtomically() async throws {
         let persistence = MemoryAttentionStatePersistence()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
         let active = try decode([reference("parent")])
         let history = try decode([reference("parent", state: "history")], revision: "view-2")
-        try store.setInboxView(active, context: context)
-        try store.setInboxView(history, context: context)
+        try await store.setInboxView(active, context: context)
+        try await store.setInboxView(history, context: context)
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
-        let presentation = try port.observe(context: port.context)
+        let presentation = try await port.observe(context: port.context)
         XCTAssertEqual(presentation.inboxFreeOrderVersion, 1)
         XCTAssertEqual(presentation.inboxViewListItems, history.listItems)
         let compatible = try decode([reference("parent")], version: nil, revision: "view-3")
-        try restored.setInboxView(compatible, context: context)
-        let fallback = try port.observe(context: port.context)
+        try await restored.setInboxView(compatible, context: context)
+        let fallback = try await port.observe(context: port.context)
         XCTAssertNil(fallback.inboxFreeOrderVersion)
         XCTAssertFalse(InboxFreeOrder.isSupported(version: fallback.inboxFreeOrderVersion,
                                                   items: fallback.inboxViewListItems))

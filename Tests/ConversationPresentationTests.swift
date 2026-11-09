@@ -7,6 +7,21 @@ import XCTest
 @testable import Harklight
 
 @MainActor
+private func assertThrowsAsync<T>(
+    _ expression: () async throws -> T,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    onError: (@MainActor (Error) -> Void)? = nil
+) async {
+    do {
+        _ = try await expression()
+        XCTFail("Expected expression to throw", file: file, line: line)
+    } catch {
+        onError?(error)
+    }
+}
+
+@MainActor
 final class ConversationPresentationTests: XCTestCase {
     func testPastedNewlineRemainsInTheComposerWithoutSending() {
         var text = "Before "
@@ -31,7 +46,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(sendCount, 1)
     }
 
-    func testFailedComposerSaveKeepsTheLatestTextAvailableForRetryInThisSession() throws {
+    func testFailedComposerSaveKeepsTheLatestTextAvailableForRetryInThisSession() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
@@ -40,7 +55,7 @@ final class ConversationPresentationTests: XCTestCase {
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("request"))
         let binding = ConversationBinding(request: key, revision: 1)
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
         let model = try LivePresentationStore(localFixtureStore: domain, context: context)
 
@@ -300,7 +315,7 @@ final class ConversationPresentationTests: XCTestCase {
             isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .availabilityUnconfirmed)
     }
 
-    func testInlineTurnAndDraftBytesStayBehindReferencesAcrossTextOnlyComposerWrites() throws {
+    func testInlineTurnAndDraftBytesStayBehindReferencesAcrossTextOnlyComposerWrites() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -316,25 +331,28 @@ final class ConversationPresentationTests: XCTestCase {
         let digest = ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
         let inline = ConversationFile(id: ExactText("attachment"), name: ExactText("large-note.bin"),
             byteCount: UInt64(bytes.count), sha256: digest, content: .inline(bytes))
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
-        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Before edit"), files: [inline]),
+        try await domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Before edit"), files: [inline]),
             context: context)
         let turn = ConversationTurn(id: ExactText("turn-2"), binding: binding, author: .person,
             sessionHandle: ExactText("session"), text: ExactText("Shared exact bytes"), files: [inline])
-        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn)), context: context)
+        try await domain.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn)), context: context)
 
-        let saved = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[request]?.drafts[1])
+        let savedConversation = try await domain.conversationSnapshot(context: context)
+        let saved = try XCTUnwrap(savedConversation.threads[request]?.drafts[1])
         let savedFile = try XCTUnwrap(saved.files.first)
         guard case .localFile = savedFile.content else { return XCTFail("Inline bytes must become an account-owned file reference.") }
         let model = try LivePresentationStore(store: domain, context: context)
         model.updateConversation(for: request, revision: 1, text: "After composer edit")
         XCTAssertNil(model.conversationError)
-        let firstEdit = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[request]?.drafts[1])
+        let firstEditConversation = try await domain.conversationSnapshot(context: context)
+        let firstEdit = try XCTUnwrap(firstEditConversation.threads[request]?.drafts[1])
         XCTAssertEqual(firstEdit.files, saved.files, "A text-only edit preserves the original file identity and reference.")
         model.updateConversation(for: request, revision: 1, text: "After the next keystroke")
         XCTAssertNil(model.conversationError)
-        let secondEdit = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[request]?.drafts[1])
+        let secondEditConversation = try await domain.conversationSnapshot(context: context)
+        let secondEdit = try XCTUnwrap(secondEditConversation.threads[request]?.drafts[1])
         XCTAssertEqual(secondEdit.files, saved.files, "Later text edits keep the same normalized file references.")
 
         let persisted = try XCTUnwrap(persistence.load(identity: identity))
@@ -346,7 +364,8 @@ final class ConversationPresentationTests: XCTestCase {
 
         let restored = try AttentionDomainStore(context: context, persistence: persistence,
             conversationFileReferences: storage)
-        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[request])
+        let restoredConversation = try await restored.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(restoredConversation.threads[request])
         XCTAssertEqual(thread.currentRevision, 1)
         XCTAssertEqual(thread.turns.first?.id, turn.id)
         XCTAssertEqual(thread.turns.first?.conversationSequence, 2)
@@ -355,12 +374,13 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(thread.turns.first?.files.first?.content, savedFile.content)
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("After the next keystroke"))
         XCTAssertEqual(thread.drafts[1]?.files.first?.content, savedFile.content)
-        try restored.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn)), context: context)
-        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 2,
+        try await restored.applyConversation(ConversationEvent(sequence: 2, binding: binding, fact: .turn(turn)), context: context)
+        let replayedConversation = try await restored.conversationSnapshot(context: context)
+        XCTAssertEqual(replayedConversation.cursor, 2,
             "A duplicate inline replay normalizes to the same retained reference instead of conflicting.")
     }
 
-    func testLegacyInlineRecoveryAfterFailedTextWriteKeepsRetryAndDuplicateReplayNormalized() throws {
+    func testLegacyInlineRecoveryAfterFailedTextWriteKeepsRetryAndDuplicateReplayNormalized() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -384,10 +404,10 @@ final class ConversationPresentationTests: XCTestCase {
         // encoded bytes as an older on-disk account state.
         let legacyPersistence = MemoryAttentionStatePersistence()
         let legacyStore = try AttentionDomainStore(context: context, persistence: legacyPersistence)
-        try legacyStore.applyConversation(requestEvent, context: context)
-        try legacyStore.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Before retry"), files: [inline]),
+        try await legacyStore.applyConversation(requestEvent, context: context)
+        try await legacyStore.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Before retry"), files: [inline]),
             context: context)
-        try legacyStore.applyConversation(turnEvent, context: context)
+        try await legacyStore.applyConversation(turnEvent, context: context)
         let legacyBytes = try XCTUnwrap(legacyPersistence.load(identity: identity))
         XCTAssertNotNil(legacyBytes.range(of: bytes), "The fixture must contain legacy inline payload bytes.")
 
@@ -398,7 +418,8 @@ final class ConversationPresentationTests: XCTestCase {
         let store = try AttentionDomainStore(context: context, persistence: failingPersistence,
             conversationFileReferences: storage)
 
-        let initiallyNormalized = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request])
+        let initialConversation = try await store.conversationSnapshot(context: context)
+        let initiallyNormalized = try XCTUnwrap(initialConversation.threads[request])
         let retainedTurnFile = try XCTUnwrap(initiallyNormalized.turns.first?.files.first)
         let retainedDraftFile = try XCTUnwrap(initiallyNormalized.drafts[1]?.files.first)
         guard case .localFile = retainedTurnFile.content, case .localFile = retainedDraftFile.content else {
@@ -408,19 +429,21 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(retainedDraftFile.id, inline.id)
 
         failingPersistence.failNextCommit()
-        XCTAssertThrowsError(try store.updateConversationDraftText(ExactText("Failed attempt"), for: binding, context: context)) { error in
+        await assertThrowsAsync({ try await store.updateConversationDraftText(
+            ExactText("Failed attempt"), for: binding, context: context) }) { error in
             guard let storeError = error as? AttentionStoreError, case .persistence = storeError else {
                 return XCTFail("Expected the injected durable-write failure; received \(error).")
             }
         }
-        let recovered = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request])
+        let recoveredConversation = try await store.conversationSnapshot(context: context)
+        let recovered = try XCTUnwrap(recoveredConversation.threads[request])
         XCTAssertEqual(recovered.drafts[1]?.text, ExactText("Before retry"), "The failed edit is not reported as saved.")
         XCTAssertEqual(recovered.turns.first?.files.first, retainedTurnFile)
         XCTAssertEqual(recovered.drafts[1]?.files.first, retainedDraftFile)
         let unchangedDiskBytes = try XCTUnwrap(failingPersistence.load(identity: identity))
         XCTAssertNotNil(unchangedDiskBytes.range(of: bytes), "A pre-replacement failure leaves the older plist intact.")
 
-        let retried = try store.updateConversationDraftText(ExactText("Saved retry"), for: binding, context: context)
+        let retried = try await store.updateConversationDraftText(ExactText("Saved retry"), for: binding, context: context)
         XCTAssertEqual(retried.text, ExactText("Saved retry"))
         XCTAssertEqual(retried.binding, binding)
         XCTAssertEqual(retried.files, [retainedDraftFile])
@@ -430,10 +453,11 @@ final class ConversationPresentationTests: XCTestCase {
         try storage.verify(retainedURL, for: retainedTurnFile)
         XCTAssertEqual(try Data(contentsOf: retainedURL), bytes)
 
-        let cursorBeforeDuplicate = try store.conversationSnapshot(context: context).cursor
-        try store.applyConversation(turnEvent, context: context)
-        let afterDuplicate = try XCTUnwrap(store.conversationSnapshot(context: context).threads[request])
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, cursorBeforeDuplicate)
+        let cursorBeforeDuplicate = (try await store.conversationSnapshot(context: context)).cursor
+        try await store.applyConversation(turnEvent, context: context)
+        let duplicatedConversation = try await store.conversationSnapshot(context: context)
+        let afterDuplicate = try XCTUnwrap(duplicatedConversation.threads[request])
+        XCTAssertEqual(duplicatedConversation.cursor, cursorBeforeDuplicate)
         XCTAssertEqual(afterDuplicate.turns.count, 1, "The original turn remains a single idempotently replayed fact.")
         XCTAssertEqual(afterDuplicate.turns.first?.id, turn.id)
         XCTAssertEqual(afterDuplicate.turns.first?.binding, binding)
@@ -442,43 +466,49 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(finalDiskBytes.range(of: bytes), "Duplicate replay leaves the normalized persisted state unchanged.")
     }
 
-    func testQuestionRevisionKeepsAnOldSelectorBoundToTheVersionThePersonSaw() throws {
+    func testQuestionRevisionKeepsAnOldSelectorBoundToTheVersionThePersonSaw() async throws {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("fictional-relay"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let first = try JSONValue.parse(Data(#"{"title":"First wording","by_when":1793200000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
         let second = try JSONValue.parse(Data(#"{"title":"Revised wording","by_when":1793300000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
-        try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
+        try await domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
         let b1 = ConversationBinding(request: key, revision: 1)
         let b2 = ConversationBinding(request: key, revision: 2)
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: b1,
+        try await domain.applyConversation(ConversationEvent(sequence: 1, binding: b1,
             fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
         let port = AttentionDomainPort(store: domain)
-        let oldSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
-        let old = try port.submit(SubmitIntent(context: port.context, selector: oldSelector, intentID: UUID(),
+        let initialInspection = try await port.inspect(context: port.context, request: key)
+        let oldSelector = try XCTUnwrap(initialInspection.requests.first?.selector)
+        let old = try await port.submit(SubmitIntent(context: port.context, selector: oldSelector, intentID: UUID(),
             inputs: [.compatibilityText(action: ExactText("old"), text: ExactText("Old answer"))]))
-        XCTAssertEqual(try domain.lookupIntent(old.intentID, context: context)?.requestRevision, 1)
-        try domain.applyConversation(ConversationEvent(sequence: 2, binding: b2,
+        let oldIntent = try await domain.lookupIntent(old.intentID, context: context)
+        XCTAssertEqual(oldIntent?.requestRevision, 1)
+        try await domain.applyConversation(ConversationEvent(sequence: 2, binding: b2,
             fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
-        try domain.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+        try await domain.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
             InboxViewEntry(key: key, priority: .high, thread: ExactText("release"))
         ]), context: context)
-        let revised = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        let revisedInspection = try await port.inspect(context: port.context, request: key)
+        let revised = try XCTUnwrap(revisedInspection.requests.first)
         XCTAssertEqual(revised.title, ExactText("Revised wording"))
         XCTAssertNil(revised.intentReceipt, "The earlier answer must not become the new version's receipt")
         XCTAssertNil(revised.draft.compatibility.selectedActionID)
-        let staleSubmission = try XCTUnwrap(domain.lookupIntent(old.intentID, context: context))
+        let staleIntent = try await domain.lookupIntent(old.intentID, context: context)
+        let staleSubmission = try XCTUnwrap(staleIntent)
         XCTAssertEqual(staleSubmission.requestRevision, 1)
         XCTAssertEqual(staleSubmission.operation.uniqueValue(named: "request_revision")?.integerValue, 1)
-        try domain.recordAnswerStaleRevision(old.intentID, operationID: old.opID,
+        try await domain.recordAnswerStaleRevision(old.intentID, operationID: old.opID,
             currentRevision: 2, context: context)
-        let currentAfterDecline = try XCTUnwrap(port.observe(context: port.context).requests.first)
+        let currentObservation = try await port.observe(context: port.context)
+        let currentAfterDecline = try XCTUnwrap(currentObservation.requests.first)
         XCTAssertEqual(currentAfterDecline.title, ExactText("Revised wording"))
         XCTAssertEqual(currentAfterDecline.staleAnswerRevision?.submittedRevision, 1)
         XCTAssertEqual(currentAfterDecline.staleAnswerRevision?.currentRevision, 2)
-        let historical = try XCTUnwrap(port.inspectAnswerDraft(context: port.context,
-                                                               request: key, revision: 1))
+        let historicalDraft = try await port.inspectAnswerDraft(context: port.context,
+            request: key, revision: 1)
+        let historical = try XCTUnwrap(historicalDraft)
         XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertEqual(historical.byWhenMilliseconds, 1_793_300_000_000,
                        "A historical answer draft keeps showing the current revision deadline.")
@@ -492,15 +522,18 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertTrue(LiveRequestDetail(request: latestRequest, store: liveAfterDecline).canAnswer,
                       "The changed request is available for another answer after the stale refusal.")
         liveAfterDecline.dismissStaleAnswerDialog()
-        try liveAfterDecline.refreshFromDurableStore()
+        try await liveAfterDecline.refreshFromDurableStore()
         XCTAssertNil(liveAfterDecline.staleAnswerDialog, "A dismissed stale-answer notice does not repeat in this session.")
-        let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
+        let declinedConversation = try await domain.conversationSnapshot(context: context)
+        let thread = try XCTUnwrap(declinedConversation.threads[key])
         XCTAssertEqual(thread.answerDrafts?[1]?.compatibility.selectedActionID, ExactText("old"))
         XCTAssertEqual(thread.revisions[1], first)
         XCTAssertEqual(historical.title, ExactText("First wording"))
         XCTAssertNil(historical.selector, "Historical drafts cannot acquire a current answer selector")
-        XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
-        let retained = try XCTUnwrap(domain.lookupIntent(old.intentID, context: context))
+        let declinedState = try await domain.snapshot(context: context)
+        XCTAssertTrue(declinedState.outbox.isEmpty)
+        let retainedIntent = try await domain.lookupIntent(old.intentID, context: context)
+        let retained = try XCTUnwrap(retainedIntent)
         XCTAssertEqual(retained.disposition, .staleRevision(currentRevision: 2))
         XCTAssertEqual(retained.answer, .string(ExactText("Old answer")))
         guard case let .compatibility(actions) = latestRequest.projection,
@@ -511,15 +544,17 @@ final class ConversationPresentationTests: XCTestCase {
                                       requestRevision: latestRequest.requestRevision)
         liveAfterDecline.updateCompatibilityText("new answer", action: newAction.id, for: key,
                                                  requestRevision: latestRequest.requestRevision)
-        XCTAssertTrue(liveAfterDecline.submitFromUser(key,
-                                                      requestRevision: latestRequest.requestRevision))
-        let current = try XCTUnwrap(domain.snapshot(context: context).outbox.first)
+        let submissionStarted = await liveAfterDecline.submitFromUser(key,
+            requestRevision: latestRequest.requestRevision)
+        XCTAssertTrue(submissionStarted)
+        let currentState = try await domain.snapshot(context: context)
+        let current = try XCTUnwrap(currentState.outbox.first)
         XCTAssertEqual(current.requestRevision, 2)
         XCTAssertTrue(String(decoding: current.wireFrame, as: UTF8.self).contains("\"request_revision\":2"))
-        XCTAssertEqual(try domain.snapshot(context: context).intents.count, 2, "Both original facts remain inspectable")
+        XCTAssertEqual(currentState.intents.count, 2, "Both original facts remain inspectable")
     }
 
-    func testPendingDraftBuffersStayBoundToTheirRequestRevision() throws {
+    func testPendingDraftBuffersStayBoundToTheirRequestRevision() async throws {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("fictional-relay"),
             personID: ExactText("draft-revision-person"), deviceID: ExactText("device")), transportMode: .relay)
         let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
@@ -527,9 +562,9 @@ final class ConversationPresentationTests: XCTestCase {
                              senderID: ExactText("sender"), messageID: ExactText("draft-revision"))
         let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
         let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
-        try domain.apply(RelayEvent(sequence: 1,
+        try await domain.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
-        try domain.applyConversation(ConversationEvent(sequence: 1,
+        try await domain.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
         let live = try LivePresentationStore(store: domain, context: context)
@@ -537,7 +572,7 @@ final class ConversationPresentationTests: XCTestCase {
         live.selectAction(ExactText("old"), input: nil, for: key, requestRevision: 1)
         live.stageCompatibilityText("Old-version draft", action: ExactText("old"),
                                     for: key, requestRevision: 1)
-        try domain.applyConversation(ConversationEvent(sequence: 2,
+        try await domain.applyConversation(ConversationEvent(sequence: 2,
             binding: ConversationBinding(request: key, revision: 2),
             fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
 
@@ -545,11 +580,14 @@ final class ConversationPresentationTests: XCTestCase {
         // catches up. Text staged against that old display must not be saved.
         live.stageCompatibilityText("Late old-version text", action: ExactText("old"),
                                     for: key, requestRevision: 1)
-        XCTAssertFalse(live.flushPendingDraft(for: key, requestRevision: 1))
-        try live.refreshFromDurableStore()
+        let flushed = await live.flushPendingDraft(for: key, requestRevision: 1)
+        XCTAssertFalse(flushed)
+        try await live.refreshFromDurableStore()
 
-        let historical = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
-        let current = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 2).requests.first)
+        let historicalDraft = try await port.inspectAnswerDraft(context: port.context, request: key, revision: 1)
+        let historical = try XCTUnwrap(historicalDraft)
+        let currentInspection = try await port.inspect(context: port.context, request: key, revision: 2)
+        let current = try XCTUnwrap(currentInspection.requests.first)
         XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertNil(current.draft.compatibility.selectedActionID,
                      "Editing the version on screen must not apply its answer to the newer version.")
@@ -558,12 +596,13 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(live.draft(for: key, revision: 2)?.compatibility.textByActionID[ExactText("new")])
         XCTAssertNil(historical.selector,
                      "A new request version cannot issue an answer selector for the archived version.")
-        XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
+        let state = try await domain.snapshot(context: context)
+        XCTAssertTrue(state.outbox.isEmpty)
     }
 
-    func testShakeConversationUsesTheDomainAndOrdinaryViewModelAndCannotPrepareDelivery() throws {
+    func testShakeConversationUsesTheDomainAndOrdinaryViewModelAndCannotPrepareDelivery() async throws {
         let library = SampleLibrary()
-        library.populate()
+        await library.populate()
         let fixture = try XCTUnwrap(library.fixture)
         let response = try XCTUnwrap(library.responses["sample-information-0"])
         let before = try XCTUnwrap(fixture.viewModel.conversation(for: response.key))
@@ -580,11 +619,13 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(last.operationID)
         XCTAssertEqual(thread.facts[last.id]?.delivered, false)
         XCTAssertNil(thread.facts[last.id]?.actedBy)
-        XCTAssertTrue(try fixture.domain.snapshot(context: fixture.context).intents.isEmpty)
-        XCTAssertTrue(try fixture.domain.snapshot(context: fixture.context).outbox.isEmpty)
-        let state = try fixture.domain.conversationSnapshot(context: fixture.context)
-        library.populate()
-        XCTAssertEqual(try fixture.domain.conversationSnapshot(context: fixture.context).cursor, state.cursor)
+        let fixtureState = try await fixture.domain.snapshot(context: fixture.context)
+        XCTAssertTrue(fixtureState.intents.isEmpty)
+        XCTAssertTrue(fixtureState.outbox.isEmpty)
+        let state = try await fixture.domain.conversationSnapshot(context: fixture.context)
+        await library.populate()
+        let repopulatedState = try await fixture.domain.conversationSnapshot(context: fixture.context)
+        XCTAssertEqual(repopulatedState.cursor, state.cursor)
         XCTAssertEqual(fixture.viewModel.conversation(for: response.key)?.turns, thread.turns)
     }
 
@@ -650,9 +691,9 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: olderURL), bytes)
     }
 
-    func testShakeExamplesIncludeRevisionArchiveDistinctFileFactsAndClosureWithoutOperations() throws {
+    func testShakeExamplesIncludeRevisionArchiveDistinctFileFactsAndClosureWithoutOperations() async throws {
         let library = SampleLibrary()
-        library.populate()
+        await library.populate()
         let fixture = try XCTUnwrap(library.fixture)
         let revised = try XCTUnwrap(library.responses["sample-approval-2"])
         let revision = try XCTUnwrap(fixture.viewModel.conversation(for: revised.key))
@@ -669,13 +710,17 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(fixture.viewModel.conversation(for: closed.key)?.terminal, .cleared)
         XCTAssertEqual(fixture.viewModel.conversation(for: closed.key)?.terminalAuthor, .origin)
         XCTAssertTrue(closed.isClosed)
-        let before = try fixture.domain.conversationSnapshot(context: fixture.context)
-        library.populate()
-        XCTAssertEqual(try fixture.domain.conversationSnapshot(context: fixture.context).cursor, before.cursor)
-        let state = try fixture.domain.snapshot(context: fixture.context)
+        let before = try await fixture.domain.conversationSnapshot(context: fixture.context)
+        await library.populate()
+        let repopulatedConversation = try await fixture.domain.conversationSnapshot(context: fixture.context)
+        XCTAssertEqual(repopulatedConversation.cursor, before.cursor)
+        let state = try await fixture.domain.snapshot(context: fixture.context)
         XCTAssertTrue(state.intents.isEmpty)
         XCTAssertTrue(state.outbox.isEmpty)
-        XCTAssertThrowsError(try fixture.domain.prepareDiscussion(ConversationBinding(request: revised.key, revision: 2), context: fixture.context))
+        await assertThrowsAsync {
+            try await fixture.domain.prepareDiscussion(
+                ConversationBinding(request: revised.key, revision: 2), context: fixture.context)
+        }
     }
 
     func testAgentReplyStaysUnreadUntilChatShowsItAcrossForegroundAndRelaunch() async throws {
@@ -693,21 +738,22 @@ final class ConversationPresentationTests: XCTestCase {
             ConversationTurn(id: ExactText(id), binding: binding, author: author, sessionHandle: session,
                 text: ExactText("Turn \(id)"), inReplyTo: author == .person ? nil : ExactText("2"), kind: kind)
         }
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: session, payload: .null)), context: context)
-        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .turn(turn("2", .person, .discussion))), context: context)
         let model = try LivePresentationStore(store: domain, context: context)
         XCTAssertFalse(model.hasUnreadAgentReply(request), "The person's own turn does not light the marker.")
 
         // Foreground: the reply arrives while Chat is closed.
-        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
             fact: .turn(turn("3", .agent, .reply))), context: context)
-        try model.refreshFromDurableStore()
+        try await model.refreshFromDurableStore()
         XCTAssertTrue(model.hasUnreadAgentReply(request))
 
-        // Opening Chat clears it, and the cleared state survives a relaunch.
-        model.markConversationRead(request)
+        // Recording the shown reply clears it, and the cleared state survives a relaunch.
+        _ = try await domain.markConversationRead(request, context: context)
+        try await model.refreshFromDurableStore()
         XCTAssertFalse(model.hasUnreadAgentReply(request))
         let relaunched = try LivePresentationStore(store: AttentionDomainStore(context: context, persistence: persistence),
             context: context)
@@ -715,19 +761,21 @@ final class ConversationPresentationTests: XCTestCase {
 
         // Background: a later reply is replayed into durable state before the app shows it.
         let replayed = try AttentionDomainStore(context: context, persistence: persistence)
-        try replayed.applyConversation(ConversationEvent(sequence: 4, binding: binding,
+        try await replayed.applyConversation(ConversationEvent(sequence: 4, binding: binding,
             fact: .turn(turn("4", .origin, .reply))), context: context)
-        let resumed = try LivePresentationStore(store: AttentionDomainStore(context: context, persistence: persistence),
+        let resumedStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let resumed = try LivePresentationStore(store: resumedStore,
             context: context)
         XCTAssertTrue(resumed.hasUnreadAgentReply(request))
-        resumed.markConversationRead(request)
+        _ = try await resumedStore.markConversationRead(request, context: context)
+        try await resumed.refreshFromDurableStore()
         await waitUntilMainActor("the persisted origin reply read position") {
             !resumed.hasUnreadAgentReply(request)
         }
         XCTAssertFalse(resumed.hasUnreadAgentReply(request))
     }
 
-    func testInboxChatMarkerNeedsAChatTurnAndKeepsClosedUnreadRepliesVisible() throws {
+    func testInboxChatMarkerNeedsAChatTurnAndKeepsClosedUnreadRepliesVisible() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -738,14 +786,14 @@ final class ConversationPresentationTests: XCTestCase {
         let binding = ConversationBinding(request: key, revision: 1)
         let handle = ExactText("session")
         let payload = try JSONValue.parse(Data(#"{"title":"A message"}"#.utf8))
-        try domain.apply(RelayEvent(sequence: 1, body: .delivery(
+        try await domain.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: handle,
                 eventID: ExactText("delivery-revision"),
                 availability: .listening)), context: context)
         let emptyKey = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("empty-chat"))
-        try domain.apply(RelayEvent(sequence: 2, body: .delivery(
+        try await domain.apply(RelayEvent(sequence: 2, body: .delivery(
             StoredRequest(key: emptyKey, originalPayload: payload), .message),
             conversation: RelayConversationMetadata(revision: 1,
                 sessionHandle: ExactText("empty-session"))), context: context)
@@ -759,28 +807,29 @@ final class ConversationPresentationTests: XCTestCase {
 
         let person = ConversationTurn(id: ExactText("person-turn"), binding: binding,
             author: .person, sessionHandle: handle, text: ExactText("Hello"), kind: .discussion)
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .turn(person)), context: context)
-        try model.refreshFromDurableStore()
+        try await model.refreshFromDurableStore()
         XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, false)
 
         let agent = ConversationTurn(id: ExactText("agent-turn"), binding: binding,
             author: .agent, sessionHandle: handle, text: ExactText("Hi"),
             inReplyTo: person.id, kind: .reply)
-        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .turn(agent)), context: context)
-        try model.refreshFromDurableStore()
+        try await model.refreshFromDurableStore()
         XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, true)
-        model.markConversationRead(key)
+        _ = try await domain.markConversationRead(key, context: context)
+        try await model.refreshFromDurableStore()
         XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, false)
 
         let later = ConversationTurn(id: ExactText("later-agent-turn"), binding: binding,
             author: .agent, sessionHandle: handle, text: ExactText("One more thing"),
             inReplyTo: person.id, kind: .reply)
-        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+        try await domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
             fact: .turn(later)), context: context)
-        try domain.apply(RelayEvent(sequence: 3, body: .terminal(key, .answered, nil)), context: context)
-        try model.refreshFromDurableStore()
+        try await domain.apply(RelayEvent(sequence: 3, body: .terminal(key, .answered, nil)), context: context)
+        try await model.refreshFromDurableStore()
         XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, true,
                        "A closed request must still show an unseen agent reply.")
     }

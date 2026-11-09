@@ -46,27 +46,30 @@ final class ConversationFileWireTests: XCTestCase {
         XCTAssertEqual(try wire.fetchRequest(uploaded).url?.path, "/origin/v1/files/" + uploadID)
         XCTAssertThrowsError(try wire.decodeUpload(Data(String(decoding: response, as: UTF8.self).replacingOccurrences(of: "\"size\":4", with: "\"size\":3").utf8), status: 200, original: original))
     }
-    func testFrozenUnknownDiscussionRetriesItsExactOperationAndMixedFileFrame() throws {
+    func testFrozenUnknownDiscussionRetriesItsExactOperationAndMixedFileFrame() async throws {
         let context = context(), persistence = MemoryAttentionStatePersistence()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
         let binding = ConversationBinding(request: RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request")), revision: 1)
-        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
         let inline = file("small.bin", bytes: Data([0, 255]))
         let large = ConversationFile(id: ExactText("local-large"), name: ExactText("large.bin"), byteCount: 3_000_000,
             sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("retained-large")))
         let uploaded = ConversationFile(id: large.id, name: large.name, byteCount: large.byteCount,
             sha256: large.sha256, content: .uploaded(ExactText(UUID().uuidString.lowercased())))
-        try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Explain exactly\nthis"), files: [inline, large]), context: context)
-        let operation = try store.prepareDiscussion(binding, context: context)
-        let frozen = try XCTUnwrap(store.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        try await store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Explain exactly\nthis"), files: [inline, large]), context: context)
+        let operation = try await store.prepareDiscussion(binding, context: context)
+        let frozenConversation = try await store.conversationSnapshot(context: context)
+        let frozen = try XCTUnwrap(frozenConversation.threads[binding.request]?.drafts[1])
         let wire = try ConversationWire(profile: context), limits = ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil)
         let originalFrame = try wire.discussion(frozen, operationID: operation, preparedFiles: [inline, uploaded], limits: limits)
-        try store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+        try await store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
         let restored = try AttentionDomainStore(context: context, persistence: persistence)
-        XCTAssertEqual(try restored.prepareDiscussion(binding, context: context), operation)
-        let retained = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        let retainedOperation = try await restored.prepareDiscussion(binding, context: context)
+        XCTAssertEqual(retainedOperation, operation)
+        let restoredConversation = try await restored.conversationSnapshot(context: context)
+        let retained = try XCTUnwrap(restoredConversation.threads[binding.request]?.drafts[1])
         XCTAssertEqual(try wire.discussion(retained, operationID: operation, preparedFiles: [inline, uploaded], limits: limits), originalFrame)
         let parsed = try JSONValue.parse(originalFrame)
         XCTAssertEqual(parsed.uniqueValue(named: "text"), .string(ExactText("Explain exactly\nthis")))
@@ -74,8 +77,10 @@ final class ConversationFileWireTests: XCTestCase {
                        .string({ if case let .uploaded(id) = uploaded.content { return id }; return ExactText("") }()))
         XCTAssertThrowsError(try wire.discussion(retained, operationID: UUID(), preparedFiles: [inline, uploaded], limits: limits))
         XCTAssertThrowsError(try wire.discussion(retained, operationID: operation, preparedFiles: [inline, large], limits: limits))
-        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1], retained)
-        XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty, "Discussion must not become an answer operation")
+        let replayedConversation = try await restored.conversationSnapshot(context: context)
+        XCTAssertEqual(replayedConversation.threads[binding.request]?.drafts[1], retained)
+        let restoredState = try await restored.snapshot(context: context)
+        XCTAssertTrue(restoredState.outbox.isEmpty, "Discussion must not become an answer operation")
     }
     func testDownloadedOriginalBytesAreMeasuredBeyondTheJSONCeiling() throws {
         let wire = try wire(context())
