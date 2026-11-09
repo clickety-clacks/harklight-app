@@ -82,10 +82,17 @@ final class ConversationPresentationTests: XCTestCase {
             text: "Latest unsent text", flushImmediately: true))
         let address = ComposerDraftAddress(identity: identity, request: key,
             revision: 1, kind: .conversation)
+        let draftFile = root.appendingPathComponent(address.stableName).appendingPathExtension("json")
+        await waitUntilMainActor("the recovered composer write") {
+            FileManager.default.fileExists(atPath: draftFile.path) || model.conversationError != nil
+        }
+        XCTAssertNil(model.conversationError, "The retry should complete after storage is available.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: draftFile.path),
+                      "The retained text must be durable before leaving this session.")
+        let recoveredPersistence = ComposerDraftPersistence(rootDirectory: root)
         var persisted: ConversationDraft?
         for _ in 0..<400 {
-            persisted = try? await ComposerDraftPersistence(rootDirectory: root)
-                .load(ConversationDraft.self, at: address)
+            persisted = try? await recoveredPersistence.load(ConversationDraft.self, at: address)
             if persisted?.text == ExactText("Latest unsent text") { break }
             try? await Task.sleep(for: .milliseconds(5))
         }
@@ -586,7 +593,9 @@ final class ConversationPresentationTests: XCTestCase {
         let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
         let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
         try await domain.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: key, originalPayload: first), .message)), context: context)
+            body: .delivery(StoredRequest(key: key, originalPayload: first), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("origin"))),
+            context: context)
         try await domain.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
@@ -598,12 +607,21 @@ final class ConversationPresentationTests: XCTestCase {
         let live = try LivePresentationStore(store: domain, context: context,
             composerDraftPersistence: persistence)
         try await live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: key)?.requestRevision, 1,
+                       "The fixture needs the server's current request revision before editing its draft.")
         live.selectAction(ExactText("old"), input: nil, for: key, requestRevision: 1)
         live.stageCompatibilityText("Old-version draft", action: ExactText("old"),
                                     for: key, requestRevision: 1)
         _ = live.flushPendingDraft(for: key, requestRevision: 1)
         let firstAddress = ComposerDraftAddress(identity: context.identity, request: key,
             revision: 1, kind: .answer)
+        let answerFile = root.appendingPathComponent(firstAddress.stableName).appendingPathExtension("json")
+        await waitUntilMainActor("the answer draft save") {
+            FileManager.default.fileExists(atPath: answerFile.path) || live.actionError != nil
+        }
+        XCTAssertNil(live.actionError, "A current-revision draft should persist successfully.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: answerFile.path),
+                      "The selected choice and its text must be saved before the revision changes.")
         var savedOldDraft: AnswerComposerDraft?
         for _ in 0..<400 {
             savedOldDraft = try? await persistence.load(AnswerComposerDraft.self, at: firstAddress)

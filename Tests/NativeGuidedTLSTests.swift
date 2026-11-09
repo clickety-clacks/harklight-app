@@ -727,7 +727,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         await app.refreshLive()
         XCTAssertEqual(app.notificationNavigation?.request, lateKey)
         XCTAssertEqual(live.selectedRequestKey, lateKey)
-        XCTAssertNil(app.notificationNavigationMessage)
+        XCTAssertEqual(app.notificationNavigationMessage,
+                       "This message is not in the latest Harklight inbox.")
 
         let retractedKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:gone"),
                                       messageID: ExactText("retracted"))
@@ -3110,10 +3111,17 @@ final class NativeGuidedTLSTests: XCTestCase {
         try await persistence.flush(AnswerComposerDraft(content: answerDraft,
             operationID: operationID, failureOperationID: operationID,
             currentAttemptUnsettled: true, failure: failure), at: address)
+        let savedBeforeRetry = try await persistence.load(AnswerComposerDraft.self, at: address)
+        XCTAssertEqual(savedBeforeRetry?.operationID, operationID,
+                       "Manual Retry starts from the durable operation id.")
+        XCTAssertEqual(savedBeforeRetry?.content, answerDraft)
 
         let editor = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true,
             identity: identity, persistence: persistence)
         await editor.loadPersistedDraft()
+        XCTAssertTrue(editor.isDraftLoaded)
+        XCTAssertEqual(ComposerDraftAddress(identity: identity, request: editor.requestKey,
+            revision: editor.requestRevision, kind: .answer), address)
         XCTAssertTrue(editor.deliveryDraft.currentAttemptUnsettled)
         XCTAssertEqual(editor.deliveryDraft.operationID, operationID)
         XCTAssertEqual(editor.draft.compatibility.selectedActionID, ExactText("approve"))
