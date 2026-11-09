@@ -5,10 +5,11 @@ import XCTest
 
 @MainActor
 final class ConversationUploadContractTests: XCTestCase {
-    private final class Session: AuthenticatedInboxPagingSession, AuthenticatedConversationFileSession, @unchecked Sendable {
+    private final class Session: AuthenticatedConversationCleanupSession, @unchecked Sendable {
         let authenticatedIdentity: ProfileIdentity
         let uploadID = UUID().uuidString.lowercased()
         var uploadedOperations: [UUID] = []
+        var discardRequests: [ConversationUploadCleanup] = []
         var transmissions: [(Data, UUID)] = []
         var transmissionOrder: [String] = []
         var durableDraftBeforeTransmission: (@Sendable () async -> ConversationDraft?)?
@@ -28,7 +29,7 @@ final class ConversationUploadContractTests: XCTestCase {
         }
 
         func correlatedRequest(_ request: Data, ref: String) async throws -> Data {
-            try await inboxRequest(request, ref: ref)
+            data("{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\"}")
         }
 
         func acknowledge(_ request: Data) async throws {}
@@ -58,6 +59,13 @@ final class ConversationUploadContractTests: XCTestCase {
                                     sha256: file.sha256, content: .uploaded(ExactText(uploadID)))
         }
 
+        func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
+                                        originURL: URL) async throws -> ConversationUploadDiscardResult {
+            discardRequests.append(cleanup)
+            return ConversationUploadDiscardResult(state: .discarded,
+                discarded: UInt64(cleanup.uploadOperations.count))
+        }
+
         func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
             transmittedDrafts.append(await durableDraftBeforeTransmission?())
             transmissions.append((frame, operationID))
@@ -85,7 +93,7 @@ final class ConversationUploadContractTests: XCTestCase {
         return (context, persistence, store, binding, session, core)
     }
 
-    func testUploadIsDurableBeforeSendAndSameDraftRetryReusesIt() async throws {
+    func testUploadIsDurableBeforeSendAndSameDraftRetryReusesItWithoutCleanup() async throws {
         let (context, persistence, store, binding, session, core) = try await setup()
         let localFile = ConversationFile(id: ExactText("file"), name: ExactText("large.bin"),
             byteCount: 300_000, sha256: ExactText(String(repeating: "a", count: 64)),
@@ -136,6 +144,10 @@ final class ConversationUploadContractTests: XCTestCase {
         let currentDraft = try XCTUnwrap(finalSnapshot.threads[binding.request]?.drafts[binding.revision])
         XCTAssertEqual(currentDraft.text, ExactText("The attachment is relevant."))
         XCTAssertEqual(currentDraft.files, [expectedUploadedFile])
+        XCTAssertTrue(finalSnapshot.threads[binding.request]?.uploadCleanups?.isEmpty ?? true,
+                      "A manual retry neither creates nor persists cleanup work.")
+        XCTAssertTrue(session.discardRequests.isEmpty,
+                      "A manual retry never invokes uploaded-file discard transport.")
 
         let attention = try await store.snapshot(context: context)
         XCTAssertTrue(attention.intents.isEmpty)

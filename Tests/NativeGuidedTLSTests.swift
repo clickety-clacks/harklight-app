@@ -112,7 +112,7 @@ private final class NativeDiagnosticEventCollector: @unchecked Sendable {
 @MainActor
 private final class MessageLinkRefreshPlan {
     var step = 0
-    var pageReturnsTarget = false
+    var deliverTargetOnRefresh = false
     var didDeliverLateMessage = false
 }
 
@@ -671,14 +671,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         let targetDelivery = RelayEvent(sequence: 2,
             body: .delivery(StoredRequest(key: targetKey, originalPayload: payload), .message))
         try await domain.apply(otherDelivery, context: context)
-        _ = try await domain.beginInboxCandidate(startupID: "message-link-startup", since: 1,
-                                           batches: [], context: context)
-        try await domain.saveInboxInitialPage(snapshotID: "message-link-snapshot", highWater: 1,
-            items: [InboxSnapshotItem(acceptance: otherDelivery)], nextCursor: nil,
-            receiptCursor: nil, context: context)
-        _ = try await domain.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try await domain.acceptInboxCheckpoint(snapshotID: "message-link-snapshot", highWater: 1,
-                                             context: context)
         let live = try LivePresentationStore(store: domain, context: context)
         try await live.refreshFromDurableStore()
         let refreshPlan = MessageLinkRefreshPlan()
@@ -687,8 +679,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             initialState: .live(live),
             notificationRouter: NativeNotificationRouter(defaults: defaults),
             refreshOperation: { _ in
-                if refreshPlan.pageReturnsTarget {
-                    refreshPlan.pageReturnsTarget = false
+                if refreshPlan.deliverTargetOnRefresh {
+                    refreshPlan.deliverTargetOnRefresh = false
                     try! await domain.apply(targetDelivery, context: context)
                     try! await live.refreshFromDurableStore()
                 }
@@ -708,7 +700,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         await app.receiveInvitation(URL(string: "harklight://message/app%3Aone/message%2Fone")!)
         XCTAssertEqual(app.notificationNavigation?.request, targetKey)
         XCTAssertEqual(app.notificationNavigationMessage,
-                       "This message hasn't arrived yet. Harklight will keep checking while it's open.")
+                       "Harklight could not verify this message in the current inbox.")
         XCTAssertNotEqual(live.selectedRequestKey, otherKey,
                           "A similar title cannot stand in for the linked sender/message identity.")
         let submittedOtherRequest = await live.submitFromUser(otherKey)
@@ -719,14 +711,15 @@ final class NativeGuidedTLSTests: XCTestCase {
         refreshPlan.step = 1
         await app.refreshLive()
         XCTAssertEqual(app.notificationNavigationMessage,
-                       "This message hasn't arrived yet. Harklight will keep checking while it's open.")
+                       "This message is not in the latest Harklight inbox.")
         XCTAssertEqual(live.actionError, otherRequestWarning,
                        "A pending message link must not clear another request's answer warning on refresh.")
 
-        refreshPlan.pageReturnsTarget = true
+        refreshPlan.deliverTargetOnRefresh = true
         await app.refreshLive()
         XCTAssertEqual(live.selectedRequestKey, targetKey)
         XCTAssertEqual(app.notificationNavigation?.request, targetKey)
+        XCTAssertEqual(app.notificationNavigation?.request?.accountScope, identity.personID)
         XCTAssertNil(app.notificationNavigationMessage)
 
         await app.receiveInvitation(URL(string: "harklight://message/app%3Aone/never-sent")!)
@@ -821,15 +814,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         let targetTerminal = RelayEvent(sequence: 2, body: .terminal(target, .superseded, nil))
         let replacementDelivery = RelayEvent(sequence: 3,
             body: .delivery(StoredRequest(key: replacement, originalPayload: replacementPayload), .message))
-        _ = try await domain.beginInboxCandidate(startupID: "notification-response-startup", since: 0,
-                                           batches: [], context: context)
-        try await domain.saveInboxInitialPage(snapshotID: "notification-response-snapshot", highWater: 3,
-            items: [InboxSnapshotItem(acceptance: targetDelivery, terminal: targetTerminal),
-                    InboxSnapshotItem(acceptance: replacementDelivery)], nextCursor: nil,
-            receiptCursor: nil, context: context)
-        _ = try await domain.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try await domain.acceptInboxCheckpoint(snapshotID: "notification-response-snapshot", highWater: 3,
-                                             context: context)
         let live = try LivePresentationStore(store: domain, context: context)
         try await live.refreshFromDurableStore()
 
@@ -864,6 +848,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let coldRouter = NativeNotificationRouter(defaults: defaults)
         XCTAssertEqual(coldRouter.intent?.locator?.request, target)
         var refreshes = 0
+        var didDeliverRouteAEvents = false
         let app = NativeAppLaunch(arguments: [],
             enrollmentStore: NativeEnrollmentStore(service: namespace),
             joinStore: NativeGuidedJoinStore(namespace: namespace + ".join"),
@@ -871,6 +856,12 @@ final class NativeGuidedTLSTests: XCTestCase {
             notificationRouter: coldRouter,
             refreshOperation: { _ in
                 refreshes += 1
+                if !didDeliverRouteAEvents {
+                    didDeliverRouteAEvents = true
+                    try! await domain.apply(targetDelivery, context: context)
+                    try! await domain.apply(targetTerminal, context: context)
+                    try! await domain.apply(replacementDelivery, context: context)
+                }
                 try! await live.refreshFromDurableStore()
                 return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
                     confirmedContext: context, confirmedTransportAttemptID: UUID())
@@ -880,6 +871,7 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         XCTAssertEqual(refreshes, 1)
         XCTAssertEqual(app.notificationNavigation?.request, target)
+        XCTAssertEqual(app.notificationNavigation?.request?.accountScope, context.identity.personID)
         XCTAssertTrue(app.notificationNavigation?.opensChat == true,
                       "A chat-target tap resolves the same request identity and then opens its conversation.")
         XCTAssertEqual(live.selectedRequestKey, target)
