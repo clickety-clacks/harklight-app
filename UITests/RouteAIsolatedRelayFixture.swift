@@ -26,14 +26,15 @@ final class RouteAIsolatedRelayFixture {
     }
 
     var answerOperationCount: Int { relay.answerOperationCount }
+    var acknowledgementCount: Int { relay.acknowledgementCount }
     var requestSummary: String { relay.requestSummary }
 
     func waitForAcceptedAnswer(timeout: TimeInterval) -> String? {
         relay.waitForAcceptedAnswer(timeout: timeout)
     }
 
-    func waitForTerminalAcknowledgement(timeout: TimeInterval) -> Bool {
-        relay.waitForTerminalAcknowledgement(timeout: timeout)
+    func waitForTerminalLifecycleRefresh(timeout: TimeInterval) -> Bool {
+        relay.waitForTerminalLifecycleRefresh(timeout: timeout)
     }
 
     func stop() {
