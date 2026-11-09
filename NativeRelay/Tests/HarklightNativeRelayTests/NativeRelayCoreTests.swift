@@ -476,7 +476,7 @@ final class NativeRelayCoreTests: XCTestCase {
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let receipt = try await port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
         session.result = .unsupported(operationID: receipt.opID)
@@ -487,7 +487,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(String(decoding: try XCTUnwrap(session.sent.first?.0), as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"no-comment","request_revision":1}"# + "\n")
 
-        let projectionAfterSend = await port.inspect(context: port.context, request: key)
+        let projectionAfterSend = try await port.inspect(context: port.context, request: key)
         let request = try XCTUnwrap(projectionAfterSend.requests.first)
         XCTAssertEqual(request.lifecycleStatus, .open)
         XCTAssertTrue(request.noCommentUnavailable)
@@ -506,7 +506,7 @@ final class NativeRelayCoreTests: XCTestCase {
         _ = try await store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         _ = try await port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
         let beforeSendFailure = try await store.snapshot(context: context)
@@ -606,7 +606,7 @@ final class NativeRelayCoreTests: XCTestCase {
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let submitted = try await port.submitNoComment(context: port.context,
                                                  selector: selector,
@@ -657,11 +657,11 @@ final class NativeRelayCoreTests: XCTestCase {
             body: .delivery(StoredRequest(key: answerKey, originalPayload: answerPayload), .message)), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let noCommentProjection = await port.inspect(context: port.context, request: noCommentKey)
+        let noCommentProjection = try await port.inspect(context: port.context, request: noCommentKey)
         let noCommentSelector = try XCTUnwrap(noCommentProjection.requests.first?.selector)
         let noComment = try await port.submitNoComment(context: port.context,
             selector: noCommentSelector, intentID: UUID())
-        let answerProjection = await port.inspect(context: port.context, request: answerKey)
+        let answerProjection = try await port.inspect(context: port.context, request: answerKey)
         let answerSelector = try XCTUnwrap(answerProjection.requests.first?.selector)
         let answer = try await port.submit(SubmitIntent(context: port.context,
             selector: answerSelector, intentID: UUID(),
@@ -706,11 +706,11 @@ final class NativeRelayCoreTests: XCTestCase {
             body: .delivery(StoredRequest(key: answerKey, originalPayload: answerPayload), .message)), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let refusedProjection = await port.inspect(context: port.context, request: refusedKey)
+        let refusedProjection = try await port.inspect(context: port.context, request: refusedKey)
         let refusedSelector = try XCTUnwrap(refusedProjection.requests.first?.selector)
         let refused = try await port.submitNoComment(context: port.context,
             selector: refusedSelector, intentID: UUID())
-        let answerProjection = await port.inspect(context: port.context, request: answerKey)
+        let answerProjection = try await port.inspect(context: port.context, request: answerKey)
         let answerSelector = try XCTUnwrap(answerProjection.requests.first?.selector)
         let answer = try await port.submit(SubmitIntent(context: port.context,
             selector: answerSelector, intentID: UUID(),
@@ -732,7 +732,7 @@ final class NativeRelayCoreTests: XCTestCase {
                        "The refusal disables only its operation while the other answer is still delivered.")
         let refusedIntent = try await port.lookupIntent(context: port.context, intentID: refused.intentID)
         XCTAssertEqual(refusedIntent?.localState, .notDelivered)
-        let refusedProjectionAfterSend = await port.inspect(context: port.context, request: refusedKey)
+        let refusedProjectionAfterSend = try await port.inspect(context: port.context, request: refusedKey)
         XCTAssertEqual(refusedProjectionAfterSend.requests.first?.lifecycleStatus, .open)
         let refusedReceipt = try XCTUnwrap(snapshot.inboxCheckpoint?.batches.first?.results?.first {
             $0.operationID == refused.opID
@@ -754,7 +754,7 @@ final class NativeRelayCoreTests: XCTestCase {
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let noComment = try await port.submitNoComment(context: port.context,
             selector: selector, intentID: UUID())
@@ -788,7 +788,7 @@ final class NativeRelayCoreTests: XCTestCase {
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
 
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let noComment = try await port.submitNoComment(context: port.context,
             selector: selector, intentID: UUID())
@@ -828,7 +828,7 @@ final class NativeRelayCoreTests: XCTestCase {
         try await store.applyConversation(ConversationEvent(sequence: 1, binding: revisionOne,
             fact: .request(sessionHandle: handle, payload: first)), context: context)
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let receipt = try await port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
@@ -851,11 +851,11 @@ final class NativeRelayCoreTests: XCTestCase {
             author: .origin, sessionHandle: handle, text: ExactText("Revised wording"), kind: .revision)
         try await store.applyConversation(ConversationEvent(sequence: 2, binding: revisionTwo,
             fact: .revision(update, payload: second)), context: context)
-        let currentProjection = await port.observe(context: port.context)
+        let currentProjection = try await port.observe(context: port.context)
         let current = try XCTUnwrap(currentProjection.requests.first)
         XCTAssertEqual(current.title, ExactText("Revised wording"))
         XCTAssertEqual(current.staleAnswerRevision?.currentRevision, 2)
-        let currentRequestProjection = await port.inspect(context: port.context, request: key)
+        let currentRequestProjection = try await port.inspect(context: port.context, request: key)
         let currentSelector = try XCTUnwrap(currentRequestProjection.requests.first?.selector)
         let retry = try await port.submit(SubmitIntent(context: port.context, selector: currentSelector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
@@ -1124,15 +1124,15 @@ final class NativeRelayCoreTests: XCTestCase {
         session.frames = [data(#"{"v":1,"type":"resynced","seq":21}"#)]
 
         let port = AttentionDomainPort(store: store)
-        let staleProjection = await port.inspect(context: port.context, request: key(21))
+        let staleProjection = try await port.inspect(context: port.context, request: key(21))
         let staleSelector = try XCTUnwrap(staleProjection.requests.first?.selector)
         let core = try await NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
 
         let bounded = try await store.snapshot(context: context)
         XCTAssertEqual(bounded.inboxCurrentKeys?.count, 20)
-        let currentProjection = await port.inspect(context: port.context, request: key(1))
-        let staleProjectionAfterRefresh = await port.inspect(context: port.context, request: key(21))
+        let currentProjection = try await port.inspect(context: port.context, request: key(1))
+        let staleProjectionAfterRefresh = try await port.inspect(context: port.context, request: key(21))
         XCTAssertEqual(currentProjection.requests.first?.inboxStateIsCurrent, true)
         XCTAssertEqual(staleProjectionAfterRefresh.requests.first?.inboxStateIsCurrent, false)
         let cachedAnswer = try await port.submit(SubmitIntent(context: port.context, selector: staleSelector,
@@ -1252,7 +1252,7 @@ final class NativeRelayCoreTests: XCTestCase {
         }
         XCTAssertTrue(firstSession.acknowledgements.isEmpty)
         let hidden = AttentionDomainPort(store: store)
-        let hiddenProjection = await hidden.observe(context: hidden.context)
+        let hiddenProjection = try await hidden.observe(context: hidden.context)
         XCTAssertTrue(hiddenProjection.requests.isEmpty,
                       "A partial replay must stay out of the visible inbox.")
 
@@ -1266,7 +1266,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let high = try await secondCore.resyncAndDrainOutbox()
         XCTAssertEqual(high, 9)
         let visible = AttentionDomainPort(store: restarted)
-        let visibleProjection = await visible.observe(context: visible.context)
+        let visibleProjection = try await visible.observe(context: visible.context)
         XCTAssertEqual(visibleProjection.requests.count, 9)
         XCTAssertEqual(secondSession.acknowledgements.count, 1)
         let completedSnapshot = try await restarted.snapshot(context: restartedContext)
@@ -1291,7 +1291,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let emptySnapshot = try await store.snapshot(context: context)
         XCTAssertEqual(emptySnapshot.cursor, 0)
         let visible = AttentionDomainPort(store: store)
-        let visibleProjection = await visible.observe(context: visible.context)
+        let visibleProjection = try await visible.observe(context: visible.context)
         XCTAssertTrue(visibleProjection.requests.isEmpty,
                       "A gapped stream must not publish a partial inbox.")
     }
@@ -1390,7 +1390,7 @@ final class NativeRelayCoreTests: XCTestCase {
                                        body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)),
                             context: context)
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let receipt = try await port.submit(SubmitIntent(context: port.context, selector: selector,
                                                   intentID: UUID(),
@@ -1432,7 +1432,7 @@ final class NativeRelayCoreTests: XCTestCase {
         _ = try await originalStore.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: originalContext)
         let port = AttentionDomainPort(store: originalStore)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let receipt = try await port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
@@ -1491,7 +1491,7 @@ final class NativeRelayCoreTests: XCTestCase {
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
             context: context)
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let receipt = try await port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
@@ -1545,7 +1545,7 @@ final class NativeRelayCoreTests: XCTestCase {
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
             context: context)
         let port = AttentionDomainPort(store: store)
-        let initialProjection = await port.inspect(context: port.context, request: key)
+        let initialProjection = try await port.inspect(context: port.context, request: key)
         let selector = try XCTUnwrap(initialProjection.requests.first?.selector)
         let receipt = try await port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
