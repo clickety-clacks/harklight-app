@@ -56,6 +56,7 @@ final class SampleLibraryTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"sender_id":"sender","message_id":"real-message","created_at":1,"title":"Keep this real message"}"#.utf8))
         _ = try await domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         let presentation = try LivePresentationStore(store: domain, context: context)
+        try await presentation.refreshFromDurableStore()
         let before = presentation.presentation
         let library = SampleLibrary()
         await library.populate()
@@ -130,6 +131,7 @@ final class SampleLibraryTests: XCTestCase {
             let didSubmit = await fixture.viewModel.submitFromUser(response.key)
             XCTAssertFalse(didSubmit, "A manual send from the sample fixture stays local.")
         }
+        try await fixture.viewModel.refreshFromDurableStore()
         let snapshot = try await fixture.domain.snapshot(context: fixture.context)
         XCTAssertTrue(snapshot.intents.isEmpty)
         let restored = try LivePresentationStore(localFixtureStore: fixture.domain, context: fixture.context)
