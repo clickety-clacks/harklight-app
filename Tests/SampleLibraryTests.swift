@@ -135,6 +135,7 @@ final class SampleLibraryTests: XCTestCase {
         let snapshot = try await fixture.domain.snapshot(context: fixture.context)
         XCTAssertTrue(snapshot.intents.isEmpty)
         let restored = try LivePresentationStore(localFixtureStore: fixture.domain, context: fixture.context)
+        try await restored.refreshFromDurableStore()
         for message in library.messages {
             let request = try XCTUnwrap(restored.request(for: fixture.key(for: message)))
             XCTAssertNil(request.intentReceipt)
