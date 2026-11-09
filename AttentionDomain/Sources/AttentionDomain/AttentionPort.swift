@@ -502,10 +502,49 @@ public struct PresentationSnapshot: Equatable, Sendable {
                 inboxViewBasis: ExactText? = nil,
                 inboxViewListItems: [InboxViewListItem]? = nil,
                 inboxFreeOrderVersion: Int? = nil,
-#if DEBUG
-                currentRequestCount: Int? = nil,
-#endif
                 requests: [PresentedRequest]) {
+        self.init(revision: revision,
+                  cursor: cursor,
+                  replayBarrier: replayBarrier,
+                  repairIssues: repairIssues,
+                  inboxViewBasis: inboxViewBasis,
+                  inboxViewListItems: inboxViewListItems,
+                  inboxFreeOrderVersion: inboxFreeOrderVersion,
+                  debugCurrentRequestCount: nil,
+                  requests: requests)
+    }
+
+#if DEBUG
+    public init(revision: UInt64,
+                cursor: UInt64,
+                replayBarrier: UInt64?,
+                repairIssues: [StoreRepairIssue],
+                inboxViewBasis: ExactText? = nil,
+                inboxViewListItems: [InboxViewListItem]? = nil,
+                inboxFreeOrderVersion: Int? = nil,
+                currentRequestCount: Int?,
+                requests: [PresentedRequest]) {
+        self.init(revision: revision,
+                  cursor: cursor,
+                  replayBarrier: replayBarrier,
+                  repairIssues: repairIssues,
+                  inboxViewBasis: inboxViewBasis,
+                  inboxViewListItems: inboxViewListItems,
+                  inboxFreeOrderVersion: inboxFreeOrderVersion,
+                  debugCurrentRequestCount: currentRequestCount,
+                  requests: requests)
+    }
+#endif
+
+    private init(revision: UInt64,
+                 cursor: UInt64,
+                 replayBarrier: UInt64?,
+                 repairIssues: [StoreRepairIssue],
+                 inboxViewBasis: ExactText?,
+                 inboxViewListItems: [InboxViewListItem]?,
+                 inboxFreeOrderVersion: Int?,
+                 debugCurrentRequestCount: Int?,
+                 requests: [PresentedRequest]) {
         self.revision = revision
         self.cursor = cursor
         self.replayBarrier = replayBarrier
@@ -514,7 +553,7 @@ public struct PresentationSnapshot: Equatable, Sendable {
         self.inboxViewListItems = inboxViewListItems
         self.inboxFreeOrderVersion = inboxFreeOrderVersion
 #if DEBUG
-        self.currentRequestCount = currentRequestCount
+        self.currentRequestCount = debugCurrentRequestCount
 #endif
         self.requests = requests
     }
@@ -1087,6 +1126,7 @@ public struct AttentionDomainPort: Sendable {
             }
             : nil
 #endif
+#if DEBUG
         return PresentationSnapshot(revision: snapshot.revision,
                                     cursor: snapshot.cursor,
                                     replayBarrier: snapshot.replayBarrier,
@@ -1094,10 +1134,18 @@ public struct AttentionDomainPort: Sendable {
                                     inboxViewBasis: snapshot.inboxView?.basis,
                                     inboxViewListItems: snapshot.inboxView?.listItems,
                                     inboxFreeOrderVersion: snapshot.inboxView?.freeOrderVersion,
-#if DEBUG
                                     currentRequestCount: currentRequestCount,
-#endif
                                     requests: sourceOrderedRequests)
+#else
+        return PresentationSnapshot(revision: snapshot.revision,
+                                    cursor: snapshot.cursor,
+                                    replayBarrier: snapshot.replayBarrier,
+                                    repairIssues: snapshot.repairIssues,
+                                    inboxViewBasis: snapshot.inboxView?.basis,
+                                    inboxViewListItems: snapshot.inboxView?.listItems,
+                                    inboxFreeOrderVersion: snapshot.inboxView?.freeOrderVersion,
+                                    requests: sourceOrderedRequests)
+#endif
     }
 
     private static func viewSlots(for keys: [RequestKey],
