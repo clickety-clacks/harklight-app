@@ -180,7 +180,7 @@ public actor NativeRelayCore {
     private let onDiagnostic: NativeClientDiagnosticSink
     private let attemptID: UUID?
 #if DEBUG
-    private let onReadinessObservation: (@Sendable (NativeRelayReadinessObservation) -> Void)?
+    private var onReadinessObservation: (@Sendable (NativeRelayReadinessObservation) -> Void)?
 #endif
     private var active = true
     private var busy = false
@@ -450,11 +450,7 @@ public actor NativeRelayCore {
                 session: any AuthenticatedInstallationSession,
                 attemptID: UUID? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }
-#if DEBUG
-                , onReadinessObservation: (@Sendable (NativeRelayReadinessObservation) -> Void)? = nil
-#endif
-                ) async throws {
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) async throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
@@ -466,12 +462,20 @@ public actor NativeRelayCore {
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
 #if DEBUG
-        self.onReadinessObservation = onReadinessObservation
+        self.onReadinessObservation = nil
 #endif
         self.wire = try RelayWire(profile: context)
         self.inboxWire = try InboxPagingWire(profile: context)
         _ = try await store.snapshot(context: context)
     }
+
+#if DEBUG
+    public func setReadinessObservationHandler(
+        _ handler: (@Sendable (NativeRelayReadinessObservation) -> Void)?
+    ) {
+        onReadinessObservation = handler
+    }
+#endif
 
     public func deactivate() {
         active = false

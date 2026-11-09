@@ -1015,11 +1015,10 @@ final class NativeRelayLifecycle {
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink()
+                                           onDiagnostic: diagnosticSink())
 #if DEBUG
-                                           , onReadinessObservation: readinessObservationSink()
+            await nextCore.setReadinessObservationHandler(readinessObservationSink())
 #endif
-        )
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -1689,11 +1688,10 @@ final class NativeRelayLifecycle {
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink()
+                                           onDiagnostic: diagnosticSink())
 #if DEBUG
-                                           , onReadinessObservation: readinessObservationSink()
+            await nextCore.setReadinessObservationHandler(readinessObservationSink())
 #endif
-        )
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
