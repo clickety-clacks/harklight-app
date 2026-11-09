@@ -202,8 +202,21 @@ final class RouteAIsolatedRelayFixture {
                 condition.unlock()
                 send(["v": 1, "type": "ok", "ref": "native-ack", "seq": sequence], on: connection)
             case "conversation_open":
-                send(["v": 1, "type": "error", "ref": frame["ref"] as? String ?? "",
-                      "reason": "unknown_type"], on: connection)
+                send(["v": 1, "type": "ok", "ref": "native-conversation-sync",
+                      "origin_https_port": 9443], on: connection)
+                send(["v": 1, "type": "conversation_resynced", "conversation_seq": 0],
+                     on: connection)
+            case "conversation_ack":
+                let sequence = (frame["conversation_seq"] as? NSNumber)?.uint64Value ?? 0
+                send(["v": 1, "type": "ok", "ref": "native-conversation-ack",
+                      "conversation_seq": sequence], on: connection)
+            case "message_open":
+                send(["v": 1, "type": "ok", "ref": "native-message-open",
+                      "op_id": frame["op_id"] as? String ?? "",
+                      "sender_id": frame["sender_id"] as? String ?? "",
+                      "message_id": frame["message_id"] as? String ?? "",
+                      "request_revision": frame["request_revision"] as? Int ?? 1,
+                      "opened": true], on: connection)
             case "view_get":
                 send(["v": 1, "type": "error", "ref": frame["ref"] as? String ?? "",
                       "reason": "unknown_type"], on: connection)

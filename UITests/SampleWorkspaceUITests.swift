@@ -164,9 +164,13 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(finish.isEnabled, app.debugDescription)
         finish.tap()
         let acceptedOperationID = relay.waitForAcceptedAnswer(timeout: 10)
+        let deliveryWarningVisible = app.buttons["request-delivery-warning"]
+            .waitForExistence(timeout: 1)
+        let finishStillEnabled = finish.exists && finish.isEnabled
         XCTAssertNotNil(acceptedOperationID,
                         "The relay accepts only the explicit answer operation sent from this action. " +
-                            relay.requestSummary)
+                            "\(relay.requestSummary) warning_visible=\(deliveryWarningVisible) " +
+                            "send_enabled_after_tap=\(finishStillEnabled)")
         XCTAssertEqual(relay.answerOperationCount, 1,
                        "The user's Send action produced one answer operation.")
         XCTAssertTrue(relay.waitForTerminalAcknowledgement(timeout: 10),
