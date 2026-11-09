@@ -8,6 +8,7 @@ import AttentionDomain
 struct HarklightConversationUITestHost: App {
     @State private var samples = SampleLibrary()
     @State private var conversationFixture: SampleFixtureDomain?
+    @State private var fixtureLoadError: String?
     @State private var prototypeFixture: PrototypeStore?
     @State private var testNotificationNavigation: NativeInboxNavigation? = nil
     @State private var didPrepareNotificationFixture = false
@@ -22,14 +23,8 @@ struct HarklightConversationUITestHost: App {
             _prototypeFixture = State(initialValue: PrototypeStore.loadFromBundle())
             _conversationFixture = State(initialValue: nil)
         } else {
-            do {
-                let fixture = try SampleFixtureDomain()
-                try fixture.populate()
-                _conversationFixture = State(initialValue: fixture)
-                _prototypeFixture = State(initialValue: nil)
-            } catch {
-                preconditionFailure("The isolated conversation test host could not load its local model: \(error)")
-            }
+            _prototypeFixture = State(initialValue: nil)
+            _conversationFixture = State(initialValue: nil)
         }
     }
 
@@ -61,8 +56,11 @@ struct HarklightConversationUITestHost: App {
                             prototypeFixture.loadError ?? "The local example could not be opened.",
                             systemImage: "exclamationmark.triangle")
                     }
+                } else if let fixtureLoadError {
+                    ContentUnavailableView(fixtureLoadError, systemImage: "exclamationmark.triangle")
                 } else {
-                    ContentUnavailableView("Local test model unavailable", systemImage: "questionmark.folder")
+                    ProgressView()
+                        .accessibilityIdentifier("conversation-test-fixture-loading")
                 }
             }
             .preferredColorScheme(testColorScheme)
@@ -70,9 +68,26 @@ struct HarklightConversationUITestHost: App {
                                              testRouter: .shared,
                                              testOpen: openTestChatIndicator)
             .task {
-                if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { samples.populate() }
+                if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { await samples.populate() }
+                await loadConversationFixtureIfNeeded()
                 prepareTestChatIndicatorIfRequested()
             }
+        }
+    }
+
+    private func loadConversationFixtureIfNeeded() async {
+        guard conversationFixture == nil, fixtureLoadError == nil else { return }
+        let arguments = ProcessInfo.processInfo.arguments
+        guard !arguments.contains("--harklight-test-inbox-list-column"),
+              !arguments.contains("--free-rendered"),
+              !arguments.contains("--attention-fixture"),
+              !arguments.contains("--reset-attention-fixture") else { return }
+        do {
+            let fixture = try await SampleFixtureDomain()
+            try await fixture.populate()
+            conversationFixture = fixture
+        } catch {
+            fixtureLoadError = "The isolated conversation test host could not load its local model: \(error)"
         }
     }
 
