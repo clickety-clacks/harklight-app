@@ -839,15 +839,29 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     func testServerAnsweredAfterLostOperationReplyMovesToRepliedWithoutInventingAcceptance() async throws {
         let (context, store, live, key) = try await setup()
         let receipt = try await commitAnswer(store, key: key)
-        let session = AnswerSession(context.identity)
-        session.loseOperationReply = true
+        let session = LostReplyRouteASession(context.identity)
         let core = try await NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
+
+        let sendResult = try await core.sendOriginalOperation(operationID: receipt.opID)
+        guard case .unresolved = sendResult else {
+            XCTFail("A lost operation reply remains unresolved until the account feed supplies a terminal fact.")
+            return
+        }
+        XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
+
+        try await live.refreshFromDurableStore()
+        let uncertain = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(uncertain.lifecycleStatus, .pending)
+        XCTAssertNotEqual(uncertain.receiptFacts?.ownOutcome, .accepted,
+                          "A transmitted operation with no correlated reply is not device acceptance.")
+
+        let high = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 2)
         try await live.refreshFromDurableStore()
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
         XCTAssertNil(live.request(for: key)?.receiptFacts,
-                     "A terminal received from the account feed supersedes local delivery uncertainty.")
+                     "The account terminal resolves the request without inventing device acceptance.")
         let assertionSnapshot810 = try await store.snapshot(context: context)
         XCTAssertTrue(assertionSnapshot810.outbox.isEmpty)
         XCTAssertNil(live.actionError)
@@ -859,6 +873,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(row.localStatus)
         XCTAssertTrue(row.status.contains("Answered"),
                       "Keep the server's answered wording without attributing it to this device.")
+        XCTAssertTrue(session.acknowledgedCursors.isEmpty,
+                      "Route A applies the resync barrier without sending the legacy paging ACK.")
     }
 
     func testServerNoCommentAfterLostOperationReplyMovesToRepliedWithoutInventingAcceptance() async throws {
@@ -1091,5 +1107,46 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
             reply += ",\"snapshot_id\":\"\(snapshotID)\",\"batch_id\":\"\(batchID)\",\"results\":[\(results.joined(separator: ","))]}"
         }
         return Data((reply + "\n").utf8)
+    }
+}
+
+private final class LostReplyRouteASession: AuthenticatedInstallationSession, @unchecked Sendable {
+    let authenticatedIdentity: ProfileIdentity
+    private(set) var sentOperationIDs: [UUID] = []
+    private(set) var acknowledgedCursors: [UInt64] = []
+    private var hasAttemptedOperation = false
+
+    init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
+
+    func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        try await consume(Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#.utf8))
+        try await consume(Data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"sample","origin":"source","as":"message","message":{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}}"#.utf8))
+        if hasAttemptedOperation {
+            try await consume(Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","at":1}"#.utf8))
+            try await consume(Data(#"{"v":1,"type":"resynced","seq":2}"#.utf8))
+        } else {
+            try await consume(Data(#"{"v":1,"type":"resynced","seq":1}"#.utf8))
+        }
+    }
+
+    func acknowledge(_ request: Data) async throws {
+        if case .number(let value)? = try JSONValue.parse(request).uniqueValue(named: "seq"),
+           let sequence = UInt64(value.lexeme) {
+            acknowledgedCursors.append(sequence)
+        }
+    }
+
+    func correlatedRequest(_ request: Data, ref: String) async throws -> Data {
+        let value = try JSONValue.parse(request)
+        guard value.uniqueValue(named: "type")?.stringValue?.rawValue == "view_get" else {
+            throw InstallationTransportError.unexpectedServerFrame
+        }
+        return Data((#"{"v":1,"type":"ok","ref":"\#(ref)","view_rev":"route-a-test","entries":[]}"# + "\n").utf8)
+    }
+
+    func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        sentOperationIDs.append(operationID)
+        hasAttemptedOperation = true
+        return .unresolved
     }
 }
