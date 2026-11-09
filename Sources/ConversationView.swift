@@ -3,6 +3,7 @@ import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
+import UIKit
 
 enum ConversationPanelEmptyState: Equatable {
     case noChat
@@ -61,6 +62,19 @@ struct ConversationPanel: View {
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var revision: UInt64 { selectedRevision ?? thread?.currentRevision ?? 1 }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
+    private var conversationFilesForPreviewChecks: [ConversationFile] {
+        (thread?.turns.flatMap(\.files) ?? []) + draft.files
+    }
+    private var conversationPreviewCheckID: String {
+        conversationFilesForPreviewChecks.map { $0.id.rawValue + ":" + $0.sha256.rawValue }
+            .joined(separator: "|")
+    }
+
+    private func cleanupInspectedPreview() {
+        guard let previewURL else { return }
+        store.removeTemporaryConversationPreview(at: previewURL)
+        self.previewURL = nil
+    }
 
     private func hasNotAcceptedCardForRetainedAnswer(thread: ConversationThread,
                                                       request: PresentedRequest?) -> Bool {
@@ -113,7 +127,6 @@ struct ConversationPanel: View {
                         .font(.caption).padding(8)
                 }
                 ConversationDraftStatus(disposition: draft.disposition)
-                ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
@@ -182,14 +195,21 @@ struct ConversationPanel: View {
                 }
             }
         }
+        .task(id: conversationPreviewCheckID) {
+            store.checkCachedConversationPreviews(conversationFilesForPreviewChecks)
+        }
         .onAppear {
             if selectedRevision == nil { selectedRevision = thread?.currentRevision }
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
             testConversationSheetDidAppear?()
         }
-        .onDisappear { NativeNotificationRouter.shared.conversationBecameHidden(key) }
+        .onDisappear {
+            NativeNotificationRouter.shared.conversationBecameHidden(key)
+            store.cancelConversationReadMark(for: key)
+        }
         .onChange(of: key) { oldKey, newKey in
             NativeNotificationRouter.shared.conversationBecameHidden(oldKey)
+            store.cancelConversationReadMark(for: oldKey)
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(newKey) }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -200,7 +220,12 @@ struct ConversationPanel: View {
             }
         }
         .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
-        .sheet(item: $inspectedFile) { file in
+        .onChange(of: previewURL) { previous, current in
+            if let previous, previous != current {
+                store.removeTemporaryConversationPreview(at: previous)
+            }
+        }
+        .sheet(item: $inspectedFile, onDismiss: cleanupInspectedPreview) { file in
             NavigationStack {
                 Form {
                     LabeledContent("File", value: file.name.rawValue)
@@ -241,6 +266,7 @@ struct ConversationPanel: View {
 
 @MainActor
 private struct ConversationHistoryContent: View, Equatable {
+    @State private var earlierAnswerDraft: PresentedRequest?
     let store: LivePresentationStore
     let key: RequestKey
     let revision: UInt64
@@ -291,7 +317,7 @@ private struct ConversationHistoryContent: View, Equatable {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    if let earlier = store.historicalAnswerDraft(for: key, revision: revision),
+                    if let earlier = earlierAnswerDraft,
                        !hasNotAcceptedCardForRetainedAnswer {
                         DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft · not delivered") {
                             HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
@@ -307,8 +333,8 @@ private struct ConversationHistoryContent: View, Equatable {
                             inspect: inspect)
                             .id(turn.id)
                             .onScrollVisibilityChange(threshold: 0.5) { isVisible in
-                                guard isVisible, turn.kind == .reply, turn.author == .origin else { return }
-                                store.markConversationRead(key, through: turn.id)
+                                store.conversationReplyVisibilityChanged(key, turn: turn,
+                                                                          isVisible: isVisible)
                             }
                     }
                 }.padding(.horizontal)
@@ -322,8 +348,16 @@ private struct ConversationHistoryContent: View, Equatable {
                 guard let target, turnIDs.contains(target) else { return }
                 proxy.scrollTo(target, anchor: .center)
             }
+            .task(id: ConversationHistoricalAnswerLoadKey(request: key, revision: revision)) {
+                earlierAnswerDraft = await store.historicalAnswerDraft(for: key, revision: revision)
+            }
         }
     }
+}
+
+private struct ConversationHistoricalAnswerLoadKey: Hashable {
+    let request: RequestKey
+    let revision: UInt64
 }
 
 @MainActor
@@ -426,28 +460,25 @@ private struct ConversationComposerTextInput: View {
 private struct ConversationComposerSendButton: View {
     let session: ConversationComposerTextSession
     let isLocalExample: Bool
-    let frozen: Bool
+    let hasFailure: Bool
     let isSendingDiscussion: Bool
+    let isOnline: Bool
     let allowsDiscussion: Bool
     let hasFiles: Bool
-    let hasPendingUploadCleanup: Bool
-    let hasAbandonedDiscussion: Bool
-    let hasUnreadyUploadReference: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: frozen ? "arrow.clockwise" : "arrow.up")
+            Image(systemName: hasFailure ? "exclamationmark.triangle" : "arrow.up")
                 .font(.headline)
                 .frame(width: 30, height: 30)
                 .contentShape(Circle())
         }
         .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
-        .accessibilityLabel(isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
+        .accessibilityLabel(isLocalExample ? "Send locally" : hasFailure ? "Review message delivery" : "Send message")
         .accessibilityIdentifier("sample-chat-send")
-        .disabled(isSendingDiscussion || !allowsDiscussion || hasPendingUploadCleanup ||
-                  hasAbandonedDiscussion || hasUnreadyUploadReference ||
-                  (!frozen && session.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasFiles))
+        .disabled(isSendingDiscussion || !allowsDiscussion || !isOnline ||
+                  (session.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasFiles))
     }
 }
 
@@ -459,14 +490,13 @@ private struct ConversationComposer: View {
     let inspect: (ConversationFile, UInt64) -> Void
     @State private var pickingFiles = false
     @State private var attachmentChoices = false
+    @State private var sendWarningPresented = false
     @State private var textSession = ConversationComposerTextSession()
     @Environment(\.scenePhase) private var scenePhase
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var allowsDiscussion: Bool { thread?.allowsDiscussion == true }
-    private var frozen: Bool {
-        switch draft.disposition { case .submitting, .outcomeUnknown, .acceptedPendingReplay: return true; default: return false }
-    }
+    private var isOnline: Bool { store.isOnline }
 
     var body: some View {
         // Each regular glass button adds 7 points around its label, for a 44-point target.
@@ -482,7 +512,7 @@ private struct ConversationComposer: View {
                 .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
                 .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
                 .accessibilityIdentifier("sample-chat-add-attachment")
-                .disabled(frozen || !allowsDiscussion || store.hasPendingUploadCleanup(for: key, revision: revision))
+                .disabled(!allowsDiscussion)
                 .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
                     Button("Sample photo") { addExample("Photo") }
                     Button("Sample file") { addExample("Document") }
@@ -501,15 +531,11 @@ private struct ConversationComposer: View {
                                             Text(file.name.rawValue).lineLimit(1)
                                         }
                                     }.font(.caption)
-                                    .disabled(store.uploadNeedsReselection(file, for: key, revision: revision))
-                                    if store.uploadNeedsReselection(file, for: key, revision: revision) {
-                                        Text("Not ready · reselect after cleanup").font(.caption2).foregroundStyle(.secondary)
-                                    }
                                     Button("Remove", systemImage: "xmark.circle.fill") {
                                         guard persistStagedText() else { return }
                                         store.updateConversation(for: key, revision: revision,
                                             files: draft.files.filter { $0.id != file.id })
-                                    }.labelStyle(.iconOnly).disabled(frozen)
+                                    }.labelStyle(.iconOnly).disabled(!allowsDiscussion)
                                 }
                             }
                         }
@@ -517,21 +543,26 @@ private struct ConversationComposer: View {
                     .padding(.top, 8)
                 }
                 ConversationComposerTextInput(session: textSession,
-                    isEnabled: !frozen && allowsDiscussion,
+                    isEnabled: allowsDiscussion,
                     onTextChange: scheduleTextSave, onReturn: sendStagedText)
             }
             .padding(.horizontal, 12)
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
             .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
             ConversationComposerSendButton(session: textSession,
-                isLocalExample: store.isLocalExample, frozen: frozen,
+                isLocalExample: store.isLocalExample, hasFailure: draft.failure != nil,
                 isSendingDiscussion: store.isSendingDiscussion,
+                isOnline: isOnline,
                 allowsDiscussion: allowsDiscussion,
                 hasFiles: !draft.files.isEmpty,
-                hasPendingUploadCleanup: store.hasPendingUploadCleanup(for: key, revision: revision),
-                hasAbandonedDiscussion: store.hasAbandonedDiscussion(for: key, revision: revision),
-                hasUnreadyUploadReference: store.hasUnreadyUploadReference(for: key, revision: revision),
-                action: sendStagedText)
+                action: {
+                    if draft.failure != nil { sendWarningPresented = true }
+                    else { sendStagedText() }
+                })
+        }
+        .task(id: ConversationBinding(request: key, revision: revision)) {
+            await store.loadPersistedConversationDraft(
+                for: ConversationBinding(request: key, revision: revision))
         }
         .onChange(of: ConversationBinding(request: key, revision: revision), initial: true) { _, binding in
             if let stagedBinding = textSession.stagedBinding, stagedBinding != binding { _ = persistStagedText() }
@@ -581,14 +612,26 @@ private struct ConversationComposer: View {
                 store.reportConversationImportError(error, for: key, revision: revision)
             }
         }
+        .sheet(isPresented: $sendWarningPresented) {
+            if let failure = draft.failure {
+                FailedResponseDialog(title: "Message delivery",
+                    summary: LocalizedStringResource(stringLiteral: failure.summary),
+                    detail: .plain(failure.detail),
+                    accessibilityPrefix: "conversation-send-warning",
+                    canRetry: isOnline && allowsDiscussion && !store.isSendingDiscussion,
+                    onRetry: { sendStagedText() },
+                    onCopy: { UIPasteboard.general.string = $0 })
+            }
+        }
     }
 
     private func scheduleTextSave() {
         textSession.textSaveTask?.cancel()
+        if let binding = textSession.stagedBinding { store.noteConversationDraftEdit(binding) }
         let expected = textSession.stagedText
         let binding = textSession.stagedBinding
         textSession.textSaveTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(450))
             guard !Task.isCancelled, textSession.stagedBinding == binding,
                   textSession.stagedText == expected else { return }
             _ = persistStagedText()
@@ -608,10 +651,8 @@ private struct ConversationComposer: View {
     private func sendStagedText() {
         textSession.textSaveTask?.cancel()
         guard !store.isSendingDiscussion, allowsDiscussion,
-              !store.hasPendingUploadCleanup(for: key, revision: revision),
-              !store.hasAbandonedDiscussion(for: key, revision: revision),
-              !store.hasUnreadyUploadReference(for: key, revision: revision),
-              frozen || !textSession.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else { return }
+              isOnline,
+              !textSession.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else { return }
         guard persistStagedText(), let binding = textSession.stagedBinding else { return }
         let submittedText = textSession.stagedText
         let submittedEdit = textSession.textEditRevision
@@ -633,51 +674,6 @@ private struct ConversationComposer: View {
         var number = 1
         while draft.files.contains(where: { $0.name.rawValue == "\(kind) \(number)" }) { number += 1 }
         store.addLocalAttachment("\(kind) \(number)", for: key, revision: revision)
-    }
-}
-
-@MainActor
-private struct ConversationUploadCleanupStatus: View {
-    let store: LivePresentationStore
-    let key: RequestKey
-    let revision: UInt64
-    private var cleanups: [ConversationUploadCleanup] {
-        (store.conversation(for: key)?.uploadCleanups ?? [:]).values
-            .filter { $0.binding.revision == revision }.sorted { $0.id.uuidString < $1.id.uuidString }
-    }
-    var body: some View {
-        if !cleanups.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(cleanups) { cleanup in
-                    switch cleanup.outcome {
-                    case .pending:
-                        Text("Upload cleanup pending. Deletion is not confirmed; your text draft is retained.")
-                    case .unknown:
-                        Text("Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained.")
-                    case let .acknowledged(result):
-                        Text("Cleanup acknowledged: \(result.discarded) unsubmitted uploads removed. Reselect unready files to upload again.")
-                        if result.state == .committed {
-                            Text("Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend.")
-                        }
-                    }
-                }
-                if store.hasPendingUploadCleanup(for: key, revision: revision), store.isLocalExample {
-                    Text("Local example · cleanup is unconfirmed; no service is contacted.")
-                }
-                if store.hasPendingUploadCleanup(for: key, revision: revision), !store.isLocalExample, !store.isReadOnly {
-                    Button("Retry upload cleanup") { Task { await store.retryUploadCleanup(for: key) } }
-                        .disabled(store.retryingCleanupRequests.contains(key))
-                        .accessibilityIdentifier("conversation-retry-cleanup")
-                }
-                if !store.isReadOnly &&
-                   (store.hasAbandonedDiscussion(for: key, revision: revision) || store.uploadHistoryNeedsReconciliation(for: key, revision: revision)) {
-                    Text("Refresh history to reconcile retained file and submission identities. These unready references will not be resent.")
-                    Button("Refresh discussion history") { Task { await store.refreshDiscussionHistory() } }
-                }
-            }.font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier("conversation-upload-cleanup-status")
-        }
     }
 }
 

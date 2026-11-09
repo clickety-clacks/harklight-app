@@ -2,8 +2,58 @@ import AttentionDomain
 import CryptoKit
 import Foundation
 import HarklightNativeRelay
+import Network
 import Security
 import Observation
+
+@MainActor
+@Observable
+final class NativeRelayPathStatus {
+    static let shared = NativeRelayPathStatus()
+
+    private(set) var isSatisfied = false
+    @ObservationIgnored private let monitor = NWPathMonitor()
+    @ObservationIgnored private let queue = DispatchQueue(label: "harklight.relay-path")
+
+    private init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in self?.isSatisfied = path.status == .satisfied }
+        }
+        monitor.start(queue: queue)
+    }
+}
+
+@MainActor
+@Observable
+final class NativeRelaySocketStatus {
+    static let shared = NativeRelaySocketStatus()
+    static let responseTimeout: TimeInterval = 15
+
+    private(set) var isConnected = false
+    private(set) var lastAnsweredAtUptime: TimeInterval?
+
+    var hasRecentReply: Bool {
+        guard isConnected, let lastAnsweredAtUptime else { return false }
+        return ProcessInfo.processInfo.systemUptime - lastAnsweredAtUptime <= Self.responseTimeout
+    }
+
+    private init() {}
+
+    func opened() {
+        isConnected = true
+        lastAnsweredAtUptime = nil
+    }
+
+    func answered() {
+        isConnected = true
+        lastAnsweredAtUptime = ProcessInfo.processInfo.systemUptime
+    }
+
+    func closed() {
+        isConnected = false
+        lastAnsweredAtUptime = nil
+    }
+}
 
 struct NativeRelayRefreshResult: Equatable, Sendable {
     enum PushRegistration: Equatable, Sendable {
@@ -636,6 +686,8 @@ final class ForegroundConnectDeadline {
         case .webSocketOpened:
             candidate = .webSocketOpened; issue = nil
             progress.webSocketOpenObserved = true
+        case .webSocketPingAnswered, .webSocketClosed:
+            candidate = nil; issue = nil
         case .relayAdmitted:
             candidate = .relayAdmitted; issue = nil
         case .nativeSyncReplayRequested:
@@ -882,6 +934,7 @@ final class NativeRelayLifecycle {
         didSet { conversationAvailability.reset() }
     }
     private var transport: URLSessionInstallationSession?
+    private var socketHealthTask: Task<Void, Never>?
     private var context: ProfileContext?
     private var confirmedRelayContext: ProfileContext?
     private var activeTransportAttemptID: UUID?
@@ -907,6 +960,25 @@ final class NativeRelayLifecycle {
 
     init() {}
 
+    func isOnline(for expected: ProfileContext) -> Bool {
+        confirmedRelayContext == expected && NativeRelaySocketStatus.shared.hasRecentReply &&
+            NativeRelayPathStatus.shared.isSatisfied
+    }
+
+    /// Sends one answer only for the current user's explicit Send action.
+    /// No stored operation list is read here and no reconnect path replays it.
+    func sendOriginalOperation(operationID: UUID,
+                               expected: ProfileContext) async -> OriginalOperationResult {
+        guard isOnline(for: expected), context == expected, let core else {
+            return .notTransmitted(operationID: operationID)
+        }
+        do {
+            return try await core.sendOriginalOperation(operationID: operationID)
+        } catch {
+            return .unresolved
+        }
+    }
+
     func activate(store: AttentionDomainStore,
                   context: ProfileContext,
                   relayURL: URL,
@@ -915,6 +987,9 @@ final class NativeRelayLifecycle {
                   diagnostics: NativeClientDiagnosticJournal? = nil) async throws {
         let generation = UUID()
         let transportAttemptID = UUID()
+        socketHealthTask?.cancel()
+        socketHealthTask = nil
+        NativeRelaySocketStatus.shared.closed()
         self.diagnosticJournal = diagnostics
         recordDiagnostic(.connection, .approvedConnection, .began,
                          attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -936,7 +1011,7 @@ final class NativeRelayLifecycle {
         }
         let nextCore: NativeRelayCore
         do {
-            nextCore = try NativeRelayCore(store: store, context: context, session: nextTransport,
+            nextCore = try await NativeRelayCore(store: store, context: context, session: nextTransport,
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
@@ -969,6 +1044,8 @@ final class NativeRelayLifecycle {
         self.context = context
         activeTransportAttemptID = transportAttemptID
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER)
+        startSocketHealthMonitor(for: nextTransport, generation: generation,
+                                 transportAttemptID: transportAttemptID)
     }
 
     /// Validates a fixed, approved endpoint with the same client identity and
@@ -992,7 +1069,7 @@ final class NativeRelayLifecycle {
                                                               trustedRootDER: current.rootDER)
         var nextCore: NativeRelayCore?
         do {
-            nextCore = try NativeRelayCore(store: current.store, context: current.context, session: nextTransport)
+            nextCore = try await NativeRelayCore(store: current.store, context: current.context, session: nextTransport)
             try await nextTransport.verifyEndpoint()
             guard refreshGeneration == expectedGeneration,
                   core === priorCore, transport === priorTransport,
@@ -1007,6 +1084,10 @@ final class NativeRelayLifecycle {
             core = nextCore
             transport = nextTransport
             configuration = (current.store, current.context, relayURL, current.identity, current.rootDER)
+            socketHealthTask?.cancel()
+            NativeRelaySocketStatus.shared.closed()
+            startSocketHealthMonitor(for: nextTransport, generation: refreshGeneration,
+                                     transportAttemptID: activeTransportAttemptID ?? UUID())
             nextCore = nil
             await priorCore.deactivate()
             await priorTransport.close()
@@ -1020,6 +1101,9 @@ final class NativeRelayLifecycle {
     func deactivate() async {
         refreshGeneration = UUID()
         refreshFlights.reset()
+        socketHealthTask?.cancel()
+        socketHealthTask = nil
+        NativeRelaySocketStatus.shared.closed()
         let priorCore = core
         let priorTransport = transport
         core = nil
@@ -1037,6 +1121,34 @@ final class NativeRelayLifecycle {
         diagnosticJournal = nil
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
+    }
+
+    private func startSocketHealthMonitor(for transport: URLSessionInstallationSession,
+                                          generation: UUID,
+                                          transportAttemptID: UUID) {
+        socketHealthTask?.cancel()
+        NativeRelaySocketStatus.shared.closed()
+        socketHealthTask = Task { [weak self, weak transport] in
+            guard let transport else { return }
+            while !Task.isCancelled {
+                guard let self,
+                      self.refreshGeneration == generation,
+                      self.activeTransportAttemptID == transportAttemptID,
+                      self.transport === transport else { return }
+                let answered = await transport.verifyConnection()
+                guard self.refreshGeneration == generation,
+                      self.activeTransportAttemptID == transportAttemptID,
+                      self.transport === transport else { return }
+                if answered {
+                    NativeRelaySocketStatus.shared.answered()
+                } else {
+                    NativeRelaySocketStatus.shared.closed()
+                    return
+                }
+                do { try await Task.sleep(nanoseconds: 7_000_000_000) }
+                catch { return }
+            }
+        }
     }
 
     /// APNs data is a wake hint only. The payload cannot choose account,
@@ -1057,11 +1169,12 @@ final class NativeRelayLifecycle {
         return await refreshFlights.coalesced()
     }
 
-    /// Attempts durable message-open reports on the current authenticated
-    /// relay session. With no active session, the store keeps them for the
-    /// ordinary reconnect drain.
-    func sendPendingMessageOpens() async {
-        _ = await core?.sendPendingMessageOpens()
+    /// Attempts one deliberate message-open report on the current relay.
+    /// An unavailable or uncertain result is discarded instead of queued.
+    func reportMessageOpened(_ operation: PendingMessageOpen,
+                             expected: ProfileContext) async -> MessageOpenOperationResult {
+        guard isOnline(for: expected), context == expected, let core else { return .unresolved }
+        return await core.reportMessageOpen(operation)
     }
 
     /// The terminal event batch used by the foreground lifecycle and its
@@ -1137,7 +1250,7 @@ final class NativeRelayLifecycle {
         foregroundDiagnosticOperations = .unavailable
         if let configuration, configuration.context == expected {
             do {
-                let snapshot = try configuration.store.snapshot(context: expected)
+                let snapshot = try await configuration.store.snapshot(context: expected)
                 foregroundDiagnosticSnapshotAvailable = true
                 var submissions = Dictionary(uniqueKeysWithValues: snapshot.intents.values
                     .filter { Self.isUnresolved($0, remoteStates: snapshot.remoteStates) }
@@ -1266,17 +1379,24 @@ final class NativeRelayLifecycle {
         let transportAttemptID = activeTransportAttemptID
         let (snapshot, failures) = await Task.detached(priority: .utility) {
             var failures: [NativeClientDiagnosticEvent] = []
-            let operations = initialOperations.values.map { initial in
+            var operations: [NativeForegroundOperationDiagnostic] = []
+            for initial in initialOperations.values {
                 let unknown = NativeForegroundOperationDiagnostic(operationID: initial.operationID,
                     senderID: initial.senderID, messageID: initial.messageID,
                     requestRevision: initial.requestRevision, receiptState: "unknown_after_attempt")
-                guard let intentID = intentIDs[initial.operationID] else { return unknown }
+                guard let intentID = intentIDs[initial.operationID] else {
+                    operations.append(unknown)
+                    continue
+                }
                 do {
-                    guard let submission = try store.lookupIntent(intentID, context: expected) else { return unknown }
-                    return NativeForegroundOperationDiagnostic(operationID: initial.operationID,
+                    guard let submission = try await store.lookupIntent(intentID, context: expected) else {
+                        operations.append(unknown)
+                        continue
+                    }
+                    operations.append(NativeForegroundOperationDiagnostic(operationID: initial.operationID,
                         senderID: initial.senderID, messageID: initial.messageID,
                         requestRevision: initial.requestRevision,
-                        receiptState: Self.receiptState(for: submission.disposition))
+                        receiptState: Self.receiptState(for: submission.disposition)))
                 } catch {
                     failures.append(NativeClientDiagnosticEvent(area: .localStore, phase: .projectionRefresh,
                         transition: NativeDiagnosticCauseCode.failureTransition(for: error),
@@ -1284,9 +1404,10 @@ final class NativeRelayLifecycle {
                         attemptID: transportAttemptID, transportAttemptID: transportAttemptID,
                         operationID: initial.operationID, requestRevision: initial.requestRevision,
                         receiptState: .unknown))
-                    return unknown
+                    operations.append(unknown)
                 }
-            }.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
+            }
+            operations.sort { $0.operationID.uuidString < $1.operationID.uuidString }
             return (NativeForegroundOperationSnapshot(available: true, operations: operations), failures)
         }.value
         recordDiagnosticEvents(failures)
@@ -1330,21 +1451,6 @@ final class NativeRelayLifecycle {
         await refreshFlights.afterCurrent()
     }
 
-    @discardableResult
-    func fetchNextInboxPage() async -> Bool {
-        guard let core, let context else { return false }
-        do {
-            let fetched = try await core.fetchNextInboxPage()
-            guard self.context == context else { return false }
-            return fetched
-        } catch {
-            recordDiagnostic(.relay, .ordinaryReplay,
-                NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
-                attemptID: activeTransportAttemptID)
-            return false
-        }
-    }
-
     func recordPushRegistrationFailure(_ error: Error? = nil,
                                       causeCode: String? = nil,
                                       area: NativeDiagnosticArea = .notifications) {
@@ -1354,29 +1460,17 @@ final class NativeRelayLifecycle {
     }
 
     func submitDiscussion(_ binding: ConversationBinding, expected: ProfileContext,
-                          retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
-        guard context == expected, let configuration else { throw NativeRelayCoreError.inactive }
-        let pending = try configuration.store.conversationSnapshot(context: expected).threads[binding.request]?.drafts[binding.revision]
-        let operation: UUID?
-        switch pending?.disposition {
-        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _): operation = id
-        default: operation = nil
-        }
-        _ = await refreshFlights.coalesced()
+                          retainedFile: @Sendable (ConversationFile) async throws -> URL,
+                          persistDraft: @Sendable (ConversationDraft?) async throws -> Void) async throws -> DiscussionOperationResult {
         guard context == expected, let core else { throw NativeRelayCoreError.inactive }
-        // Refresh may already have joined the uncertain operation. Do not turn
-        // that successful reconciliation into a new send or a missing-draft error.
-        if let operation, let accepted = try configuration.store.conversationSnapshot(context: expected)
-            .threads[binding.request]?.turns.first(where: { $0.operationID == operation }) {
-            return .accepted(turnID: accepted.id)
-        }
-        return try await core.submitDiscussion(binding, retainedFile: retainedFile)
+        return try await core.submitDiscussion(binding, retainedFile: retainedFile,
+                                               persistDraft: persistDraft)
     }
 
-    func sendPendingConversationReadPositions(expected: ProfileContext) async {
-        guard context == expected, let core else { return }
-        await core.sendPendingConversationReadPositions()
-        guard context == expected else { return }
+    func reportConversationReadPosition(_ request: RequestKey, through turnID: ExactText,
+                                       expected: ProfileContext) async {
+        guard context == expected, isOnline(for: expected), let core else { return }
+        await core.reportConversationReadPosition(request, through: turnID)
     }
 
     func discardAbandonedUploads(for request: RequestKey, expected: ProfileContext) async throws {
@@ -1454,15 +1548,6 @@ final class NativeRelayLifecycle {
         }
         conversationAvailability.confirm(for: context, conversationsUnavailable: conversationsUnavailable)
         confirmedRelayContext = context
-        if let configuration {
-            let threads = try configuration.store.conversationSnapshot(context: context).threads
-            for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {
-                if case .acknowledged = $0.outcome { return false }; return true
-            }) {
-                // Cleanup retry never resends a discussion or changes a replay cursor.
-                try? await core.discardAbandonedUploads(for: request)
-            }
-        }
         // Notification setup is a separate fact from the replay/answer receipt
         // already committed above. Its refusal cannot undo that success.
         return await NativeRelayRefreshResult.afterConfirmedRelay(
@@ -1572,6 +1657,7 @@ final class NativeRelayLifecycle {
         let priorTransport = transport
         core = nil
         transport = nil
+        NativeRelaySocketStatus.shared.closed()
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
@@ -1593,7 +1679,7 @@ final class NativeRelayLifecycle {
         }
         let nextCore: NativeRelayCore
         do {
-            nextCore = try NativeRelayCore(store: configuration.store,
+            nextCore = try await NativeRelayCore(store: configuration.store,
                                            context: configuration.context,
                                            session: nextTransport,
                                            attemptID: transportAttemptID,
@@ -1613,6 +1699,8 @@ final class NativeRelayLifecycle {
         }
         self.transport = nextTransport
         self.core = nextCore
+        startSocketHealthMonitor(for: nextTransport, generation: generation,
+                                 transportAttemptID: transportAttemptID)
     }
 
     private func progressHandler(generation: UUID,
@@ -1634,7 +1722,12 @@ final class NativeRelayLifecycle {
                     self.recordDiagnostic(.connection, .clientIdentity, .failed,
                                           causeCode: "client_identity_challenge_rejected", attemptID: transportAttemptID)
                 case .webSocketOpened:
+                    NativeRelaySocketStatus.shared.opened()
                     self.recordDiagnostic(.connection, .webSocketOpen, .completed, attemptID: transportAttemptID)
+                case .webSocketPingAnswered:
+                    NativeRelaySocketStatus.shared.answered()
+                case .webSocketClosed:
+                    NativeRelaySocketStatus.shared.closed()
                 case .relayAdmitted:
                     self.recordDiagnostic(.connection, .relayAdmission, .completed, attemptID: transportAttemptID)
                 case .nativeSyncReplayRequested:

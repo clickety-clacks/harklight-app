@@ -172,28 +172,15 @@ enum NewMessageAreaSummaryText {
 final class NewMessageAreaStore {
     static let defaultsKey = "harklight.new-message-area.v1"
 
-    @ObservationIgnored private let defaults: UserDefaults
-    @ObservationIgnored private let defaultsKey: String
-    @ObservationIgnored private let persistence: DeferredLedgerPersistence<NewMessageAreaLedger>
     @ObservationIgnored private var inFlightSummaries: [NewMessageAreaSummaryKey: Task<Void, Never>] = [:]
     @ObservationIgnored private var currentRevisionByKey: [RequestKey: UInt64] = [:]
     @ObservationIgnored private var reconciliationGeneration: UInt64 = 0
     private(set) var ledger: NewMessageAreaLedger
     private(set) var summaries: [NewMessageAreaSummaryKey: String] = [:]
 
-    init(defaults: UserDefaults = .standard, defaultsKey: String = NewMessageAreaStore.defaultsKey,
+    init(defaults: UserDefaults? = nil, defaultsKey: String = NewMessageAreaStore.defaultsKey,
          initialLedger: NewMessageAreaLedger? = nil) {
-        self.defaults = defaults
-        self.defaultsKey = defaultsKey
-        self.persistence = DeferredLedgerPersistence(defaults: defaults, key: defaultsKey)
-        if let initialLedger {
-            ledger = initialLedger
-        } else if let data = defaults.data(forKey: defaultsKey),
-           let saved = try? JSONDecoder().decode(NewMessageAreaLedger.self, from: data) {
-            ledger = saved
-        } else {
-            ledger = NewMessageAreaLedger()
-        }
+        ledger = initialLedger ?? NewMessageAreaLedger()
     }
 
     var entries: [NewMessageAreaEntry] { ledger.entries }
@@ -206,7 +193,6 @@ final class NewMessageAreaStore {
 
     func reconcile(_ messages: [NewMessageAreaMessage], revisions: [RequestKey: UInt64],
                    accountScopes: Set<ExactText> = [], now: Date = .now) {
-        let previousLedger = ledger
         let prepared = Self.prepareReconciliation(ledger: ledger, messages: messages,
             revisions: revisions, accountScopes: accountScopes, now: now)
         ledger = prepared.ledger
@@ -220,7 +206,6 @@ final class NewMessageAreaStore {
             where revisions[summaryKey.request] != summaryKey.revision {
             summaries.removeValue(forKey: summaryKey)
         }
-        if ledger != previousLedger { persist() }
         reconciliationGeneration &+= 1
     }
 
@@ -259,7 +244,6 @@ final class NewMessageAreaStore {
             where prepared.revisions[summaryKey.request] != summaryKey.revision {
             summaries.removeValue(forKey: summaryKey)
         }
-        if prepared.didChange { persist() }
         reconciliationGeneration &+= 1
         return true
     }
@@ -269,7 +253,6 @@ final class NewMessageAreaStore {
         ledger.markFirstSeen(key, at: date)
         guard oldEntries != ledger.entriesByKey else { return }
         reconciliationGeneration &+= 1
-        persist()
     }
 
     func open(_ key: RequestKey) {
@@ -281,7 +264,6 @@ final class NewMessageAreaStore {
         ledger.remove(key)
         reconciliationGeneration &+= 1
         cancelSummaries(for: key)
-        persist()
     }
 
     func removeExpired(now: Date = .now) {
@@ -290,7 +272,6 @@ final class NewMessageAreaStore {
         reconciliationGeneration &+= 1
         let activeEntries = Set(ledger.entriesByKey.keys)
         for key in oldEntries.subtracting(activeEntries) { cancelSummaries(for: key) }
-        persist()
     }
 
     func summary(for key: RequestKey, revision: UInt64) -> String? {
@@ -334,9 +315,6 @@ final class NewMessageAreaStore {
         inFlightSummaries.removeValue(forKey: key)
     }
 
-    private func persist() {
-        persistence.schedule(ledger)
-    }
 }
 
 private enum OnDeviceMessageSummarizer {

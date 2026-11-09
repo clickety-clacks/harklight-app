@@ -274,6 +274,19 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     public var text: ExactText
     public var files: [ConversationFile]
     public var disposition: Disposition
+    /// Identity for the current content. It is written with the composer draft
+    /// before the direct send, then retained across uncertain outcomes.
+    public var operationID: UUID?
+    public var inFlightOperationID: UUID?
+    public var currentAttemptUnsettled: Bool
+    public var earlierVersionMayHaveBeenSent: Bool
+    public var failure: ComposerSendFailure?
+    public var carriedOverSend: CarriedOverConversationSend?
+
+    private enum CodingKeys: String, CodingKey {
+        case binding, text, files, disposition, operationID, inFlightOperationID
+        case currentAttemptUnsettled, earlierVersionMayHaveBeenSent, failure, carriedOverSend
+    }
 
     public enum Disposition: Equatable, Codable, Sendable {
         case saved
@@ -284,11 +297,56 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     }
 
     public init(binding: ConversationBinding, text: ExactText = ExactText(""),
-                files: [ConversationFile] = [], disposition: Disposition = .saved) {
+                files: [ConversationFile] = [], disposition: Disposition = .saved,
+                operationID: UUID? = nil, inFlightOperationID: UUID? = nil,
+                currentAttemptUnsettled: Bool = false,
+                earlierVersionMayHaveBeenSent: Bool = false,
+                failure: ComposerSendFailure? = nil,
+                carriedOverSend: CarriedOverConversationSend? = nil) {
         self.binding = binding
         self.text = text
         self.files = files
         self.disposition = disposition
+        self.operationID = operationID
+        self.inFlightOperationID = inFlightOperationID
+        self.currentAttemptUnsettled = currentAttemptUnsettled
+        self.earlierVersionMayHaveBeenSent = earlierVersionMayHaveBeenSent
+        self.failure = failure
+        self.carriedOverSend = carriedOverSend
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        binding = try values.decode(ConversationBinding.self, forKey: .binding)
+        text = try values.decodeIfPresent(ExactText.self, forKey: .text) ?? ExactText("")
+        files = try values.decodeIfPresent([ConversationFile].self, forKey: .files) ?? []
+        disposition = try values.decodeIfPresent(Disposition.self, forKey: .disposition) ?? .saved
+        operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
+        inFlightOperationID = try values.decodeIfPresent(UUID.self, forKey: .inFlightOperationID)
+        currentAttemptUnsettled = try values.decodeIfPresent(Bool.self, forKey: .currentAttemptUnsettled) ?? false
+        earlierVersionMayHaveBeenSent = try values.decodeIfPresent(Bool.self, forKey: .earlierVersionMayHaveBeenSent) ?? false
+        failure = try values.decodeIfPresent(ComposerSendFailure.self, forKey: .failure)
+        carriedOverSend = try values.decodeIfPresent(CarriedOverConversationSend.self, forKey: .carriedOverSend)
+    }
+}
+
+public struct CarriedOverConversationSend: Equatable, Codable, Sendable {
+    public var text: ExactText
+    public var files: [ConversationFile]
+    public var operationID: UUID?
+    public var currentAttemptUnsettled: Bool
+    public var earlierVersionMayHaveBeenSent: Bool
+    public var failure: ComposerSendFailure
+
+    public init(text: ExactText, files: [ConversationFile] = [], operationID: UUID?,
+                currentAttemptUnsettled: Bool, earlierVersionMayHaveBeenSent: Bool = false,
+                failure: ComposerSendFailure) {
+        self.text = text
+        self.files = files
+        self.operationID = operationID
+        self.currentAttemptUnsettled = currentAttemptUnsettled
+        self.earlierVersionMayHaveBeenSent = earlierVersionMayHaveBeenSent
+        self.failure = failure
     }
 }
 

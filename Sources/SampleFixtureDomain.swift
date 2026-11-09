@@ -10,7 +10,7 @@ final class SampleFixtureDomain {
     let domain: AttentionDomainStore
     let viewModel: LivePresentationStore
 
-    init() throws {
+    init() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:harklight-examples"),
             personID: ExactText("local-examples"), deviceID: ExactText("local-example-device"))
         context = ProfileContext(identity: identity, transportMode: .fixture)
@@ -31,16 +31,16 @@ final class SampleFixtureDomain {
         return defaults
     }
 
-    func populate() throws {
-        try domain.registerFixtureRequests(try SampleCatalog.messages.map { try record($0) }, context: context)
-        let requests = try domain.snapshot(context: context).requests
-        let existing = try domain.conversationSnapshot(context: context)
+    func populate() async throws {
+        try await domain.registerFixtureRequests(try SampleCatalog.messages.map { try record($0) }, context: context)
+        let requests = try await domain.snapshot(context: context).requests
+        let existing = try await domain.conversationSnapshot(context: context)
         var sequence = existing.cursor
         for message in SampleCatalog.messages where message.hasChat && existing.threads[key(for: message)] == nil {
             let key = key(for: message)
             let binding = ConversationBinding(request: key, revision: 1)
             let handle = ExactText("local-session-" + message.id)
-            func apply(_ fact: ConversationEvent.Fact, revision: UInt64 = 1) throws {
+            func apply(_ fact: ConversationEvent.Fact, revision: UInt64 = 1) async throws {
                 sequence += 1
                 let sequencedFact: ConversationEvent.Fact
                 switch fact {
@@ -53,11 +53,11 @@ final class SampleFixtureDomain {
                 default:
                     sequencedFact = fact
                 }
-                try domain.applyConversation(ConversationEvent(sequence: sequence,
+                try await domain.applyConversation(ConversationEvent(sequence: sequence,
                     binding: ConversationBinding(request: key, revision: revision), fact: sequencedFact), context: context)
             }
             guard let request = requests[key] else { throw ConversationError.missingRequest }
-            try apply(.request(sessionHandle: handle, payload: request.originalPayload))
+            try await apply(.request(sessionHandle: handle, payload: request.originalPayload))
             let showUnsupportedChatNotice = message.id == "sample-information-2" &&
                 ProcessInfo.processInfo.arguments.contains("--harklight-test-chat-status-unsupported")
             let availability: ConversationAvailability
@@ -68,7 +68,7 @@ final class SampleFixtureDomain {
             } else {
                 availability = .listening
             }
-            try apply(.availability(sessionHandle: handle, availability))
+            try await apply(.availability(sessionHandle: handle, availability))
             if message.hasChat {
                 let personID = message.id == "sample-information-0" ? "30" : message.id + "-question"
                 let replyID = message.id == "sample-information-0" ? "20" : message.id + "-reply"
@@ -84,10 +84,10 @@ final class SampleFixtureDomain {
                         ? "The first option favors *speed*; the second leaves more room to revise."
                         : "The first option favors speed; the second leaves more room to revise. This is an example conversation."),
                     inReplyTo: person.id)
-                try apply(.turn(person))
-                try apply(.delivered(turn: person.id))
-                try apply(.turn(reply))
-                try apply(.acted(turn: person.id, by: reply.id))
+                try await apply(.turn(person))
+                try await apply(.delivered(turn: person.id))
+                try await apply(.turn(reply))
+                try await apply(.acted(turn: person.id, by: reply.id))
                 if message.id == "sample-information-0" || isMarkdownAcceptance {
                     let agentReply = ConversationTurn(id: ExactText("10"), binding: binding,
                         author: .agent, sessionHandle: handle,
@@ -95,7 +95,7 @@ final class SampleFixtureDomain {
                             ? "Agent reply with `inline code`, a **clear** summary, and [Open reply guide](https://example.invalid/reply-guide)."
                             : "Agent example: the shorter path is faster, while the longer path is easier to revise."),
                         inReplyTo: reply.id, kind: .reply)
-                    try apply(.turn(agentReply))
+                    try await apply(.turn(agentReply))
 
                     if isMarkdownAcceptance && ProcessInfo.processInfo.arguments.contains(
                         "--harklight-test-markdown-reply-item") {
@@ -105,56 +105,56 @@ final class SampleFixtureDomain {
                             text: ExactText(
                                 "Open [reply guide](https://example.invalid/reply-guide): an *important* response with `inline code`."),
                             inReplyTo: reply.id, kind: .reply)
-                        try apply(.turn(markdownReply))
+                        try await apply(.turn(markdownReply))
                     }
 
                     if ProcessInfo.processInfo.arguments.contains("--harklight-test-chat-status-two-ack") {
-                        try apply(.availability(sessionHandle: handle,
+                        try await apply(.availability(sessionHandle: handle,
                             .notListening(lastDetachedAt: nil)))
                         let now = UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
                         let ack1FinalOnly = ProcessInfo.processInfo.arguments.contains(
                             "--harklight-test-chat-status-ack1-final-only")
-                        func appendStatusExample(_ suffix: String, _ text: String) throws -> ConversationTurn {
+                        func appendStatusExample(_ suffix: String, _ text: String) async throws -> ConversationTurn {
                             let turn = ConversationTurn(id: ExactText("two-ack-" + suffix), binding: binding,
                                 author: .person, sessionHandle: handle, text: ExactText(text),
                                 kind: .discussion, deliveryAcks: true)
-                            try apply(.turn(turn))
+                            try await apply(.turn(turn))
                             return turn
                         }
                         if !ack1FinalOnly {
-                            let sending = try appendStatusExample("sending", "Agent not given yet.")
-                            try apply(.deliveryAck(turn: sending.id, acknowledgement: .listenerReceived(
+                            let sending = try await appendStatusExample("sending", "Agent not given yet.")
+                            try await apply(.deliveryAck(turn: sending.id, acknowledgement: .listenerReceived(
                                 atMilliseconds: now - 30_000, ack2Expected: true,
                                 acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)))
 
-                            let waiting = try appendStatusExample("waiting", "First acknowledgement received.")
-                            try apply(.deliveryAck(turn: waiting.id, acknowledgement: .listenerReceived(
+                            let waiting = try await appendStatusExample("waiting", "First acknowledgement received.")
+                            try await apply(.deliveryAck(turn: waiting.id, acknowledgement: .listenerReceived(
                                 atMilliseconds: now - 180_000, ack2Expected: true,
                                 acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)))
                         }
 
-                        let incapable = try appendStatusExample("ack1-final", "This listener cannot send ACK2.")
-                        try apply(.deliveryAck(turn: incapable.id, acknowledgement: .listenerReceived(
+                        let incapable = try await appendStatusExample("ack1-final", "This listener cannot send ACK2.")
+                        try await apply(.deliveryAck(turn: incapable.id, acknowledgement: .listenerReceived(
                             atMilliseconds: now, ack2Expected: false,
                             acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)))
 
                         if !ack1FinalOnly {
-                            _ = try appendStatusExample("no-listener", "No first acknowledgement.")
+                            _ = try await appendStatusExample("no-listener", "No first acknowledgement.")
 
-                            let delivered = try appendStatusExample("handed", "Handed to an agent.")
-                            try apply(.deliveryAck(turn: delivered.id, acknowledgement: .handed(
+                            let delivered = try await appendStatusExample("handed", "Handed to an agent.")
+                            try await apply(.deliveryAck(turn: delivered.id, acknowledgement: .handed(
                                 atMilliseconds: now, rerouted: false,
                                 acknowledgerSystem: ExactText("Tightbeam"),
                                 acknowledgerAgent: ExactText("Release orchestrator"))))
 
-                            let deliveredTo = try appendStatusExample("rerouted", "Handed to a follower.")
-                            try apply(.deliveryAck(turn: deliveredTo.id, acknowledgement: .handed(
+                            let deliveredTo = try await appendStatusExample("rerouted", "Handed to a follower.")
+                            try await apply(.deliveryAck(turn: deliveredTo.id, acknowledgement: .handed(
                                 atMilliseconds: now, rerouted: true,
                                 acknowledgerSystem: ExactText("Tightbeam"),
                                 acknowledgerAgent: ExactText("Release orchestrator"))))
 
-                            let notHanded = try appendStatusExample("not-handed", "Handoff unavailable.")
-                            try apply(.deliveryAck(turn: notHanded.id, acknowledgement: .notHanded(
+                            let notHanded = try await appendStatusExample("not-handed", "Handoff unavailable.")
+                            try await apply(.deliveryAck(turn: notHanded.id, acknowledgement: .notHanded(
                                 atMilliseconds: now, reason: ExactText("The receiving system is unavailable."),
                                 acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)))
                         }
@@ -162,19 +162,19 @@ final class SampleFixtureDomain {
                     }
 
                     if ProcessInfo.processInfo.arguments.contains("--harklight-test-reply-item-area") {
-                        func appendHistory(_ index: Int) throws {
-                            try apply(.turn(ConversationTurn(id: ExactText("reply-area-history-\(index)"),
+                        func appendHistory(_ index: Int) async throws {
+                            try await apply(.turn(ConversationTurn(id: ExactText("reply-area-history-\(index)"),
                                 binding: binding, author: .person, sessionHandle: handle,
                                 text: ExactText("Earlier local discussion turn \(index) keeps this example history long."),
                                 kind: .discussion)))
                         }
-                        for index in 1...20 { try appendHistory(index) }
-                        try apply(.turn(ConversationTurn(id: ExactText("reply-area-earliest"), binding: binding,
+                        for index in 1...20 { try await appendHistory(index) }
+                        try await apply(.turn(ConversationTurn(id: ExactText("reply-area-earliest"), binding: binding,
                             author: .origin, sessionHandle: handle,
                             text: ExactText("Earliest unseen chat reply: the middle section of the draft now reads better."),
                             inReplyTo: person.id, kind: .reply)))
-                        for index in 21...30 { try appendHistory(index) }
-                        try apply(.turn(ConversationTurn(id: ExactText("reply-area-newest"), binding: binding,
+                        for index in 21...30 { try await appendHistory(index) }
+                        try await apply(.turn(ConversationTurn(id: ExactText("reply-area-newest"), binding: binding,
                             author: .origin, sessionHandle: handle,
                             text: ExactText("Newest unseen chat reply: the revised draft tightens the opening, keeps the middle section's new ordering, and closes with the shorter summary we discussed, so the whole note should now fit on one screen."),
                             inReplyTo: person.id, kind: .reply)))
@@ -186,7 +186,7 @@ final class SampleFixtureDomain {
                     "--harklight-test-markdown-history")
                 var answer = RequestDraft(interface: request.interface)
                 answer.inputs[ExactText("answer")]?.selectedActionID = message.options.first.map { ExactText($0.id) }
-                try domain.saveDraft(answer, selector: domain.selector(for: key, context: context), context: context)
+                try await domain.saveDraft(answer, selector: domain.selector(for: key, context: context), context: context)
                 let members = request.originalPayload.objectMembers ?? []
                 let revisedBody = usesMarkdownHistory
                     ? "The new request adds a **review** before archiving."
@@ -199,7 +199,7 @@ final class SampleFixtureDomain {
                 let revised = ConversationTurn(id: ExactText(message.id + "-revision"),
                     binding: ConversationBinding(request: key, revision: 2), author: .origin,
                     sessionHandle: handle, text: ExactText("Please review the sketches before archiving. The earlier answer draft is retained."), kind: .revision)
-                try apply(.revision(revised, payload: payload), revision: 2)
+                try await apply(.revision(revised, payload: payload), revision: 2)
             }
             if message.id == "sample-information-2" {
                 let bytes = Data("Fictional local file; no upload or service call occurred.".utf8)
@@ -208,29 +208,29 @@ final class SampleFixtureDomain {
                     sha256: ExactText(digest), content: .inline(bytes))
                 let turn = ConversationTurn(id: ExactText(message.id + "-file"), binding: binding, author: .person,
                     sessionHandle: handle, text: ExactText("This local file demonstrates distinct transfer and use facts."), files: [file])
-                try apply(.turn(turn))
-                try apply(.fileTransfer(turn: turn.id, file: file.id, .transferred))
-                try apply(.fileUse(turn: turn.id, file: file.id, .unusable(reason: ExactText("Fictional unsupported format"))))
+                try await apply(.turn(turn))
+                try await apply(.fileTransfer(turn: turn.id, file: file.id, .transferred))
+                try await apply(.fileUse(turn: turn.id, file: file.id, .unusable(reason: ExactText("Fictional unsupported format"))))
                 let simulatedAcceptedAt = UInt64(max(0, Date().timeIntervalSince1970 * 1_000 - 180_000))
-                try domain.saveConversationDraft(ConversationDraft(binding: binding,
+                try await domain.saveConversationDraft(ConversationDraft(binding: binding,
                     text: ExactText("Could you check whether this message reached anyone?")), context: context)
-                try domain.appendFixtureDiscussion(binding, context: context,
+                try await domain.appendFixtureDiscussion(binding, context: context,
                     simulatedAcceptanceObservedAtMilliseconds: simulatedAcceptedAt)
                 sequence += 1
             }
             if message.id == "sample-completed-2" {
-                try apply(.availability(sessionHandle: handle, .gone))
-                try apply(.terminal(turn: ExactText(message.id + "-terminal"), author: .origin, state: .cleared))
+                try await apply(.availability(sessionHandle: handle, .gone))
+                try await apply(.terminal(turn: ExactText(message.id + "-terminal"), author: .origin, state: .cleared))
             }
             if message.id == "sample-review-0" {
                 let bytes = Data(repeating: 66, count: 300_000)
                 let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
                 let file = ConversationFile(id: ExactText("local-mixed-file"), name: ExactText("Unidentified example.txt"),
                     byteCount: UInt64(bytes.count), sha256: ExactText(digest), content: .inline(bytes))
-                try domain.stageFixtureConversationUpload(file, binding: binding,
+                try await domain.stageFixtureConversationUpload(file, binding: binding,
                     text: ExactText("Keep the original mixed-result note."), context: context)
-                if let cleanup = try domain.abandonConversationUploads(for: key, context: context).first {
-                    try domain.recordConversationCleanup(cleanup.id, request: key,
+                if let cleanup = try await domain.abandonConversationUploads(for: key, context: context).first {
+                    try await domain.recordConversationCleanup(cleanup.id, request: key,
                         outcome: .acknowledged(ConversationUploadDiscardResult(state: .committed, discarded: 1)), context: context)
                 }
             }
@@ -239,19 +239,19 @@ final class SampleFixtureDomain {
                 let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
                 let file = ConversationFile(id: ExactText("local-cleanup-file"), name: ExactText("Unsubmitted example.txt"),
                     byteCount: UInt64(bytes.count), sha256: ExactText(digest), content: .inline(bytes))
-                try domain.stageFixtureConversationUpload(file, binding: binding,
+                try await domain.stageFixtureConversationUpload(file, binding: binding,
                     text: ExactText("Keep this file note."), context: context)
             }
             if message.id == "sample-approval-1" {
                 var answer = RequestDraft(interface: request.interface)
                 answer.inputs[ExactText("answer")]?.selectedActionID = message.options.first.map { ExactText($0.id) }
-                try domain.saveDraft(answer, selector: domain.selector(for: key, context: context), context: context)
-                try domain.saveConversationDraft(ConversationDraft(binding: binding,
+                try await domain.saveDraft(answer, selector: domain.selector(for: key, context: context), context: context)
+                try await domain.saveConversationDraft(ConversationDraft(binding: binding,
                     text: ExactText("Please keep this unsent note.")), context: context)
-                try apply(.retraction(turn: ExactText(message.id + "-retracted"), terminalSequence: 1))
+                try await apply(.retraction(turn: ExactText(message.id + "-retracted"), terminalSequence: 1))
             }
         }
-        try viewModel.refreshFromDurableStore()
+        try await viewModel.refreshFromDurableStore()
         if ProcessInfo.processInfo.arguments.contains("--harklight-test-reply-item-area") {
             guard let parentMessage = SampleCatalog.messages.first(where: {
                 $0.id == "sample-information-0"
@@ -277,7 +277,7 @@ final class SampleFixtureDomain {
                     unseenCount: groupedReplies.count, score: 0.93, scoreKind: .current),
                 InboxViewListItem(kind: .message, key: replyParent)
             ]
-            try domain.setFixtureInboxView(InboxView(
+            try await domain.setFixtureInboxView(InboxView(
                 revision: ExactText("sample-reply-item-list"),
                 entries: [],
                 replies: groupedReplies.compactMap { turn in
@@ -286,7 +286,7 @@ final class SampleFixtureDomain {
                                           score: perReplyScores[sequence])
                 },
                 listItems: listItems), context: context)
-            try viewModel.refreshFromDurableStore()
+            try await viewModel.refreshFromDurableStore()
         }
         if ProcessInfo.processInfo.arguments.contains("--harklight-test-markdown-reply-item") {
             guard let parentMessage = SampleCatalog.messages.first(where: {
@@ -301,7 +301,7 @@ final class SampleFixtureDomain {
                   let replySequence = markdownReply.conversationSequence else {
                 throw ConversationError.missingRequest
             }
-            try domain.setFixtureInboxView(InboxView(
+            try await domain.setFixtureInboxView(InboxView(
                 revision: ExactText("sample-markdown-reply-list"),
                 entries: [],
                 replies: [InboxViewReply(key: replyParent,
@@ -314,7 +314,7 @@ final class SampleFixtureDomain {
                         unseenCount: 1, score: 0.84, scoreKind: .current),
                     InboxViewListItem(kind: .message, key: replyParent)
                 ]), context: context)
-            try viewModel.refreshFromDurableStore()
+            try await viewModel.refreshFromDurableStore()
         }
     }
 

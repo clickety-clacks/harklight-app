@@ -257,14 +257,81 @@ final class ReplyEditorDraftSession {
     private(set) var draft: RequestDraft
     private(set) var noCommentSelected: Bool
     private(set) var hasLocalChanges = false
+    @ObservationIgnored private var mergeSeedDraft: RequestDraft
+    private(set) var deliveryDraft: AnswerComposerDraft
+    private(set) var isSendInFlight = false
+    @ObservationIgnored private let persistence: ComposerDraftPersistence?
+    @ObservationIgnored private let persistenceAddress: ComposerDraftAddress?
+    @ObservationIgnored private var persistenceTask: Task<Void, Never>?
+    @ObservationIgnored private var didLoadPersistedDraft = false
+    private(set) var isDraftLoaded: Bool
+    @ObservationIgnored private let onDraftLoaded: ((AnswerComposerDraft) -> Void)?
 
-    init(request: PresentedRequest, canSubmitFromSnapshot: Bool) {
+    init(request: PresentedRequest, canSubmitFromSnapshot: Bool,
+         identity: ProfileIdentity? = nil,
+         persistence: ComposerDraftPersistence? = nil,
+         onDraftLoaded: ((AnswerComposerDraft) -> Void)? = nil) {
         requestKey = request.key
         requestRevision = request.requestRevision
         self.canSubmitFromSnapshot = canSubmitFromSnapshot
         let initialDraft = Self.initialDraft(for: request)
+        mergeSeedDraft = initialDraft
         draft = initialDraft
         noCommentSelected = initialDraft.noCommentSelected
+        deliveryDraft = AnswerComposerDraft(content: initialDraft)
+        self.persistence = persistence
+        self.onDraftLoaded = onDraftLoaded
+        isDraftLoaded = persistence == nil
+        persistenceAddress = identity.map {
+            ComposerDraftAddress(identity: $0, request: request.key,
+                                 revision: request.requestRevision, kind: .answer)
+        }
+    }
+
+    func loadPersistedDraft() async {
+        guard !didLoadPersistedDraft else { return }
+        didLoadPersistedDraft = true
+        guard let persistence, let persistenceAddress else {
+            isDraftLoaded = true
+            onDraftLoaded?(deliveryDraft)
+            return
+        }
+        let loaded: AnswerComposerDraft?
+        do {
+            loaded = try await persistence.load(AnswerComposerDraft.self, at: persistenceAddress)
+        } catch {
+            isDraftLoaded = false
+            return
+        }
+        guard var saved = loaded else {
+            isDraftLoaded = true
+            onDraftLoaded?(deliveryDraft)
+            return
+        }
+        if (saved.currentAttemptUnsettled || saved.earlierVersionMayHaveBeenSent), saved.failure == nil {
+            saved.failure = ComposerSendFailure(outcome: .unconfirmed,
+                summary: saved.earlierVersionMayHaveBeenSent
+                    ? "This response or an earlier version may have been sent."
+                    : "Confirmation was not received. The response may not have gone through.",
+                detail: "The app stopped before a correlated server reply was saved.")
+        }
+        if saved.failure != nil, saved.failureOperationID == nil {
+            saved.failureOperationID = saved.operationID
+        }
+        if hasLocalChanges {
+            var merged = Self.merge(local: draft, over: saved.content,
+                                    original: mergeSeedDraft)
+            merged.noCommentSelected = noCommentSelected
+            deliveryDraft = saved
+            deliveryDraft.content = merged
+            draft = merged
+        } else {
+            deliveryDraft = saved
+            draft = saved.content
+            noCommentSelected = saved.content.noCommentSelected
+        }
+        isDraftLoaded = true
+        onDraftLoaded?(deliveryDraft)
     }
 
     func updateText(_ text: String, target: ReplyEditorTarget) {
@@ -315,18 +382,267 @@ final class ReplyEditorDraftSession {
 
     func adoptUneditedRequest(_ request: PresentedRequest, canSubmit: Bool) {
         guard request.key == requestKey, !hasLocalChanges else { return }
+        flushPendingPersistence()
         requestRevision = request.requestRevision
         canSubmitFromSnapshot = canSubmit
         draft = Self.initialDraft(for: request)
+        mergeSeedDraft = draft
+        deliveryDraft = AnswerComposerDraft(content: draft)
         noCommentSelected = draft.noCommentSelected
+        didLoadPersistedDraft = false
+        isDraftLoaded = persistence == nil
     }
 
     private func store(_ updated: RequestDraft) {
+        guard updated != draft else { return }
+        let contentChanged = updated != draft
+        if contentChanged {
+            if deliveryDraft.currentAttemptUnsettled {
+                deliveryDraft.currentAttemptUnsettled = false
+                deliveryDraft.earlierVersionMayHaveBeenSent = true
+            }
+            deliveryDraft.operationID = nil
+        }
         draft = updated
+        deliveryDraft.content = updated
         if noCommentSelected != updated.noCommentSelected {
             noCommentSelected = updated.noCommentSelected
         }
         hasLocalChanges = true
+        schedulePersistence()
+    }
+
+    private func schedulePersistence() {
+        guard let persistence, let persistenceAddress else { return }
+        let value = deliveryDraft
+        persistenceTask?.cancel()
+        persistenceTask = Task { [weak self] in
+            try? await persistence.scheduleSave(value, at: persistenceAddress)
+            await MainActor.run { self?.persistenceTask = nil }
+        }
+    }
+
+    func flushPendingPersistence() {
+        guard let persistence, let persistenceAddress else { return }
+        persistenceTask?.cancel()
+        persistenceTask = nil
+        let value = deliveryDraft
+        Task { try? await persistence.flush(value, at: persistenceAddress) }
+    }
+
+    func prepareAttempt() async throws -> PreparedAnswerAttempt {
+        guard let persistence, let persistenceAddress else { throw CocoaError(.fileWriteUnknown) }
+        guard !isSendInFlight, isDraftLoaded, canSubmitFromSnapshot else { throw LiveReplyError.notOpen }
+        let attemptID = deliveryDraft.operationID ?? UUID()
+        let wasUnsettled = deliveryDraft.currentAttemptUnsettled
+        let earlierVersionMayHaveBeenSent = deliveryDraft.earlierVersionMayHaveBeenSent
+        var prepared = deliveryDraft
+        prepared.content = draft
+        prepared.operationID = attemptID
+        prepared.failureOperationID = nil
+        prepared.currentAttemptUnsettled = true
+        prepared.failure = nil
+        deliveryDraft = prepared
+        do {
+            try await persistence.flush(prepared, at: persistenceAddress)
+        } catch {
+            prepared.currentAttemptUnsettled = wasUnsettled
+            prepared.failureOperationID = attemptID
+            prepared.failure = ComposerSendFailure(outcome: .notSent,
+                summary: "The response was not sent. Your draft is kept.",
+                detail: "The draft could not be saved before sending.")
+            deliveryDraft = prepared
+            throw error
+        }
+        isSendInFlight = true
+        return PreparedAnswerAttempt(operationID: attemptID,
+                                     requestRevision: requestRevision,
+                                     draft: draft,
+                                     wasUnsettled: wasUnsettled,
+                                     earlierVersionMayHaveBeenSent: earlierVersionMayHaveBeenSent)
+    }
+
+    func prepareCarriedOverAttempt() async throws -> PreparedAnswerAttempt {
+        guard let persistence, let persistenceAddress else { throw CocoaError(.fileWriteUnknown) }
+        guard !isSendInFlight, isDraftLoaded, canSubmitFromSnapshot,
+              deliveryDraft.carriedOverSend != nil else { throw LiveReplyError.notOpen }
+        persistenceTask?.cancel()
+        persistenceTask = nil
+        var current = deliveryDraft
+        current.content = draft
+        try await persistence.flush(current, at: persistenceAddress)
+
+        guard var carriedOver = deliveryDraft.carriedOverSend else { throw LiveReplyError.notOpen }
+        let attemptID = carriedOver.operationID ?? UUID()
+        let wasUnsettled = carriedOver.currentAttemptUnsettled
+        let earlierVersionMayHaveBeenSent = carriedOver.earlierVersionMayHaveBeenSent
+        let previousCarriedOver = carriedOver
+        carriedOver.operationID = attemptID
+        carriedOver.failureOperationID = attemptID
+        carriedOver.currentAttemptUnsettled = true
+        carriedOver.failure = ComposerSendFailure(outcome: .unconfirmed,
+            summary: "This response may not have gone through.",
+            detail: carriedOver.failure.detail)
+        deliveryDraft.content = draft
+        deliveryDraft.carriedOverSend = carriedOver
+        do {
+            try await persistence.flush(deliveryDraft, at: persistenceAddress)
+        } catch {
+            if deliveryDraft.carriedOverSend?.operationID == attemptID {
+                deliveryDraft.carriedOverSend = previousCarriedOver
+            }
+            throw error
+        }
+        isSendInFlight = true
+        return PreparedAnswerAttempt(operationID: attemptID,
+            requestRevision: requestRevision, draft: carriedOver.content,
+            wasUnsettled: wasUnsettled,
+            earlierVersionMayHaveBeenSent: earlierVersionMayHaveBeenSent)
+    }
+
+    func finishAttempt(_ attempt: PreparedAnswerAttempt,
+                       outcome: ComposerDeliveryOutcome) async {
+        isSendInFlight = false
+        switch outcome {
+        case .confirmed:
+            if deliveryDraft.operationID == attempt.operationID,
+               deliveryDraft.content == attempt.draft {
+                if let persistence, let persistenceAddress {
+                    if let carriedOver = deliveryDraft.carriedOverSend {
+                        draft = mergeSeedDraft
+                        deliveryDraft = AnswerComposerDraft(content: mergeSeedDraft,
+                            carriedOverSend: carriedOver)
+                        try? await persistence.flush(deliveryDraft, at: persistenceAddress)
+                    } else {
+                        try? await persistence.remove(at: persistenceAddress)
+                        draft = mergeSeedDraft
+                        deliveryDraft = AnswerComposerDraft(content: mergeSeedDraft)
+                    }
+                } else {
+                    draft = mergeSeedDraft
+                    deliveryDraft = AnswerComposerDraft(content: mergeSeedDraft)
+                }
+                noCommentSelected = mergeSeedDraft.noCommentSelected
+                hasLocalChanges = false
+            } else {
+                deliveryDraft.currentAttemptUnsettled = false
+                deliveryDraft.earlierVersionMayHaveBeenSent = false
+                deliveryDraft.failure = nil
+                deliveryDraft.failureOperationID = nil
+                await flushCurrentDraft()
+            }
+        case let .notSent(summary, detail, operationConflict, correlated):
+            if operationConflict {
+                if deliveryDraft.operationID == attempt.operationID || deliveryDraft.operationID == nil {
+                    deliveryDraft.operationID = UUID()
+                }
+                deliveryDraft.currentAttemptUnsettled = false
+            } else if correlated {
+                if deliveryDraft.operationID == attempt.operationID {
+                    deliveryDraft.currentAttemptUnsettled = false
+                }
+                deliveryDraft.earlierVersionMayHaveBeenSent = false
+            } else if deliveryDraft.operationID == attempt.operationID {
+                deliveryDraft.currentAttemptUnsettled = attempt.wasUnsettled
+            }
+            deliveryDraft.failure = ComposerSendFailure(outcome: .notSent,
+                summary: summary, detail: detail)
+            deliveryDraft.failureOperationID = attempt.operationID
+            await flushCurrentDraft()
+        case let .unconfirmed(summary, detail):
+            if deliveryDraft.operationID == attempt.operationID {
+                deliveryDraft.currentAttemptUnsettled = true
+            } else {
+                deliveryDraft.earlierVersionMayHaveBeenSent = true
+            }
+            deliveryDraft.failure = ComposerSendFailure(outcome: .unconfirmed,
+                summary: summary, detail: detail)
+            deliveryDraft.failureOperationID = attempt.operationID
+            await flushCurrentDraft()
+        }
+    }
+
+    func finishCarriedOverAttempt(_ attempt: PreparedAnswerAttempt,
+                                  outcome: ComposerDeliveryOutcome) async {
+        isSendInFlight = false
+        guard var carriedOver = deliveryDraft.carriedOverSend,
+              carriedOver.operationID == attempt.operationID else { return }
+        switch outcome {
+        case .confirmed:
+            deliveryDraft.carriedOverSend = nil
+        case let .notSent(summary, detail, operationConflict, correlated):
+            carriedOver.failureOperationID = attempt.operationID
+            if operationConflict {
+                carriedOver.operationID = UUID()
+                carriedOver.currentAttemptUnsettled = false
+                carriedOver.earlierVersionMayHaveBeenSent = false
+            } else if correlated {
+                carriedOver.currentAttemptUnsettled = false
+                carriedOver.earlierVersionMayHaveBeenSent = false
+            } else {
+                carriedOver.currentAttemptUnsettled = attempt.wasUnsettled
+                carriedOver.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
+            }
+            carriedOver.failure = ComposerSendFailure(outcome: .notSent,
+                summary: summary, detail: detail)
+            deliveryDraft.carriedOverSend = carriedOver
+        case let .unconfirmed(summary, detail):
+            carriedOver.failureOperationID = attempt.operationID
+            carriedOver.currentAttemptUnsettled = true
+            carriedOver.failure = ComposerSendFailure(outcome: .unconfirmed,
+                summary: summary, detail: detail)
+            deliveryDraft.carriedOverSend = carriedOver
+        }
+        deliveryDraft.content = draft
+        if let persistence, let persistenceAddress {
+            try? await persistence.flush(deliveryDraft, at: persistenceAddress)
+        }
+        onDraftLoaded?(deliveryDraft)
+    }
+
+    private func flushCurrentDraft() async {
+        guard let persistence, let persistenceAddress else { return }
+        try? await persistence.flush(deliveryDraft, at: persistenceAddress)
+    }
+
+    private static func merge(local: RequestDraft, over persisted: RequestDraft,
+                              original: RequestDraft) -> RequestDraft {
+        var merged = persisted
+        if local.noCommentSelected != original.noCommentSelected {
+            merged.noCommentSelected = local.noCommentSelected
+        }
+        if local.compatibility.selectedActionID != original.compatibility.selectedActionID {
+            merged.compatibility.selectedActionID = local.compatibility.selectedActionID
+        }
+        let actionIDs = Set(local.compatibility.textByActionID.keys)
+            .union(original.compatibility.textByActionID.keys)
+        for id in actionIDs where local.compatibility.textByActionID[id] != original.compatibility.textByActionID[id] {
+            merged.compatibility.textByActionID[id] = local.compatibility.textByActionID[id]
+        }
+        for id in Set(local.inputs.keys).union(original.inputs.keys) {
+            let localInput = local.inputs[id] ?? InputDraft()
+            let originalInput = original.inputs[id] ?? InputDraft()
+            var mergedInput = merged.inputs[id] ?? InputDraft()
+            if localInput.selectedActionID != originalInput.selectedActionID {
+                mergedInput.selectedActionID = localInput.selectedActionID
+            }
+            if localInput.text != originalInput.text { mergedInput.text = localInput.text }
+            if localInput.point != originalInput.point { mergedInput.point = localInput.point }
+            if localInput.horizontalText != originalInput.horizontalText {
+                mergedInput.horizontalText = localInput.horizontalText
+            }
+            if localInput.verticalText != originalInput.verticalText {
+                mergedInput.verticalText = localInput.verticalText
+            }
+            let actionTextIDs = Set(localInput.textByActionID.keys)
+                .union(originalInput.textByActionID.keys)
+            for actionID in actionTextIDs
+                where localInput.textByActionID[actionID] != originalInput.textByActionID[actionID] {
+                mergedInput.textByActionID[actionID] = localInput.textByActionID[actionID]
+            }
+            merged.inputs[id] = mergedInput
+        }
+        return merged
     }
 
     private static func initialDraft(for request: PresentedRequest) -> RequestDraft {
@@ -552,7 +868,7 @@ struct LiveContentView: View {
                 samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { key, revision in markSeen(key, requestRevision: revision) },
                 markNoCommentRequest: { key, revision in
-                    store.submitNoCommentFromUser(key, requestRevision: revision)
+                    Task { _ = await store.submitNoCommentFromUser(key, requestRevision: revision) }
                 },
                 clearRetractedRequest: { store.clearRetracted($0) },
                 requestDetail: { key, context in
@@ -579,7 +895,7 @@ struct LiveContentView: View {
                     .compactMap { $0 },
                 isRefreshing: store.isRefreshing,
                 conversationStore: store,
-                fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
+                fetchOlderInboxPage: nil,
                 refreshInbox: inboxRefreshAction,
                 showsLocalExamples: showsSampleMessages && !store.isReadOnly,
                 notificationNavigation: testNotificationNavigation ?? launch?.notificationNavigation,
@@ -609,11 +925,16 @@ struct LiveContentView: View {
                 Text(diagnostic.progress.message)
             }
             .onChange(of: store.presentation.revision) { _, _ in
-                fixtureStore?.refreshFromDurableStore()
+                if let fixtureStore {
+                    Task { await fixtureStore.refreshFromDurableStore() }
+                }
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { refreshRetractionVisibilityForSceneActivation() }
-                if phase == .background { store.flushPendingDrafts() }
+                if phase != .active {
+                    store.flushPendingDrafts()
+                    store.flushPendingComposerDrafts()
+                }
             }
             .onPreferenceChange(ReplyEditorFocusKey.self) { replyEditorFocused = $0 }
             .onAppear { applyPresentationTestFixtureIfNeeded() }
@@ -683,12 +1004,16 @@ struct LiveContentView: View {
 
     private func markSeen(_ key: RequestKey, requestRevision: UInt64) {
         if let fixtureStore {
-            guard fixtureStore.sendSelectedAnswer(for: key,
-                                                   explicitCompatibilityAction: ExactText("seen")) else { return }
-            try? store.refreshFromDurableStore()
+            Task {
+                guard await fixtureStore.sendSelectedAnswer(for: key,
+                    explicitCompatibilityAction: ExactText("seen")) else { return }
+                try? await store.refreshFromDurableStore()
+            }
         } else {
-            store.submitFromUser(key, explicitCompatibilityAction: ExactText("seen"),
-                                 requestRevision: requestRevision)
+            Task {
+                _ = await store.submitFromUser(key, explicitCompatibilityAction: ExactText("seen"),
+                                               requestRevision: requestRevision)
+            }
         }
     }
 }
@@ -1239,9 +1564,11 @@ struct LiveRequestDetail: View {
         }
         guard let fixtureStore else { return nil }
         return { action in
-            guard fixtureStore.sendSelectedAnswer(for: request.key,
-                                                   explicitCompatibilityAction: action) else { return }
-            try? store.refreshFromDurableStore()
+            Task {
+                guard await fixtureStore.sendSelectedAnswer(for: request.key,
+                    explicitCompatibilityAction: action) else { return }
+                try? await store.refreshFromDurableStore()
+            }
         }
     }
 
@@ -1474,10 +1801,17 @@ struct LiveRequestDetail: View {
     }
 
     private var canSubmitCurrentAnswer: Bool {
+        if localExample != nil {
+            return noCommentSelected ? canOfferNoComment : canAnswer
+        }
+        if fixtureStore != nil {
+            return noCommentSelected ? canOfferNoComment : canAnswer
+        }
+        guard store.isOnline else { return false }
         if let session = localReplySession {
-            return session.noCommentSelected
-                ? session.canSubmitFromSnapshot && request.informationalSeenStatus == nil
-                : session.canSubmitFromSnapshot
+            guard session.isDraftLoaded, !session.isSendInFlight else { return false }
+            return session.canSubmitFromSnapshot &&
+                (!session.noCommentSelected || request.informationalSeenStatus == nil)
         }
         if noCommentSelected { return canOfferNoComment }
         return canAnswer
@@ -1515,8 +1849,10 @@ struct LiveRequestDetail: View {
         if let localSeenAction {
             localSeenAction(action)
         } else {
-            store.submitFromUser(request.key, explicitCompatibilityAction: action,
-                                 requestRevision: request.requestRevision)
+            Task {
+                _ = await store.submitFromUser(request.key, explicitCompatibilityAction: action,
+                                               requestRevision: request.requestRevision)
+            }
         }
     }
 
@@ -1805,12 +2141,6 @@ struct LiveRequestDetail: View {
                         }
                     }
                 }
-                if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
-                   request.lifecycleStatus == .pending, failedResponseWarning == nil {
-                    Button("Retry delivery") { store.retryPendingDelivery() }
-                        .buttonStyle(.bordered)
-                        .disabled(store.isReadOnly)
-                }
                 if !isSupersedesReadOnly, let fixtureStore, request.lifecycleStatus == .pending {
                     Button("Simulate fixture outcome", systemImage: "testtube.2") {
                         fixtureOutcomePresented = true
@@ -1822,9 +2152,11 @@ struct LiveRequestDetail: View {
                         ForEach([DemoTerminalScenario.ownOperationAccepted,
                                  .answerOutcomeUnconfirmed, .cleared]) { scenario in
                             Button(scenario.simulationTitle) {
-                                guard fixtureStore.simulateTerminal(for: request.key,
-                                                                    scenario: scenario) else { return }
-                                try? store.refreshFromDurableStore()
+                                Task {
+                                    guard await fixtureStore.simulateTerminal(for: request.key,
+                                        scenario: scenario) else { return }
+                                    try? await store.refreshFromDurableStore()
+                                }
                             }
                             .accessibilityIdentifier("fixture-outcome-" + scenario.id)
                         }
@@ -1872,6 +2204,11 @@ struct LiveRequestDetail: View {
                             .disabled(!localExample.canFinishLocally || localExample.finished)
                             .accessibilityIdentifier("sample-finish")
                         }
+                    } else if failedResponseWarning?.isCarriedOver == true {
+                        HStack(spacing: 10) {
+                            failedResponseWarningButton
+                            submitReplyButton
+                        }
                     } else if failedResponseWarning != nil {
                         failedResponseWarningButton
                     } else if isEditingLocalReply {
@@ -1904,7 +2241,7 @@ struct LiveRequestDetail: View {
                             summary: warning.summary,
                             detail: .localized(warning.detail),
                             canRetry: store.canRetryFailedResponse(for: request.key),
-                            onRetry: { _ = store.retryFailedResponse(for: request.key) },
+                            onRetry: { Task { _ = await store.retryFailedResponse(for: request.key) } },
                             onCopy: { UIPasteboard.general.string = $0 })
                     }
                 case .skippedMessage:
@@ -1927,6 +2264,12 @@ struct LiveRequestDetail: View {
             conversationPanel
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
+        }
+        .task(id: "\(request.key.accountScope.rawValue):\(request.key.senderID.rawValue):\(request.key.messageID.rawValue):\(request.requestRevision)") {
+            guard localExample == nil else { return }
+            let session = store.replyEditorSession(for: request)
+            replyDraftSession = session
+            await session.loadPersistedDraft()
         }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
@@ -1994,44 +2337,52 @@ struct LiveRequestDetail: View {
 
     private var submitReplyButton: some View {
         Button(submitLabel, systemImage: "checkmark") {
-            let submitted: Bool
             if let fixtureStore {
-                let sent: Bool
-                if let session = localReplySession {
-                    if session.noCommentSelected {
-                        sent = fixtureStore.sendNoCommentLocally(for: request.key,
-                                                                 selectionIsLocal: true)
+                Task {
+                    let sent: Bool
+                    if let session = localReplySession {
+                        if session.noCommentSelected {
+                            sent = await fixtureStore.sendNoCommentLocally(for: request.key,
+                                selectionIsLocal: true)
+                        } else {
+                            sent = await fixtureStore.sendSelectedAnswer(for: request.key,
+                                answerDraft: session.draft)
+                        }
                     } else {
-                        sent = fixtureStore.sendSelectedAnswer(for: request.key,
-                                                               answerDraft: session.draft)
+                        sent = store.draft(for: request.key,
+                            revision: request.requestRevision)?.noCommentSelected == true
+                            ? await fixtureStore.sendNoCommentLocally(for: request.key)
+                            : await fixtureStore.sendSelectedAnswer(for: request.key)
                     }
-                } else {
-                    sent = store.draft(for: request.key,
-                                       revision: request.requestRevision)?.noCommentSelected == true
-                        ? fixtureStore.sendNoCommentLocally(for: request.key)
-                        : fixtureStore.sendSelectedAnswer(for: request.key)
-                }
-                guard sent else { return }
-                submitted = true
-                try? store.refreshFromDurableStore()
-            } else if let session = localReplySession {
-                if session.noCommentSelected {
-                    submitted = store.submitNoCommentFromUser(request.key,
-                                                             requestRevision: session.requestRevision,
-                                                             selectionIsLocal: true)
-                } else {
-                    submitted = store.submitFromUser(request.key,
-                                                     answerDraft: session.draft,
-                                                     requestRevision: session.requestRevision)
-                }
-                guard submitted else {
-                    endLocalReplyIfRequestChanged(session)
-                    return
+                    guard sent else { return }
+                    try? await store.refreshFromDurableStore()
                 }
             } else {
-                submitted = store.submitFromUser(request.key,
-                                                 requestRevision: request.requestRevision)
-                guard submitted else { return }
+                let session = localReplySession ?? store.replyEditorSession(for: request)
+                replyDraftSession = session
+                localReplyEditingActive = true
+                Task {
+                    let submitted: Bool
+                    if session.noCommentSelected {
+                        submitted = await store.submitNoCommentFromUser(request.key,
+                            requestRevision: session.requestRevision,
+                            selectionIsLocal: true, session: session)
+                    } else {
+                        submitted = await store.submitFromUser(request.key,
+                            answerDraft: session.draft,
+                            requestRevision: session.requestRevision, session: session)
+                    }
+                    guard submitted else {
+                        endLocalReplyIfRequestChanged(session)
+                        return
+                    }
+                    store.discardReplyEditorSession(for: request.key)
+                    localReplyEditingActive = false
+                    replyDraftSession = nil
+                    closeReplyEditor()
+                    returnToListIfSinglePane()
+                }
+                return
             }
             store.discardReplyEditorSession(for: request.key)
             localReplyEditingActive = false
@@ -2040,9 +2391,8 @@ struct LiveRequestDetail: View {
             returnToListIfSinglePane()
         }
         .labelStyle(.iconOnly)
-        .disabled(isEditingLocalReply
-                  ? !canSubmitCurrentAnswer
-                  : (fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer))
+        .disabled(localReplySession?.isSendInFlight == true ||
+            (fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer))
         .accessibilityIdentifier("request-finish")
     }
 
@@ -2807,8 +3157,11 @@ private struct LiveCompatibilityActions: View {
                         if let onSeen {
                             onSeen(action.id)
                         } else {
-                            store.submitFromUser(request.key, explicitCompatibilityAction: action.id,
-                                                 requestRevision: request.requestRevision)
+                            Task {
+                                _ = await store.submitFromUser(request.key,
+                                    explicitCompatibilityAction: action.id,
+                                    requestRevision: request.requestRevision)
+                            }
                         }
                     } label: {
                         Label("Seen", systemImage: "eye")
@@ -2921,7 +3274,7 @@ struct FailedResponseDialogCopyContent: Equatable {
     }
 }
 
-private struct FailedResponseDialog: View {
+struct FailedResponseDialog: View {
     enum Detail {
         case localized(LocalizedStringResource)
         case plain(String)

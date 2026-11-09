@@ -459,10 +459,12 @@ final class SampleLibrary {
         return reorderedIDs.compactMap { byID[$0] }
     }
 
-    func populate() {
+    func populate() async {
         do {
-            let fixture = try self.fixture ?? SampleFixtureDomain()
-            try fixture.populate()
+            let fixture: SampleFixtureDomain
+            if let current = self.fixture { fixture = current }
+            else { fixture = try await SampleFixtureDomain() }
+            try await fixture.populate()
             self.fixture = fixture
             for message in messages where responses[message.id] == nil {
                 let response = SampleResponse(viewModel: fixture.viewModel, key: fixture.key(for: message), message: message)

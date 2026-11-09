@@ -61,29 +61,67 @@ struct ConversationFileStorage: Sendable {
               file.sha256.rawValue.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw ConversationError.fileMismatch
         }
-        let folder = directory.appendingPathComponent("Downloads", isDirectory: true)
-            .appendingPathComponent(file.sha256.rawValue, isDirectory: true)
+        let folder = temporaryPreviewRoot.appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder.appendingPathComponent(file.name.rawValue)
     }
 
     func cachedPreview(for file: ConversationFile) throws -> URL? {
-        if case .localFile = file.content {
-            let url = try fileURL(for: file)
-            try verify(url, for: file)
-            return url
-        }
-        let destination = try previewDestination(for: file)
-        if !FileManager.default.fileExists(atPath: destination.path), case let .inline(bytes) = file.content {
+        guard case .localFile = file.content else { return nil }
+        let url = try fileURL(for: file)
+        try verify(url, for: file)
+        return url
+    }
+
+    func writeInlinePreview(of file: ConversationFile, to destination: URL) throws {
+        guard case let .inline(bytes) = file.content else { throw ConversationError.fileMismatch }
+        do {
             try bytes.write(to: destination, options: .atomic)
+            try verify(destination, for: file)
+        } catch {
+            removeTemporaryPreview(at: destination)
+            throw error
         }
-        guard FileManager.default.fileExists(atPath: destination.path) else { return nil }
-        try verify(destination, for: file)
-        return destination
+    }
+
+    func removeTemporaryPreview(at url: URL) {
+        let rootPath = temporaryPreviewRoot.standardizedFileURL.path
+        let candidate = url.standardizedFileURL.path
+        guard candidate.hasPrefix(rootPath + "/") else { return }
+        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
     }
 
     func removeAccountFiles() throws {
         if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+    }
+
+    func removeUnreferencedInlineContent(preserving relativePaths: Set<String>) throws {
+        let inlineDirectory = directory.appendingPathComponent("Inline", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: inlineDirectory.path) else { return }
+        for file in try FileManager.default.contentsOfDirectory(at: inlineDirectory,
+            includingPropertiesForKeys: nil) {
+            let relativePath = "Inline/" + file.lastPathComponent
+            guard !relativePaths.contains(relativePath) else { continue }
+            try FileManager.default.removeItem(at: file)
+        }
+        if try FileManager.default.contentsOfDirectory(atPath: inlineDirectory.path).isEmpty {
+            try FileManager.default.removeItem(at: inlineDirectory)
+        }
+    }
+
+    func clearCachedPreviews() throws {
+        let previews = directory.appendingPathComponent("Downloads", isDirectory: true)
+        if FileManager.default.fileExists(atPath: previews.path) {
+            try FileManager.default.removeItem(at: previews)
+        }
+        if FileManager.default.fileExists(atPath: temporaryPreviewRoot.path) {
+            try FileManager.default.removeItem(at: temporaryPreviewRoot)
+        }
+    }
+
+    private var temporaryPreviewRoot: URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightConversationPreviews", isDirectory: true)
     }
 
     /// This is also used after an uploaded file is downloaded: transport completion is not byte integrity.

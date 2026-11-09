@@ -7,6 +7,449 @@ import Security
 import UIKit
 import UserNotifications
 
+enum ComposerDraftKind: String, Codable, Sendable {
+    case answer
+    case conversation
+}
+
+struct ComposerDraftAddress: Codable, Hashable, Sendable {
+    let identity: ProfileIdentity
+    let request: RequestKey
+    let revision: UInt64
+    let kind: ComposerDraftKind
+
+    var stableName: String {
+        let bytes = (try? JSONEncoder().encode(ComposerDraftStorageKey(
+            identity: identity, request: request, kind: kind))) ?? Data()
+        return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private struct ComposerDraftStorageKey: Codable, Sendable {
+    let identity: ProfileIdentity
+    let request: RequestKey
+    let kind: ComposerDraftKind
+}
+
+struct AnswerComposerDraft: Codable, Equatable, Sendable {
+    var content: RequestDraft
+    var operationID: UUID?
+    var failureOperationID: UUID?
+    var currentAttemptUnsettled: Bool
+    var earlierVersionMayHaveBeenSent: Bool
+    var failure: ComposerSendFailure?
+    var carriedOverSend: CarriedOverAnswerSend?
+
+    init(content: RequestDraft, operationID: UUID? = nil,
+         failureOperationID: UUID? = nil,
+         currentAttemptUnsettled: Bool = false,
+         earlierVersionMayHaveBeenSent: Bool = false,
+         failure: ComposerSendFailure? = nil,
+         carriedOverSend: CarriedOverAnswerSend? = nil) {
+        self.content = content
+        self.operationID = operationID
+        self.failureOperationID = failureOperationID
+        self.currentAttemptUnsettled = currentAttemptUnsettled
+        self.earlierVersionMayHaveBeenSent = earlierVersionMayHaveBeenSent
+        self.failure = failure
+        self.carriedOverSend = carriedOverSend
+    }
+}
+
+struct CarriedOverAnswerSend: Codable, Equatable, Sendable {
+    var content: RequestDraft
+    var operationID: UUID?
+    var failureOperationID: UUID?
+    var currentAttemptUnsettled: Bool
+    var earlierVersionMayHaveBeenSent: Bool
+    var failure: ComposerSendFailure
+}
+
+struct PreparedAnswerAttempt: Equatable, Sendable {
+    let operationID: UUID
+    let requestRevision: UInt64
+    let draft: RequestDraft
+    let wasUnsettled: Bool
+    let earlierVersionMayHaveBeenSent: Bool
+
+    var mayHaveBeenSent: Bool { wasUnsettled || earlierVersionMayHaveBeenSent }
+}
+
+enum ComposerDeliveryOutcome: Equatable, Sendable {
+    case confirmed
+    case notSent(summary: String, detail: String, operationConflict: Bool, correlated: Bool)
+    case unconfirmed(summary: String, detail: String)
+}
+
+/// Draft files are the only server-adjacent content retained by the live app.
+/// Each file is isolated by account, device, item, revision and composer.
+actor ComposerDraftPersistence {
+    static let shared = ComposerDraftPersistence()
+
+    private var latestGenerationByName: [String: UInt64] = [:]
+    private var latestDataByName: [String: Data] = [:]
+    private var pendingWritesByName: [String: Task<Void, Never>] = [:]
+    private var addressesByName: [String: ComposerDraftAddress]?
+    private var legacyMigrationTask: Task<Void, Never>?
+    private var legacyMigrationFailure: String?
+    private let fileManager = FileManager.default
+
+    private struct AddressIndex: Codable {
+        var version = 1
+        var addresses: [String: ComposerDraftAddress]
+    }
+
+    func load<Value: Decodable & Sendable>(_ type: Value.Type,
+                                           at address: ComposerDraftAddress) async throws -> Value? {
+        await legacyMigrationTask?.value
+        return try loadRaw(type, at: address)
+    }
+
+    private func loadRaw<Value: Decodable & Sendable>(_ type: Value.Type,
+                                                      at address: ComposerDraftAddress) throws -> Value? {
+        let name = address.stableName
+        if let data = latestDataByName[name] { return try JSONDecoder().decode(type, from: data) }
+        let file = try fileURL(named: name, createDirectory: false)
+        guard fileManager.fileExists(atPath: file.path) else { return nil }
+        return try JSONDecoder().decode(type, from: Data(contentsOf: file, options: .mappedIfSafe))
+    }
+
+    func scheduleSave<Value: Encodable & Sendable>(_ value: Value,
+                                                   at address: ComposerDraftAddress) async throws {
+        await legacyMigrationTask?.value
+        let name = address.stableName
+        let data = try JSONEncoder().encode(value)
+        var addresses = try loadAddressIndex()
+        addresses[name] = address
+        addressesByName = addresses
+        let generation = latestGenerationByName[name, default: 0] &+ 1
+        latestGenerationByName[name] = generation
+        latestDataByName[name] = data
+        pendingWritesByName[name]?.cancel()
+        pendingWritesByName[name] = Task {
+            do { try await Task.sleep(for: .milliseconds(450)) }
+            catch { return }
+            try? await self.write(data, named: name, address: address, generation: generation)
+        }
+    }
+
+    func flush<Value: Encodable & Sendable>(_ value: Value,
+                                            at address: ComposerDraftAddress) async throws {
+        await legacyMigrationTask?.value
+        let name = address.stableName
+        let data = try JSONEncoder().encode(value)
+        let generation = latestGenerationByName[name, default: 0] &+ 1
+        latestGenerationByName[name] = generation
+        latestDataByName[name] = data
+        pendingWritesByName.removeValue(forKey: name)?.cancel()
+        try write(data, named: name, address: address, generation: generation)
+    }
+
+    func remove(at address: ComposerDraftAddress) async throws {
+        // This is actor-owned file work and may suspend until the one-time
+        // legacy import has either completed or failed without deleting source.
+        if let legacyMigrationTask { await legacyMigrationTask.value }
+        let name = address.stableName
+        latestGenerationByName[name, default: 0] &+= 1
+        pendingWritesByName.removeValue(forKey: name)?.cancel()
+        let file = try fileURL(named: name, createDirectory: false)
+        if fileManager.fileExists(atPath: file.path) { try fileManager.removeItem(at: file) }
+        try updateAddressIndex(name: name, address: nil)
+        latestGenerationByName.removeValue(forKey: name)
+        latestDataByName.removeValue(forKey: name)
+    }
+
+    func addresses(for identity: ProfileIdentity) async throws -> [ComposerDraftAddress] {
+        await legacyMigrationTask?.value
+        return try loadAddressIndex().values.filter { $0.identity == identity }
+    }
+
+    func pruneDrafts(for identity: ProfileIdentity, keeping requestKeys: Set<RequestKey>) async throws {
+        await legacyMigrationTask?.value
+        let stale = try loadAddressIndex().filter { _, address in
+            address.identity == identity && !requestKeys.contains(address.request)
+        }
+        guard !stale.isEmpty else { return }
+        for name in stale.keys {
+            pendingWritesByName.removeValue(forKey: name)?.cancel()
+            let file = try fileURL(named: name, createDirectory: false)
+            if fileManager.fileExists(atPath: file.path) { try fileManager.removeItem(at: file) }
+            latestGenerationByName[name, default: 0] &+= 1
+            latestDataByName.removeValue(forKey: name)
+        }
+        var index = try loadAddressIndex()
+        for name in stale.keys { index.removeValue(forKey: name) }
+        addressesByName = index
+        try writeAddressIndex(index)
+    }
+
+    func beginLegacyAttentionMigration(context: ProfileContext,
+                                       conversationFiles: ConversationFileStorage) {
+        guard legacyMigrationTask == nil else { return }
+        legacyMigrationTask = Task { [weak self] in
+            guard let self else { return }
+            do { try await self.performLegacyAttentionMigration(context: context,
+                                                                conversationFiles: conversationFiles) }
+            catch { await self.recordLegacyMigrationFailure(String(describing: error)) }
+        }
+    }
+
+    private func recordLegacyMigrationFailure(_ message: String) {
+        legacyMigrationFailure = message
+    }
+
+    func legacyAttentionMigrationFailure() async -> String? {
+        await legacyMigrationTask?.value
+        return legacyMigrationFailure
+    }
+
+    private func performLegacyAttentionMigration(context: ProfileContext,
+                                                 conversationFiles: ConversationFileStorage) async throws {
+        let legacyPersistence = try FileAttentionStatePersistence.applicationSupport()
+        guard try legacyPersistence.load(identity: context.identity) != nil else {
+            try removeUnreferencedLegacyInlineContent(for: context.identity, conversationFiles: conversationFiles)
+            return
+        }
+        let legacyStore = try AttentionDomainStore(context: context,
+            persistence: legacyPersistence, conversationFileReferences: conversationFiles)
+        let legacy = try await legacyStore.snapshot(context: context)
+        let conversation = try await legacyStore.currentConversationSnapshot(context: context)
+
+        var answerByKey: [RequestKey: AnswerComposerDraft] = [:]
+        for key in legacy.requests.keys {
+            let revision = conversation.threads[key]?.currentRevision ?? 1
+            let typed = legacy.drafts[key] ?? conversation.threads[key]?.answerDrafts?[revision]
+            if let typed, typed.hasEdits {
+                answerByKey[key] = AnswerComposerDraft(content: typed)
+            }
+        }
+
+        let unresolvedResponses = legacy.intents.values.filter(Self.isLegacyUnresolvedResponse)
+            .sorted { lhs, rhs in
+                (lhs.requestRevision ?? 0, lhs.operationID.uuidString) <
+                    (rhs.requestRevision ?? 0, rhs.operationID.uuidString)
+            }
+        for submission in unresolvedResponses {
+            guard legacy.requests[submission.requestKey] != nil else { continue }
+            let responseContent = Self.answerDraft(for: submission)
+            let isUnsettled = Self.legacyResponseIsUnsettled(submission)
+            let failure = ComposerSendFailure(
+                outcome: isUnsettled ? .unconfirmed : .notSent,
+                summary: isUnsettled
+                    ? "This response may not have gone through."
+                    : "The response was not sent.",
+                detail: isUnsettled
+                    ? "The earlier build kept this response without a server confirmation."
+                    : "The earlier build recorded that the server refused this response.")
+            let existing = answerByKey[submission.requestKey]
+            if let existing, existing.content != responseContent {
+                var composerDraft = existing
+                composerDraft.carriedOverSend = CarriedOverAnswerSend(
+                    content: responseContent, operationID: submission.operationID,
+                    failureOperationID: submission.operationID,
+                    currentAttemptUnsettled: isUnsettled,
+                    earlierVersionMayHaveBeenSent: false, failure: failure)
+                answerByKey[submission.requestKey] = composerDraft
+            } else {
+                answerByKey[submission.requestKey] = AnswerComposerDraft(
+                    content: existing?.content ?? responseContent,
+                    operationID: submission.operationID,
+                    currentAttemptUnsettled: isUnsettled,
+                    failure: failure)
+            }
+        }
+
+        for (key, thread) in conversation.threads {
+            guard let revision = thread.drafts.keys.max(),
+                  let oldDraft = thread.drafts[revision] else { continue }
+            let migrated = Self.migrateConversationDraft(oldDraft)
+            guard migrated.text.rawValue.isEmpty == false || !migrated.files.isEmpty ||
+                  migrated.carriedOverSend != nil || migrated.failure != nil else { continue }
+            let address = ComposerDraftAddress(identity: context.identity,
+                request: key, revision: revision, kind: .conversation)
+            if try loadRaw(ConversationDraft.self, at: address) == nil {
+                try flushRaw(migrated, at: address)
+            }
+        }
+
+        for (key, draft) in answerByKey {
+            let revision = conversation.threads[key]?.currentRevision ?? 1
+            let address = ComposerDraftAddress(identity: context.identity,
+                request: key, revision: revision, kind: .answer)
+            if try loadRaw(AnswerComposerDraft.self, at: address) == nil {
+                try flushRaw(draft, at: address)
+            }
+        }
+        try legacyPersistence.remove(identity: context.identity)
+        try removeUnreferencedLegacyInlineContent(for: context.identity, conversationFiles: conversationFiles)
+    }
+
+    private func removeUnreferencedLegacyInlineContent(for identity: ProfileIdentity,
+                                                        conversationFiles: ConversationFileStorage) throws {
+        var referencedPaths = Set<String>()
+        for address in try loadAddressIndex().values
+            where address.identity == identity && address.kind == .conversation {
+            guard let draft = try loadRaw(ConversationDraft.self, at: address) else { continue }
+            for file in draft.files {
+                guard case let .localFile(relativePath) = file.content,
+                      relativePath.rawValue.hasPrefix("Inline/") else { continue }
+                referencedPaths.insert(relativePath.rawValue)
+            }
+        }
+        try conversationFiles.removeUnreferencedInlineContent(preserving: referencedPaths)
+    }
+
+    private nonisolated static func isLegacyUnresolvedResponse(_ submission: Submission) -> Bool {
+        switch submission.disposition {
+        case .pending, .lost, .failed: true
+        default: false
+        }
+    }
+
+    private nonisolated static func legacyResponseIsUnsettled(_ submission: Submission) -> Bool {
+        switch submission.disposition {
+        case .pending, .lost: true
+        case .failed: false
+        default: false
+        }
+    }
+
+    private nonisolated static func answerDraft(for submission: Submission) -> RequestDraft {
+        var draft = RequestDraft(inputs: [:])
+        if submission.isNoComment {
+            draft.noCommentSelected = true
+            return draft
+        }
+        for input in submission.typedInputs {
+            switch input {
+            case let .responseValue(inputID, action):
+                var field = draft.inputs[inputID] ?? InputDraft()
+                field.selectedActionID = action
+                draft.inputs[inputID] = field
+            case let .responseText(inputID, action, text):
+                var field = draft.inputs[inputID] ?? InputDraft()
+                field.selectedActionID = action
+                field.textByActionID[action] = text
+                draft.inputs[inputID] = field
+            case let .text(inputID, text):
+                var field = draft.inputs[inputID] ?? InputDraft()
+                field.text = text
+                draft.inputs[inputID] = field
+            case let .point(inputID, point):
+                var field = draft.inputs[inputID] ?? InputDraft()
+                field.point = point
+                field.horizontalText = ExactText(String(point.x))
+                field.verticalText = ExactText(String(point.y))
+                draft.inputs[inputID] = field
+            case let .compatibilityValue(action):
+                draft.compatibility.selectedActionID = action
+            case let .compatibilityText(action, text):
+                draft.compatibility.selectedActionID = action
+                draft.compatibility.textByActionID[action] = text
+            }
+        }
+        return draft
+    }
+
+    private nonisolated static func migrateConversationDraft(_ old: ConversationDraft) -> ConversationDraft {
+        var migrated = old
+        switch old.disposition {
+        case let .submitting(operation), let .outcomeUnknown(operation):
+            migrated.operationID = operation
+            migrated.inFlightOperationID = nil
+            migrated.currentAttemptUnsettled = true
+            migrated.failure = ComposerSendFailure(outcome: .unconfirmed,
+                summary: "This message may not have gone through.",
+                detail: "The earlier build kept this message without a server confirmation.")
+            migrated.disposition = .saved
+        case let .rejected(reason):
+            migrated.inFlightOperationID = nil
+            migrated.currentAttemptUnsettled = false
+            migrated.failure = ComposerSendFailure(outcome: .notSent,
+                summary: "The message was not sent.", detail: reason.rawValue)
+            migrated.disposition = .saved
+        case .acceptedPendingReplay:
+            migrated.text = ExactText("")
+            migrated.files = []
+            migrated.operationID = nil
+            migrated.inFlightOperationID = nil
+            migrated.currentAttemptUnsettled = false
+            migrated.failure = nil
+            migrated.disposition = .saved
+        case .saved:
+            migrated.disposition = .saved
+        }
+        return migrated
+    }
+
+    private func flushRaw<Value: Encodable & Sendable>(_ value: Value,
+                                                        at address: ComposerDraftAddress) throws {
+        let name = address.stableName
+        let data = try JSONEncoder().encode(value)
+        let generation = latestGenerationByName[name, default: 0] &+ 1
+        latestGenerationByName[name] = generation
+        latestDataByName[name] = data
+        pendingWritesByName.removeValue(forKey: name)?.cancel()
+        try write(data, named: name, address: address, generation: generation)
+    }
+
+    private func write(_ data: Data, named name: String,
+                       address: ComposerDraftAddress, generation: UInt64) throws {
+        guard latestGenerationByName[name] == generation else { return }
+        try updateAddressIndex(name: name, address: address)
+        let file = try fileURL(named: name, createDirectory: true)
+        try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    private func loadAddressIndex() throws -> [String: ComposerDraftAddress] {
+        if let addressesByName { return addressesByName }
+        let file = try fileURL(named: "draft-index", createDirectory: false)
+        guard fileManager.fileExists(atPath: file.path) else {
+            addressesByName = [:]
+            return [:]
+        }
+        let decoded = try JSONDecoder().decode(AddressIndex.self,
+            from: Data(contentsOf: file, options: .mappedIfSafe))
+        guard decoded.version == 1 else { throw CocoaError(.fileReadCorruptFile) }
+        addressesByName = decoded.addresses
+        return decoded.addresses
+    }
+
+    private func updateAddressIndex(name: String, address: ComposerDraftAddress?) throws {
+        var index = try loadAddressIndex()
+        index[name] = address
+        addressesByName = index
+        try writeAddressIndex(index)
+    }
+
+    private func writeAddressIndex(_ addresses: [String: ComposerDraftAddress]) throws {
+        guard !addresses.isEmpty else {
+            let file = try fileURL(named: "draft-index", createDirectory: false)
+            if fileManager.fileExists(atPath: file.path) { try fileManager.removeItem(at: file) }
+            return
+        }
+        let file = try fileURL(named: "draft-index", createDirectory: true)
+        let data = try JSONEncoder().encode(AddressIndex(addresses: addresses))
+        try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    private func fileURL(named name: String, createDirectory: Bool) throws -> URL {
+        guard let support = fileManager.urls(for: .applicationSupportDirectory,
+                                             in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let directory = support.appendingPathComponent("Harklight/ComposerDrafts", isDirectory: true)
+        if createDirectory {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true,
+                attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+                             .posixPermissions: 0o700])
+        }
+        return directory.appendingPathComponent(name).appendingPathExtension("json")
+    }
+}
+
 /// Material supplied only after an enrollment owner has verified the server's
 /// approved person/device record. This consumer never infers it from a push or
 /// from the bundled fictional fixture.
@@ -43,6 +486,7 @@ final class NativeAppLaunch {
     enum State {
         case enrollmentRequired
         case enrollmentPending(NativeEnrollmentRecord)
+        case loadingFixture
         case fixture(PrototypeStore)
         case live(LivePresentationStore)
         case disconnected(LivePresentationStore?)
@@ -82,7 +526,6 @@ final class NativeAppLaunch {
     @ObservationIgnored private var didFinishRestoring = false
     @ObservationIgnored private var foregroundActivationPushCheckPending = false
     @ObservationIgnored private let refreshOperation: @MainActor (Bool) async -> NativeRelayRefreshResult
-    @ObservationIgnored private let fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)?
 
     private var dismissedForegroundConnectFailure: NativeForegroundConnectFailureKey?
 
@@ -101,9 +544,8 @@ final class NativeAppLaunch {
          notificationRouter: NativeNotificationRouter = .shared,
          refreshOperation: @escaping @MainActor (Bool) async -> NativeRelayRefreshResult = { checkBlockedPush in
              await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay(
-                checkBlockedPush: checkBlockedPush)
-         },
-         fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil) {
+                 checkBlockedPush: checkBlockedPush)
+         }) {
         #if DEBUG
         let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
         #else
@@ -119,7 +561,6 @@ final class NativeAppLaunch {
         self.diagnostics = diagnostics
         self.notificationRouter = notificationRouter
         self.refreshOperation = refreshOperation
-        self.fetchInboxPageOperation = fetchInboxPageOperation
         didFinishRestoring = initialState != nil
         activeEnrollmentRecord = initialEnrollmentRecord
         archivedAccountDepartures = initialArchivedDepartures
@@ -134,7 +575,7 @@ final class NativeAppLaunch {
         if let initialState {
             state = initialState
         } else if fixture {
-            state = .fixture(PrototypeStore.loadFromBundle())
+            state = .loadingFixture
         } else if let standaloneDeparture {
             state = .disconnected(nil)
         } else {
@@ -209,6 +650,12 @@ final class NativeAppLaunch {
             // it in this process without waiting for another launch.
             self.refreshArchivedAccounts()
         }
+        if fixture, initialState == nil {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.state = .fixture(await PrototypeStore.loadFromBundle())
+            }
+        }
     }
 
     func restoreInstallation() async {
@@ -216,6 +663,7 @@ final class NativeAppLaunch {
         didRestore = true
         defer { didFinishRestoring = true }
         if case .fixture = state { return }
+        if case .loadingFixture = state { return }
         refreshArchivedAccounts()
         if let departure = try? guidedJoinStore.departure(),
            departure.replacement == nil {
@@ -605,10 +1053,10 @@ final class NativeAppLaunch {
             trustedRelayAuthority: ExactText(departure.record.profileAuthority),
             personID: ExactText(personID),
             deviceID: ExactText(departure.record.deviceID)), transportMode: .relay)
-        let persistence = try FileAttentionStatePersistence.applicationSupport()
+        let persistence = EphemeralAttentionStatePersistence()
         let store = try AttentionDomainStore(context: context, persistence: persistence)
         return try LivePresentationStore(disconnectedStore: store, context: context,
-                                        newMessageAreaDefaults: .standard)
+                                        newMessageAreaDefaults: nil)
     }
 
     private var disconnectedStore: LivePresentationStore? {
@@ -796,18 +1244,40 @@ final class NativeAppLaunch {
         guard activationGeneration == generation else { return }
         let context = installation.context
         let (store, fileStorage) = try await Task.detached(priority: .userInitiated) {
-            let persistence = try FileAttentionStatePersistence.applicationSupport()
+            let persistence = EphemeralAttentionStatePersistence()
             let fileStorage = try ConversationFileStorage(identity: context.identity)
+            try? fileStorage.clearCachedPreviews()
             let store = try AttentionDomainStore(context: context, persistence: persistence,
                                                  conversationFileReferences: fileStorage)
             return (store, fileStorage)
         }.value
         guard activationGeneration == generation else { return }
+        await ComposerDraftPersistence.shared.beginLegacyAttentionMigration(
+            context: context, conversationFiles: fileStorage)
+        Task { [weak self] in
+            let failure = await ComposerDraftPersistence.shared.legacyAttentionMigrationFailure()
+            guard let self, self.activationGeneration == generation, let failure else { return }
+            self.diagnostics.record(area: .localStore, phase: .draftLoad, transition: .failed,
+                                    causeCode: "legacy_draft_migration_failed")
+        }
         let activation = try await LivePresentationStore.makeForActivation(
             store: store, context: context, diagnostics: diagnostics,
-            newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
+            newMessageAreaDefaults: nil, conversationFiles: fileStorage)
         guard activationGeneration == generation else { return }
         let presentation = activation.presentation
+        presentation.notificationProjectionDidChange = { [weak self] in
+            Task { await self?.resolveNotificationNavigation() }
+        }
+        presentation.confirmedRelayRefresh = { [weak self, weak presentation] in
+            guard let self, let presentation,
+                  case let .live(current) = self.state, current === presentation,
+                  self.foregroundConnectProgress?.outcome != .confirmed else { return }
+            self.clearForegroundConnectionDetails()
+            Task { await presentation.refreshDraftStateAfterServerCatchUp() }
+        }
+        presentation.startObserving()
+        state = .live(presentation)
+        isShowingDisconnectedArchive = false
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
                                                            context: installation.context,
@@ -819,21 +1289,10 @@ final class NativeAppLaunch {
             if activationGeneration != generation { return }
             diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,
                                error: error)
-            throw error
+            presentation.connectionWarning = "Offline · retry to refresh messages from the server."
+            return
         }
         guard activationGeneration == generation else { return }
-        presentation.notificationProjectionDidChange = { [weak self] in
-            Task { await self?.resolveNotificationNavigation() }
-        }
-        presentation.confirmedRelayRefresh = { [weak self, weak presentation] in
-            guard let self, let presentation,
-                  case let .live(current) = self.state, current === presentation,
-                  self.foregroundConnectProgress?.outcome != .confirmed else { return }
-            self.clearForegroundConnectionDetails()
-        }
-        presentation.startObserving()
-        state = .live(presentation)
-        isShowingDisconnectedArchive = false
         Task { [weak self] in
             guard let self else { return }
             await notifications.resume { self.activationGeneration == generation }
@@ -957,40 +1416,10 @@ final class NativeAppLaunch {
             pendingMessageDeepLink = nil
             notificationNavigationMessage = nil
         } else {
-            if notificationNavigation?.request != key {
-                navigateToMessage(key, in: presentation)
-            }
-            var pageAvailability = presentation.inboxPageAvailability()
-            while synchronized, pageAvailability == .more {
-                guard pendingMessageDeepLink == deepLink else { return }
-                let revisionBeforePage = presentation.presentation.revision
-                let fetched: Bool
-                if let fetchInboxPageOperation {
-                    fetched = await fetchInboxPageOperation(presentation)
-                } else {
-                    fetched = await presentation.fetchNextInboxPage()
-                }
-                guard pendingMessageDeepLink == deepLink,
-                      case let .live(current) = state, current === presentation else { return }
-                if presentation.isRetracted(key) {
-                    navigateToMessage(key, in: presentation)
-                    pendingMessageDeepLink = nil
-                    notificationNavigationMessage = "The sender retracted this message."
-                    return
-                }
-                if presentation.request(for: key) != nil {
-                    navigateToMessage(key, in: presentation)
-                    pendingMessageDeepLink = nil
-                    notificationNavigationMessage = nil
-                    return
-                }
-                pageAvailability = presentation.inboxPageAvailability()
-                guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
-            }
             let confirmed = synchronized && notificationSynchronized
-            notificationNavigationMessage = confirmed && pageAvailability == .exhausted
-                ? "This message was never sent to this Harklight inbox."
-                : "This message hasn't arrived yet. Harklight will keep checking while it's open."
+            notificationNavigationMessage = confirmed
+                ? "This message is not in the latest Harklight inbox."
+                : "Harklight could not verify this message in the current inbox."
         }
     }
 
@@ -1070,7 +1499,7 @@ final class NativeAppLaunch {
             notificationRouter.consumed()
             return
         }
-        guard let locator = notificationRouter.intent?.locator else {
+        guard notificationRouter.intent?.locator != nil else {
             presentation.selectRequest(nil)
             notificationNavigationMessage = nil
             notificationRouter.consumed()
@@ -1083,57 +1512,11 @@ final class NativeAppLaunch {
             return
         }
 
-        var pageAvailability = presentation.inboxPageAvailability()
-        while pageAvailability == .more {
-            guard notificationRouter.intent?.serial == intent.serial,
-                  notificationRouter.intent?.locator != nil,
-                  notificationSynchronized, notificationRefreshFinished,
-                  case let .live(current) = state, current === presentation else { return }
-            // A present identity with a different acceptance sequence is stale;
-            // older pages cannot make it current.
-            if presentation.presentation.requests.contains(where: { $0.key == locator.request }) {
-                break
-            }
-
-            let revisionBeforePage = presentation.presentation.revision
-            let fetched: Bool
-            if let fetchInboxPageOperation {
-                fetched = await fetchInboxPageOperation(presentation)
-            } else {
-                fetched = await presentation.fetchNextInboxPage()
-            }
-            guard notificationRouter.intent?.serial == intent.serial,
-                  notificationRouter.intent?.locator != nil,
-                  notificationSynchronized, notificationRefreshFinished,
-                  case let .live(current) = state, current === presentation else { return }
-
-            if let key = notificationRouter.resolve(records: records,
-                context: presentation.notificationContext,
-                requests: presentation.presentation.requests, synchronized: true) {
-                presentation.selectRequest(key)
-                let opensChat = notificationRouter.intent?.locator?.target == "chat"
-                notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key,
-                                                                opensChat: opensChat)
-                notificationNavigationMessage = nil
-                notificationRouter.consumed()
-                return
-            }
-            guard notificationRouter.intent?.locator != nil else {
-                presentation.selectRequest(nil)
-                notificationNavigationMessage = nil
-                notificationRouter.consumed()
-                return
-            }
-            if presentation.presentation.requests.contains(where: { $0.key == locator.request }) {
-                break
-            }
-
-            pageAvailability = presentation.inboxPageAvailability()
-            guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
-        }
         guard notificationRouter.intent?.serial == intent.serial,
               notificationRouter.intent?.locator != nil else { return }
-        notificationNavigationMessage = "This notification's message has not loaded yet."
+        notificationNavigationMessage = notificationSynchronized
+            ? "This notification's message is not in the latest Harklight inbox."
+            : "This notification's message could not be verified in the current inbox."
     }
 
     func retryForegroundConnection() async {
@@ -1222,18 +1605,21 @@ final class LivePresentationStore {
         let failedOperationID: UUID?
         let answerKind: SubmissionAnswerKind
         let submittedInputs: [TypedInputRecord]
-        let answerDraft: RequestDraft?
+        var answerDraft: RequestDraft?
         let detail: LocalizedStringResource
         var retryOperationID: UUID?
+        var summaryOverride: String? = nil
+        var isCarriedOver = false
 
         var summary: LocalizedStringResource {
-            answerKind == .noComment
+            if let summaryOverride { return LocalizedStringResource(stringLiteral: summaryOverride) }
+            return answerKind == .noComment
                 ? "Your No comment response was not delivered."
                 : "Your response was not delivered."
         }
 
         var canRetry: Bool {
-            failedOperationID != nil && answerDraft != nil
+            (isCarriedOver || failedOperationID != nil) && answerDraft != nil
         }
     }
 
@@ -1243,20 +1629,14 @@ final class LivePresentationStore {
         let conversationSequence: UInt64
     }
 
-    enum InboxPageAvailability: Equatable {
-        case more
-        case exhausted
-        case unknown
-    }
-
     private struct DraftBufferKey: Hashable {
         let request: RequestKey
         let revision: UInt64
     }
 
-    private struct ConversationReadKey: Hashable, Sendable {
-        let request: RequestKey
+    private struct ConversationReadTarget: Sendable {
         let turnID: ExactText
+        let sequence: UInt64
     }
 
     private(set) var conversationThreads: [RequestKey: ConversationThread]
@@ -1277,6 +1657,8 @@ final class LivePresentationStore {
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
     private(set) var retractionVisibilityTime = Date()
+    private(set) var cachedConversationPreviewAvailability: [String: Bool] = [:]
+    @ObservationIgnored private var checkedConversationPreviewKeys: Set<String> = []
     private(set) var selectedRequestKey: RequestKey?
     private var activeRefreshCount = 0
     var isRefreshing: Bool { activeRefreshCount > 0 }
@@ -1335,15 +1717,22 @@ final class LivePresentationStore {
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var locallyReconciledConversationReadRevisions = Set<UInt64>()
     @ObservationIgnored private var failedResponseWarningGeneration: UInt64 = 0
-    @ObservationIgnored private var pendingConversationReadUpdates = Set<ConversationReadKey>()
+    @ObservationIgnored private var visibleConversationReplyIDs: [RequestKey: Set<ExactText>] = [:]
+    @ObservationIgnored private var pendingConversationReadTasks: [RequestKey: Task<Void, Never>] = [:]
+    @ObservationIgnored private var pendingConversationReadGenerations: [RequestKey: UUID] = [:]
     @ObservationIgnored private var conversationProjectionRevision: UInt64?
     @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
     @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
+    @ObservationIgnored private let composerDraftPersistence = ComposerDraftPersistence.shared
+    @ObservationIgnored private var loadedConversationDrafts = Set<ConversationBinding>()
+    @ObservationIgnored private var editedConversationDrafts = Set<ConversationBinding>()
     // Reply edits remain local until submission, but must outlive a detail view
     // recreated by ordinary navigation in this app session.
     @ObservationIgnored private var replyEditorSessions: [RequestKey: ReplyEditorDraftSession] = [:]
+    @ObservationIgnored private var answerSendInFlight = Set<RequestKey>()
+    @ObservationIgnored private var answerDraftRestoreGeneration: UInt64 = 0
     // Clearing a retracted row is list state on this device only: no frame is
     // sent and the retracted record stays intact in the durable store.
     private(set) var clearedRetractions: Set<RequestKey> = []
@@ -1351,8 +1740,6 @@ final class LivePresentationStore {
     @ObservationIgnored private var pendingRetractionExpiryAdvance: CheckedContinuation<Void, Never>?
     @ObservationIgnored private var retractionExpiryAdvanceRequested = false
 #endif
-    @ObservationIgnored private let clearedRetractionDefaults: UserDefaults
-    private static let clearedRetractionsDefaultsKey = "harklight.cleared-retracted-requests"
     private static let retractedRowVisibilityDuration: TimeInterval = 24 * 60 * 60
     @ObservationIgnored private var presentedStaleAnswerOperationIDs = Set<UUID>()
 
@@ -1404,9 +1791,9 @@ final class LivePresentationStore {
         mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
         let initial = try await Task.detached(priority: .userInitiated) {
             let port = AttentionDomainPort(store: store)
-            let snapshot = try port.observe(context: port.context)
-            let conversationThreads = try port.conversations(context: port.context).threads
-            let attentionSnapshot = try store.snapshot(context: context)
+            let snapshot = try await port.observe(context: port.context)
+            let conversationThreads = try await port.conversations(context: port.context).threads
+            let attentionSnapshot = try await store.snapshot(context: context)
             let messageLedger = messageLedgerData.flatMap {
                 try? JSONDecoder().decode(NewMessageAreaLedger.self, from: $0)
             } ?? NewMessageAreaLedger()
@@ -1463,14 +1850,11 @@ final class LivePresentationStore {
                  clearedRetractionDefaults: UserDefaults = .standard,
                  newMessageAreaDefaults: UserDefaults? = nil,
                  preparedInitialState: PreparedLivePresentationInitialState? = nil) throws {
-        self.clearedRetractionDefaults = clearedRetractionDefaults
-        let areaStore = newMessageAreaDefaults.map {
-            NewMessageAreaStore(defaults: $0, initialLedger: preparedInitialState?.messageLedger)
-        }
+        let areaStore = NewMessageAreaStore(defaults: newMessageAreaDefaults,
+                                            initialLedger: preparedInitialState?.messageLedger)
         self.messageAreaStore = areaStore
-        let replyStore = newMessageAreaDefaults.map {
-            ReplyItemAreaStore(defaults: $0, initialLedger: preparedInitialState?.replyLedger)
-        }
+        let replyStore = ReplyItemAreaStore(defaults: newMessageAreaDefaults,
+                                            initialLedger: preparedInitialState?.replyLedger)
         self.replyAreaStore = replyStore
         self.conversationAvailability = conversationAvailability
         self.permitsDelivery = permitsDelivery
@@ -1490,10 +1874,12 @@ final class LivePresentationStore {
             conversationThreads = preparedInitialState.conversationThreads
             conversationFiles = preparedInitialState.conversationFiles
         } else {
-            snapshot = try port.observe(context: port.context)
-            conversationThreads = try port.conversations(context: port.context).threads
-            conversationFiles = context.transportMode == .relay
-                ? try ConversationFileStorage(identity: context.identity) : nil
+            // The shell starts with an empty presentation. Relay activation
+            // supplies a prepared server snapshot after its off-main fetch.
+            snapshot = PresentationSnapshot(revision: 0, cursor: 0,
+                replayBarrier: nil, repairIssues: [], requests: [])
+            conversationThreads = [:]
+            conversationFiles = nil
         }
         self.port = port
         self.attentionStore = store
@@ -1503,20 +1889,15 @@ final class LivePresentationStore {
         self.conversationFiles = conversationFiles
         self.selectedRequestKey = snapshot.requests.first?.key
         if let preparedInitialState {
-            _ = areaStore?.applyPreparedReconciliation(preparedInitialState.preparedMessageArea,
-                                                        basedOn: 0)
-            _ = replyStore?.applyPreparedReconciliation(preparedInitialState.preparedReplyArea,
-                                                        basedOn: 0)
+            _ = areaStore.applyPreparedReconciliation(preparedInitialState.preparedMessageArea,
+                                                      basedOn: 0)
+            _ = replyStore.applyPreparedReconciliation(preparedInitialState.preparedReplyArea,
+                                                       basedOn: 0)
         } else {
             reconcileNewMessageArea(snapshot.requests, using: areaStore)
             reconcileReplyItemArea(using: replyStore)
         }
-        if let data = clearedRetractionDefaults.data(forKey: Self.clearedRetractionsDefaultsKey),
-           let cleared = try? JSONDecoder().decode(Set<RequestKey>.self, from: data) {
-            clearedRetractions = cleared
-        }
         if preparedInitialState == nil {
-            refreshFailedResponseWarnings(for: snapshot.requests)
             presentStaleAnswerIfAvailable(in: snapshot)
         }
     }
@@ -1524,6 +1905,9 @@ final class LivePresentationStore {
     /// Read-only real account archives are offline relay data, not fictional
     /// local examples. Delivery permission and data provenance are separate.
     var isLocalExample: Bool { profileContext.transportMode == .fixture }
+    var isOnline: Bool {
+        isLocalExample || (permitsDelivery && NativeRelayLifecycle.shared.isOnline(for: profileContext))
+    }
 
     func hasAcceptedUpdate(for key: RequestKey) -> Bool {
         conversationThreads[key]?.acceptedUpdates.isEmpty == false
@@ -1627,9 +2011,6 @@ final class LivePresentationStore {
     func clearRetracted(_ key: RequestKey) {
         guard isRetracted(key), !clearedRetractions.contains(key) else { return }
         clearedRetractions.insert(key)
-        if let data = try? JSONEncoder().encode(clearedRetractions) {
-            clearedRetractionDefaults.set(data, forKey: Self.clearedRetractionsDefaultsKey)
-        }
     }
 
     func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
@@ -1651,71 +2032,49 @@ final class LivePresentationStore {
         return thread.hasUnreadAgentReply
     }
 
-    func markConversationRead(_ key: RequestKey) {
-        guard !isReadOnly, let latest = conversationThreads[key]?.latestAgentReply else { return }
-        markConversationRead(key, through: latest.id)
-    }
-
-    /// Chat calls this when the reply crosses the visible threshold. The durable
-    /// position stops at that reply, so later offscreen replies stay unread.
-    func markConversationRead(_ key: RequestKey, through turnID: ExactText) {
-        guard !isReadOnly,
-              conversationThreads[key]?.turns.contains(where: {
-                  $0.id == turnID && $0.kind == .reply && $0.author == .origin
-              }) == true else { return }
-        let readKey = ConversationReadKey(request: key, turnID: turnID)
-        guard pendingConversationReadUpdates.insert(readKey).inserted else { return }
-        let port = self.port
-        let context = port.context
-        Task.detached(priority: .userInitiated) { [weak self] in
-            do {
-                let update = try port.markConversationReadAndProject(key, through: turnID,
-                                                                     context: context)
-                await self?.finishConversationRead(readKey, update: update)
-            } catch {
-                await self?.finishConversationRead(
-                    readKey, errorDescription: String(describing: error))
-            }
-        }
-    }
-
-    private func finishConversationRead(_ readKey: ConversationReadKey,
-                                        update: ConversationReadUpdate? = nil,
-                                        errorDescription: String? = nil) {
-        pendingConversationReadUpdates.remove(readKey)
-        guard !isReadOnly else { return }
-        guard let update else {
-            UIDiagnostics.shared.record(
-                "store.markConversationRead \(UIDiagnostics.describe(readKey.request)) error=\(errorDescription ?? "unknown")")
+    func conversationReplyVisibilityChanged(_ key: RequestKey,
+                                            turn: ConversationTurn,
+                                            isVisible: Bool) {
+        guard permitsDelivery, !isReadOnly,
+              turn.kind == .reply, turn.author == .origin else { return }
+        var visible = visibleConversationReplyIDs[key, default: []]
+        if isVisible { visible.insert(turn.id) }
+        else { visible.remove(turn.id) }
+        visibleConversationReplyIDs[key] = visible
+        guard let thread = conversationThreads[key], !visible.isEmpty,
+              let target = thread.turns.enumerated().compactMap({ index, candidate -> ConversationReadTarget? in
+                  guard visible.contains(candidate.id), candidate.kind == .reply,
+                        candidate.author == .origin else { return nil }
+                  return ConversationReadTarget(turnID: candidate.id,
+                      sequence: candidate.conversationSequence ?? UInt64(index + 1))
+              }).max(by: { $0.sequence < $1.sequence }) else {
+            cancelConversationReadMark(for: key)
             return
         }
-        if let currentRevision = conversationProjectionRevision,
-           currentRevision > update.revision { return }
-
-        let canSkipObservedRefresh = update.didCommit &&
-            update.previousRevision == presentation.revision &&
-            conversationProjectionRevision == update.previousRevision &&
-            observation != nil
-        if conversationThreads[readKey.request] != update.thread {
-            conversationThreads[readKey.request] = update.thread
-            reconcileReplyItemArea(for: readKey.request)
-        }
-        if conversationProjectionRevision == update.previousRevision {
-            conversationProjectionRevision = update.revision
-        }
-        if canSkipObservedRefresh {
-            locallyReconciledConversationReadRevisions.insert(update.revision)
-        }
-        if permitsDelivery, update.pendingPosition != nil {
-            let expected = profileContext
-            Task {
-                await NativeRelayLifecycle.shared.sendPendingConversationReadPositions(expected: expected)
-            }
+        pendingConversationReadTasks[key]?.cancel()
+        let generation = UUID()
+        pendingConversationReadGenerations[key] = generation
+        pendingConversationReadTasks[key] = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(500)) }
+            catch { return }
+            guard let self,
+                  self.pendingConversationReadGenerations[key] == generation,
+                  self.visibleConversationReplyIDs[key]?.contains(target.turnID) == true else { return }
+            self.pendingConversationReadTasks[key] = nil
+            self.pendingConversationReadGenerations[key] = nil
+            await NativeRelayLifecycle.shared.reportConversationReadPosition(
+                key, through: target.turnID, expected: self.profileContext)
         }
     }
 
-    func historicalAnswerDraft(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
-        do { return try port.inspectAnswerDraft(context: port.context, request: key, revision: revision) }
+    func cancelConversationReadMark(for key: RequestKey) {
+        pendingConversationReadTasks.removeValue(forKey: key)?.cancel()
+        pendingConversationReadGenerations.removeValue(forKey: key)
+        visibleConversationReplyIDs.removeValue(forKey: key)
+    }
+
+    func historicalAnswerDraft(for key: RequestKey, revision: UInt64) async -> PresentedRequest? {
+        do { return try await port.inspectAnswerDraft(context: port.context, request: key, revision: revision) }
         catch {
             diagnose(.localStore, .draftLoad,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
@@ -1729,11 +2088,27 @@ final class LivePresentationStore {
                                     revision: UInt64? = nil) async throws -> URL {
         guard let files = conversationFiles else { throw AttentionStoreError.fixtureOnlyOperation }
         do {
-            if let cached = try files.cachedPreview(for: file) { return cached }
-            guard permitsDelivery, !isReadOnly else { throw AttentionStoreError.fixtureOnlyOperation }
-            let destination = try files.previewDestination(for: file)
-            try await NativeRelayLifecycle.shared.fetchConversationFile(file, to: destination, expected: profileContext)
-            try files.verify(destination, for: file)
+            if let cached = try await Task.detached(priority: .utility, operation: {
+                try files.cachedPreview(for: file)
+            }).value { return cached }
+
+            let destination = try await Task.detached(priority: .utility, operation: {
+                try files.previewDestination(for: file)
+            }).value
+            switch file.content {
+            case .inline:
+                try await Task.detached(priority: .utility, operation: {
+                    try files.writeInlinePreview(of: file, to: destination)
+                }).value
+            case .uploaded:
+                guard permitsDelivery, !isReadOnly else { throw AttentionStoreError.fixtureOnlyOperation }
+                try await NativeRelayLifecycle.shared.fetchConversationFile(file, to: destination, expected: profileContext)
+                try await Task.detached(priority: .utility, operation: {
+                    try files.verify(destination, for: file)
+                }).value
+            case .localFile:
+                throw ConversationError.fileMismatch
+            }
             return destination
         } catch {
             diagnose(.fileAccess, .filePreview,
@@ -1744,8 +2119,35 @@ final class LivePresentationStore {
     }
 
     func hasCachedConversationPreview(_ file: ConversationFile) -> Bool {
-        guard let conversationFiles else { return false }
-        return (try? conversationFiles.cachedPreview(for: file)) != nil
+        if case .inline = file.content { return true }
+        return cachedConversationPreviewAvailability[Self.conversationPreviewKey(file)] == true
+    }
+
+    func removeTemporaryConversationPreview(at url: URL) {
+        guard let conversationFiles else { return }
+        Task.detached(priority: .utility) {
+            conversationFiles.removeTemporaryPreview(at: url)
+        }
+    }
+
+    func checkCachedConversationPreviews(_ files: [ConversationFile]) {
+        guard let conversationFiles else { return }
+        let pending = files.filter { checkedConversationPreviewKeys.insert(Self.conversationPreviewKey($0)).inserted }
+        guard !pending.isEmpty else { return }
+        let keys = Dictionary(uniqueKeysWithValues: pending.map { (Self.conversationPreviewKey($0), $0) })
+        Task.detached(priority: .utility) { [weak self] in
+            let availability = keys.mapValues { file in
+                (try? conversationFiles.cachedPreview(for: file)) != nil
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.cachedConversationPreviewAvailability.merge(availability) { _, updated in updated }
+            }
+        }
+    }
+
+    private nonisolated static func conversationPreviewKey(_ file: ConversationFile) -> String {
+        file.id.rawValue + ":" + file.sha256.rawValue
     }
 
     func reportConversationImportError(_ error: Error, for key: RequestKey, revision: UInt64) {
@@ -1759,6 +2161,51 @@ final class LivePresentationStore {
         conversationThreads[key]?.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
     }
 
+    func noteConversationDraftEdit(_ binding: ConversationBinding) {
+        editedConversationDrafts.insert(binding)
+    }
+
+    func loadPersistedConversationDraft(for binding: ConversationBinding) async {
+        guard permitsDelivery, !isReadOnly,
+              loadedConversationDrafts.insert(binding).inserted else { return }
+        let address = ComposerDraftAddress(identity: profileContext.identity,
+            request: binding.request, revision: binding.revision, kind: .conversation)
+        guard let persisted = try? await composerDraftPersistence.load(ConversationDraft.self, at: address) else { return }
+        guard persisted.binding == binding,
+              !editedConversationDrafts.contains(binding),
+              conversationThreads[binding.request] != nil else { return }
+        let current = conversationDraft(for: binding.request, revision: binding.revision)
+        guard current.text.rawValue.isEmpty, current.files.isEmpty,
+              current.operationID == nil, current.failure == nil else { return }
+        do {
+            try await port.saveConversationDraft(persisted, context: port.context)
+            try await refreshFromDurableStore()
+        } catch {
+            diagnose(.localStore, .draftSave, .failed, error: error,
+                     request: binding.request, revision: binding.revision)
+        }
+    }
+
+    private func persistConversationDraft(_ draft: ConversationDraft) {
+        guard permitsDelivery, !isReadOnly else { return }
+        let binding = draft.binding
+        let address = ComposerDraftAddress(identity: profileContext.identity,
+            request: binding.request, revision: binding.revision, kind: .conversation)
+        let persistence = composerDraftPersistence
+        Task { [weak self, persistence] in
+            do {
+                try await persistence.scheduleSave(draft, at: address)
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.conversationError = "Your latest discussion edit could not be saved. It remains in this session; nothing was sent."
+                    self.diagnose(.localStore, .draftSave, .failed, error: error,
+                                  request: binding.request, revision: binding.revision)
+                }
+            }
+        }
+    }
+
     func unsavedConversationText(for binding: ConversationBinding) -> String? {
         pendingConversationTextByBinding[binding]
     }
@@ -1767,33 +2214,19 @@ final class LivePresentationStore {
     func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
                             files: [ConversationFile]? = nil) -> Bool {
         guard !isReadOnly else { return false }
-        do {
-            if let text, files == nil {
-                guard var thread = conversationThreads[key] else { throw ConversationError.missingRequest }
-                let binding = ConversationBinding(request: key, revision: revision)
-                let updated = try port.updateConversationDraftText(ExactText(text), for: binding,
-                    context: port.context)
-                thread.drafts[revision] = updated
-                conversationThreads[key] = thread
-                pendingConversationTextByBinding.removeValue(forKey: binding)
-                conversationError = nil
-                return true
-            }
-            var draft = conversationDraft(for: key, revision: revision)
-            if let text { draft.text = ExactText(text) }
-            if let files { draft.files = files }
-            draft.disposition = .saved
-            try port.saveConversationDraft(draft, context: port.context)
-            try refreshFromDurableStore()
-            conversationError = nil
-            return true
-        } catch {
-            if let text { pendingConversationTextByBinding[ConversationBinding(request: key, revision: revision)] = text }
-            conversationError = "Your latest discussion edit could not be saved. It remains in this session; the earlier saved draft is unchanged."
-            diagnose(.localStore, .draftSave, .failed, error: error,
-                     request: key, revision: revision)
-            return false
-        }
+        let binding = ConversationBinding(request: key, revision: revision)
+        editedConversationDrafts.insert(binding)
+        guard var thread = conversationThreads[key] else { return false }
+        var draft = thread.drafts[revision] ?? ConversationDraft(binding: binding)
+        if let text { draft.text = ExactText(text) }
+        if let files { draft.files = files }
+        draft.disposition = .saved
+        thread.drafts[revision] = draft
+        conversationThreads[key] = thread
+        pendingConversationTextByBinding.removeValue(forKey: binding)
+        persistConversationDraft(draft)
+        conversationError = nil
+        return true
     }
 
     /// The ordinary inbox calls this only for explicit selection/back navigation.
@@ -1801,177 +2234,93 @@ final class LivePresentationStore {
     func navigateMessage(from previous: RequestKey?, to next: RequestKey?) {
         guard previous != next else { return }
         if let previous { flushPendingDraft(for: previous) }
-        if !isReadOnly, let previous {
-            do {
-                let pending = try port.abandonConversationUploads(for: previous, context: port.context)
-                try refreshFromDurableStore()
-                UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) pending=\(pending.count)")
-                if !pending.isEmpty {
-                    if permitsDelivery { Task { await retryUploadCleanup(for: previous) } }
-                    else {
-                        try port.markConversationCleanupUnknown(for: previous,
-                            reason: ExactText("Local example: no service is contacted"), context: port.context)
-                        try refreshFromDurableStore()
-                    }
-                }
-            } catch {
-                UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) error=\(error)")
-                conversationError = "Upload cleanup could not be saved. Return to this message and retry; deletion is not confirmed."
-                diagnose(.upload, .uploadCleanup,
-                         NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
-                         request: previous)
-            }
-        } else {
-            UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) readOnly=\(self.isReadOnly)")
+        if !isReadOnly, let previous, let drafts = conversationThreads[previous]?.drafts.values {
+            for draft in drafts { persistConversationDraft(draft) }
         }
         selectRequest(next)
-    }
-
-    func hasPendingUploadCleanup(for key: RequestKey, revision: UInt64) -> Bool {
-        (conversationThreads[key]?.uploadCleanups ?? [:]).values.contains {
-            guard $0.binding.revision == revision else { return false }
-            if case .acknowledged = $0.outcome { return false }; return true
-        }
-    }
-
-    func hasAbandonedDiscussion(for key: RequestKey, revision: UInt64) -> Bool {
-        let draft = conversationDraft(for: key, revision: revision)
-        let operation: UUID
-        switch draft.disposition {
-        case let .submitting(id), let .outcomeUnknown(id): operation = id
-        default: return false
-        }
-        return conversationThreads[key]?.uploadGroups?[operation]?.cleanupID != nil
     }
 
     func refreshDiscussionHistory() async {
         guard permitsDelivery else { return }
         _ = await NativeRelayLifecycle.shared.refreshFromTrustedRelay()
-        do { try refreshFromDurableStore() }
+        do { try await refreshFromDurableStore() }
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
-    }
-
-    @discardableResult
-    func fetchNextInboxPage() async -> Bool {
-        guard permitsDelivery, !isReadOnly else { return false }
-        let fetched = await NativeRelayLifecycle.shared.fetchNextInboxPage()
-        if fetched {
-            do { try refreshFromDurableStore() }
-            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
-        }
-        return fetched
-    }
-
-    func inboxPageAvailability() -> InboxPageAvailability {
-        guard let checkpoint = try? attentionStore.snapshot(context: profileContext).inboxCheckpoint,
-              checkpoint.checkpointAccepted, checkpoint.hasInitialPage else { return .unknown }
-        return checkpoint.nextCursor == nil ? .exhausted : .more
-    }
-
-    func uploadNeedsReselection(_ file: ConversationFile, for key: RequestKey, revision: UInt64) -> Bool {
-        (conversationThreads[key]?.uploadGroups ?? [:]).values.contains {
-            $0.binding.revision == revision && $0.cleanupID != nil && $0.originals.contains(where: { $0.id == file.id })
-        }
-    }
-
-    func hasUnreadyUploadReference(for key: RequestKey, revision: UInt64) -> Bool {
-        conversationDraft(for: key, revision: revision).files.contains {
-            uploadNeedsReselection($0, for: key, revision: revision)
-        }
-    }
-
-    func uploadHistoryNeedsReconciliation(for key: RequestKey, revision: UInt64) -> Bool {
-        hasUnreadyUploadReference(for: key, revision: revision) &&
-        (conversationThreads[key]?.uploadCleanups ?? [:]).values.contains {
-            guard $0.binding.revision == revision, case let .acknowledged(result) = $0.outcome else { return false }
-            return result.state == .committed
-        }
-    }
-
-    func retryUploadCleanup(for key: RequestKey) async {
-        guard permitsDelivery, retryingCleanupRequests.insert(key).inserted else { return }
-        defer { retryingCleanupRequests.remove(key) }
-        do {
-            try await NativeRelayLifecycle.shared.discardAbandonedUploads(for: key, expected: profileContext)
-        } catch {
-            diagnose(.upload, .uploadCleanup,
-                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error, request: key)
-            do {
-                try port.markConversationCleanupUnknown(for: key,
-                    reason: ExactText("Cleanup not confirmed: \(error)"), context: port.context)
-            } catch {
-                diagnose(.localStore, .draftSave, .failed, error: error, request: key)
-            }
-        }
-        do { try refreshFromDurableStore() }
-        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
     }
 
     func sendDiscussion(for key: RequestKey, revision: UInt64,
                         onResult: ((Bool) -> Void)? = nil) {
         guard !isReadOnly, conversationUnavailableMessage == nil else { return }
-        do {
-            let binding = ConversationBinding(request: key, revision: revision)
-            guard !hasPendingUploadCleanup(for: key, revision: revision),
-                  !hasUnreadyUploadReference(for: key, revision: revision) else {
-                conversationError = "Upload files are not ready to resend. Reconcile cleanup/history or remove and reselect them; your text draft is retained."
-                return
+        let binding = ConversationBinding(request: key, revision: revision)
+        if permitsDelivery {
+            guard !isSendingDiscussion, let files = conversationFiles else { return }
+            isSendingDiscussion = true
+            conversationError = nil
+            let address = ComposerDraftAddress(identity: profileContext.identity,
+                request: key, revision: revision, kind: .conversation)
+            let persistence = composerDraftPersistence
+            let persistDraft: @Sendable (ConversationDraft?) async throws -> Void = { draft in
+                if let draft { try await persistence.flush(draft, at: address) }
+                else { try await persistence.remove(at: address) }
             }
-            if permitsDelivery {
-                guard !isSendingDiscussion, let files = conversationFiles else { return }
-                isSendingDiscussion = true
-                conversationError = nil
-                Task { [weak self] in
-                    guard let self else { return }
-                    defer { isSendingDiscussion = false }
-                    do {
-                        let result = try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: profileContext) { file in
-                            try files.fileURL(for: file)
-                        }
-                        do { try refreshFromDurableStore() }
-                        catch {
-                            diagnose(.localStore, .projectionRefresh, .failed, error: error,
-                                     request: key, revision: revision)
-                        }
-                        switch result {
-                        case .accepted:
-                            conversationError = nil
-                            onResult?(true)
-                        case let .rejected(reason):
-                            conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
-                            onResult?(false)
-                        case .unresolved:
-                            conversationError = "Submission unconfirmed. Retry uses the same saved operation."
-                            onResult?(false)
-                        }
-                    } catch {
-                        diagnose(.conversation, .discussionSubmission,
-                                 NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
-                                 operationID: discussionOperationID(for: key, revision: revision),
-                                 request: key, revision: revision, receiptState: .unknown)
-                        do { try refreshFromDurableStore() }
-                        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error,
-                                         request: key, revision: revision) }
-                        if case InstallationTransportError.conversationsUnavailable = error {
-                            conversationError = nil // The conversation surface shows the capability message.
-                        } else if (error as? ConversationError) == .emptyDraft {
-                            conversationError = "Add a message before sending these files. Your draft is retained."
-                        } else {
-                            conversationError = "Discussion could not be confirmed (\(error)). Your saved text and files are retained."
-                        }
+            Task { [weak self] in
+                guard let self else { return }
+                defer { isSendingDiscussion = false }
+                do {
+                    let result = try await NativeRelayLifecycle.shared.submitDiscussion(
+                        binding, expected: profileContext,
+                        retainedFile: { file in try files.fileURL(for: file) },
+                        persistDraft: persistDraft)
+                    do { try await refreshFromDurableStore() }
+                    catch {
+                        diagnose(.localStore, .projectionRefresh, .failed, error: error,
+                                 request: key, revision: revision)
+                    }
+                    switch result {
+                    case .accepted:
+                        conversationError = nil
+                        onResult?(true)
+                    case let .rejected(reason):
+                        conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
+                        onResult?(false)
+                    case .unresolved, .operationConflict:
+                        conversationError = nil
+                        onResult?(false)
+                    }
+                } catch {
+                    diagnose(.conversation, .discussionSubmission,
+                             NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
+                             operationID: discussionOperationID(for: key, revision: revision),
+                             request: key, revision: revision, receiptState: .unknown)
+                    do { try await refreshFromDurableStore() }
+                    catch { diagnose(.localStore, .projectionRefresh, .failed, error: error,
+                                     request: key, revision: revision) }
+                    if case InstallationTransportError.conversationsUnavailable = error {
+                        conversationError = nil // The conversation surface shows the capability message.
+                    } else if (error as? ConversationError) == .emptyDraft {
+                        conversationError = "Add a message before sending these files. Your draft is retained."
+                    } else if conversationDraft(for: key, revision: revision).failure != nil {
+                        conversationError = nil
+                    } else {
+                        conversationError = "Discussion could not be confirmed (\(error)). Your saved text and files are retained."
                     }
                 }
-                return
             }
-            try port.appendFixtureDiscussion(binding, context: port.context)
-            try refreshFromDurableStore()
-            conversationError = nil
-            onResult?(true)
-        } catch {
-            conversationError = "Not delivered: the discussion could not be submitted. Your draft is retained."
-            diagnose(.conversation, .discussionSubmission, .failed, error: error,
-                     operationID: discussionOperationID(for: key, revision: revision),
-                     request: key, revision: revision, receiptState: .unknown)
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await port.appendFixtureDiscussion(binding, context: port.context)
+                try await refreshFromDurableStore()
+                conversationError = nil
+                onResult?(true)
+            } catch {
+                conversationError = "Not delivered: the discussion could not be submitted. Your draft is retained."
+                diagnose(.conversation, .discussionSubmission, .failed, error: error,
+                         operationID: discussionOperationID(for: key, revision: revision),
+                         request: key, revision: revision, receiptState: .unknown)
+                onResult?(false)
+            }
         }
     }
 
@@ -2273,26 +2622,17 @@ final class LivePresentationStore {
         presentation.requests.first { $0.key == key }
     }
 
-    /// Records only an explicit detail-content navigation. The durable
-    /// operation is stored before any best-effort relay send; a reconnect will
-    /// retry it with the same message identity and revision.
+    /// Reports only this explicit detail-content navigation. The operation is
+    /// attempted once on the current relay connection and is never retained.
     func reportMessageContentOpened(_ request: PresentedRequest) {
         guard permitsDelivery, !isReadOnly, !isLocalExample,
               request.requestRevision > 0 else { return }
-        do {
-            _ = try attentionStore.enqueueMessageOpen(request.key,
-                                                       requestRevision: request.requestRevision,
-                                                       context: profileContext)
-        } catch {
-            // Opening remains available when the local report cannot be saved.
-            // Without a durable outbox entry, no relay report is attempted.
-            diagnostics?.record(area: .localStore, phase: .messageOpen, transition: .failed,
-                                error: error, request: request.key,
-                                requestRevision: request.requestRevision,
-                                receiptState: .unknown)
-            return
+        let operation = PendingMessageOpen(requestKey: request.key,
+            requestRevision: request.requestRevision)
+        Task {
+            _ = await NativeRelayLifecycle.shared.reportMessageOpened(operation,
+                expected: profileContext)
         }
-        Task { await NativeRelayLifecycle.shared.sendPendingMessageOpens() }
     }
 
     func failedResponseWarning(for key: RequestKey,
@@ -2347,8 +2687,20 @@ final class LivePresentationStore {
     private func failedResponseWarning(for request: PresentedRequest) -> FailedResponseWarning? {
         guard request.informationalSeenStatus == nil,
               request.staleAnswerRevision == nil else { return nil }
-        if let warning = failedResponseWarnings[request.key],
+        if let session = replyEditorSessions[request.key],
+           session.requestRevision == request.requestRevision,
+           let carriedOver = session.deliveryDraft.carriedOverSend {
+            return carriedOverWarning(carriedOver, for: request)
+        }
+        if var warning = failedResponseWarnings[request.key],
            warning.requestRevision == request.requestRevision {
+            if let session = replyEditorSessions[request.key], !warning.isCarriedOver {
+                warning.answerDraft = session.draft
+                warning.retryOperationID = session.deliveryDraft.operationID
+                if session.deliveryDraft.earlierVersionMayHaveBeenSent {
+                    warning.summaryOverride = "This response or an earlier version may have been sent."
+                }
+            }
             return warning
         }
         guard request.answerNotDelivered || request.noCommentUnavailable else { return nil }
@@ -2356,8 +2708,30 @@ final class LivePresentationStore {
             retryOperationID: nil, diagnosticEvents: diagnostics?.events ?? [])
     }
 
+    private func carriedOverWarning(_ carriedOver: CarriedOverAnswerSend,
+                                    for request: PresentedRequest) -> FailedResponseWarning {
+        let text = carriedOver.content.noCommentSelected
+            ? "No comment"
+            : AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
+                submittedAnswer: carriedOver.content, projection: request.projection)
+                ?? carriedOver.content.inputs.values
+                    .compactMap { $0.text?.rawValue }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+        return FailedResponseWarning(
+            requestRevision: request.requestRevision,
+            failedOperationID: carriedOver.failureOperationID ?? carriedOver.operationID,
+            answerKind: carriedOver.content.noCommentSelected ? .noComment : .answer,
+            submittedInputs: [], answerDraft: carriedOver.content,
+            detail: LocalizedStringResource(stringLiteral: text),
+            retryOperationID: carriedOver.operationID,
+            summaryOverride: carriedOver.failure.summary,
+            isCarriedOver: true)
+    }
+
     func canRetryFailedResponse(for key: RequestKey) -> Bool {
-        guard permitsDelivery, !isReadOnly,
+        guard permitsDelivery, !isReadOnly, isOnline,
+              !answerSendInFlight.contains(key),
               let request = request(for: key),
               let warning = failedResponseWarning(for: key, revision: request.requestRevision),
               warning.canRetry,
@@ -2366,43 +2740,48 @@ final class LivePresentationStore {
               request.staleAnswerRevision == nil,
               !isRetracted(key) else { return false }
         if let receipt = request.intentReceipt {
-            return warning.retryOperationID == receipt.opID &&
-                Self.matches(receipt: receipt, warning: warning)
+            guard warning.failedOperationID == receipt.opID else { return false }
+            return warning.retryOperationID == nil || Self.matches(receipt: receipt, warning: warning)
         }
-        return warning.retryOperationID == nil
+        return true
     }
 
-    /// Reuses the exact typed response retained by the failed durable submission.
-    /// If that retry is already pending, only the same operation is replayed.
+    /// Reuses the composer operation id and sends once for this explicit Retry tap.
     @discardableResult
-    func retryFailedResponse(for key: RequestKey) -> Bool {
+    func retryFailedResponse(for key: RequestKey) async -> Bool {
         guard canRetryFailedResponse(for: key),
               let request = request(for: key),
               let warning = failedResponseWarning(for: key, revision: request.requestRevision) else {
             return false
         }
-        if request.intentReceipt != nil {
-            retryPendingDelivery()
-            return true
-        }
         guard let answerDraft = warning.answerDraft else { return false }
+        let session = replyEditorSessions[key]
+        if warning.isCarriedOver {
+            return await submitAnswerFromUser(key, answerDraft: answerDraft,
+                explicitCompatibilityAction: nil,
+                requestRevision: warning.requestRevision,
+                session: session, carriedOverRetry: true)
+        }
+        if session != nil {
+            return await submitFromUser(key, answerDraft: answerDraft,
+                requestRevision: warning.requestRevision, session: session)
+        }
+        let address = ComposerDraftAddress(identity: profileContext.identity,
+            request: key, revision: warning.requestRevision, kind: .answer)
         do {
-            let receipt = try submit(key, answerDraft: answerDraft,
-                                    requestRevision: warning.requestRevision)
-            if var current = failedResponseWarnings[key],
-               current.failedOperationID == warning.failedOperationID {
-                current.retryOperationID = receipt.opID
-                failedResponseWarnings[key] = current
-                failedResponseWarningGeneration &+= 1
-            }
-            retryPendingDelivery()
-            return true
+            var saved = try await composerDraftPersistence.load(AnswerComposerDraft.self,
+                at: address) ?? AnswerComposerDraft(content: answerDraft)
+            if saved.operationID == nil { saved.operationID = warning.retryOperationID }
+            saved.content = answerDraft
+            try await composerDraftPersistence.flush(saved, at: address)
+            return await submitFromUser(key, answerDraft: answerDraft,
+                requestRevision: warning.requestRevision)
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error,
                      request: key, revision: warning.requestRevision,
                      receiptState: .unknown)
             actionErrorRequest = key
-            actionError = "The saved response could not be retried. Review the latest message and try again."
+            actionError = "The response was not sent. Your draft is kept."
             return false
         }
     }
@@ -2426,13 +2805,78 @@ final class LivePresentationStore {
            session.requestRevision == request.requestRevision {
             return session
         }
-        let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
+        let session = ReplyEditorDraftSession(request: request,
+            canSubmitFromSnapshot: request.lifecycleStatus == .open && request.intentReceipt == nil,
+            identity: permitsDelivery ? profileContext.identity : nil,
+            persistence: permitsDelivery ? ComposerDraftPersistence.shared : nil,
+            onDraftLoaded: { [weak self] saved in
+                guard let self else { return }
+                if let failure = saved.failure {
+                    self.restoreAnswerComposerFailure(for: request, draft: saved, failure: failure)
+                } else if let carriedOver = saved.carriedOverSend {
+                    self.failedResponseWarnings[request.key] = self.carriedOverWarning(
+                        carriedOver, for: request)
+                    self.failedResponseWarningGeneration &+= 1
+                }
+            })
         replyEditorSessions[request.key] = session
+        Task { await session.loadPersistedDraft() }
         return session
     }
 
+    private func restoreAnswerComposerFailure(for request: PresentedRequest,
+                                             draft: AnswerComposerDraft,
+                                             failure: ComposerSendFailure) {
+        if let carriedOver = draft.carriedOverSend {
+            failedResponseWarnings[request.key] = carriedOverWarning(carriedOver, for: request)
+            failedResponseWarningGeneration &+= 1
+            return
+        }
+        guard let operationID = draft.failureOperationID ?? draft.operationID,
+              request.informationalSeenStatus == nil else { return }
+        setAnswerFailure(for: request.key, attemptID: operationID,
+            revision: request.requestRevision, draft: draft.content,
+            summary: failure.summary, detail: failure.detail,
+            retryOperationID: draft.operationID)
+    }
+
+    func refreshDraftStateAfterServerCatchUp() async {
+        guard permitsDelivery, !isReadOnly else { return }
+        do { try await refreshFromDurableStore() }
+        catch {
+            diagnose(.localStore, .projectionRefresh, .failed, error: error)
+            return
+        }
+        do {
+            let snapshot = try await attentionStore.snapshot(context: profileContext)
+            guard snapshot.replayBarrier == nil, snapshot.repairIssues.isEmpty else { return }
+            try await composerDraftPersistence.pruneDrafts(for: profileContext.identity,
+                keeping: Set(snapshot.requests.keys))
+        } catch {
+            diagnose(.localStore, .draftLoad, .failed, error: error)
+        }
+    }
+
+    private nonisolated static func answerDraftFailure(for draft: AnswerComposerDraft) -> ComposerSendFailure? {
+        if draft.earlierVersionMayHaveBeenSent {
+            return ComposerSendFailure(outcome: .unconfirmed,
+                summary: "This response or an earlier version may have been sent.",
+                detail: "A prior send attempt did not receive a correlated server reply.")
+        }
+        if draft.currentAttemptUnsettled {
+            return ComposerSendFailure(outcome: .unconfirmed,
+                summary: "Confirmation was not received. The response may not have gone through.",
+                detail: "The app stopped before a correlated server reply was saved.")
+        }
+        return nil
+    }
+
     func discardReplyEditorSession(for key: RequestKey) {
-        replyEditorSessions.removeValue(forKey: key)
+        replyEditorSessions.removeValue(forKey: key)?.flushPendingPersistence()
+    }
+
+    func flushPendingComposerDrafts() {
+        for session in replyEditorSessions.values { session.flushPendingPersistence() }
     }
 
     func selectRequest(_ key: RequestKey?) {
@@ -2553,11 +2997,13 @@ final class LivePresentationStore {
     @discardableResult
     func submit(_ key: RequestKey,
                 explicitCompatibilityAction: ExactText? = nil,
-                requestRevision: UInt64? = nil) throws -> IntentReceipt {
-        try submit(key,
+                requestRevision: UInt64? = nil,
+                operationID: UUID? = nil) async throws -> IntentReceipt {
+        try await submit(key,
                    answerDraftOverride: nil,
                    explicitCompatibilityAction: explicitCompatibilityAction,
-                   requestRevision: requestRevision)
+                   requestRevision: requestRevision,
+                   operationID: operationID)
     }
 
     /// Submits the Reply box's in-memory contents without first saving them as
@@ -2566,20 +3012,29 @@ final class LivePresentationStore {
     @discardableResult
     func submit(_ key: RequestKey,
                 answerDraft: RequestDraft,
-                requestRevision: UInt64) throws -> IntentReceipt {
-        try submit(key,
+                requestRevision: UInt64,
+                operationID: UUID? = nil) async throws -> IntentReceipt {
+        try await submit(key,
                    answerDraftOverride: answerDraft,
                    explicitCompatibilityAction: nil,
-                   requestRevision: requestRevision)
+                   requestRevision: requestRevision,
+                   operationID: operationID)
     }
 
     private func submit(_ key: RequestKey,
                         answerDraftOverride: RequestDraft?,
                         explicitCompatibilityAction: ExactText?,
-                        requestRevision: UInt64?) throws -> IntentReceipt {
+                        requestRevision: UInt64?,
+                        operationID: UUID?) async throws -> IntentReceipt {
         guard !isReadOnly else { throw LiveReplyError.disconnected }
         guard permitsDelivery else { throw LiveReplyError.localExample }
-        let inspected = try inspectedRequest(key, revision: requestRevision)
+        var inspected = try inspectedRequest(key, revision: requestRevision)
+        if let existing = inspected.intentReceipt, let operationID, existing.opID != operationID {
+            try await attentionStore.releaseUncertainIntentForNewAttempt(key, retaining: operationID,
+                context: profileContext)
+            try await refreshFromDurableStore()
+            inspected = try inspectedRequest(key, revision: requestRevision)
+        }
         let revision = inspected.requestRevision
         let bufferKey = DraftBufferKey(request: key, revision: revision)
         let answerDraft = answerDraftOverride ?? pendingDrafts[bufferKey] ?? inspected.draft
@@ -2590,11 +3045,12 @@ final class LivePresentationStore {
         }
         if answerDraft.noCommentSelected {
             if answerDraftOverride == nil {
-                try persistPendingDraft(for: bufferKey)
+                try await persistPendingDraft(for: bufferKey)
             }
-            return try submitNoComment(key,
+            return try await submitNoComment(key,
                                        request: inspected,
-                                       discardDraft: answerDraftOverride != nil)
+                                       discardDraft: answerDraftOverride != nil,
+                                       operationID: operationID)
         }
 
         let records = try typedInputs(for: inspected, draft: answerDraft,
@@ -2612,184 +3068,419 @@ final class LivePresentationStore {
         guard hasAnswerContent else { throw LiveReplyError.incomplete }
 
         if answerDraftOverride == nil {
-            try persistPendingDraft(for: bufferKey)
+            try await persistPendingDraft(for: bufferKey)
             let request = try inspectedRequest(key, revision: revision)
             guard !isRetracted(bufferKey.request), request.lifecycleStatus == .open,
                   request.intentReceipt == nil else {
                 throw LiveReplyError.notOpen
             }
         }
-        let receipt = try port.submit(SubmitIntent(context: port.context,
+        let receipt = try await port.submit(SubmitIntent(context: port.context,
                                                    selector: selector,
                                                    intentID: UUID(),
+                                                   operationID: operationID,
                                                    inputs: records,
                                                    persistAnswerDraft: answerDraftOverride == nil))
-        do { try refreshFromDurableStore() }
+        do { try await refreshFromDurableStore() }
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         clearActionError()
         return receipt
     }
 
-    /// Returns whether an intent for this request now exists, so callers can
-    /// avoid treating a validation refusal as a submission.
+    /// The user action owns one draft write and one awaited relay send.
     @discardableResult
     func submitFromUser(_ key: RequestKey,
                         explicitCompatibilityAction: ExactText? = nil,
-                        requestRevision: UInt64? = nil) -> Bool {
-        guard permitsDelivery, !isReadOnly else { return false }
-        let selectedNoComment: Bool
-        guard let request = try? inspectedRequest(key, revision: requestRevision) else { return false }
+                        requestRevision: UInt64? = nil,
+                        session: ReplyEditorDraftSession? = nil) async -> Bool {
+        guard permitsDelivery, !isReadOnly,
+              let request = try? inspectedRequest(key, revision: requestRevision) else { return false }
         let bufferKey = DraftBufferKey(request: key, revision: request.requestRevision)
-        selectedNoComment = (pendingDrafts[bufferKey] ?? request.draft).noCommentSelected
-        if selectedNoComment {
-            return submitNoCommentFromUser(key, requestRevision: requestRevision)
+        var answerDraft = session?.draft ?? pendingDrafts[bufferKey] ?? request.draft
+        if let action = explicitCompatibilityAction {
+            answerDraft.compatibility.selectedActionID = action
         }
-        return submitAnswerFromUser(key,
-                                    answerDraftOverride: nil,
-                                    explicitCompatibilityAction: explicitCompatibilityAction,
-                                    requestRevision: requestRevision)
+        return await submitAnswerFromUser(key, answerDraft: answerDraft,
+            explicitCompatibilityAction: explicitCompatibilityAction,
+            requestRevision: request.requestRevision, session: session)
     }
 
-    /// Commits a Reply box session directly, without reading or saving the
-    /// shared draft buffer first.
     @discardableResult
     func submitFromUser(_ key: RequestKey,
                         answerDraft: RequestDraft,
-                        requestRevision: UInt64) -> Bool {
+                        requestRevision: UInt64,
+                        session: ReplyEditorDraftSession? = nil) async -> Bool {
         guard permitsDelivery, !isReadOnly else { return false }
-        if answerDraft.noCommentSelected {
-            return submitNoCommentFromUser(key, requestRevision: requestRevision,
-                                           selectionIsLocal: true)
-        }
-        return submitAnswerFromUser(key,
-                                    answerDraftOverride: answerDraft,
-                                    explicitCompatibilityAction: nil,
-                                    requestRevision: requestRevision)
+        return await submitAnswerFromUser(key, answerDraft: answerDraft,
+            explicitCompatibilityAction: nil, requestRevision: requestRevision,
+            session: session)
     }
 
     private func submitAnswerFromUser(_ key: RequestKey,
-                                      answerDraftOverride: RequestDraft?,
+                                      answerDraft: RequestDraft,
                                       explicitCompatibilityAction: ExactText?,
-                                      requestRevision: UInt64?) -> Bool {
+                                      requestRevision: UInt64?,
+                                      session: ReplyEditorDraftSession?,
+                                      carriedOverRetry: Bool = false) async -> Bool {
+        guard let requestRevision,
+              answerSendInFlight.insert(key).inserted else { return false }
+        defer { answerSendInFlight.remove(key) }
+        let answerAddress = ComposerDraftAddress(identity: profileContext.identity,
+            request: key, revision: requestRevision, kind: .answer)
+        let attempt: PreparedAnswerAttempt
         do {
-            if let answerDraftOverride {
-                guard let requestRevision else { return false }
-                _ = try submit(key, answerDraft: answerDraftOverride,
-                               requestRevision: requestRevision)
+            if carriedOverRetry, let session {
+                attempt = try await session.prepareCarriedOverAttempt()
+            } else if carriedOverRetry {
+                var saved = try await composerDraftPersistence.load(AnswerComposerDraft.self,
+                    at: answerAddress) ?? AnswerComposerDraft(content: answerDraft)
+                guard var carriedOver = saved.carriedOverSend else { return false }
+                let operationID = carriedOver.operationID ?? UUID()
+                let wasUnsettled = carriedOver.currentAttemptUnsettled
+                let earlierVersionMayHaveBeenSent = carriedOver.earlierVersionMayHaveBeenSent
+                carriedOver.operationID = operationID
+                carriedOver.failureOperationID = operationID
+                carriedOver.currentAttemptUnsettled = true
+                carriedOver.failure = ComposerSendFailure(outcome: .unconfirmed,
+                    summary: "This response may not have gone through.",
+                    detail: carriedOver.failure.detail)
+                saved.carriedOverSend = carriedOver
+                try await composerDraftPersistence.flush(saved, at: answerAddress)
+                attempt = PreparedAnswerAttempt(operationID: operationID,
+                    requestRevision: requestRevision,
+                    draft: carriedOver.content, wasUnsettled: wasUnsettled,
+                    earlierVersionMayHaveBeenSent: earlierVersionMayHaveBeenSent)
+            } else if let session {
+                attempt = try await session.prepareAttempt()
             } else {
-                _ = try submit(key, explicitCompatibilityAction: explicitCompatibilityAction,
-                               requestRevision: requestRevision)
+                var saved = try await composerDraftPersistence.load(AnswerComposerDraft.self,
+                    at: answerAddress) ?? AnswerComposerDraft(content: answerDraft)
+                if saved.content != answerDraft {
+                    if saved.currentAttemptUnsettled { saved.earlierVersionMayHaveBeenSent = true }
+                    saved.currentAttemptUnsettled = false
+                    saved.operationID = nil
+                }
+                let wasUnsettled = saved.currentAttemptUnsettled
+                let operationID = saved.operationID ?? UUID()
+                saved.content = answerDraft
+                saved.operationID = operationID
+                saved.currentAttemptUnsettled = true
+                saved.failure = nil
+                saved.failureOperationID = nil
+                try await composerDraftPersistence.flush(saved, at: answerAddress)
+                attempt = PreparedAnswerAttempt(operationID: operationID,
+                    requestRevision: requestRevision, draft: answerDraft,
+                    wasUnsettled: wasUnsettled,
+                    earlierVersionMayHaveBeenSent: saved.earlierVersionMayHaveBeenSent)
             }
-            retryPendingDelivery()
-            return true
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error, request: key,
-                     receiptState: .unknown)
-            do { try refreshFromDurableStore() }
-            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
-            // A stale Send callback can arrive after the original intent or
-            // its receipt. Never mint another intent or contradict that fact.
-            let current: PresentedRequest?
-            do { current = try inspectedRequest(key) }
-            catch {
-                diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key)
-                current = nil
+                     revision: requestRevision, receiptState: .unknown)
+            if let session, !carriedOverRetry {
+                setAnswerFailure(for: key, attemptID: session.deliveryDraft.operationID,
+                    revision: requestRevision, draft: session.draft,
+                    summary: "The response was not sent. Your draft is kept.",
+                    detail: "The draft could not be saved before sending.", retryOperationID: session.deliveryDraft.operationID)
             }
-            if let current, current.intentReceipt != nil {
-                clearActionError()
-                return true
-            } else {
-                actionErrorRequest = key
-                if let current, current.lifecycleStatus != .open {
-                    actionError = "This request is no longer open for an answer."
-                } else if let requestRevision, let current,
-                          current.requestRevision != requestRevision {
-                    actionError = "This message changed. Review the latest version before answering."
-                } else if case .some(.incomplete) = error as? LiveReplyError {
-                    actionError = "Complete the response before sending your answer."
-                } else {
-                    // A thrown save/refresh is not proof of non-delivery.
-                    actionError = "Your answer could not be confirmed. Check its saved status before trying again."
-                }
-                return false
-            }
+            return false
         }
+
+        guard NativeRelayLifecycle.shared.isOnline(for: profileContext) else {
+            let outcome = ComposerDeliveryOutcome.notSent(
+                summary: attempt.mayHaveBeenSent
+                    ? "This attempt was not sent. An earlier version may have been sent."
+                    : "The response was not sent. Your draft is kept.",
+                detail: "The relay disconnected before the send frame was transmitted.",
+                operationConflict: false, correlated: false)
+            await finishAnswerAttempt(attempt, outcome: outcome, key: key,
+                                      address: answerAddress, session: session,
+                                      carriedOverRetry: carriedOverRetry)
+            return false
+        }
+
+        let stored = try? await attentionStore.snapshot(context: profileContext).intents.values.first {
+            $0.operationID == attempt.operationID
+        }
+        let currentRequest = try? inspectedRequest(key, revision: requestRevision)
+        let currentInputs = currentRequest.flatMap {
+            try? typedInputs(for: $0, draft: answerDraft,
+                             explicitCompatibilityAction: explicitCompatibilityAction)
+        }
+        if let stored, stored.requestKey != key || stored.requestRevision != attempt.requestRevision ||
+            (answerDraft.noCommentSelected ? !stored.isNoComment :
+                (stored.isNoComment || currentInputs.map { stored.typedInputs != $0 } ?? true)) {
+            let outcome = ComposerDeliveryOutcome.notSent(
+                summary: "The response was not sent. Your draft is kept.",
+                detail: "This operation id is already bound to another response.",
+                operationConflict: true, correlated: true)
+            await finishAnswerAttempt(attempt, outcome: outcome, key: key,
+                                      address: answerAddress, session: session,
+                                      carriedOverRetry: carriedOverRetry)
+            return false
+        }
+
+        do {
+            if stored == nil {
+                _ = try await submit(key, answerDraft: answerDraft,
+                    requestRevision: requestRevision, operationID: attempt.operationID)
+            }
+        } catch {
+            let outcome = ComposerDeliveryOutcome.notSent(
+                summary: "The response was not sent. Your draft is kept.",
+                detail: error.localizedDescription,
+                operationConflict: false, correlated: false)
+            await finishAnswerAttempt(attempt, outcome: outcome, key: key,
+                                      address: answerAddress, session: session,
+                                      carriedOverRetry: carriedOverRetry)
+            return false
+        }
+
+        let result = await NativeRelayLifecycle.shared.sendOriginalOperation(
+            operationID: attempt.operationID, expected: profileContext)
+        let outcome: ComposerDeliveryOutcome
+        switch result {
+        case .accepted:
+            outcome = .confirmed
+        case .operationConflict:
+            outcome = .notSent(summary: !carriedOverRetry && attempt.mayHaveBeenSent
+                ? "The response was not sent. An earlier version may have been sent."
+                : "The response was not sent.",
+                detail: "The server rejected this operation because its id was already used for different content.",
+                operationConflict: true, correlated: true)
+        case .notTransmitted:
+            outcome = .notSent(summary: attempt.mayHaveBeenSent
+                ? "This attempt was not sent. An earlier version may have been sent."
+                : "The response was not sent. Your draft is kept.",
+                detail: "The relay connection failed before the send frame was transmitted.",
+                operationConflict: false, correlated: false)
+        case .refusedByRetraction:
+            outcome = .notSent(summary: "The response was not sent.",
+                detail: "The request was retracted before the server accepted this answer.",
+                operationConflict: false, correlated: true)
+        case .staleRevision:
+            outcome = .notSent(summary: "The response was not sent.",
+                detail: "The request changed before the server accepted this answer.",
+                operationConflict: false, correlated: true)
+        case .unsupported:
+            outcome = .notSent(summary: "The response was not sent.",
+                detail: "The relay does not support this answer type.",
+                operationConflict: false, correlated: true)
+        case .failed:
+            outcome = .notSent(summary: "The response was not sent.",
+                detail: "The server returned a correlated error for this answer.",
+                operationConflict: false, correlated: true)
+        case .unresolved:
+            outcome = .unconfirmed(summary: attempt.mayHaveBeenSent
+                ? "Confirmation was not received. This response or an earlier version may have been sent."
+                : "Confirmation was not received. The response may not have gone through.",
+                detail: "The send frame was transmitted, but no correlated server reply arrived.")
+        }
+        await finishAnswerAttempt(attempt, outcome: outcome, key: key,
+                                  address: answerAddress, session: session,
+                                  carriedOverRetry: carriedOverRetry)
+        let shouldRefresh: Bool
+        switch outcome {
+        case .confirmed:
+            shouldRefresh = true
+        case .notSent(_, _, let operationConflict, let correlated):
+            shouldRefresh = operationConflict && correlated
+        case .unconfirmed:
+            shouldRefresh = false
+        }
+        if shouldRefresh {
+            let refresh = await NativeRelayLifecycle.shared.refreshAfterAnswerStored()
+            applyRefreshResult(refresh)
+            do { try await refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+        }
+        return outcome == .confirmed
     }
 
-    /// Returns whether an intent for this request now exists, so callers can
-    /// avoid treating a validation refusal as a submission.
+    private func finishAnswerAttempt(_ attempt: PreparedAnswerAttempt,
+                                    outcome: ComposerDeliveryOutcome,
+                                    key: RequestKey,
+                                    address: ComposerDraftAddress,
+                                    session: ReplyEditorDraftSession?,
+                                    carriedOverRetry: Bool = false) async {
+        if carriedOverRetry, let session {
+            await session.finishCarriedOverAttempt(attempt, outcome: outcome)
+        } else if carriedOverRetry {
+            var saved = (try? await composerDraftPersistence.load(AnswerComposerDraft.self,
+                at: address)) ?? AnswerComposerDraft(content: attempt.draft)
+            guard var carriedOver = saved.carriedOverSend,
+                  carriedOver.operationID == attempt.operationID else { return }
+            switch outcome {
+            case .confirmed:
+                saved.carriedOverSend = nil
+            case let .notSent(summary, detail, operationConflict, correlated):
+                carriedOver.failureOperationID = attempt.operationID
+                if operationConflict {
+                    carriedOver.operationID = UUID()
+                    carriedOver.currentAttemptUnsettled = false
+                    carriedOver.earlierVersionMayHaveBeenSent = false
+                } else if correlated {
+                    carriedOver.currentAttemptUnsettled = false
+                    carriedOver.earlierVersionMayHaveBeenSent = false
+                } else {
+                    carriedOver.currentAttemptUnsettled = attempt.wasUnsettled
+                    carriedOver.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
+                }
+                carriedOver.failure = ComposerSendFailure(outcome: .notSent,
+                    summary: summary, detail: detail)
+                saved.carriedOverSend = carriedOver
+            case let .unconfirmed(summary, detail):
+                carriedOver.failureOperationID = attempt.operationID
+                carriedOver.currentAttemptUnsettled = true
+                carriedOver.failure = ComposerSendFailure(outcome: .unconfirmed,
+                    summary: summary, detail: detail)
+                saved.carriedOverSend = carriedOver
+            }
+            try? await composerDraftPersistence.flush(saved, at: address)
+        } else if let session {
+            await session.finishAttempt(attempt, outcome: outcome)
+        }
+        else {
+            var draft = (try? await composerDraftPersistence.load(AnswerComposerDraft.self,
+                at: address)) ?? AnswerComposerDraft(content: attempt.draft)
+            switch outcome {
+            case .confirmed:
+                if draft.operationID == attempt.operationID && draft.content == attempt.draft {
+                    try? await composerDraftPersistence.remove(at: address)
+                } else {
+                    draft.currentAttemptUnsettled = false
+                    draft.earlierVersionMayHaveBeenSent = false
+                    draft.failure = nil
+                    draft.failureOperationID = nil
+                    try? await composerDraftPersistence.flush(draft, at: address)
+                }
+            case let .notSent(summary, detail, conflict, correlated):
+                if conflict {
+                    if draft.operationID == attempt.operationID || draft.operationID == nil {
+                        draft.operationID = UUID()
+                    }
+                    draft.currentAttemptUnsettled = false
+                } else if correlated {
+                    draft.currentAttemptUnsettled = false
+                    draft.earlierVersionMayHaveBeenSent = false
+                } else {
+                    draft.currentAttemptUnsettled = attempt.wasUnsettled
+                }
+                draft.failure = ComposerSendFailure(outcome: .notSent,
+                    summary: summary, detail: detail)
+                draft.failureOperationID = attempt.operationID
+                try? await composerDraftPersistence.flush(draft, at: address)
+            case let .unconfirmed(summary, detail):
+                draft.currentAttemptUnsettled = true
+                draft.failure = ComposerSendFailure(outcome: .unconfirmed,
+                    summary: summary, detail: detail)
+                draft.failureOperationID = attempt.operationID
+                try? await composerDraftPersistence.flush(draft, at: address)
+            }
+        }
+
+        if carriedOverRetry {
+            switch outcome {
+            case .confirmed:
+                failedResponseWarnings.removeValue(forKey: key)
+            case .notSent, .unconfirmed:
+                let carriedOver: CarriedOverAnswerSend?
+                if let session {
+                    carriedOver = session.deliveryDraft.carriedOverSend
+                } else {
+                    carriedOver = (try? await composerDraftPersistence.load(AnswerComposerDraft.self,
+                        at: address))?.carriedOverSend
+                }
+                if let carriedOver, let request = request(for: key) {
+                    failedResponseWarnings[key] = carriedOverWarning(carriedOver, for: request)
+                }
+            }
+            failedResponseWarningGeneration &+= 1
+            return
+        }
+
+        switch outcome {
+        case .confirmed:
+            failedResponseWarnings.removeValue(forKey: key)
+        case let .notSent(summary, detail, conflict, _):
+            let retryID: UUID?
+            if let session { retryID = session.deliveryDraft.operationID }
+            else {
+                retryID = (try? await composerDraftPersistence.load(AnswerComposerDraft.self,
+                    at: address))?.operationID ?? (conflict ? nil : attempt.operationID)
+            }
+            setAnswerFailure(for: key, attemptID: attempt.operationID,
+                revision: attempt.requestRevision, draft: attempt.draft,
+                summary: summary, detail: detail, retryOperationID: retryID)
+        case let .unconfirmed(summary, detail):
+            let retryID: UUID?
+            if let session { retryID = session.deliveryDraft.operationID }
+            else { retryID = attempt.operationID }
+            setAnswerFailure(for: key, attemptID: attempt.operationID,
+                revision: attempt.requestRevision, draft: attempt.draft,
+                summary: summary, detail: detail, retryOperationID: retryID)
+        }
+        failedResponseWarningGeneration &+= 1
+    }
+
+    private func setAnswerFailure(for key: RequestKey, attemptID: UUID?, revision: UInt64,
+                                  draft: RequestDraft, summary: String, detail: String,
+                                  retryOperationID: UUID?) {
+        failedResponseWarnings[key] = FailedResponseWarning(
+            requestRevision: revision, failedOperationID: attemptID,
+            answerKind: draft.noCommentSelected ? .noComment : .answer,
+            submittedInputs: [], answerDraft: draft,
+            detail: LocalizedStringResource(stringLiteral: detail),
+            retryOperationID: retryOperationID, summaryOverride: summary)
+        failedResponseWarningGeneration &+= 1
+    }
+
     @discardableResult
     func submitNoCommentFromUser(_ key: RequestKey,
                                  requestRevision: UInt64? = nil,
-                                 selectionIsLocal: Bool = false) -> Bool {
-        guard permitsDelivery, !isReadOnly else { return false }
-        let revision: UInt64?
-        if !selectionIsLocal {
-            guard let request = try? inspectedRequest(key, revision: requestRevision),
-                  !isRetracted(key), request.lifecycleStatus == .open,
-                  request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
-            revision = request.requestRevision
-            selectNoComment(for: key, requestRevision: revision)
-            guard flushPendingDraft(for: key, requestRevision: revision) else { return false }
-        } else {
-            revision = requestRevision
+                                 selectionIsLocal: Bool = false,
+                                 session: ReplyEditorDraftSession? = nil) async -> Bool {
+        guard permitsDelivery, !isReadOnly,
+              let request = try? inspectedRequest(key, revision: requestRevision),
+              !isRetracted(key), request.lifecycleStatus == .open,
+              request.informationalSeenStatus == nil else { return false }
+        var answerDraft = session?.draft ?? pendingDrafts[DraftBufferKey(
+            request: key, revision: request.requestRevision)] ?? request.draft
+        answerDraft.noCommentSelected = true
+        answerDraft.compatibility.selectedActionID = nil
+        for inputID in Array(answerDraft.inputs.keys) {
+            answerDraft.inputs[inputID]?.selectedActionID = nil
         }
-        do {
-            _ = try submitNoComment(key,
-                                    requestRevision: revision,
-                                    discardDraft: selectionIsLocal)
-            retryPendingDelivery()
-            return true
-        } catch {
-            diagnose(.localStore, .draftSave, .failed, error: error, request: key,
-                     receiptState: .unknown)
-            do { try refreshFromDurableStore() }
-            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
-            let current: PresentedRequest?
-            do { current = try inspectedRequest(key) }
-            catch {
-                diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key)
-                current = nil
-            }
-            if current?.intentReceipt != nil {
-                clearActionError()
-                return true
-            } else {
-                actionErrorRequest = key
-                if let current, current.lifecycleStatus != .open {
-                    actionError = "This request is no longer open for an answer."
-                } else if let revision, let current, current.requestRevision != revision {
-                    actionError = "This message changed. Review the latest version before answering."
-                } else {
-                    actionError = "No comment could not be confirmed. Check its saved status before trying again."
-                }
-                return false
-            }
-        }
+        return await submitAnswerFromUser(key, answerDraft: answerDraft,
+            explicitCompatibilityAction: nil, requestRevision: request.requestRevision,
+            session: session)
     }
 
     @discardableResult
     private func submitNoComment(_ key: RequestKey,
                                  requestRevision: UInt64? = nil,
-                                 discardDraft: Bool = false) throws -> IntentReceipt {
+                                 discardDraft: Bool = false,
+                                 operationID: UUID? = nil) async throws -> IntentReceipt {
         let request = try inspectedRequest(key, revision: requestRevision)
-        return try submitNoComment(key, request: request, discardDraft: discardDraft)
+        return try await submitNoComment(key, request: request, discardDraft: discardDraft,
+                                   operationID: operationID)
     }
 
     @discardableResult
     private func submitNoComment(_ key: RequestKey,
                                  request: PresentedRequest,
-                                 discardDraft: Bool = false) throws -> IntentReceipt {
+                                 discardDraft: Bool = false,
+                                 operationID: UUID? = nil) async throws -> IntentReceipt {
         guard !isRetracted(key),
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil,
               let selector = request.selector,
               canSubmitNoComment(request) else { throw LiveReplyError.notOpen }
-        let receipt = try port.submitNoComment(context: port.context,
+        let receipt = try await port.submitNoComment(context: port.context,
                                                selector: selector,
                                                intentID: UUID(),
+                                               operationID: operationID,
                                                discardDraft: discardDraft)
-        do { try refreshFromDurableStore() }
+        do { try await refreshFromDurableStore() }
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         clearActionError()
         return receipt
@@ -2797,16 +3488,6 @@ final class LivePresentationStore {
 
     private func canSubmitNoComment(_ request: PresentedRequest) -> Bool {
         request.informationalSeenStatus == nil
-    }
-
-    func retryPendingDelivery() {
-        guard permitsDelivery, !isReadOnly else { return }
-        Task {
-            beginRefresh()
-            defer { endRefresh() }
-            let result = await NativeRelayLifecycle.shared.refreshAfterAnswerStored()
-            applyRefreshResult(result)
-        }
     }
 
     func applyRefreshResult(_ result: NativeRelayRefreshResult) {
@@ -2836,29 +3517,15 @@ final class LivePresentationStore {
     private func editDraft(for key: RequestKey, revision: UInt64? = nil,
                            _ change: (inout RequestDraft) -> Void) {
         guard !isReadOnly else { return }
-        do {
-            let request = try inspectedRequest(key, revision: revision)
-            guard !isRetracted(key), request.lifecycleStatus == .open,
-                  request.intentReceipt == nil,
-                  let selector = request.selector else { throw LiveReplyError.notOpen }
-            let bufferKey = DraftBufferKey(request: key, revision: request.requestRevision)
-            var draft = pendingDrafts[bufferKey] ?? request.draft
-            change(&draft)
-            try port.saveDraft(context: port.context, selector: selector, completeDraft: draft)
-            do {
-                try refreshFromDurableStore()
-                pendingDrafts.removeValue(forKey: bufferKey)
-                pendingDraftSaveTasks[bufferKey]?.cancel()
-                pendingDraftSaveTasks[bufferKey] = nil
-            } catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
-            clearActionError()
-        } catch {
-            diagnose(.localStore, .draftSave, .failed, error: error, request: key)
-            actionErrorRequest = key
-            actionError = "Your edit could not be saved."
-            do { try refreshFromDurableStore() }
-            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
-        }
+        guard let request = try? inspectedRequest(key, revision: revision),
+              !isRetracted(key), request.lifecycleStatus == .open,
+              request.intentReceipt == nil else { return }
+        let bufferKey = DraftBufferKey(request: key, revision: request.requestRevision)
+        var draft = pendingDrafts[bufferKey] ?? request.draft
+        change(&draft)
+        pendingDrafts[bufferKey] = draft
+        clearActionError()
+        scheduleDraftPersistence(for: bufferKey)
     }
 
     private func stageDraftText(for key: RequestKey, revision: UInt64? = nil,
@@ -2885,28 +3552,37 @@ final class LivePresentationStore {
             catch { return }
             guard let self else { return }
             self.pendingDraftSaveTasks[bufferKey] = nil
-            do { try self.persistPendingDraft(for: bufferKey) }
+            do { try await self.persistPendingDraft(for: bufferKey) }
             catch { self.recordDraftSaveFailure(error, for: bufferKey.request) }
         }
     }
 
-    private func persistPendingDraft(for bufferKey: DraftBufferKey) throws {
+    private func persistPendingDraft(for bufferKey: DraftBufferKey,
+                                     flushImmediately: Bool = false) async throws {
         guard let draft = pendingDrafts[bufferKey] else { return }
-        let request = try inspectedRequest(bufferKey.request, revision: bufferKey.revision)
-        guard !isRetracted(bufferKey.request), request.lifecycleStatus == .open,
-              request.intentReceipt == nil,
-              let selector = request.selector else { throw LiveReplyError.notOpen }
-        try port.saveDraft(context: port.context, selector: selector, completeDraft: draft)
-        do {
-            try refreshFromDurableStore()
-            if pendingDrafts[bufferKey] == draft {
-                pendingDrafts.removeValue(forKey: bufferKey)
-                pendingDraftSaveTasks[bufferKey]?.cancel()
-                pendingDraftSaveTasks[bufferKey] = nil
-            }
-        } catch {
-            diagnose(.localStore, .projectionRefresh, .failed, error: error, request: bufferKey.request)
-            throw error
+        _ = try inspectedRequest(bufferKey.request, revision: bufferKey.revision)
+        guard permitsDelivery else { return }
+        let address = ComposerDraftAddress(identity: profileContext.identity,
+            request: bufferKey.request, revision: bufferKey.revision, kind: .answer)
+        var saved = try await composerDraftPersistence.load(AnswerComposerDraft.self,
+            at: address) ?? AnswerComposerDraft(content: draft)
+        if saved.content != draft {
+            if saved.currentAttemptUnsettled { saved.earlierVersionMayHaveBeenSent = true }
+            saved.currentAttemptUnsettled = false
+            saved.operationID = nil
+            saved.failure = nil
+            saved.failureOperationID = nil
+        }
+        saved.content = draft
+        if flushImmediately {
+            try await composerDraftPersistence.flush(saved, at: address)
+        } else {
+            try await composerDraftPersistence.scheduleSave(saved, at: address)
+        }
+        if pendingDrafts[bufferKey] == draft {
+            pendingDrafts.removeValue(forKey: bufferKey)
+            pendingDraftSaveTasks[bufferKey]?.cancel()
+            pendingDraftSaveTasks[bufferKey] = nil
         }
         clearActionError()
     }
@@ -2922,10 +3598,10 @@ final class LivePresentationStore {
         for bufferKey in bufferKeys {
             pendingDraftSaveTasks[bufferKey]?.cancel()
             pendingDraftSaveTasks[bufferKey] = nil
-            do { try persistPendingDraft(for: bufferKey) }
-            catch {
-                recordDraftSaveFailure(error, for: key)
-                return false
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do { try await self.persistPendingDraft(for: bufferKey, flushImmediately: true) }
+                catch { self.recordDraftSaveFailure(error, for: key) }
             }
         }
         return true
@@ -2950,15 +3626,8 @@ final class LivePresentationStore {
     }
 
     private func inspectedRequest(_ key: RequestKey, revision: UInt64? = nil) throws -> PresentedRequest {
-        let snapshot: PresentationSnapshot
-        if let revision {
-            snapshot = try port.inspect(context: port.context, request: key, revision: revision)
-        } else {
-            snapshot = try port.inspect(context: port.context, request: key)
-        }
-        guard let request = snapshot.requests.first else {
-            throw LiveReplyError.notOpen
-        }
+        guard let request = presentation.requests.first(where: { $0.key == key }),
+              revision == nil || revision == request.requestRevision else { throw LiveReplyError.notOpen }
         return request
     }
 
@@ -3032,8 +3701,8 @@ final class LivePresentationStore {
         guard observation == nil else { return }
         observation = Task { @MainActor in
             do {
-                let updates = try port.snapshots(context: port.context,
-                                                 afterRevision: presentation.revision)
+                let updates = try await port.snapshots(context: port.context,
+                                                       afterRevision: presentation.revision)
                 for try await snapshot in updates {
                     _ = try await adoptForLiveUpdates(snapshot)
                 }
@@ -3053,8 +3722,25 @@ final class LivePresentationStore {
     }
 
     func refreshFromDurableStore() throws {
-        let snapshot = try port.observe(context: port.context)
-        adopt(snapshot)
+        Task { [weak self] in
+            do { try await self?.refreshFromDurableStore() }
+            catch { await self?.recordProjectionRefreshFailure(error) }
+        }
+    }
+
+    func refreshFromDurableStore() async throws {
+        async let snapshot = port.observe(context: port.context)
+        async let threads = port.conversations(context: port.context)
+        async let storeSnapshot = attentionStore.snapshot(context: profileContext)
+        let (freshSnapshot, freshThreads, attentionSnapshot) = try await (snapshot, threads, storeSnapshot)
+        adopt(freshSnapshot, conversationThreads: freshThreads.threads,
+              attentionSnapshot: attentionSnapshot)
+    }
+
+    private func recordProjectionRefreshFailure(_ error: Error) {
+        observationError = "The local request view could not be refreshed."
+        diagnose(.localStore, .projectionRefresh,
+                 NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
     }
 
     private func clearActionError() {
@@ -3063,26 +3749,21 @@ final class LivePresentationStore {
         actionErrorRequest = nil
     }
 
-    private func adopt(_ snapshot: PresentationSnapshot) {
+    private func adopt(_ snapshot: PresentationSnapshot,
+                       conversationThreads freshConversationThreads: [RequestKey: ConversationThread],
+                       attentionSnapshot: AttentionStoreSnapshot) {
         let previousRoutingStates = noReplyRoutingStates(for: presentation.requests)
         let locallyReconciledRead = locallyReconciledConversationReadRevisions.remove(snapshot.revision) != nil
         locallyReconciledConversationReadRevisions = Set(
             locallyReconciledConversationReadRevisions.filter { $0 > snapshot.revision })
         if !locallyReconciledRead {
-            do {
-                conversationThreads = try port.conversations(context: port.context).threads
-                conversationProjectionRevision = snapshot.revision
-            }
-            catch {
-                conversationProjectionRevision = nil
-                observationError = "The local conversation could not be refreshed."
-                diagnose(.localStore, .projectionRefresh, .failed, error: error)
-            }
+            conversationThreads = freshConversationThreads
+            conversationProjectionRevision = snapshot.revision
         }
         presentation = snapshot
         reconcileNewMessageArea(snapshot.requests)
         if !locallyReconciledRead { reconcileReplyItemArea() }
-        refreshFailedResponseWarnings(for: snapshot.requests)
+        refreshFailedResponseWarnings(for: snapshot.requests, attentionSnapshot: attentionSnapshot)
         recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
         presentStaleAnswerIfAvailable(in: snapshot)
         if let key = actionErrorRequest,
@@ -3123,8 +3804,8 @@ final class LivePresentationStore {
             let updateSnapshot = snapshot
             var mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
             let preparation = Task.detached(priority: .userInitiated) {
-                let conversationThreads = try port.conversations(context: port.context).threads
-                let attentionSnapshot = try store.snapshot(context: context)
+                let conversationThreads = try await port.conversations(context: port.context).threads
+                let attentionSnapshot = try await store.snapshot(context: context)
                 let messages = Self.newMessageObservations(for: updateSnapshot.requests)
                 let revisions = Dictionary(uniqueKeysWithValues: updateSnapshot.requests.map {
                     ($0.key, $0.requestRevision)
@@ -3198,7 +3879,7 @@ final class LivePresentationStore {
                     failedResponseWarningGeneration == prepared.warningGeneration else {
                 mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
                 let refresh = Task.detached(priority: .userInitiated) {
-                    try port.observe(context: port.context)
+                    try await port.observe(context: port.context)
                 }
                 snapshot = try await refresh.value
                 mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
@@ -3245,15 +3926,8 @@ final class LivePresentationStore {
 
     private func refreshFailedResponseWarnings(
         for requests: [PresentedRequest],
-        attentionSnapshot suppliedSnapshot: AttentionStoreSnapshot? = nil
+        attentionSnapshot snapshot: AttentionStoreSnapshot
     ) {
-        let snapshot: AttentionStoreSnapshot
-        if let suppliedSnapshot {
-            snapshot = suppliedSnapshot
-        } else {
-            guard let loaded = try? attentionStore.snapshot(context: profileContext) else { return }
-            snapshot = loaded
-        }
         failedResponseWarnings = Self.prepareFailedResponseWarnings(
             previous: failedResponseWarnings, requests: requests, attentionSnapshot: snapshot,
             diagnosticEvents: diagnostics?.events ?? [])

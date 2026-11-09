@@ -74,6 +74,7 @@ public struct SubmitIntent: Equatable, Sendable {
     public let context: PortContext
     public let selector: BoundDocumentSelector
     public let intentID: UUID
+    public let operationID: UUID?
     public let inputs: [TypedInputRecord]
     /// Reply editors may commit their local values without retaining an
     /// editable draft alongside the durable submission.
@@ -82,11 +83,13 @@ public struct SubmitIntent: Equatable, Sendable {
     public init(context: PortContext,
                 selector: BoundDocumentSelector,
                 intentID: UUID,
+                operationID: UUID? = nil,
                 inputs: [TypedInputRecord],
                 persistAnswerDraft: Bool = true) {
         self.context = context
         self.selector = selector
         self.intentID = intentID
+        self.operationID = operationID
         self.inputs = inputs
         self.persistAnswerDraft = persistAnswerDraft
     }
@@ -508,7 +511,7 @@ public struct PresentationSnapshot: Equatable, Sendable {
 }
 
 /// Shared synchronous semantic port. The store and this object are created by the native trusted owner.
-public final class AttentionDomainPort: @unchecked Sendable {
+public struct AttentionDomainPort: Sendable {
     public let context: PortContext
     private let profileContext: ProfileContext
     private let store: AttentionDomainStore
@@ -524,15 +527,15 @@ public final class AttentionDomainPort: @unchecked Sendable {
         )
     }
 
-    public func conversations(context suppliedContext: PortContext) throws -> ConversationSnapshot {
+    public func conversations(context suppliedContext: PortContext) async throws -> ConversationSnapshot {
         try validate(suppliedContext)
-        return try store.conversationSnapshot(context: profileContext)
+        return try await store.conversationSnapshot(context: profileContext)
     }
 
     public func inspectAnswerDraft(context suppliedContext: PortContext, request key: RequestKey,
-                                   revision: UInt64) throws -> PresentedRequest? {
+                                   revision: UInt64) async throws -> PresentedRequest? {
         try validate(suppliedContext)
-        let snapshot = try store.snapshot(context: profileContext)
+        let snapshot = try await store.snapshot(context: profileContext)
         guard let thread = snapshot.conversationThreads[key], let payload = thread.revisions[revision],
               let draft = thread.answerDrafts?[revision], let stored = snapshot.requests[key] else { return nil }
         let currentPayload = thread.revisions[thread.currentRevision] ?? stored.originalPayload
@@ -562,92 +565,93 @@ public final class AttentionDomainPort: @unchecked Sendable {
             inboxReplyScores: Self.replyScores(for: key, in: snapshot.inboxView))
     }
 
-    public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) throws {
+    public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: PortContext) async throws {
         try validate(suppliedContext)
-        try store.saveConversationDraft(draft, context: profileContext)
+        try await store.saveConversationDraft(draft, context: profileContext)
     }
 
     @discardableResult
     public func updateConversationDraftText(_ text: ExactText, for binding: ConversationBinding,
-                                            context suppliedContext: PortContext) throws -> ConversationDraft {
+                                            context suppliedContext: PortContext) async throws -> ConversationDraft {
         try validate(suppliedContext)
-        return try store.updateConversationDraftText(text, for: binding, context: profileContext)
+        return try await store.updateConversationDraftText(text, for: binding, context: profileContext)
     }
 
     @discardableResult
     public func markConversationRead(_ request: RequestKey,
-                                    context suppliedContext: PortContext) throws -> PendingConversationReadPosition? {
+                                    context suppliedContext: PortContext) async throws -> PendingConversationReadPosition? {
         try validate(suppliedContext)
-        return try store.markConversationRead(request, context: profileContext)
+        return try await store.markConversationRead(request, context: profileContext)
     }
 
     @discardableResult
     public func markConversationRead(_ request: RequestKey,
                                      through turnID: ExactText,
-                                     context suppliedContext: PortContext) throws -> PendingConversationReadPosition? {
+                                     context suppliedContext: PortContext) async throws -> PendingConversationReadPosition? {
         try validate(suppliedContext)
-        return try store.markConversationRead(request, through: turnID, context: profileContext)
+        return try await store.markConversationRead(request, through: turnID, context: profileContext)
     }
 
     public func markConversationReadAndProject(_ request: RequestKey,
                                                through turnID: ExactText,
-                                               context suppliedContext: PortContext) throws -> ConversationReadUpdate {
+                                               context suppliedContext: PortContext) async throws -> ConversationReadUpdate {
         try validate(suppliedContext)
-        return try store.markConversationReadAndProject(request, through: turnID,
+        return try await store.markConversationReadAndProject(request, through: turnID,
                                                         context: profileContext)
     }
 
-    public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws {
+    public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) async throws {
         try validate(suppliedContext)
-        try store.appendFixtureDiscussion(binding, context: profileContext)
+        try await store.appendFixtureDiscussion(binding, context: profileContext)
     }
 
-    public func abandonConversationUploads(for request: RequestKey, context suppliedContext: PortContext) throws -> [ConversationUploadCleanup] {
+    public func abandonConversationUploads(for request: RequestKey, context suppliedContext: PortContext) async throws -> [ConversationUploadCleanup] {
         try validate(suppliedContext)
-        return try store.abandonConversationUploads(for: request, context: profileContext)
+        return try await store.abandonConversationUploads(for: request, context: profileContext)
     }
 
-    public func markConversationCleanupUnknown(for request: RequestKey, reason: ExactText, context suppliedContext: PortContext) throws {
+    public func markConversationCleanupUnknown(for request: RequestKey, reason: ExactText, context suppliedContext: PortContext) async throws {
         try validate(suppliedContext)
-        let pending = try store.conversationSnapshot(context: profileContext).threads[request]?.uploadCleanups ?? [:]
+        let pending = try await store.conversationSnapshot(context: profileContext).threads[request]?.uploadCleanups ?? [:]
         for cleanup in pending.values {
             if case .acknowledged = cleanup.outcome { continue }
-            try store.recordConversationCleanup(cleanup.id, request: request, outcome: .unknown(reason), context: profileContext)
+            try await store.recordConversationCleanup(cleanup.id, request: request, outcome: .unknown(reason), context: profileContext)
         }
     }
 
-    public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) throws -> UUID {
+    public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: PortContext) async throws -> UUID {
         try validate(suppliedContext)
-        return try store.prepareDiscussion(binding, context: profileContext)
+        return try await store.prepareDiscussion(binding, context: profileContext)
     }
 
-    public func observe(context suppliedContext: PortContext) throws -> PresentationSnapshot {
+    public func observe(context suppliedContext: PortContext) async throws -> PresentationSnapshot {
         try validate(suppliedContext)
-        return try presentation(from: store.snapshot(context: profileContext), selectorFor: nil)
+        let snapshot = try await store.snapshot(context: profileContext)
+        return try presentation(from: snapshot, selectorFor: nil)
     }
 
-    public func inspect(context suppliedContext: PortContext, request key: RequestKey) throws -> PresentationSnapshot {
-        try inspect(context: suppliedContext, request: key, revision: nil)
+    public func inspect(context suppliedContext: PortContext, request key: RequestKey) async throws -> PresentationSnapshot {
+        try await inspect(context: suppliedContext, request: key, revision: nil)
     }
 
     public func inspect(context suppliedContext: PortContext,
                         request key: RequestKey,
-                        revision: UInt64) throws -> PresentationSnapshot {
-        try inspect(context: suppliedContext, request: key, revision: Optional(revision))
+                        revision: UInt64) async throws -> PresentationSnapshot {
+        try await inspect(context: suppliedContext, request: key, revision: Optional(revision))
     }
 
     private func inspect(context suppliedContext: PortContext,
                          request key: RequestKey,
-                         revision requestedRevision: UInt64?) throws -> PresentationSnapshot {
+                         revision requestedRevision: UInt64?) async throws -> PresentationSnapshot {
         try validate(suppliedContext)
-        let snapshot = try store.snapshot(context: profileContext)
+        let snapshot = try await store.snapshot(context: profileContext)
         let revision = requestedRevision ?? snapshot.conversationThreads[key]?.currentRevision ?? 1
         if snapshot.conversationThreads[key]?.redactedRevisions?.contains(revision) == true {
             return try presentation(from: snapshot, selectorFor: nil).filtering(to: key)
         }
-        let selector = try store.selector(for: key, requestRevision: revision, context: profileContext)
-        return try presentation(from: store.snapshot(context: profileContext), selectorFor: [key: selector])
-            .filtering(to: key)
+        let selector = try await store.selector(for: key, requestRevision: revision, context: profileContext)
+        let updated = try await store.snapshot(context: profileContext)
+        return try presentation(from: updated, selectorFor: [key: selector]).filtering(to: key)
     }
 
     private func request(for selector: BoundDocumentSelector,
@@ -677,43 +681,44 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
     public func saveDraft(context suppliedContext: PortContext,
                           selector: BoundDocumentSelector,
-                          completeDraft: RequestDraft) throws {
+                          completeDraft: RequestDraft) async throws {
         try validate(suppliedContext)
-        try store.saveDraft(completeDraft, selector: selector, context: profileContext)
+        try await store.saveDraft(completeDraft, selector: selector, context: profileContext)
     }
 
-    public func cancelDraft(context suppliedContext: PortContext, selector: BoundDocumentSelector) throws {
+    public func cancelDraft(context suppliedContext: PortContext, selector: BoundDocumentSelector) async throws {
         try validate(suppliedContext)
-        let snapshot = try store.snapshot(context: profileContext)
+        let snapshot = try await store.snapshot(context: profileContext)
         guard let request = request(for: selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
-        try store.saveDraft(RequestDraft(interface: interface(for: request, in: snapshot)), selector: selector, context: profileContext)
+        try await store.saveDraft(RequestDraft(interface: interface(for: request, in: snapshot)), selector: selector, context: profileContext)
     }
 
     public func preview(context suppliedContext: PortContext,
                         selector: BoundDocumentSelector,
-                        inputs: [TypedInputRecord]) throws -> JSONValue {
+                        inputs: [TypedInputRecord]) async throws -> JSONValue {
         try validate(suppliedContext)
-        let snapshot = try store.snapshot(context: profileContext)
+        let snapshot = try await store.snapshot(context: profileContext)
         guard let request = request(for: selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
         let (typedSubmission, draft) = try makeSubmission(inputs, for: interface(for: request, in: snapshot))
-        return try store.previewSubmission(typedSubmission,
+        return try await store.previewSubmission(typedSubmission,
                                            draft: draft,
                                            selector: selector,
                                            context: profileContext)
     }
 
-    public func submit(_ intent: SubmitIntent) throws -> IntentReceipt {
+    public func submit(_ intent: SubmitIntent) async throws -> IntentReceipt {
         try validate(intent.context)
-        let snapshot = try store.snapshot(context: profileContext)
+        let snapshot = try await store.snapshot(context: profileContext)
         guard let request = request(for: intent.selector, in: snapshot) else { throw AttentionStoreError.requestMissing }
         let (typedSubmission, draft) = try makeSubmission(intent.inputs, for: interface(for: request, in: snapshot))
-        let stored = try store.submit(intentID: intent.intentID,
+        let stored = try await store.submit(intentID: intent.intentID,
                                       typedSubmission: typedSubmission,
                                       typedInputs: intent.inputs,
                                       draft: draft,
                                       selector: intent.selector,
                                       context: profileContext,
-                                      persistAnswerDraft: intent.persistAnswerDraft)
+                                      persistAnswerDraft: intent.persistAnswerDraft,
+                                      operationID: intent.operationID)
         return receipt(stored, context: context)
     }
 
@@ -721,18 +726,20 @@ public final class AttentionDomainPort: @unchecked Sendable {
     public func submitNoComment(context suppliedContext: PortContext,
                                 selector: BoundDocumentSelector,
                                 intentID: UUID,
-                                discardDraft: Bool = false) throws -> IntentReceipt {
+                                operationID: UUID? = nil,
+                                discardDraft: Bool = false) async throws -> IntentReceipt {
         try validate(suppliedContext)
-        let stored = try store.submitNoComment(intentID: intentID,
+        let stored = try await store.submitNoComment(intentID: intentID,
                                                selector: selector,
                                                context: profileContext,
-                                               discardDraft: discardDraft)
+                                               discardDraft: discardDraft,
+                                               operationID: operationID)
         return receipt(stored, context: context)
     }
 
-    public func lookupIntent(context suppliedContext: PortContext, intentID: UUID) throws -> IntentReceipt? {
+    public func lookupIntent(context suppliedContext: PortContext, intentID: UUID) async throws -> IntentReceipt? {
         try validate(suppliedContext)
-        guard let stored = try store.lookupIntent(intentID, context: profileContext) else { return nil }
+        guard let stored = try await store.lookupIntent(intentID, context: profileContext) else { return nil }
         return receipt(stored, context: context)
     }
 
@@ -740,25 +747,25 @@ public final class AttentionDomainPort: @unchecked Sendable {
     /// the missing intent ID was durably fenced against any late submit.
     public func fenceUncommittedIntent(context suppliedContext: PortContext,
                                       requestKey: RequestKey,
-                                      intentID: UUID) throws -> IntentReceipt? {
+                                      intentID: UUID) async throws -> IntentReceipt? {
         try validate(suppliedContext)
-        guard let stored = try store.fenceUncommittedIntent(intentID,
+        guard let stored = try await store.fenceUncommittedIntent(intentID,
                                                             requestKey: requestKey,
                                                             context: profileContext) else { return nil }
         return receipt(stored, context: context)
     }
 
-    public func retryIntent(context suppliedContext: PortContext, intentID: UUID) throws -> IntentReceipt? {
+    public func retryIntent(context suppliedContext: PortContext, intentID: UUID) async throws -> IntentReceipt? {
         try validate(suppliedContext)
-        guard let stored = try store.retryOperation(intentID, context: profileContext) else { return nil }
+        guard let stored = try await store.retryOperation(intentID, context: profileContext) else { return nil }
         return receipt(stored, context: context)
     }
 
     /// Emits the newest committed snapshot first, then every later durable revision.
     public func snapshots(context suppliedContext: PortContext,
-                          afterRevision: UInt64 = 0) throws -> AsyncThrowingStream<PresentationSnapshot, Error> {
+                          afterRevision: UInt64 = 0) async throws -> AsyncThrowingStream<PresentationSnapshot, Error> {
         try validate(suppliedContext)
-        let revisions = try store.revisions(context: profileContext, after: afterRevision)
+        let revisions = try await store.revisions(context: profileContext, after: afterRevision)
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -766,7 +773,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                     var hasEmitted = false
                     for await _ in revisions {
                         try Task.checkCancellation()
-                        let snapshot = try self.observe(context: suppliedContext)
+                        let snapshot = try await self.observe(context: suppliedContext)
                         guard !hasEmitted || snapshot.revision > lastRevision else { continue }
                         hasEmitted = true
                         lastRevision = snapshot.revision

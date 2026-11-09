@@ -92,6 +92,19 @@ public struct RequestDraft: Equatable, Codable, Sendable {
     }
 }
 
+public struct ComposerSendFailure: Codable, Equatable, Sendable {
+    public enum Outcome: String, Codable, Sendable { case notSent, unconfirmed }
+    public let outcome: Outcome
+    public let summary: String
+    public let detail: String
+
+    public init(outcome: Outcome, summary: String, detail: String) {
+        self.outcome = outcome
+        self.summary = summary
+        self.detail = detail
+    }
+}
+
 public struct InputSubmission: Equatable, Codable, Sendable {
     public let inputID: ExactText
     public let actionID: ExactText?

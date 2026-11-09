@@ -276,25 +276,12 @@ enum NewMessageAreaRowOrder {
 final class ReplyItemAreaStore {
     static let defaultsKey = "harklight.reply-item-area.v1"
 
-    @ObservationIgnored private let defaults: UserDefaults
-    @ObservationIgnored private let defaultsKey: String
-    @ObservationIgnored private let persistence: DeferredLedgerPersistence<ReplyItemLedger>
     @ObservationIgnored private var reconciliationGeneration: UInt64 = 0
     private(set) var ledger: ReplyItemLedger
 
-    init(defaults: UserDefaults = .standard, defaultsKey: String = ReplyItemAreaStore.defaultsKey,
+    init(defaults: UserDefaults? = nil, defaultsKey: String = ReplyItemAreaStore.defaultsKey,
          initialLedger: ReplyItemLedger? = nil) {
-        self.defaults = defaults
-        self.defaultsKey = defaultsKey
-        self.persistence = DeferredLedgerPersistence(defaults: defaults, key: defaultsKey)
-        if let initialLedger {
-            ledger = initialLedger
-        } else if let data = defaults.data(forKey: defaultsKey),
-           let saved = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) {
-            ledger = saved
-        } else {
-            ledger = ReplyItemLedger()
-        }
+        ledger = initialLedger ?? ReplyItemLedger()
     }
 
     var entries: [ReplyItemEntry] { ledger.entries }
@@ -304,12 +291,10 @@ final class ReplyItemAreaStore {
                    accountScopes: Set<ExactText> = [],
                    parentScope: Set<RequestKey>? = nil,
                    now: Date = .now) {
-        let previousLedger = ledger
         let prepared = Self.prepareReconciliation(ledger: ledger,
             observations: observations, accountScopes: accountScopes,
             parentScope: parentScope, now: now)
         ledger = prepared.ledger
-        if ledger != previousLedger { persist() }
         reconciliationGeneration &+= 1
     }
 
@@ -335,7 +320,6 @@ final class ReplyItemAreaStore {
                                      basedOn generation: UInt64) -> Bool {
         guard reconciliationGeneration == generation else { return false }
         ledger = prepared.ledger
-        if prepared.didChange { persist() }
         reconciliationGeneration &+= 1
         return true
     }
@@ -345,22 +329,15 @@ final class ReplyItemAreaStore {
         ledger.markFirstSeen(parent, at: date)
         guard oldEntries != ledger.entriesByParent else { return }
         reconciliationGeneration &+= 1
-        persist()
     }
 
     func removeForSelection(_ parent: RequestKey) {
         guard ledger.removeForSelection(parent) else { return }
         reconciliationGeneration &+= 1
-        persist()
     }
 
     func removeExpired(now: Date = .now) {
         guard ledger.pruneExpired(now: now) else { return }
         reconciliationGeneration &+= 1
-        persist()
-    }
-
-    private func persist() {
-        persistence.schedule(ledger)
     }
 }

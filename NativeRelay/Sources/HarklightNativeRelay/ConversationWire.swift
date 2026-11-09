@@ -5,6 +5,7 @@ import Foundation
 public enum DiscussionOperationResult: Equatable, Sendable {
     case accepted(turnID: ExactText)
     case rejected(reason: ExactText)
+    case operationConflict
     case unresolved
 }
 
@@ -150,6 +151,7 @@ public struct ConversationWire: Sendable {
             return .accepted(turnID: ExactText(try text(value, "event_id")))
         case "error":
             let reason = ExactText(try text(value, "reason"))
+            if reason.rawValue == "operation_conflict" { return .operationConflict }
             // The relay can return this after it fails to persist the result
             // of dispatch. The server classifies that response as unknown, so
             // keep the saved operation frozen for an exact retry.

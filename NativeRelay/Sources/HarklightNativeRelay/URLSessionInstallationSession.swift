@@ -23,6 +23,8 @@ public enum NativeRelayProgressEvent: Equatable, Sendable {
     case clientIdentityOffered
     case clientIdentityChallengeRejected
     case webSocketOpened
+    case webSocketPingAnswered
+    case webSocketClosed
     case relayAdmitted
     /// The client is about to request replay; this does not prove the relay
     /// received or admitted that request.
@@ -46,7 +48,8 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
 public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession,
-    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession {
+    AuthenticatedInboxEventStreamSession, AuthenticatedLiveEventSession,
+    AuthenticatedConversationEventSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
     public nonisolated let supportsPostCheckpointInboxEvents = true
@@ -57,6 +60,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
     private let attemptID: UUID?
+    private var isClosed = false
     private var postCheckpointReader: Task<Void, Never>?
     private var responseFrames: [Data] = []
     private var responseWaiters: [CheckedContinuation<Data, any Error>] = []
@@ -137,11 +141,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         try await replay(request, ref: "native-sync", event: "delivery", end: "resynced", consume: consume)
     }
 
-    /// Reads one correlated paging or receipt response on the enrolled relay
-    /// socket. It never starts replay or sends a mutation.
-    public func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+    /// Reads one correlated reply on the enrolled relay socket. It is used for
+    /// Route A view reads and direct, one-shot user actions.
+    public func correlatedRequest(_ request: Data, ref: String) async throws -> Data {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         do {
             try await send(request)
             while true {
@@ -166,13 +170,17 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
+    public func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        try await correlatedRequest(request, ref: ref)
+    }
+
     /// Opens only the explicit replay half of a confirmed paging checkpoint.
     /// The accepted reply is delivered first, followed by ordinary projections
     /// through `resynced`; the caller owns contiguous validation and ACK.
     public func attachInboxReplay(_ request: Data, ref: String,
                                   consume: @Sendable (Data) async throws -> Void) async throws {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         do {
             try await send(request)
             var accepted = false
@@ -249,13 +257,33 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
+    /// Checks that the established peer still answers within URLSession's
+    /// configured request timeout. This updates connection truth only; it does
+    /// not fetch or reconcile application state.
+    public func verifyConnection() async -> Bool {
+        guard !isClosed else { return false }
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                task.sendPing { error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume() }
+                }
+            }
+            onProgress(.webSocketPingAnswered)
+            return true
+        } catch {
+            close()
+            return false
+        }
+    }
+
     private func replay(_ request: Data, ref: String, event: String, end: String,
                         consume: @Sendable (Data) async throws -> Void) async throws {
         await socketExchangeGate.enter()
         if event == "conversation" { conversationReplayReading = true }
         defer {
             if event == "conversation" { endConversationReplayReading() }
-            socketExchangeGate.leave()
+            Task { await socketExchangeGate.leave() }
         }
         let area: NativeDiagnosticArea = event == "conversation" ? .conversation : .relay
         let phase: NativeDiagnosticPhase = event == "conversation" ? .conversationReplay : .ordinaryReplay
@@ -296,7 +324,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     continue
                 }
                 try await consume(frame)
-                if kind == end { return }
+                if kind == end {
+                    if event == "delivery" { startPostCheckpointReader() }
+                    return
+                }
             }
         } catch InstallationTransportError.conversationsUnavailable {
             throw InstallationTransportError.conversationsUnavailable
@@ -316,7 +347,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     private func acknowledgeProjection(_ request: Data, field: String, ref: String) async throws {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         let area: NativeDiagnosticArea = field == "conversation_seq" ? .conversation : .relay
         do {
             let requestValue = try JSONValue.parse(request)
@@ -369,7 +400,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             isNoCommentOperation = false
         }
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         do { try await send(frame) }
         catch {
             if isNoCommentOperation {
@@ -380,7 +411,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
             close()
-            return .unresolved
+            return .notTransmitted(operationID: operationID)
         }
         if isNoCommentOperation {
             diagnoseNoReply(.noReplyResponseReceive, .began, nil, operationID: operationID)
@@ -425,6 +456,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 responseClass = .acknowledgement
             case "error":
                 let reason = value.uniqueValue(named: "reason")?.stringValue?.rawValue
+                if reason == "operation_conflict" {
+                    diagnose(.answer, .originalOperationDelivery, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                             operationID: operationID, receipt: .terminal)
+                    return .operationConflict(operationID: operationID)
+                }
                 if isNoCommentOperation, let reason {
                     let normalizedReason = reason.lowercased()
                     responseClass = normalizedReason == "unknown_type" || normalizedReason.contains("unsupported")
@@ -494,14 +531,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     close()
                     return .unresolved
                 }
-                if reason == "closed" || reason == nil {
-                    // Closed can follow an earlier accepted send whose reply
-                    // was lost. Keep the original operation pending until replay.
-                    diagnose(.answer, .originalOperationDelivery, .unresolved,
-                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
-                             operationID: operationID, receipt: .unknown)
-                    return .unresolved
-                }
                 diagnose(.answer, .originalOperationDelivery, .rejected,
                          causeCode: NativeDiagnosticCauseCode.serverReason(reason),
                          operationID: operationID, receipt: .terminal)
@@ -542,7 +571,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// A send response is not a replay ACK and cannot advance either cursor.
     public func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         do {
             let outgoing = try JSONValue.parse(frame)
             guard outgoing.uniqueValue(named: "type") == .string(ExactText("discussion")),
@@ -567,6 +596,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     diagnose(.conversation, .discussionSubmission, .rejected,
                              causeCode: NativeDiagnosticCauseCode.serverReason(reason.rawValue),
                              operationID: operationID, receipt: .pendingUnconfirmed)
+                case .operationConflict:
+                    diagnose(.conversation, .discussionSubmission, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason("operation_conflict"),
+                             operationID: operationID, receipt: .pendingUnconfirmed)
                 case .unresolved:
                     diagnose(.conversation, .discussionSubmission, .unresolved,
                              operationID: operationID, receipt: .unknown)
@@ -584,7 +617,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
 
     public func sendConversationReadPosition(_ frame: Data, operationID: UUID) async -> ConversationReadPositionResult {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         do {
             let outgoing = try JSONValue.parse(frame)
             guard outgoing.uniqueValue(named: "type") == .string(ExactText("conversation_read")),
@@ -614,7 +647,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             throw InstallationTransportError.unexpectedServerFrame
         }
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         let profileID = PushRegistrationProfile.current.rawValue
         let frame = Data(("{\"v\":1,\"type\":\"push_register\",\"ref\":\"native-push\",\"op_id\":\"\(operationID.uuidString.lowercased())\",\"revision\":\(revision),\"profile_id\":\"\(profileID)\",\"address_kind\":\"apns_token\",\"address\":\"\(address)\"}\n").utf8)
         do {
@@ -646,7 +679,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// Recover legacy accepted registrations only on this authenticated session.
     public func currentPushBindingID(revision: UInt64) async throws -> String? {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         do {
             try await send(Data("{\"v\":1,\"type\":\"push_status\",\"ref\":\"native-push-status\"}\n".utf8))
             while true {
@@ -669,7 +702,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// registration before it may advance the durable revision.
     public func currentPushBindingStatus() async throws -> PushBindingStatus? {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        defer { Task { await socketExchangeGate.leave() } }
         do {
             try await send(Data("{\"v\":1,\"type\":\"push_status\",\"ref\":\"native-push-status\"}\n".utf8))
             while true {
@@ -690,6 +723,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func close() {
+        guard !isClosed else { return }
+        isClosed = true
+        onProgress(.webSocketClosed)
         postCheckpointReader?.cancel()
         postCheckpointReader = nil
         failPostCheckpointReader(InstallationTransportError.unexpectedServerFrame)
@@ -720,6 +756,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         return try await withCheckedThrowingContinuation { continuation in
             postCheckpointEventWaiters.append(continuation)
         }
+    }
+
+    public func nextLiveEvent() async throws -> Data {
+        try await nextPostCheckpointInboxEvent()
     }
 
     public func discardConversationUploads(_ cleanup: ConversationUploadCleanup,
@@ -928,9 +968,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func signalLiveConversation(for frame: Data) {
+        guard !conversationReplayReading else { return }
         let replyArrival: LiveConversationReplyArrival?
-        if !conversationReplayReading,
-           let wire = try? ConversationWire(profile: profileContext, endpointHost: relayEndpointHost),
+        if let wire = try? ConversationWire(profile: profileContext, endpointHost: relayEndpointHost),
            let update = try? wire.decodeUpdate(frame),
            case let .event(event) = update,
            let arrival = LiveConversationReplyArrival(
@@ -1058,6 +1098,12 @@ private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, URLSess
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
                     didOpenWithProtocol protocol: String?) {
         onProgress(.webSocketOpened)
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+                    didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+                    reason: Data?) {
+        onProgress(.webSocketClosed)
     }
 
     func urlSession(_ session: URLSession,

@@ -110,6 +110,8 @@ struct HarklightApp: App {
                         NativeEnrollmentView(launch: launch)
                     case let .enrollmentPending(record):
                         NativeEnrollmentView(launch: launch, pending: record)
+                    case .loadingFixture:
+                        ProgressView()
                     case let .fixture(store):
                         if let presentation = store.presentationStore {
                             LiveContentView(store: presentation, samples: samples,
@@ -127,7 +129,7 @@ struct HarklightApp: App {
             .modifier(AcceptanceReduceMotionOverride(isEnabled: acceptanceReduceMotionOverride))
             .foregroundChatNotificationLayer()
             .task {
-                if loadsSampleMessages { samples.populate() }
+                if loadsSampleMessages { await samples.populate() }
             }
             .task {
                 await launch.restoreInstallation()
@@ -143,18 +145,9 @@ struct HarklightApp: App {
             .task(id: scenePhase) {
                 launch.guidedJoin.invalidateApprovalObservation()
                 guard scenePhase == .active else { return }
-                var isActivationRefresh = true
-                while !Task.isCancelled {
-                    if isActivationRefresh {
-                        await launch.refreshForForegroundActivation()
-                        isActivationRefresh = false
-                    } else {
-                        await launch.refreshLive()
-                    }
-                    await launch.guidedJoin.retryAutomaticallyIfNeeded(
-                        foregroundOutcome: launch.foregroundConnectProgress?.outcome)
-                    try? await Task.sleep(for: .seconds(15))
-                }
+                await launch.refreshForForegroundActivation()
+                await launch.guidedJoin.retryAutomaticallyIfNeeded(
+                    foregroundOutcome: launch.foregroundConnectProgress?.outcome)
             }
             .sheet(isPresented: $releaseNotes.isShowingCurrentRelease) {
                 if !releaseNotes.notesToShow.isEmpty {

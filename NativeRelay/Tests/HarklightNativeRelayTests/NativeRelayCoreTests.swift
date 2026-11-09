@@ -415,7 +415,7 @@ final class NativeRelayCoreTests: XCTestCase {
 
         func exchange(_ request: String) async -> String {
             await gate.enter()
-            defer { gate.leave() }
+            defer { Task { await gate.leave() } }
             await channel.send(request)
             return await channel.receive()
         }

@@ -35,7 +35,7 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
                       "The retained choice remains ready for deliberate submission.")
     }
 
-    func testReplyContentsAreNotSavedAcrossAppRelaunch() async throws {
+    func testTypedReplyContentsSurviveAppRelaunch() async throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
@@ -73,8 +73,8 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         let reopenedEditor = app.textFields["request-input-note"]
         XCTAssertTrue(reopenedEditor.waitForExistence(timeout: 5), app.debugDescription)
         reveal(reopenedEditor, in: app)
-        XCTAssertNotEqual(reopenedEditor.value as? String, longReply,
-                          "Reply contents are not saved when the app closes before the checkmark is tapped.")
+        XCTAssertEqual(reopenedEditor.value as? String, longReply,
+                       "An unsent typed reply survives app restart as a local draft.")
     }
 
     private func reveal(_ editor: XCUIElement, in app: XCUIApplication) {

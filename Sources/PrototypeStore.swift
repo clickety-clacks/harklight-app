@@ -64,7 +64,7 @@ final class PrototypeStore {
     static let defaultCaptureLimit = 65_536
 
     let fixtures: FixtureSet
-    let loadError: String?
+    private(set) var loadError: String?
     let captureLimitBytes: Int
     private(set) var selectedRequestKey: RequestKey?
     private(set) var persistenceError: String?
@@ -72,9 +72,9 @@ final class PrototypeStore {
     private(set) var snapshot: AttentionStoreSnapshot?
     private(set) var presentationStore: LivePresentationStore?
 
-    @ObservationIgnored private let domainStore: AttentionDomainStore?
+    @ObservationIgnored private var domainStore: AttentionDomainStore?
     @ObservationIgnored private let profileContext: ProfileContext
-    @ObservationIgnored private let port: AttentionDomainPort?
+    @ObservationIgnored private var port: AttentionDomainPort?
     @ObservationIgnored private var selectors: [RequestKey: BoundDocumentSelector] = [:]
 
     var sessions: [RequestKey: RequestSession] { snapshot?.fixtureSessions ?? [:] }
@@ -86,10 +86,16 @@ final class PrototypeStore {
          resetFixtureAtLaunch: Bool = false,
          serverRetractionFixture: NativeServerRetractionFixture? = nil,
          seedServerRetractionFixture: Bool = false,
-         expireServerRetractionAtLaunch: Bool = false) {
+         expireServerRetractionAtLaunch: Bool = false) async {
         self.fixtures = fixtures
+        self.loadError = loadError
         self.captureLimitBytes = max(0, captureLimitBytes)
         self.selectedRequestKey = fixtures.requests.first?.key
+        self.domainStore = nil
+        self.port = nil
+        self.presentationStore = nil
+        self.snapshot = nil
+        self.serverRetractionTestStatus = nil
 
         let identity = ProfileIdentity(
             trustedRelayAuthority: ExactText(serverRetractionFixture?.host ?? "fixture-only:attention-client-m2"),
@@ -107,15 +113,17 @@ final class PrototypeStore {
         var initializationError: String?
         var serverRetractionTestStatus: String?
         do {
-            let store = try AttentionDomainStore(context: profile,
-                                                 persistence: persistence ?? MemoryAttentionStatePersistence(),
-                                                 maximumWireFrameBytes: max(0, captureLimitBytes))
+            let store = try await Task.detached(priority: .userInitiated) {
+                try AttentionDomainStore(context: profile,
+                    persistence: persistence ?? MemoryAttentionStatePersistence(),
+                    maximumWireFrameBytes: max(0, captureLimitBytes))
+            }.value
             let requests = fixtures.requests.map { StoredRequest(key: $0.key, originalPayload: $0.originalPayload) }
             if serverRetractionFixture == nil {
                 if resetFixtureAtLaunch {
-                    try store.resetFixtureState(requests, context: profile)
+                    try await store.resetFixtureState(requests, context: profile)
                 } else {
-                    try store.registerFixtureRequests(requests, context: profile)
+                    try await store.registerFixtureRequests(requests, context: profile)
                 }
             }
 #if DEBUG
@@ -123,21 +131,21 @@ final class PrototypeStore {
                 guard resetFixtureAtLaunch, let serverRetractionFixture else {
                     throw ConversationError.missingRequest
                 }
-                try Self.seedServerRetractionFixture(serverRetractionFixture, in: store, context: profile)
+                try await Self.seedServerRetractionFixture(serverRetractionFixture, in: store, context: profile)
             }
             if resetFixtureAtLaunch,
                ProcessInfo.processInfo.arguments.contains("--harklight-test-retraction-expiry-relaunch") {
-                try Self.seedRetractionExpiryRelaunchFixture(in: store, fixtures: fixtures, context: profile)
+                try await Self.seedRetractionExpiryRelaunchFixture(in: store, fixtures: fixtures, context: profile)
             }
 #endif
             createdStore = store
             createdPort = AttentionDomainPort(store: store)
             if serverRetractionFixture == nil {
-                createdPresentation = try LivePresentationStore(
+                createdPresentation = try await LivePresentationStore(
                     localFixtureStore: store,
                     context: profile)
             } else {
-                createdPresentation = try LivePresentationStore(
+                createdPresentation = try await LivePresentationStore(
                     disconnectedStore: store,
                     context: profile)
             }
@@ -155,12 +163,19 @@ final class PrototypeStore {
                         at: retractionDate.addingTimeInterval(86_401))
                 }
                 let phase = expireServerRetractionAtLaunch ? "after_process_relaunch" : "first_process"
-                serverRetractionTestStatus = try Self.recordServerRetractionReadback(
+                serverRetractionTestStatus = try await Self.recordServerRetractionReadback(
                     serverRetractionFixture, requestKey: key, in: store,
                     presentation: presentation, context: profile, phase: phase)
             }
 #endif
-            initialSnapshot = try store.snapshot(context: profile)
+            initialSnapshot = try await store.snapshot(context: profile)
+            if let initialSnapshot {
+                for request in initialSnapshot.requests {
+                    if let selector = try? await store.selector(for: request.key, context: profile) {
+                        selectors[request.key] = selector
+                    }
+                }
+            }
         } catch {
             initializationError = error.localizedDescription
         }
@@ -175,7 +190,7 @@ final class PrototypeStore {
 #if DEBUG
     private static func seedServerRetractionFixture(_ fixture: NativeServerRetractionFixture,
                                                     in store: AttentionDomainStore,
-                                                    context: ProfileContext) throws {
+                                                    context: ProfileContext) async throws {
         let retraction = fixture.native_retraction
         let relayWire = try RelayWire(profile: context)
         let delivery = try relayWire.decodeEvent(Data(retraction.delivery_event_json.utf8))
@@ -184,36 +199,36 @@ final class PrototypeStore {
               request.key.messageID.rawValue == fixture.message_id else {
             throw ConversationError.missingRequest
         }
-        try store.apply(delivery, context: context)
+        _ = try await store.apply(delivery, context: context)
 
         let port = AttentionDomainPort(store: store)
-        guard let selector = try port.inspect(context: port.context, request: request.key)
+        guard let selector = try await port.inspect(context: port.context, request: request.key)
                 .requests.first?.selector,
-              var answerDraft = try store.snapshot(context: context).drafts[request.key] else {
+              var answerDraft = try await store.snapshot(context: context).drafts[request.key] else {
             throw ConversationError.missingRequest
         }
         answerDraft.compatibility.selectedActionID = ExactText("keep")
-        try store.saveDraft(answerDraft, selector: selector, context: context)
+        try await store.saveDraft(answerDraft, selector: selector, context: context)
         let conversationWire = try ConversationWire(profile: context)
         let conversationEvents = try retraction.conversation_event_json.map {
             try conversationWire.decodeEvent(Data($0.utf8))
         }
         guard conversationEvents.count >= 3 else { throw ConversationError.missingRequest }
         for event in conversationEvents.dropLast() {
-            try store.applyConversation(event, context: context)
+            try await store.applyConversation(event, context: context)
         }
 
         let lifecycle = try relayWire.decodeEvent(Data(retraction.lifecycle_event_json.utf8))
         guard lifecycle.conversation?.retractedAtMilliseconds == retraction.retracted_at_ms else {
             throw ConversationError.missingRequest
         }
-        try store.apply(lifecycle, context: context)
+        _ = try await store.apply(lifecycle, context: context)
         if let retractionEvent = conversationEvents.last {
-            try store.applyConversation(retractionEvent, context: context)
+            try await store.applyConversation(retractionEvent, context: context)
         }
 
-        let snapshot = try store.snapshot(context: context)
-        let conversation = try store.conversationSnapshot(context: context)
+        let snapshot = try await store.snapshot(context: context)
+        let conversation = try await store.conversationSnapshot(context: context)
         guard let thread = conversation.threads[request.key],
               snapshot.requests.contains(where: { $0.key == request.key }),
               snapshot.drafts[request.key]?.compatibility.selectedActionID == ExactText("keep"),
@@ -234,9 +249,9 @@ final class PrototypeStore {
         presentation: LivePresentationStore,
         context: ProfileContext,
         phase: String
-    ) throws -> String {
-        let snapshot = try store.snapshot(context: context)
-        let conversation = try store.conversationSnapshot(context: context)
+    ) async throws -> String {
+        let snapshot = try await store.snapshot(context: context)
+        let conversation = try await store.conversationSnapshot(context: context)
         guard let thread = conversation.threads[requestKey],
               snapshot.requests.contains(where: { $0.key == requestKey }),
               snapshot.drafts[requestKey]?.compatibility.selectedActionID == ExactText("keep"),
@@ -278,7 +293,7 @@ final class PrototypeStore {
 
     private static func seedRetractionExpiryRelaunchFixture(in store: AttentionDomainStore,
                                                            fixtures: FixtureSet,
-                                                           context: ProfileContext) throws {
+                                                           context: ProfileContext) async throws {
         guard let request = fixtures.requests.first(where: {
             $0.key.messageID.rawValue == "facilities-01"
         }) else {
@@ -288,23 +303,23 @@ final class PrototypeStore {
         let binding = ConversationBinding(request: request.key, revision: 1)
         let sessionHandle = ExactText("retraction-expiry-relaunch-fixture")
         let terminalTurn = ExactText("retraction-expiry-relaunch-terminal")
-        let firstSequence = try store.conversationSnapshot(context: context).cursor + 1
+        let firstSequence = try await store.conversationSnapshot(context: context).cursor + 1
         let terminalSequence = firstSequence + 1
         let retractionSequence = terminalSequence + 1
         let retractedAtMilliseconds = UInt64(
             Date().addingTimeInterval(-86_400 + 180).timeIntervalSince1970 * 1_000)
 
-        try store.applyConversation(ConversationEvent(sequence: firstSequence, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: firstSequence, binding: binding,
             fact: .request(sessionHandle: sessionHandle, payload: request.originalPayload)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: terminalSequence, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: terminalSequence, binding: binding,
             fact: .terminal(turn: terminalTurn, author: .origin, state: .cleared)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: retractionSequence, binding: binding,
+        try await store.applyConversation(ConversationEvent(sequence: retractionSequence, binding: binding,
             fact: .retraction(turn: terminalTurn, terminalSequence: terminalSequence),
             retractedAtMilliseconds: retractedAtMilliseconds), context: context)
     }
 #endif
 
-    static func loadFromBundle(_ bundle: Bundle = .main) -> PrototypeStore {
+    static func loadFromBundle(_ bundle: Bundle = .main) async -> PrototypeStore {
         do {
             let arguments = ProcessInfo.processInfo.arguments
 #if DEBUG
@@ -327,7 +342,7 @@ final class PrototypeStore {
                     legacyValueConformanceVectors: [], legacyTextConformanceVectors: [],
                     validSubmissions: [], invalidSubmissions: [], pointVectors: [],
                     terminalContexts: [], additionalCases: [])
-                return PrototypeStore(
+                return await PrototypeStore(
                     fixtures: emptyFixtures,
                     persistence: try FileAttentionStatePersistence.applicationSupport(),
                     resetFixtureAtLaunch: arguments.contains("--reset-attention-fixture"),
@@ -338,7 +353,7 @@ final class PrototypeStore {
                         "--harklight-test-retraction-expiry-after-deadline"))
             }
 #endif
-            return PrototypeStore(fixtures: try FixtureSet.loadBundled(from: bundle),
+            return await PrototypeStore(fixtures: try FixtureSet.loadBundled(from: bundle),
                                   persistence: try FileAttentionStatePersistence.applicationSupport(),
                                   resetFixtureAtLaunch: arguments.contains("--reset-attention-fixture"))
         } catch {
@@ -351,7 +366,7 @@ final class PrototypeStore {
                                   pointVectors: [],
                                   terminalContexts: [],
                                   additionalCases: [])
-            return PrototypeStore(fixtures: empty, loadError: "The bundled fixture or local durable store could not be opened.")
+            return await PrototypeStore(fixtures: empty, loadError: "The bundled fixture or local durable store could not be opened.")
         }
     }
 
@@ -506,12 +521,15 @@ final class PrototypeStore {
     func cancelDraft(for key: RequestKey) {
         guard let session = sessions[key], case .open = session.lifecycle,
               let port, let selector = try? boundSelector(for: key) else { return }
-        do {
-            try port.cancelDraft(context: port.context, selector: selector)
-            refreshSnapshot()
-            persistenceError = nil
-        } catch {
-            persistenceError = error.localizedDescription
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await port.cancelDraft(context: port.context, selector: selector)
+                await refreshSnapshot()
+                persistenceError = nil
+            } catch {
+                persistenceError = error.localizedDescription
+            }
         }
     }
 
@@ -520,12 +538,10 @@ final class PrototypeStore {
         if session.draft.noCommentSelected {
             return canSendNoCommentLocally(for: key)
         }
-        guard let port, let records = typedRecords(for: key, draft: session.draft),
-              let selector = try? boundSelector(for: key),
-              let answer = try? port.preview(context: port.context, selector: selector, inputs: records) else {
+        guard typedRecords(for: key, draft: session.draft) != nil else {
             return false
         }
-        return answer.jsonString.utf8.count <= captureLimitBytes
+        return true
     }
 
     func canSendNoCommentLocally(for key: RequestKey) -> Bool {
@@ -539,19 +555,19 @@ final class PrototypeStore {
     }
 
     @discardableResult
-    func sendNoCommentLocally(for key: RequestKey, selectionIsLocal: Bool = false) -> Bool {
+    func sendNoCommentLocally(for key: RequestKey, selectionIsLocal: Bool = false) async -> Bool {
         guard canSendNoCommentLocally(for: key), let port,
               let selector = try? boundSelector(for: key) else { return false }
         if !selectionIsLocal {
             guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
         }
-        refreshSnapshot()
+        await refreshSnapshot()
         do {
-            _ = try port.submitNoComment(context: port.context,
+            _ = try await port.submitNoComment(context: port.context,
                                          selector: selector,
                                          intentID: UUID(),
                                          discardDraft: selectionIsLocal)
-            refreshSnapshot()
+            await refreshSnapshot()
             persistenceError = nil
             return true
         } catch {
@@ -563,15 +579,15 @@ final class PrototypeStore {
     @discardableResult
     func sendSelectedAnswer(for key: RequestKey,
                             answerDraft: RequestDraft? = nil,
-                            explicitCompatibilityAction: ExactText? = nil) -> Bool {
+                            explicitCompatibilityAction: ExactText? = nil) async -> Bool {
         if answerDraft == nil {
             guard presentationStore?.flushPendingDraft(for: key) ?? true else { return false }
         }
-        refreshSnapshot()
+        await refreshSnapshot()
         guard let session = sessions[key], case .open = session.lifecycle else { return false }
         let draft = answerDraft ?? session.draft
         if draft.noCommentSelected {
-            return sendNoCommentLocally(for: key, selectionIsLocal: answerDraft != nil)
+            return await sendNoCommentLocally(for: key, selectionIsLocal: answerDraft != nil)
         }
         guard let port, let records = typedRecords(for: key, draft: draft,
                                                    explicitCompatibilityAction: explicitCompatibilityAction),
@@ -582,8 +598,8 @@ final class PrototypeStore {
                                       intentID: UUID(),
                                       inputs: records,
                                       persistAnswerDraft: answerDraft == nil)
-            _ = try port.submit(intent)
-            refreshSnapshot()
+            _ = try await port.submit(intent)
+            await refreshSnapshot()
             return true
         } catch {
             persistenceError = error.localizedDescription
@@ -592,8 +608,8 @@ final class PrototypeStore {
     }
 
     @discardableResult
-    func simulateTerminal(for key: RequestKey, scenario: DemoTerminalScenario) -> Bool {
-        refreshSnapshot()
+    func simulateTerminal(for key: RequestKey, scenario: DemoTerminalScenario) async -> Bool {
+        await refreshSnapshot()
         guard let store = domainStore, let session = sessions[key],
               case let .pending(submission) = session.lifecycle else { return false }
         let terminal: FixtureTerminal
@@ -615,8 +631,8 @@ final class PrototypeStore {
                                        ownOutcome: .unconfirmed)
         }
         do {
-            try store.recordFixtureTerminal(terminal, for: key, context: profileContext)
-            refreshSnapshot()
+            try await store.recordFixtureTerminal(terminal, for: key, context: profileContext)
+            await refreshSnapshot()
             persistenceError = nil
             return true
         } catch {
@@ -626,39 +642,43 @@ final class PrototypeStore {
     }
 
     @discardableResult
-    func simulateResolution(for key: RequestKey) -> Bool {
-        simulateTerminal(for: key, scenario: .answerOutcomeUnconfirmed)
+    func simulateResolution(for key: RequestKey) async -> Bool {
+        await simulateTerminal(for: key, scenario: .answerOutcomeUnconfirmed)
     }
 
     private func persistDraft(_ draft: RequestDraft, for key: RequestKey) {
         guard let domainStore, let selector = try? boundSelector(for: key) else { return }
-        do {
-            try domainStore.saveDraft(draft, selector: selector, context: profileContext)
-            refreshSnapshot()
-            persistenceError = nil
-        } catch {
-            persistenceError = error.localizedDescription
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await domainStore.saveDraft(draft, selector: selector, context: profileContext)
+                await refreshSnapshot()
+                persistenceError = nil
+            } catch {
+                persistenceError = error.localizedDescription
+            }
         }
     }
 
-    private func refreshSnapshot() {
+    private func refreshSnapshot() async {
         guard let domainStore else { return }
         do {
-            snapshot = try domainStore.snapshot(context: profileContext)
+            snapshot = try await domainStore.snapshot(context: profileContext)
         } catch {
             persistenceError = error.localizedDescription
         }
     }
 
-    func refreshFromDurableStore() {
-        refreshSnapshot()
+    func refreshFromDurableStore() async {
+        await refreshSnapshot()
     }
 
     private func boundSelector(for key: RequestKey) throws -> BoundDocumentSelector {
         if let cached = selectors[key] { return cached }
         guard let domainStore else { throw AttentionStoreError.persistence("The durable store is unavailable.") }
-        let selector = try domainStore.selector(for: key, context: profileContext)
-        selectors[key] = selector
+        guard let selector = selectors[key] else {
+            throw AttentionStoreError.requestMissing
+        }
         return selector
     }
 

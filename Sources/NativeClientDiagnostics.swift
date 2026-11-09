@@ -28,14 +28,7 @@ struct NativeDiagnosticSourceProvenance: Equatable {
     }
 
     static var current: Self {
-        guard let url = Bundle.main.url(forResource: "HarklightBuildProvenance", withExtension: "plist"),
-              let data = try? Data(contentsOf: url),
-              let propertyList = try? PropertyListSerialization.propertyList(from: data,
-                  options: [], format: nil),
-              let dictionary = propertyList as? [String: Any] else {
-            return .unavailable
-        }
-        return from(infoDictionary: dictionary)
+        from(infoDictionary: Bundle.main.infoDictionary ?? [:])
     }
 }
 
@@ -43,6 +36,7 @@ struct NativeDiagnosticSourceProvenance: Equatable {
 @Observable
 final class NativeClientDiagnosticJournal {
     enum PersistenceStatus: String {
+        case memoryOnly = "memory_only"
         case new
         case saved
         case readFailed
@@ -51,36 +45,25 @@ final class NativeClientDiagnosticJournal {
         case unsupportedVersion
     }
 
-    private struct JournalFile: Codable {
-        let version: Int
-        let events: [NativeClientDiagnosticEvent]
-    }
-
     static let retainedEventLimit = 256
 
     private(set) var events: [NativeClientDiagnosticEvent] = []
-    private(set) var persistenceStatus: PersistenceStatus = .new
-    private(set) var persistenceCauseCode: String?
-    private let fileURL: URL?
+    let persistenceStatus: PersistenceStatus = .memoryOnly
+    let persistenceCauseCode: String? = nil
 
-    init() {
-        fileURL = Self.defaultFileURL()
-        load()
-    }
+    init() {}
 
-    init(fileURL: URL?) {
-        self.fileURL = fileURL
-        load()
-    }
+    /// Kept as a source-compatible initializer for existing diagnostics tests.
+    /// Diagnostic events are intentionally never read from or written to disk.
+    init(fileURL: URL?) {}
 
-    var hasEvents: Bool { !events.isEmpty || persistenceStatus != .new }
+    var hasEvents: Bool { !events.isEmpty }
 
     func record(_ event: NativeClientDiagnosticEvent) {
         record([event])
     }
 
-    /// Persist a group of related facts with one journal rewrite while keeping
-    /// the existing unchanged-operation replay suppression in force.
+    /// Keep related facts together while suppressing unchanged operation state.
     func record(_ newEvents: [NativeClientDiagnosticEvent]) {
         guard !newEvents.isEmpty else { return }
         // URLSession and actor callbacks may reach the main-actor journal in a
@@ -101,7 +84,6 @@ final class NativeClientDiagnosticJournal {
         if events.count > Self.retainedEventLimit {
             events.removeFirst(events.count - Self.retainedEventLimit)
         }
-        persist()
     }
 
     func recordNoReplyRoutingIfChanged(request: RequestKey,
@@ -191,8 +173,8 @@ final class NativeClientDiagnosticJournal {
             "app_executable_sha256=\(NativeForegroundConnectDiagnostic.executableSHA256(for: Bundle.main.executableURL))",
             "app_source_commit=\(source.commit)",
             "app_source_tree=\(source.tree)",
-            "journal_status=\(persistenceStatus.rawValue)",
-            "journal_cause=\(persistenceCauseCode ?? "none_observed")",
+            "journal_status=memory_only",
+            "journal_cause=none_observed",
             "retained_event_count=\(events.count)",
             "retained_event_limit=\(Self.retainedEventLimit)",
             "older_events_may_be_omitted=yes"
@@ -259,63 +241,6 @@ final class NativeClientDiagnosticJournal {
     private func append(_ name: String, _ value: Bool?, to fields: inout [String]) {
         guard let value else { return }
         fields.append("\(name)=\(value ? "yes" : "no")")
-    }
-
-    private func load() {
-        guard let fileURL else {
-            persistenceStatus = .unavailable
-            return
-        }
-        do {
-            let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
-            let saved = try JSONDecoder().decode(JournalFile.self, from: data)
-            guard saved.version == 1 else {
-                persistenceStatus = .unsupportedVersion
-                persistenceCauseCode = "unsupported_journal_version"
-                return
-            }
-            let ordered = saved.events.enumerated().sorted { lhs, rhs in
-                if lhs.element.occurredAtMilliseconds == rhs.element.occurredAtMilliseconds {
-                    return lhs.offset < rhs.offset
-                }
-                return lhs.element.occurredAtMilliseconds < rhs.element.occurredAtMilliseconds
-            }.map(\.element)
-            events = Array(ordered.suffix(Self.retainedEventLimit))
-            persistenceStatus = .saved
-        } catch {
-            let value = error as NSError
-            if value.domain == NSCocoaErrorDomain && value.code == CocoaError.fileReadNoSuchFile.rawValue {
-                persistenceStatus = .new
-            } else {
-                persistenceStatus = .readFailed
-                persistenceCauseCode = Self.causeCode(for: error)
-            }
-        }
-    }
-
-    private func persist() {
-        guard let fileURL else {
-            persistenceStatus = .unavailable
-            persistenceCauseCode = "application_support_unavailable"
-            return
-        }
-        do {
-            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
-            let data = try JSONEncoder.sorted.encode(JournalFile(version: 1, events: events))
-            try data.write(to: fileURL, options: .atomic)
-            persistenceStatus = .saved
-            persistenceCauseCode = nil
-        } catch {
-            persistenceStatus = .writeFailed
-            persistenceCauseCode = Self.causeCode(for: error)
-        }
-    }
-
-    private static func defaultFileURL() -> URL? {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Harklight", isDirectory: true)
-            .appendingPathComponent("native-client-diagnostics-v1.json", isDirectory: false)
     }
 
     private func bundleValue(_ key: String) -> String {

@@ -64,30 +64,19 @@ extension View {
 }
 
 extension LivePresentationStore {
-    /// Cleanup, upload binding and composer readiness for one request.
+    /// Draft and send state for one request, without exposing message content.
     func uiDiagnosticSummary(for key: RequestKey, revision: UInt64) -> String {
         let thread = conversation(for: key)
         let draft = conversationDraft(for: key, revision: revision)
-        let groups = (thread?.uploadGroups ?? [:]).values.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
-            .map { group in
-                "op=\(group.operationID.uuidString.prefix(8)) rev=\(group.binding.revision) cleanup=\(group.cleanupID.map { String($0.uuidString.prefix(8)) } ?? "nil") originals=\(group.originals.map { $0.id.rawValue }) uploaded=\(group.uploaded.count)"
-            }
-        let cleanups = (thread?.uploadCleanups ?? [:]).values.sorted { $0.id.uuidString < $1.id.uuidString }
-            .map { cleanup in
-                let outcome: String = switch cleanup.outcome {
-                case .pending: "pending"
-                case .unknown: "unknown"
-                case let .acknowledged(result): "acknowledged-\(result.state.rawValue)"
-                }
-                return "id=\(cleanup.id.uuidString.prefix(8)) rev=\(cleanup.binding.revision) ops=\(cleanup.uploadOperations.map { String($0.uuidString.prefix(8)) }) outcome=\(outcome)"
-            }
-        let files = draft.files.map { "\($0.id.rawValue):reselect=\(uploadNeedsReselection($0, for: key, revision: revision))" }
+        let files = draft.files.map(\.id.rawValue)
+        let carriedOver = draft.carriedOverSend.map {
+            "op=\($0.operationID?.uuidString.prefix(8) ?? "nil") text=\($0.text.rawValue.count) unsettled=\($0.currentAttemptUnsettled)"
+        } ?? "nil"
         return [
             "request=\(UIDiagnostics.describe(key)) revision=\(revision) currentRevision=\(thread.map { String($0.currentRevision) } ?? "nil")",
             "readOnly=\(isReadOnly) local=\(isLocalExample) error=\(conversationError ?? "nil")",
-            "draft text=\(draft.text.rawValue.count) disposition=\(draft.disposition) files=\(files)",
-            "pendingCleanup=\(hasPendingUploadCleanup(for: key, revision: revision)) unreadyUpload=\(hasUnreadyUploadReference(for: key, revision: revision)) abandoned=\(hasAbandonedDiscussion(for: key, revision: revision))",
-            "groups=\(groups) cleanups=\(cleanups)",
+            "draft text=\(draft.text.rawValue.count) disposition=\(draft.disposition) operation=\(draft.operationID?.uuidString.prefix(8) ?? "nil") inFlight=\(draft.inFlightOperationID?.uuidString.prefix(8) ?? "nil") unsettled=\(draft.currentAttemptUnsettled) files=\(files)",
+            "failure=\(draft.failure?.summary ?? "nil") carriedOver=\(carriedOver)",
             UIDiagnostics.shared.eventSummary,
         ].joined(separator: " | ")
     }

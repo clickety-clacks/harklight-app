@@ -10,6 +10,16 @@ public protocol AttentionStatePersistence: AnyObject, Sendable {
     func commit(_ data: Data, identity: ProfileIdentity) throws
 }
 
+/// Keeps server projections for the lifetime of the current process only.
+/// Production relay sessions use this so a later launch must fetch server truth
+/// again instead of restoring a persisted inbox, event journal, cursor or outbox.
+public final class EphemeralAttentionStatePersistence: AttentionStatePersistence, Sendable {
+    public init() {}
+
+    public func load(identity: ProfileIdentity) throws -> Data? { nil }
+    public func commit(_ data: Data, identity: ProfileIdentity) throws {}
+}
+
 public final class MemoryAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
     private let lock = NSLock()
     private var files: [String: Data] = [:]
@@ -18,20 +28,14 @@ public final class MemoryAttentionStatePersistence: AttentionStatePersistence, @
     public init() {}
 
     public func failNextCommit() {
-        lock.lock()
-        defer { lock.unlock() }
         failNextWrite = true
     }
 
     public func load(identity: ProfileIdentity) throws -> Data? {
-        lock.lock()
-        defer { lock.unlock() }
         return files[identity.storageKey]
     }
 
     public func commit(_ data: Data, identity: ProfileIdentity) throws {
-        lock.lock()
-        defer { lock.unlock() }
         if failNextWrite {
             failNextWrite = false
             throw AttentionStoreError.persistence("Injected durable-write failure.")
@@ -71,6 +75,12 @@ public final class FileAttentionStatePersistence: AttentionStatePersistence, @un
         } catch {
             throw AttentionStoreError.persistence(error.localizedDescription)
         }
+    }
+
+    public func remove(identity: ProfileIdentity) throws {
+        let url = fileURL(for: identity)
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        try fileManager.removeItem(at: url)
     }
 
     public func commit(_ data: Data, identity: ProfileIdentity) throws {
@@ -131,12 +141,10 @@ public final class FileAttentionStatePersistence: AttentionStatePersistence, @un
     }
 }
 
-public final class AttentionDomainStore: @unchecked Sendable {
+public actor AttentionDomainStore {
     // Serialize writers while presentation readers can keep using the last
     // committed state during a durable write.
-    private let writerLock = NSRecursiveLock()
-    private let lock = NSRecursiveLock()
-    private let context: ProfileContext
+    private nonisolated let context: ProfileContext
     private let persistence: any AttentionStatePersistence
     private let conversationFileReferences: (any ConversationFileReferenceStore)?
     private let maximumWireFrameBytes: Int
@@ -148,8 +156,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private var selectorBindings: [UUID: SelectorBinding] = [:]
     private var changeObservers: [UUID: AsyncStream<UInt64>.Continuation] = [:]
     private var isInvalidated = false
+    private var routeAReplayPublishedConversation: ConversationState?
+    private var routeAConversationReplayActive = false
 
-    var profileContext: ProfileContext { context }
+    nonisolated var profileContext: ProfileContext { context }
 
     public init(context: ProfileContext,
                 persistence: any AttentionStatePersistence,
@@ -243,9 +253,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
             loaded.conversation?.orderTurnsFromProjectionEvents()
             Self.backfillSupersededByMessageKeys(in: &loaded)
+            let fetchedFilesStayInMemory = context.transportMode == .relay
             self.state = try Self.externalizingConversationFiles(in: loaded,
-                using: conversationFileReferences,
-                allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+                using: fetchedFilesStayInMemory ? nil : conversationFileReferences,
+                allowInlinePersistence: fetchedFilesStayInMemory || persistence is MemoryAttentionStatePersistence)
             self.acceptedAwaitingTerminalReplay = acceptedAwaitingReplay
         } else {
             self.state = PersistedAttentionState(profileIdentity: context.identity)
@@ -253,19 +264,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func invalidate() {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         isInvalidated = true
         selectorBindings.removeAll()
     }
 
     public func registerFixtureRequests(_ requests: [StoredRequest], context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
@@ -296,10 +299,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func resetFixtureState(_ requests: [StoredRequest], context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = PersistedAttentionState(profileIdentity: context.identity)
@@ -318,8 +317,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func selector(for requestKey: RequestKey,
                          requestRevision requestedRevision: UInt64? = nil,
                          context suppliedContext: ProfileContext) throws -> BoundDocumentSelector {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(requestKey, in: context.identity)
         let thread = state.conversation?.threads[requestKey]
@@ -359,10 +356,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func saveDraft(_ draft: RequestDraft,
                           selector: BoundDocumentSelector,
                           context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
         let interface = requestInterface(for: request)
@@ -385,8 +378,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                   draft: RequestDraft,
                                   selector: BoundDocumentSelector,
                                   context suppliedContext: ProfileContext) throws -> JSONValue {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
         return try compose(typedSubmission, draft: draft, for: request)
@@ -399,11 +390,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                        draft: RequestDraft,
                        selector: BoundDocumentSelector,
                        context suppliedContext: ProfileContext,
-                       persistAnswerDraft: Bool = true) throws -> Submission {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
+                       persistAnswerDraft: Bool = true,
+                       operationID suppliedOperationID: UUID? = nil) throws -> Submission {
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
         guard state.replayBarrier == nil else { throw AttentionStoreError.replayAlreadyActive }
@@ -444,7 +432,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.competingIntent(activeID)
         }
         guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
-        let operationID = UUID()
+        let operationID = suppliedOperationID ?? UUID()
+        guard isUUIDv4(operationID) else { throw AttentionStoreError.invalidSubmission }
         let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID,
                                              requestRevision: selector.requestRevision)
         let frame = Data((operation.jsonString + "\n").utf8)
@@ -469,7 +458,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
-        next.outboxOrder.append(intentID)
+        if suppliedContext.transportMode == .fixture { next.outboxOrder.append(intentID) }
         if suppliedContext.transportMode == .fixture {
             let sessionDraft = persistAnswerDraft ? draft : RequestDraft(interface: interface)
             next.fixtureSessions[request.key] = RequestSession(draft: sessionDraft,
@@ -485,11 +474,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func submitNoComment(intentID: UUID,
                                 selector: BoundDocumentSelector,
                                 context suppliedContext: ProfileContext,
-                                discardDraft: Bool = false) throws -> Submission {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
+                                discardDraft: Bool = false,
+                                operationID suppliedOperationID: UUID? = nil) throws -> Submission {
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
         guard suppliedContext.transportMode == .relay || suppliedContext.transportMode == .fixture,
@@ -522,7 +508,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.competingIntent(activeID)
         }
         guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
-        let operationID = UUID()
+        let operationID = suppliedOperationID ?? UUID()
+        guard isUUIDv4(operationID) else { throw AttentionStoreError.invalidSubmission }
         let operation = JSONValue.object([
             JSONMember("type", .string(ExactText("answer_no_comment"))),
             JSONMember("request_id", .string(request.key.messageID)),
@@ -549,7 +536,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
-        next.outboxOrder.append(intentID)
+        if suppliedContext.transportMode == .fixture { next.outboxOrder.append(intentID) }
         if discardDraft {
             discardAnswerDraft(for: request.key, revision: requestRevision, in: &next)
         }
@@ -561,8 +548,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func lookupIntent(_ intentID: UUID, context suppliedContext: ProfileContext) throws -> Submission? {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         return state.intents[intentID]
     }
@@ -573,10 +558,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func fenceUncommittedIntent(_ intentID: UUID,
                                        requestKey: RequestKey,
                                        context suppliedContext: ProfileContext) throws -> Submission? {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(requestKey, in: suppliedContext.identity)
         guard isUUIDv4(intentID), state.requests[requestKey] != nil else {
@@ -599,12 +580,39 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func retryOperation(_ intentID: UUID, context suppliedContext: ProfileContext) throws -> Submission? {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         guard state.outboxOrder.contains(intentID) else { return nil }
         return state.intents[intentID]
+    }
+
+    /// Releases a previous unresolved local receipt when a user starts a new
+    /// attempt with edited content. The old operation is kept as unknown and
+    /// is never sent again by this transition.
+    public func releaseUncertainIntentForNewAttempt(_ requestKey: RequestKey,
+                                                    retaining operationID: UUID,
+                                                    context suppliedContext: ProfileContext) throws {
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              let intentID = state.intentByRequest[requestKey],
+              var intent = state.intents[intentID],
+              intent.operationID != operationID else { return }
+        switch intent.disposition {
+        case .pending, .lost:
+            break
+        default:
+            return
+        }
+        var next = state
+        intent.disposition = .lost
+        next.intents[intentID] = intent
+        next.intentByRequest.removeValue(forKey: requestKey)
+        next.outboxOrder.removeAll(where: { $0 == intentID })
+        if var published = next.replayPublishedIntents {
+            published[intentID] = intent
+            next.replayPublishedIntents = published
+        }
+        try commit(next)
     }
 
     /// Persist a message-open observation before any relay send. Reopening the
@@ -614,10 +622,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func enqueueMessageOpen(_ requestKey: RequestKey,
                                    requestRevision: UInt64,
                                    context suppliedContext: ProfileContext) throws -> PendingMessageOpen {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(requestKey, in: suppliedContext.identity)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
@@ -646,10 +650,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func retireMessageOpen(_ operationID: UUID,
                                   context suppliedContext: ProfileContext) throws -> Bool {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         let pending = state.pendingMessageOpens ?? []
@@ -664,10 +664,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                         operationID: UUID,
                                         terminalSequence: UInt64,
                                         context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         guard var intent = state.intents[intentID] else { throw AttentionStoreError.intentMissing }
@@ -689,10 +685,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func recordNoCommentUnsupported(_ intentID: UUID,
                                            operationID: UUID,
                                            context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var intent = state.intents[intentID], intent.operationID == operationID,
@@ -724,10 +716,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func recordAnswerNotDelivered(_ intentID: UUID,
                                          operationID: UUID,
                                          context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var intent = state.intents[intentID],
@@ -760,10 +748,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                           operationID: UUID,
                                           currentRevision: UInt64,
                                           context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var intent = state.intents[intentID],
@@ -797,10 +781,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                                 operationID: UUID,
                                                 retractedAtMilliseconds: UInt64,
                                                 context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         guard var intent = state.intents[intentID], intent.operationID == operationID,
@@ -842,10 +822,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       state terminalState: TerminalState,
                                       authorizedOriginAnswer: JSONValue?,
                                       context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         guard var intent = state.intents[intentID] else { throw AttentionStoreError.intentMissing }
@@ -889,10 +865,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func recordFixtureTerminal(_ terminal: FixtureTerminal,
                                       for requestKey: RequestKey,
                                       context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         guard var session = state.fixtureSessions[requestKey] else { throw AttentionStoreError.requestMissing }
@@ -904,17 +876,15 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func apply(_ event: RelayEvent, context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        let event = try Self.externalizingConversationFiles(in: event,
-            using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        let event = try externalizingFetchedConversationFiles(in: event)
 
         if event.sequence <= state.cursor {
+            if persistence is EphemeralAttentionStatePersistence,
+               state.appliedEvents[event.sequence] == nil {
+                return state.cursor
+            }
             if let deferred = state.pendingRelayOverlays?[event.sequence] {
                 guard deferred.hasSameSemanticContent(as: event) else {
                     try recordRepair(.conflictingEvent(sequence: event.sequence))
@@ -1134,10 +1104,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func advanceRelayCursor(overIgnoredUpdateAt sequence: UInt64,
                                    context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         if sequence <= state.cursor { return state.cursor }
@@ -1211,9 +1177,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 thread.terminalTurn = terminalReceiptTarget
                 var preparedTurns: [UInt64: ConversationEvent] = [:]
                 for (sequence, target) in restoredTurns where target.binding.request == request.key {
-                    let prepared = try Self.externalizingConversationFiles(in: target,
-                        using: conversationFileReferences,
-                        allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+                    let prepared = try externalizingFetchedConversationFiles(in: target)
                     if case let .turn(turn) = prepared.fact { try validateConversationFiles(turn.files) }
                     preparedTurns[sequence] = prepared
                 }
@@ -1917,7 +1881,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func applyRelayEvent(_ event: RelayEvent,
-                                context suppliedContext: ProfileContext) -> ApplyEventResult {
+                                context suppliedContext: ProfileContext) async -> ApplyEventResult {
         if let result = deferUnloadedContiguousFact(event, context: suppliedContext) {
             return result
         }
@@ -1945,7 +1909,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 return .committed(contiguousCursor: cursor, publishable: nil)
             }
             let port = AttentionDomainPort(store: self)
-            let published = try port.observe(context: port.context)
+            let published = try await port.observe(context: port.context)
             return .committed(contiguousCursor: cursor, publishable: published)
         } catch let error as AttentionStoreError {
             switch error {
@@ -1963,10 +1927,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     private func deferUnloadedContiguousFact(_ event: RelayEvent,
                                              context suppliedContext: ProfileContext) -> ApplyEventResult? {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         do {
             try validate(suppliedContext)
             guard suppliedContext.transportMode == .relay,
@@ -2001,10 +1961,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func beginReplay(through highWaterSequence: UInt64,
                             context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         if let activeBarrier = state.replayBarrier {
@@ -2033,12 +1989,99 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try commit(next)
     }
 
+    /// Begins a fresh Route A reduction while retaining the last completed
+    /// projection for presentation until the new `resynced` barrier arrives.
+    public func beginRouteAReplay(context suppliedContext: ProfileContext) throws {
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+
+        let publishedRequests = state.replayPublishedRequests ?? state.requests
+        let publishedStates = state.replayPublishedStates ?? state.remoteStates
+        let publishedIntents = state.replayPublishedIntents ?? state.intents
+        let publishedKeys = state.replayPublishedInboxCurrentKeys ?? Set(publishedRequests.keys)
+        if !routeAConversationReplayActive {
+            routeAReplayPublishedConversation = state.conversation
+            routeAConversationReplayActive = true
+        }
+
+        var next = state
+        next.replayBarrier = UInt64.max
+        next.replayPublishedRequests = publishedRequests
+        next.replayPublishedStates = publishedStates
+        next.replayPublishedIntents = publishedIntents
+        next.replayPublishedInboxCurrentKeys = publishedKeys
+        next.requests.removeAll(keepingCapacity: false)
+        next.remoteStates.removeAll(keepingCapacity: false)
+        next.appliedEvents.removeAll(keepingCapacity: false)
+        next.intents.removeAll(keepingCapacity: false)
+        next.intentByRequest.removeAll(keepingCapacity: false)
+        next.fencedIntents = [:]
+        next.outboxOrder.removeAll(keepingCapacity: false)
+        next.cursor = 0
+        next.inboxCheckpoint = nil
+        next.inboxCandidate = nil
+        next.pendingRelayOverlays = nil
+        next.inboxReferences = nil
+        next.pendingMessageOpens = []
+        next.conversation = ConversationState()
+        acceptedAwaitingTerminalReplay.removeAll(keepingCapacity: false)
+        selectorBindings.removeAll(keepingCapacity: false)
+        try commit(next)
+    }
+
+    /// Ends the conversation view hold after a complete Route A open. Composer
+    /// drafts are carried from the last reduction only for matching live items.
+    public func finishRouteAConversationReplay(context suppliedContext: ProfileContext) throws {
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+
+        var next = state
+        if var conversation = next.conversation, let previous = routeAReplayPublishedConversation {
+            for (request, oldThread) in previous.threads {
+                guard var current = conversation.threads[request] else { continue }
+                var drafts = current.drafts ?? [:]
+                for (revision, draft) in oldThread.drafts ?? [:]
+                where current.revisions[revision] != nil {
+                    drafts[revision] = draft
+                }
+                current.drafts = drafts
+                conversation.threads[request] = current
+            }
+            next.conversation = conversation
+        }
+        let previousPublishedConversation = routeAReplayPublishedConversation
+        routeAReplayPublishedConversation = nil
+        routeAConversationReplayActive = false
+        do {
+            try commit(next)
+        } catch {
+            routeAReplayPublishedConversation = previousPublishedConversation
+            routeAConversationReplayActive = true
+            throw error
+        }
+    }
+
+    public func beginRouteAConversationReplay(context suppliedContext: ProfileContext) throws {
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        if !routeAConversationReplayActive {
+            routeAReplayPublishedConversation = state.conversation
+            routeAConversationReplayActive = true
+        }
+        var next = state
+        next.conversation = ConversationState()
+        try commit(next)
+    }
+
+    /// The relay reducer reads its in-progress state here; UI snapshots keep
+    /// reading the last complete Route A conversation until replay finishes.
+    public func currentConversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
+        try validate(suppliedContext)
+        return Self.makeConversationSnapshot(state.conversation ?? ConversationState())
+    }
+
     public func finishReplay(at resyncedSequence: UInt64,
                              context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard let barrier = state.replayBarrier else { throw AttentionStoreError.replayNotActive }
         guard (barrier == resyncedSequence || barrier == UInt64.max),
@@ -2057,10 +2100,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func resolveOriginReference(sequence: UInt64,
                                        request: StoredRequest,
                                        context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try validate(request.key, in: context.identity)
@@ -2091,8 +2130,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// Exact operation originals that must be covered before a new paging checkpoint.
     /// The ordinary outbox and accepted-awaiting-terminal index are disjoint by design.
     public func inboxOperationInventory(context suppliedContext: ProfileContext) throws -> [Submission] {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var seen = Set<UUID>()
@@ -2117,10 +2154,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                     since: UInt64,
                                     batches: [InboxReceiptBatch],
                                     context suppliedContext: ProfileContext) throws -> InboxPagingCheckpoint {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         if let existing = state.inboxCandidate {
@@ -2147,10 +2180,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func discardInboxCandidate(context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard let candidate = state.inboxCandidate else { return }
         guard !candidate.checkpointRequestStarted else { throw AttentionStoreError.inboxCheckpointPending }
@@ -2164,10 +2193,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// operation record, but allow a new bounded candidate from the durable C.
     public func discardReplacedInboxCandidate(snapshotID: String,
                                               context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard let candidate = state.inboxCandidate,
               candidate.snapshotID == snapshotID else {
@@ -2201,10 +2226,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                      skippingHeldEvents: [UInt64: ConversationEvent] = [:],
                                      onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
         validationRejection = nil
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var candidate = state.inboxCandidate,
@@ -2283,10 +2304,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private func replaceInboxView(_ view: InboxView?,
                                   context suppliedContext: ProfileContext,
                                   fixture: Bool) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == (fixture ? .fixture : .relay) else {
             throw AttentionStoreError.fixtureOnlyOperation
@@ -2327,10 +2344,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                      skippingHeldEvents: [UInt64: ConversationEvent] = [:],
                                      onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
         validationRejection = nil
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var checkpoint = state.inboxCheckpoint,
@@ -2382,17 +2395,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
         checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
         checkpoint.nextCursor = nextCursor
         next.inboxCheckpoint = checkpoint
-        try commit(next, allowingCommittedReads: true)
+        try commit(next)
         refreshAcceptedReplayIndexes(for: keys)
     }
 
     public func appendInboxReceiptBatches(_ batches: [InboxReceiptBatch],
                                          context suppliedContext: ProfileContext) throws {
         guard !batches.isEmpty else { return }
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var candidate = state.inboxCandidate,
@@ -2419,10 +2428,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       results: [InboxOperationReceipt],
                                       missingOperationIDs: [UUID] = [],
                                       context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var candidate = state.inboxCandidate,
@@ -2551,10 +2556,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       events: [RelayEvent],
                                       nextCursor: String?,
                                       context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var candidate = state.inboxCandidate,
@@ -2592,10 +2593,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     /// Durably freezes the exact manifest immediately before the distinct server checkpoint ACK.
     public func prepareInboxCheckpointAcknowledgement(context suppliedContext: ProfileContext) throws -> InboxPagingCheckpoint {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var candidate = state.inboxCandidate,
@@ -2625,10 +2622,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func acceptInboxCheckpoint(snapshotID: String,
                                       highWater: UInt64,
                                       context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay,
               var candidate = state.inboxCandidate,
@@ -2652,8 +2645,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func snapshot(context suppliedContext: ProfileContext) throws -> AttentionStoreSnapshot {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         let publishedRequests = (state.replayPublishedRequests ?? state.requests).mapValues { original in
             effectiveRequest(for: original.key) ?? original
@@ -2701,7 +2692,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       cursor: state.cursor,
                                       replayBarrier: state.replayBarrier,
                                       repairIssues: state.repairIssues,
-                                      conversationThreads: state.conversation?.threads ?? [:],
+                                      conversationThreads: routeAConversationReplayActive
+                                        ? routeAReplayPublishedConversation?.threads ?? [:]
+                                        : state.conversation?.threads ?? [:],
                                       inboxCheckpoint: state.inboxCheckpoint,
                                       inboxCandidate: state.inboxCandidate,
                                       inboxSourceOrder: inboxSourceOrder,
@@ -2715,8 +2708,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// Returns only the contiguous relay cursor after validating the profile.
     /// Unlike `snapshot(context:)`, this does not project retained presentation history.
     public func relayCursor(context suppliedContext: ProfileContext) throws -> UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else {
             throw AttentionStoreError.fixtureOnlyOperation
@@ -2727,8 +2718,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// Checks that a caller still owns the active profile without materializing
     /// the retained request, draft, fixture, conversation, or outbox projections.
     public func validateContext(context suppliedContext: ProfileContext) throws {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
     }
 
@@ -2736,8 +2725,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// has not yet been observed. The store builds this small index at load and
     /// updates it with the same durable mutations that accept or replay events.
     public func acceptedOperationsAwaitingTerminalReplay(context suppliedContext: ProfileContext) throws -> [Submission] {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         return acceptedAwaitingTerminalReplay.values.sorted {
             $0.operationID.uuidString < $1.operationID.uuidString
@@ -2745,10 +2732,17 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
-        let conversation = state.conversation ?? ConversationState()
+        let conversation: ConversationState
+        if routeAConversationReplayActive {
+            conversation = routeAReplayPublishedConversation ?? ConversationState()
+        } else {
+            conversation = state.conversation ?? ConversationState()
+        }
+        return Self.makeConversationSnapshot(conversation)
+    }
+
+    private static func makeConversationSnapshot(_ conversation: ConversationState) -> ConversationSnapshot {
         let pending = (conversation.pendingChatReadPositions ?? [:]).values.sorted {
             if $0.request.senderID != $1.request.senderID {
                 return $0.request.senderID.rawValue < $1.request.senderID.rawValue
@@ -2768,8 +2762,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
         _ event: ConversationEvent,
         context suppliedContext: ProfileContext
     ) throws -> ConversationValidationRejection? {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else {
             throw AttentionStoreError.fixtureOnlyOperation
@@ -2787,19 +2779,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                                  for receipt: ConversationEvent,
                                                  origin: ExactText? = nil,
                                                  context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else {
             throw AttentionStoreError.fixtureOnlyOperation
         }
         try validate(event.binding.request, in: context.identity)
         try validate(receipt.binding.request, in: context.identity)
-        let event = try Self.externalizingConversationFiles(in: event,
-            using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        let event = try externalizingFetchedConversationFiles(in: event)
         guard case let .turn(turn) = event.fact else { throw ConversationError.conflict }
         try validateConversationFiles(turn.files)
         var next = state
@@ -2838,14 +2824,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                   validationRejection: inout ConversationValidationRejection?,
                                   locallyReceivedAtMilliseconds: UInt64? = nil) throws -> UInt64 {
         validationRejection = nil
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
-        let event = try Self.externalizingConversationFiles(in: event,
-            using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        let event = try externalizingFetchedConversationFiles(in: event)
         try validate(event.binding.request, in: context.identity)
         switch event.fact {
         case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn): try validateConversationFiles(turn.files)
@@ -2853,6 +2833,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         var next = state
         var conversation = next.conversation ?? ConversationState()
+        if persistence is EphemeralAttentionStatePersistence, event.sequence <= conversation.cursor {
+            return conversation.cursor
+        }
         do {
             try conversation.apply(event)
         } catch let error as ConversationValidationRejectionError {
@@ -2957,7 +2940,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
         }
         next.conversation = conversation
-        try commit(next, allowingCommittedReads: true)
+        try commit(next)
         return conversation.cursor
     }
 
@@ -2970,10 +2953,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                             conversationSequence: UInt64,
                                             receivedAtMilliseconds: UInt64,
                                             context suppliedContext: ProfileContext) throws -> Bool {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(request, in: context.identity)
 
@@ -3000,10 +2979,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func advanceConversationCursor(overIgnoredUpdateAt sequence: UInt64,
                                           context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var conversation = state.conversation ?? ConversationState()
@@ -3036,10 +3011,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                          context suppliedContext: ProfileContext,
                                          validationRejection: inout ConversationValidationRejection?) throws {
         validationRejection = nil
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         let actual = state.conversation?.cursor ?? 0
         guard highWater == actual else {
@@ -3072,26 +3043,28 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func saveConversationDraft(_ draft: ConversationDraft, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
-        let draft = try Self.externalizingConversationFiles(in: draft,
+        var draft = try Self.externalizingConversationFiles(in: draft,
             using: conversationFileReferences,
             allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
         try validate(draft.binding.request, in: context.identity)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
               thread.revisions[draft.binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion else { throw ConversationError.closed }
         if let previous = thread.drafts[draft.binding.revision] {
-            switch previous.disposition {
-            case .submitting, .outcomeUnknown, .acceptedPendingReplay: throw ConversationError.pendingSubmission
-            default: break
+            let contentChanged = previous.text != draft.text || previous.files != draft.files
+            if contentChanged {
+                if previous.currentAttemptUnsettled || previous.inFlightOperationID != nil {
+                    draft.earlierVersionMayHaveBeenSent = true
+                    draft.currentAttemptUnsettled = false
+                }
+                draft.operationID = nil
+            }
+            if previous.inFlightOperationID != nil {
+                draft.inFlightOperationID = previous.inFlightOperationID
             }
         }
-        guard case .saved = draft.disposition else { throw ConversationError.invalidBinding }
+        draft.disposition = .saved
         try validateConversationFiles(draft.files)
         thread.drafts[draft.binding.revision] = draft
         conversation.threads[draft.binding.request] = thread
@@ -3104,26 +3077,22 @@ public final class AttentionDomainStore: @unchecked Sendable {
     @discardableResult
     public func updateConversationDraftText(_ text: ExactText, for binding: ConversationBinding,
                                            context suppliedContext: ProfileContext) throws -> ConversationDraft {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(binding.request, in: context.identity)
         var next = state
         guard var conversation = next.conversation,
               var thread = conversation.threads[binding.request],
               thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion else { throw ConversationError.closed }
         var draft = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
         guard draft.binding == binding else { throw ConversationError.invalidBinding }
-        switch draft.disposition {
-        case .submitting, .outcomeUnknown, .acceptedPendingReplay:
-            throw ConversationError.pendingSubmission
-        case .saved, .rejected:
-            break
+        if draft.text != text {
+            if draft.currentAttemptUnsettled || draft.inFlightOperationID != nil {
+                draft.earlierVersionMayHaveBeenSent = true
+                draft.currentAttemptUnsettled = false
+            }
+            draft.operationID = nil
+            draft.text = text
         }
-        draft.text = text
         draft.disposition = .saved
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
@@ -3158,10 +3127,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private func markConversationReadUpdate(_ request: RequestKey,
                                             through requestedTurnID: ExactText?,
                                             context suppliedContext: ProfileContext) throws -> ConversationReadUpdate {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(request, in: context.identity)
         let previousRevision = state.revision
@@ -3218,10 +3183,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func acceptConversationReadPosition(_ pending: PendingConversationReadPosition,
                                                serverPosition: UInt64,
                                                context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         try validate(pending.request, in: context.identity)
         var next = state
@@ -3233,10 +3194,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext,
                                         simulatedAcceptanceObservedAtMilliseconds: UInt64? = nil) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
@@ -3263,10 +3220,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// A typed local upload example, with no delivery operation or transport.
     public func stageFixtureConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
         text: ExactText, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         let file = try Self.externalizingConversationFiles(in: file,
@@ -3292,10 +3245,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// Freeze a durable operation before transport. Local examples may edit drafts,
     /// but cannot enter this submission path or acquire a delivery operation.
     public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws -> UUID {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
@@ -3305,31 +3254,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
-        guard !(thread.uploadCleanups ?? [:]).values.contains(where: {
-            guard $0.binding == binding else { return false }
-            if case .acknowledged = $0.outcome { return false }; return true
-        }) else { throw ConversationError.pendingSubmission }
-        let unready = Set((thread.uploadGroups ?? [:]).values.filter { $0.cleanupID != nil }
-            .flatMap { $0.originals.map(\.id) })
-        guard !draft.files.contains(where: { unready.contains($0.id) }) else { throw ConversationError.pendingSubmission }
-        let operation: UUID
-        switch draft.disposition {
-        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
-            guard thread.uploadGroups?[id]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
-            operation = id
-        case .saved, .rejected:
-            operation = UUID()
-            draft.disposition = .submitting(operation)
+        guard draft.inFlightOperationID == nil else { throw ConversationError.pendingSubmission }
+        let operation = draft.operationID ?? UUID()
+        guard isUUIDv4(operation) else {
+            throw ConversationError.pendingSubmission
         }
-        // Register planned upload-tier files before awaiting limits or disk/HTTP.
-        // Departure during that preparation must fence this original operation too.
-        let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
-        let uploads = zip(draft.files, tiers).filter { $0.1 == .upload }.map { $0.0 }
-        if !uploads.isEmpty, thread.uploadGroups?[operation] == nil {
-            let group = ConversationUploadGroup(operationID: operation, binding: binding,
-                originals: uploads, uploaded: [], cleanupID: nil)
-            thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
-        }
+        draft.operationID = operation
+        draft.inFlightOperationID = operation
+        draft.disposition = .submitting(operation)
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation
@@ -3337,24 +3269,61 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return operation
     }
 
+    public func recordUploadedConversationFile(_ file: ConversationFile,
+                                               binding: ConversationBinding,
+                                               operation: UUID,
+                                               context suppliedContext: ProfileContext) throws -> ConversationDraft {
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision],
+              draft.binding == binding,
+              draft.inFlightOperationID == operation,
+              let index = draft.files.firstIndex(where: { $0.id == file.id }),
+              draft.files[index].name == file.name,
+              draft.files[index].byteCount == file.byteCount,
+              draft.files[index].sha256 == file.sha256,
+              case .uploaded = file.content else { throw ConversationError.fileMismatch }
+        draft.files[index] = file
+        try validateConversationFiles(draft.files)
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return draft
+    }
+
+    public func markDiscussionTransmissionStarting(_ binding: ConversationBinding,
+                                                  operation: UUID,
+                                                  context suppliedContext: ProfileContext) throws -> ConversationDraft {
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision],
+              draft.binding == binding,
+              draft.inFlightOperationID == operation else { throw ConversationError.conflict }
+        draft.currentAttemptUnsettled = true
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return draft
+    }
+
     /// Called before starting an upload, not after its response: navigation may
     /// happen while the transfer is suspended or its result is unknown.
     public func registerConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
         operation: UUID, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
               let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        switch draft.disposition {
-        case let .submitting(id), let .outcomeUnknown(id):
-            guard id == operation else { throw ConversationError.conflict }
-        default: throw ConversationError.pendingSubmission
-        }
+        guard draft.inFlightOperationID == operation else { throw ConversationError.conflict }
         guard draft.files.contains(file) else { throw ConversationError.fileMismatch }
         var group = thread.uploadGroups?[operation] ?? ConversationUploadGroup(operationID: operation,
             binding: binding, originals: [], uploaded: [], cleanupID: nil)
@@ -3368,10 +3337,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func recordConversationUpload(_ file: ConversationFile, binding: ConversationBinding,
         operation: UUID, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
@@ -3395,10 +3360,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// its uncommitted upload groups; retries preserve that command identity.
     public func abandonConversationUploads(for request: RequestKey,
         context suppliedContext: ProfileContext) throws -> [ConversationUploadCleanup] {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[request] else { return [] }
@@ -3427,10 +3388,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func recordConversationCleanup(_ id: UUID, request: RequestKey,
         outcome: ConversationUploadCleanup.Outcome, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[request],
@@ -3446,26 +3403,70 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     public func markDiscussionOutcome(_ binding: ConversationBinding, operation: UUID,
-                                      rejection: ExactText?, context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
+                                      rejection: ExactText?, preserveUnsettled: Bool = false,
+                                      context suppliedContext: ProfileContext) throws {
         try validate(suppliedContext)
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
-              var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        switch draft.disposition {
-        case let .submitting(savedID) where savedID == operation,
-             let .outcomeUnknown(savedID) where savedID == operation: break
-        default: throw ConversationError.conflict
+              var draft = thread.drafts[binding.revision],
+              draft.inFlightOperationID == operation else { throw ConversationError.conflict }
+        draft.inFlightOperationID = nil
+        if let rejection {
+            let currentContentUsedOperation = draft.operationID == operation
+            draft.currentAttemptUnsettled = preserveUnsettled
+            draft.failure = ComposerSendFailure(outcome: preserveUnsettled ? .unconfirmed : .notSent,
+                summary: preserveUnsettled
+                    ? "This attempt was not sent. The message may have been sent."
+                    : (draft.earlierVersionMayHaveBeenSent
+                        ? "The message, or an earlier version, may have been sent."
+                        : "The message was not sent."),
+                detail: rejection.rawValue)
+            draft.disposition = currentContentUsedOperation ? .rejected(rejection) : .saved
+        } else if draft.operationID == operation {
+        if draft.operationID == operation {
+            draft.currentAttemptUnsettled = true
+        } else {
+            draft.earlierVersionMayHaveBeenSent = true
         }
-        // Rejection and unknown outcomes retain text, selected files and addressed revision.
-        draft.disposition = rejection.map { .rejected($0) } ?? .outcomeUnknown(operation)
+            draft.failure = ComposerSendFailure(outcome: .unconfirmed,
+                summary: draft.earlierVersionMayHaveBeenSent
+                    ? "An earlier version of this message may have been sent."
+                    : "The send may not have gone through.",
+                detail: "No correlated confirmation arrived after the send frame was transmitted.")
+            draft.disposition = .outcomeUnknown(operation)
+        } else {
+            draft.earlierVersionMayHaveBeenSent = true
+            draft.failure = ComposerSendFailure(outcome: .unconfirmed,
+                summary: "An earlier version of this message may have been sent.",
+                detail: "No correlated confirmation arrived after the send frame was transmitted.")
+            draft.disposition = .saved
+        }
         thread.drafts[binding.revision] = draft
-        thread.settleAbandonedDraft(revision: binding.revision)
         conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func markDiscussionConflict(_ binding: ConversationBinding, operation: UUID,
+                                      context suppliedContext: ProfileContext) throws {
+        try validate(suppliedContext)
+        guard var conversation = state.conversation,
+              var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision],
+              draft.inFlightOperationID == operation else { throw ConversationError.conflict }
+        draft.inFlightOperationID = nil
+        draft.operationID = UUID()
+        draft.currentAttemptUnsettled = false
+        draft.failure = ComposerSendFailure(outcome: .notSent,
+            summary: draft.earlierVersionMayHaveBeenSent
+                ? "The message, or an earlier version, may have been sent."
+                : "The message was not sent.",
+            detail: "The server rejected this operation because its id was already used for different content.")
+        draft.disposition = .rejected(ExactText("operation_conflict"))
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        var next = state
         next.conversation = conversation
         try commit(next)
     }
@@ -3473,21 +3474,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
     public func markDiscussionAccepted(_ binding: ConversationBinding, operation: UUID, turn: ExactText,
                                         context suppliedContext: ProfileContext,
                                         acceptanceObservedAtMilliseconds: UInt64? = nil) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .relay, !turn.rawValue.isEmpty else { throw ConversationError.invalidBinding }
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
               var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        switch draft.disposition {
-        case let .submitting(id), let .outcomeUnknown(id):
-            guard id == operation else { throw ConversationError.conflict }
-        case let .acceptedPendingReplay(id, priorTurn):
-            guard id == operation, priorTurn == turn else { throw ConversationError.conflict }
-        default: throw ConversationError.conflict
+        guard draft.inFlightOperationID == operation || draft.operationID == operation else {
+            throw ConversationError.conflict
         }
         var facts = thread.facts[turn] ?? ConversationTurnFacts()
         if facts.acceptedAtMilliseconds == nil {
@@ -3496,7 +3489,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
             facts.acceptedAtMilliseconds = observedAt
         }
         thread.facts[turn] = facts
-        draft.disposition = .acceptedPendingReplay(operation: operation, turn: turn)
+        draft.inFlightOperationID = nil
+        draft.failure = nil
+        draft.currentAttemptUnsettled = false
+        draft.earlierVersionMayHaveBeenSent = false
+        if draft.operationID == operation {
+            draft.text = ExactText("")
+            draft.files = []
+            draft.operationID = nil
+            draft.disposition = .acceptedPendingReplay(operation: operation, turn: turn)
+        } else {
+            draft.disposition = .saved
+        }
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation
@@ -3518,22 +3522,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     public func revisions(context suppliedContext: ProfileContext,
                           after _: UInt64) throws -> AsyncStream<UInt64> {
-        lock.lock()
-        defer { lock.unlock() }
         try validate(suppliedContext)
         let id = UUID()
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             changeObservers[id] = continuation
             continuation.yield(state.revision)
             continuation.onTermination = { [weak self] _ in
-                self?.removeObserver(id)
+                Task { await self?.removeObserver(id) }
             }
         }
     }
 
     private func removeObserver(_ id: UUID) {
-        lock.lock()
-        defer { lock.unlock() }
         changeObservers.removeValue(forKey: id)
     }
 
@@ -3674,30 +3674,27 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard requestKey.accountScope == identity.personID else { throw AttentionStoreError.wrongAccount }
     }
 
-    private func commit(_ proposed: PersistedAttentionState,
-                        allowingCommittedReads: Bool = true) throws {
+    private func commit(_ proposed: PersistedAttentionState) throws {
         // File payloads are normalized when events and drafts enter the state,
         // and loaded state is normalized during initialization. Rewalking every
         // retained conversation value here makes an unrelated text edit grow
         // with conversation history.
         var next = proposed
         next.revision = state.revision &+ 1
-        // Readers may use the last committed snapshot while the next revision is
-        // encoded and persisted. The writer gate stays held through persistence,
-        // recovery, publication and the caller's index updates, so no writer can
-        // derive a new revision from the pending one.
-        var stateLockReleased = allowingCommittedReads
-        if stateLockReleased { lock.unlock() }
-        defer { if stateLockReleased { lock.lock() } }
+        if persistence is EphemeralAttentionStatePersistence {
+            next.appliedEvents.removeAll(keepingCapacity: false)
+            next.conversation?.events.removeAll(keepingCapacity: false)
+            state = next
+            for observer in Array(changeObservers.values) {
+                observer.yield(state.revision)
+            }
+            return
+        }
         do {
             let encoder = PropertyListEncoder()
             encoder.outputFormat = .binary
             let bytes = try encoder.encode(next)
             try persistence.commit(bytes, identity: context.identity)
-            if stateLockReleased {
-                lock.lock()
-                stateLockReleased = false
-            }
             state = next
             for observer in Array(changeObservers.values) {
                 observer.yield(state.revision)
@@ -3714,10 +3711,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 // edits when recovering that older durable snapshot. This scan
                 // runs only after a failed commit, never on the normal edit path.
                 let recoveredIndex = Self.acceptedAwaitingTerminalReplay(in: normalized)
-                if stateLockReleased {
-                    lock.lock()
-                    stateLockReleased = false
-                }
                 state = normalized
                 acceptedAwaitingTerminalReplay = recoveredIndex
             }
@@ -3755,6 +3748,20 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return false
     }
 
+    private func externalizingFetchedConversationFiles(in event: RelayEvent) throws -> RelayEvent {
+        let memoryOnly = persistence is EphemeralAttentionStatePersistence
+        return try Self.externalizingConversationFiles(in: event,
+            using: memoryOnly ? nil : conversationFileReferences,
+            allowInlinePersistence: memoryOnly || persistence is MemoryAttentionStatePersistence)
+    }
+
+    private func externalizingFetchedConversationFiles(in event: ConversationEvent) throws -> ConversationEvent {
+        let memoryOnly = persistence is EphemeralAttentionStatePersistence
+        return try Self.externalizingConversationFiles(in: event,
+            using: memoryOnly ? nil : conversationFileReferences,
+            allowInlinePersistence: memoryOnly || persistence is MemoryAttentionStatePersistence)
+    }
+
     private static func externalizingConversationFiles(in file: ConversationFile,
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationFile {
         guard case .inline = file.content else { return file }
@@ -3786,7 +3793,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationDraft {
         ConversationDraft(binding: draft.binding, text: draft.text,
             files: try draft.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
-            disposition: draft.disposition)
+            disposition: draft.disposition, operationID: draft.operationID,
+            inFlightOperationID: draft.inFlightOperationID,
+            currentAttemptUnsettled: draft.currentAttemptUnsettled,
+            earlierVersionMayHaveBeenSent: draft.earlierVersionMayHaveBeenSent,
+            failure: draft.failure)
     }
 
     private static func externalizingConversationFiles(in event: ConversationEvent,

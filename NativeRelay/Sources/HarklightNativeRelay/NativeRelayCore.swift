@@ -13,6 +13,7 @@ public protocol AuthenticatedInstallationSession: AnyObject, Sendable {
     func resync(_ request: Data,
                 consume: @Sendable (Data) async throws -> Void) async throws
     func acknowledge(_ request: Data) async throws
+    func correlatedRequest(_ request: Data, ref: String) async throws -> Data
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult
 }
 
@@ -27,13 +28,25 @@ public protocol AuthenticatedInboxPagingSession: AuthenticatedInstallationSessio
 /// Receives events that the relay sends after the first replay barrier on the
 /// same authenticated connection. These frames remain unacknowledged until the
 /// core durably applies them.
-public protocol AuthenticatedInboxEventStreamSession: AuthenticatedInboxPagingSession {
+public protocol AuthenticatedInboxEventStreamSession: AuthenticatedInboxPagingSession, AuthenticatedLiveEventSession {
     var supportsPostCheckpointInboxEvents: Bool { get }
     func nextPostCheckpointInboxEvent() async throws -> Data
 }
 
+public extension AuthenticatedInboxEventStreamSession {
+    func nextLiveEvent() async throws -> Data {
+        try await nextPostCheckpointInboxEvent()
+    }
+}
+
 public extension AuthenticatedInstallationSession {
     var relayEndpointHost: String { authenticatedIdentity.trustedRelayAuthority.rawValue }
+}
+
+/// Route A's legacy sync connection also carries post-replay delivery and
+/// lifecycle events. This interface does not imply paged inbox support.
+public protocol AuthenticatedLiveEventSession: AuthenticatedInstallationSession {
+    func nextLiveEvent() async throws -> Data
 }
 
 public protocol AuthenticatedConversationSession: AuthenticatedInstallationSession {
@@ -101,7 +114,9 @@ public enum OriginalOperationResult: Equatable, Sendable {
     case refusedByRetraction(operationID: UUID, retractedAtMilliseconds: UInt64)
     case staleRevision(operationID: UUID, currentRevision: UInt64)
     case unsupported(operationID: UUID)
+    case operationConflict(operationID: UUID)
     case failed(operationID: UUID)
+    case notTransmitted(operationID: UUID)
     case unresolved
 }
 
@@ -193,7 +208,7 @@ public actor NativeRelayCore {
     /// while it is awaiting HTTP. This method never submits a discussion.
     public func discardAbandonedUploads(for request: RequestKey) async throws {
         try validate()
-        let pending = (try store.conversationSnapshot(context: context).threads[request]?.uploadCleanups ?? [:]).values
+        let pending = (try await store.currentConversationSnapshot(context: context).threads[request]?.uploadCleanups ?? [:]).values
             .filter { if case .acknowledged = $0.outcome { return false }; return true }
         for cleanup in pending {
             // Foreground replay and explicit navigation may retry the same
@@ -210,7 +225,7 @@ public actor NativeRelayCore {
                 }
                 let result = try await transport.discardConversationUploads(cleanup, originURL: endpoint)
                 try validate()
-                try store.recordConversationCleanup(cleanup.id, request: request,
+                try await store.recordConversationCleanup(cleanup.id, request: request,
                     outcome: .acknowledged(result), context: context)
                 diagnose(.upload, .uploadCleanup, .completed, operationID: cleanup.id,
                          request: request, revision: cleanup.binding.revision)
@@ -220,7 +235,7 @@ public actor NativeRelayCore {
                          error: error, operationID: cleanup.id, request: request,
                          revision: cleanup.binding.revision, receipt: .unknown)
                 do {
-                    try store.recordConversationCleanup(cleanup.id, request: request,
+                    try await store.recordConversationCleanup(cleanup.id, request: request,
                         outcome: .unknown(ExactText(String(describing: cleanupError))), context: context)
                 } catch {
                     diagnose(.localStore, .uploadCleanup, .failed, error: error,
@@ -233,13 +248,9 @@ public actor NativeRelayCore {
         }
     }
 
-    private func validateUploadOperation(_ binding: ConversationBinding, operation: UUID) throws {
-        let thread = try store.conversationSnapshot(context: context).threads[binding.request]
-        guard thread?.uploadGroups?[operation]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
-    }
-
     public func submitDiscussion(_ binding: ConversationBinding,
-        retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
+        retainedFile: @Sendable (ConversationFile) async throws -> URL,
+        persistDraft: @Sendable (ConversationDraft?) async throws -> Void) async throws -> DiscussionOperationResult {
         diagnose(.conversation, .discussionSubmission, .began, request: binding.request,
                  revision: binding.revision)
         guard !busy else { throw NativeRelayCoreError.inactive }
@@ -248,23 +259,20 @@ public actor NativeRelayCore {
         try validate()
         guard !conversationsUnavailable else { throw InstallationTransportError.conversationsUnavailable }
         guard let transport = session as? any AuthenticatedConversationFileSession,
-              let draft = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+              let draft = try await store.currentConversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
         }
         if case let .acceptedPendingReplay(_, turn) = draft.disposition {
-            try await replayConversationAndAcknowledge(using: transport)
+            try await replayConversationRouteA(using: transport)
             return .accepted(turnID: turn)
         }
         guard !draft.text.rawValue.isEmpty else { throw ConversationError.emptyDraft }
-        let wasUncertain: Bool
-        switch draft.disposition {
-        case .submitting, .outcomeUnknown: wasUncertain = true
-        default: wasUncertain = false
-        }
-        let operation = try store.prepareDiscussion(binding, context: context)
-        guard let frozen = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+        let wasUncertain = draft.currentAttemptUnsettled || draft.earlierVersionMayHaveBeenSent
+        let operation = try await store.prepareDiscussion(binding, context: context)
+        guard let frozen = try await store.currentConversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
         }
+        try await persistDraft(frozen)
         let frame: Data
         do {
             var prepared: [ConversationFile] = []
@@ -280,15 +288,15 @@ public actor NativeRelayCore {
                 for (file, tier) in zip(frozen.files, tiers) {
                     if case .uploaded = file.content { prepared.append(file); continue }
                     if tier == .upload {
-                        try store.registerConversationUpload(file, binding: binding, operation: operation, context: context)
                         let source = try await retainedFile(file)
-                        try validateUploadOperation(binding, operation: operation)
                         diagnose(.upload, .uploadTransfer, .began, operationID: operation,
                                  request: binding.request, revision: binding.revision)
                         let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
                             operationID: operation, limits: published, originURL: endpoint)
                         try validate()
-                        try store.recordConversationUpload(uploaded, binding: binding, operation: operation, context: context)
+                        let savedDraft = try await store.recordUploadedConversationFile(uploaded,
+                            binding: binding, operation: operation, context: context)
+                        try await persistDraft(savedDraft)
                         diagnose(.upload, .uploadTransfer, .completed, operationID: operation,
                                  request: binding.request, revision: binding.revision)
                         prepared.append(uploaded)
@@ -306,19 +314,27 @@ public actor NativeRelayCore {
             }
             frame = try ConversationWire(profile: context, endpointHost: session.relayEndpointHost).discussion(frozen, operationID: operation,
                 preparedFiles: prepared, limits: limits)
+            let transmittingDraft = try await store.markDiscussionTransmissionStarting(
+                binding, operation: operation, context: context)
+            try await persistDraft(transmittingDraft)
         } catch {
             // No discussion frame has been sent by this attempt. A previous
             // ambiguous attempt must still keep its exact operation frozen.
-            // Keep all original bytes/draft; unreferenced uploads do not submit a turn.
+            // Uploads are not tracked for cleanup; a failed pre-send upload leaves
+            // the draft available for Mike's next explicit Send.
             let names = frozen.files.map { $0.name.rawValue }.joined(separator: ", ")
             diagnose(.conversation, .discussionPreparation,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
                      operationID: operation, request: binding.request, revision: binding.revision,
                      receipt: wasUncertain ? .unknown : .pendingUnconfirmed)
             do {
-                try store.markDiscussionOutcome(binding, operation: operation,
-                    rejection: wasUncertain ? nil : ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
+                try await store.markDiscussionOutcome(binding, operation: operation,
+                    rejection: ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
+                    preserveUnsettled: wasUncertain,
                     context: context)
+                let savedDraft = try await store.currentConversationSnapshot(context: context)
+                    .threads[binding.request]?.drafts[binding.revision]
+                try await persistDraft(savedDraft)
             } catch {
                 diagnose(.localStore, .discussionPreparation, .failed, error: error,
                          operationID: operation, request: binding.request,
@@ -328,18 +344,17 @@ public actor NativeRelayCore {
             throw error
         }
         try validate()
-        try validateUploadOperation(binding, operation: operation)
         let result = await transport.sendDiscussion(frame, operationID: operation)
         try validate()
         switch result {
         case let .accepted(turn):
-            try store.markDiscussionAccepted(binding, operation: operation, turn: turn, context: context)
+            try await store.markDiscussionAccepted(binding, operation: operation, turn: turn, context: context)
             diagnose(.conversation, .discussionSubmission, .accepted, operationID: operation,
                      request: binding.request, revision: binding.revision,
                      receipt: .acceptedAwaitingReplay)
             // The accepted turn is durable even if replay temporarily fails. A later
             // refresh joins it; the send response cannot move a replay cursor.
-            do { try await replayConversationAndAcknowledge(using: transport) }
+            do { try await replayConversationRouteA(using: transport) }
             catch {
                 diagnose(.conversation, .conversationReplay,
                          NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
@@ -347,13 +362,28 @@ public actor NativeRelayCore {
                          revision: binding.revision, receipt: .acceptedAwaitingReplay)
             }
         case let .rejected(reason):
-            try store.markDiscussionOutcome(binding, operation: operation, rejection: reason, context: context)
+            try await store.markDiscussionOutcome(binding, operation: operation, rejection: reason, context: context)
             diagnose(.conversation, .discussionSubmission, .rejected, operationID: operation,
                      request: binding.request, revision: binding.revision, receipt: .pendingUnconfirmed)
+        case .operationConflict:
+            try await store.markDiscussionConflict(binding, operation: operation, context: context)
+            diagnose(.conversation, .discussionSubmission, .rejected,
+                     causeCode: NativeDiagnosticCauseCode.serverReason("operation_conflict"),
+                     operationID: operation, request: binding.request,
+                     revision: binding.revision, receipt: .pendingUnconfirmed)
         case .unresolved:
-            try store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+            try await store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
             diagnose(.conversation, .discussionSubmission, .unresolved, operationID: operation,
                      request: binding.request, revision: binding.revision, receipt: .unknown)
+        }
+        let latestDraft = try await store.currentConversationSnapshot(context: context)
+            .threads[binding.request]?.drafts[binding.revision]
+        if let latestDraft,
+           latestDraft.text.rawValue.isEmpty, latestDraft.files.isEmpty,
+           latestDraft.operationID == nil {
+            try? await persistDraft(nil)
+        } else {
+            try? await persistDraft(latestDraft)
         }
         return result
     }
@@ -388,12 +418,11 @@ public actor NativeRelayCore {
                 session: any AuthenticatedInstallationSession,
                 attemptID: UUID? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) async throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
         }
-        _ = try store.snapshot(context: context)
         self.store = store
         self.context = context
         self.session = session
@@ -402,6 +431,7 @@ public actor NativeRelayCore {
         self.onDiagnostic = onDiagnostic
         self.wire = try RelayWire(profile: context)
         self.inboxWire = try InboxPagingWire(profile: context)
+        _ = try await store.snapshot(context: context)
     }
 
     public func deactivate() {
@@ -420,7 +450,7 @@ public actor NativeRelayCore {
         resumePostCheckpointWaiters(throwing: NativeRelayCoreError.inactive)
     }
 
-    /// Returns details for the most recent failed post-ACK drain without
+    /// Returns details for the most recent failed Route A fetch without
     /// changing the error thrown by `resyncAndDrainOutbox()`.
     public func takePostAckFailureDetails() -> NativePostAckFailureDetails? {
         defer { postAckFailureDetails = nil }
@@ -436,120 +466,217 @@ public actor NativeRelayCore {
         busy = true
         defer { releaseBusy() }
         try validate()
-        try throwPostCheckpointInboxFailureIfPresent()
-        guard let pagingSession = session as? any AuthenticatedInboxPagingSession else {
-            throw NativeRelayCoreError.inboxPagingUnavailable
-        }
-        let acceptedBeforeReplay = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
-        retainReplayDiagnostics(for: acceptedBeforeReplay)
-        var high: UInt64
-        if inboxBootstrapped {
-            if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
-               eventStream.supportsPostCheckpointInboxEvents {
-                startPostCheckpointInboxConsumer(from: eventStream,
-                    baseline: try currentInboxCheckpointHighWater())
-                high = try store.snapshot(context: context).cursor
-            } else {
-                high = try await replayInboxAndAcknowledge(
-                    since: store.snapshot(context: context).cursor,
-                    trackingAcceptedOperations: acceptedBeforeReplay,
-                    using: pagingSession)
-            }
-        } else {
-            high = try await bootstrapInbox(using: pagingSession,
-                                            trackingAcceptedOperations: acceptedBeforeReplay)
-            inboxBootstrapped = true
-        }
-        onProgress(.postAckDrainBegan)
-        var failedStep = NativeDiagnosticPostAckStep.readAcceptedOperationsBeforeDrain
+        diagnose(.relay, .ordinaryReplay, .began)
         do {
-            inspectedConversationMetadata = true
-            let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
-                .map(\.operationID))
-            failedStep = .readOutboxBeforeDrain
-            let pendingBeforeDrain = try store.snapshot(context: context).outbox
-            let attempted: Int
-            do {
-                failedStep = .drainPendingOperations
-                attempted = try await drainPending()
-            } catch {
-                // A later operation may fail after an earlier operation was
-                // accepted. Record that the accepted operation's terminal replay
-                // was not reached, without attributing the later operation's
-                // transport error to it.
-                let acceptedAfterInterruptedDrain = (try? store.acceptedOperationsAwaitingTerminalReplay(context: context)) ?? []
-                for submission in acceptedAfterInterruptedDrain where !acceptedBeforeDrain.contains(submission.operationID) {
-                    diagnoseOperationReplay(.unresolved,
-                             causeCode: "follow_on_replay_not_reached",
-                             submission: submission, receipt: .acceptedAwaitingReplay)
-                }
-                throw error
+            try await store.beginRouteAReplay(context: context)
+            activeInboxReplay = ReplayProgress(expected: 0, durableCursor: 0)
+            onProgress(.nativeSyncReplayRequested)
+            try await session.resync(wire.resync(since: 0)) { frame in
+                try await self.consumeRouteAInboxReplay(frame)
             }
-            if attempted > 0 {
-                failedStep = .readOutboxAfterDrain
-                let afterDrain = try store.snapshot(context: context)
-                let newlyAccepted = pendingBeforeDrain.compactMap { pending -> Submission? in
-                    guard let recorded = afterDrain.intents[pending.intentID],
-                          case .accepted = recorded.disposition else { return nil }
-                    return recorded
-                }
-                for submission in newlyAccepted {
-                    acceptedReplaySubmissions[submission.operationID] = submission
-                    if operationReplayDiagnosticStates[submission.operationID] == nil {
-                        diagnoseOperationReplay(.began, submission: submission,
-                                                receipt: .acceptedAwaitingReplay)
-                    }
-                }
-                failedStep = .readAcceptedOperationsAfterDrain
-                let acceptedAfterDrain = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
-                let trackingSubmissions = Array(acceptedReplaySubmissions.values)
-                if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
-                   eventStream.supportsPostCheckpointInboxEvents {
-                    let terminalSequence = (acceptedAfterDrain + newlyAccepted)
-                        .compactMap(Self.acceptedTerminalSequence).max()
-                    if let terminalSequence {
-                        failedStep = .waitForAcceptedOperationAcknowledgement
-                        try await waitForPostCheckpointAcknowledgement(through: terminalSequence)
-                    }
-                    completeAcceptedOperationReplayDiagnostics(trackingSubmissions)
-                    failedStep = .readInboxCursorAfterAcknowledgement
-                    high = try store.snapshot(context: context).cursor
-                } else {
-                    failedStep = .replayInboxAfterDrain
-                    high = try await replayInboxAndAcknowledge(
-                        since: high,
-                        trackingAcceptedOperations: acceptedAfterDrain + newlyAccepted,
-                        using: pagingSession)
-                }
+            guard let high = activeInboxReplay?.high else { throw NativeRelayCoreError.invalidReplay }
+            activeInboxReplay = nil
+            onProgress(.nativeSyncResynced)
+
+            if let eventStream = session as? any AuthenticatedLiveEventSession {
+                startPostCheckpointInboxConsumer(from: eventStream, baseline: high)
             }
-            // An empty local projection does not mean the server has no history.
-            // It can also have a durable cursor after accounting for an unusable
-            // message, and that progress still needs its conversation ACK.
+
+            // Route A's unsequenced ordering view is fetched on the same relay
+            // socket after the complete replay barrier. It never starts paging.
+            await refreshInboxView(using: session)
+
             if let conversationSession = session as? any AuthenticatedConversationSession {
-                failedStep = .replayConversationsAndAcknowledge
-                try await replayConversationAndAcknowledge(using: conversationSession)
+                try await replayConversationRouteA(using: conversationSession)
+            } else {
+                try await store.finishRouteAConversationReplay(context: context)
             }
-            if !inboxViewRequestedOnConnection {
-                inboxViewRequestedOnConnection = true
-                await refreshInboxView(using: pagingSession)
-            }
-            failedStep = .readFinalRelayCursor
-            let durableCursor = try store.snapshot(context: context).cursor
-            failedStep = .validateRelayState
+
             try validate()
-            onProgress(.postAckDrainFinished(.completed))
-            _ = await drainPendingMessageOpens(using: pagingSession)
-            return max(high, durableCursor)
+            diagnose(.relay, .ordinaryReplay, .completed)
+            return high
         } catch {
-            let errorCode = NativeDiagnosticCauseCode.forPostAckError(error)
-            let details = NativePostAckFailureDetails(step: failedStep, errorCode: errorCode)
-            postAckFailureDetails = details
-            let transition = NativeDiagnosticCauseCode.failureTransition(for: error)
-            onProgress(.postAckDrainFinished(transition))
-            diagnose(.relay, .postAckDrain, transition, error: error,
-                     postAckFailureStep: details.step,
-                     postAckFailureErrorCode: details.errorCode)
+            activeInboxReplay = nil
+            diagnose(.relay, .ordinaryReplay,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
             throw error
+        }
+    }
+
+    /// Sends exactly one operation as the direct result of a user action.
+    /// This deliberately does not inspect or drain any operation list.
+    public func sendOriginalOperation(operationID: UUID) async throws -> OriginalOperationResult {
+        guard !busy else { throw NativeRelayCoreError.inactive }
+        try validate()
+        let submissions = try await store.snapshot(context: context).intents.values
+        guard let submission = submissions.first(where: { $0.operationID == operationID }) else {
+            return .unresolved
+        }
+        guard submission.operationID == operationID else {
+            throw NativeRelayCoreError.mismatchedOperationResult
+        }
+        busy = true
+        defer { releaseBusy() }
+        diagnose(.answer, .originalOperationDelivery, .began,
+                 operationID: operationID, request: submission.requestKey,
+                 revision: submission.requestRevision, receipt: .pendingUnconfirmed)
+
+        let result = try await session.sendOriginalOperation(submission.wireFrame,
+                                                              operationID: operationID)
+        try validate()
+        switch result {
+        case let .accepted(returnedID, terminalSequence):
+            guard returnedID == operationID, terminalSequence > 0 else {
+                throw NativeRelayCoreError.mismatchedOperationResult
+            }
+            try await store.recordAcceptedOperation(submission.intentID, operationID: returnedID,
+                terminalSequence: terminalSequence, context: context)
+            diagnose(.answer, .originalOperationDelivery, .accepted,
+                     operationID: returnedID, request: submission.requestKey,
+                     revision: submission.requestRevision, receipt: .acceptedAwaitingReplay)
+        case let .refusedByRetraction(returnedID, timestamp):
+            guard returnedID == operationID else { throw NativeRelayCoreError.mismatchedOperationResult }
+            try await store.recordAnswerRefusedByRetraction(submission.intentID, operationID: returnedID,
+                retractedAtMilliseconds: timestamp, context: context)
+        case let .staleRevision(returnedID, currentRevision):
+            guard returnedID == operationID, currentRevision > (submission.requestRevision ?? 1) else {
+                throw NativeRelayCoreError.mismatchedOperationResult
+            }
+            try await store.recordAnswerStaleRevision(submission.intentID, operationID: returnedID,
+                currentRevision: currentRevision, context: context)
+        case let .unsupported(returnedID):
+            guard returnedID == operationID, submission.isNoComment else {
+                throw NativeRelayCoreError.mismatchedOperationResult
+            }
+            try await store.recordNoCommentUnsupported(submission.intentID, operationID: returnedID,
+                context: context)
+        case let .operationConflict(returnedID), let .failed(returnedID):
+            guard returnedID == operationID else { throw NativeRelayCoreError.mismatchedOperationResult }
+            try await store.recordAnswerNotDelivered(submission.intentID, operationID: returnedID,
+                context: context)
+        case .notTransmitted:
+            break
+        case .unresolved:
+            break
+        }
+        return result
+    }
+
+    /// Reports one deliberate detail open. This operation is never persisted
+    /// or retried when the relay is unavailable or its reply is uncertain.
+    public func reportMessageOpen(_ operation: PendingMessageOpen) async -> MessageOpenOperationResult {
+        guard !busy else { return .unresolved }
+        busy = true
+        defer { releaseBusy() }
+        do {
+            try validate()
+            let wire = MessageOpenWire()
+            let response = try await session.correlatedRequest(
+                wire.request(for: operation), ref: MessageOpenWire.requestRef)
+            try validate()
+            let result = wire.decodeResult(response, for: operation)
+            switch result {
+            case .confirmed:
+                diagnose(.relay, .messageOpen, .completed,
+                    operationID: operation.operationID, request: operation.requestKey,
+                    revision: operation.requestRevision, receipt: .terminal)
+            case let .permanentlyRejected(reason):
+                diagnose(.relay, .messageOpen, .rejected, causeCode: reason,
+                    operationID: operation.operationID, request: operation.requestKey,
+                    revision: operation.requestRevision, receipt: .terminal)
+            case .unsupported:
+                diagnose(.relay, .messageOpen, .unresolved, causeCode: "message_open_unsupported",
+                    operationID: operation.operationID, request: operation.requestKey,
+                    revision: operation.requestRevision, receipt: .pendingUnconfirmed)
+            case .unresolved:
+                diagnose(.relay, .messageOpen, .unresolved,
+                    causeCode: "message_open_confirmation_unresolved",
+                    operationID: operation.operationID, request: operation.requestKey,
+                    revision: operation.requestRevision, receipt: .unknown)
+            }
+            return result
+        } catch {
+            diagnose(.relay, .messageOpen,
+                NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
+                operationID: operation.operationID, request: operation.requestKey,
+                revision: operation.requestRevision, receipt: .unknown)
+            return .unresolved
+        }
+    }
+
+    private func consumeRouteAInboxReplay(_ frame: Data) async throws {
+        try validate()
+        guard var replay = activeInboxReplay, replay.high == nil else {
+            throw NativeRelayCoreError.invalidReplay
+        }
+        if !replay.accepted {
+            guard try wire.isResyncAccepted(frame) else { throw NativeRelayCoreError.invalidReplay }
+            try await store.beginReplay(through: UInt64.max, context: context)
+            replay.accepted = true
+            activeInboxReplay = replay
+            return
+        }
+        if let high = try? wire.decodeResynced(frame) {
+            guard high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
+            try await store.finishReplay(at: high, context: context)
+            replay.high = high
+            activeInboxReplay = replay
+            return
+        }
+        switch try wire.decodeUpdate(frame) {
+        case let .event(event):
+            guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            switch await store.applyRelayEvent(event, context: context) {
+            case .committed, .compatibleRepeat:
+                break
+            case let .deferred(cursor) where cursor == event.sequence:
+                break
+            case .gap, .conflict, .repairRequired, .deferred:
+                throw NativeRelayCoreError.eventRejected
+            }
+            replay.expected = event.sequence
+        case let .ignored(sequence):
+            guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
+                throw NativeRelayCoreError.invalidReplay
+            }
+            _ = try await store.advanceRelayCursor(overIgnoredUpdateAt: sequence, context: context)
+            replay.expected = sequence
+        case .viewChanged, .ignoredUnsequenced:
+            break
+        }
+        activeInboxReplay = replay
+    }
+
+    private func replayConversationRouteA(using transport: any AuthenticatedConversationSession) async throws {
+        try await store.beginRouteAConversationReplay(context: context)
+        guard !conversationsUnavailable else {
+            try await store.finishRouteAConversationReplay(context: context)
+            return
+        }
+        diagnose(.conversation, .conversationReplay, .began)
+        do {
+            let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
+            _ = try await replayConversation(since: 0, using: transport, wire: wire)
+            await flushCommittedLiveReplyArrivals()
+            try await store.finishRouteAConversationReplay(context: context)
+            diagnose(.conversation, .conversationReplay, .completed)
+        } catch InstallationTransportError.conversationsUnavailable {
+            conversationsUnavailable = true
+            discoveredOriginURL = nil
+            try await store.finishRouteAConversationReplay(context: context)
+            return
+        } catch {
+            diagnose(.conversation, .conversationReplay,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+            throw error
+        }
+        if liveConversationConsumerTask == nil,
+           let events = transport as? any AuthenticatedConversationEventSession {
+            liveConversationConsumerTask = Task { [weak self] in
+                await self?.consumeLiveConversationSignals(from: events)
+            }
         }
     }
 
@@ -558,55 +685,18 @@ public actor NativeRelayCore {
     /// owns the socket, then return only after the page is durably saved.
     @discardableResult
     public func fetchNextInboxPage() async throws -> Bool {
-        guard let pagingSession = session as? any AuthenticatedInboxPagingSession else {
-            throw NativeRelayCoreError.inboxPagingUnavailable
-        }
-        guard !busy else {
-            return try await withCheckedThrowingContinuation { continuation in
-                pendingInboxPageWaiters.append(continuation)
-            }
-        }
-        busy = true
-        defer { releaseBusy() }
-        do {
-            try validate()
-            try throwPostCheckpointInboxFailureIfPresent()
-            let checkpoint = try store.snapshot(context: context).inboxCheckpoint
-            guard let checkpoint, checkpoint.checkpointAccepted,
-                  checkpoint.hasInitialPage,
-                  let snapshotID = checkpoint.snapshotID,
-                  let highWater = checkpoint.highWater,
-                  let cursor = checkpoint.nextCursor else {
-                return false
-            }
-            let ref = Self.inboxRef("page")
-            let reply = try await pagingSession.inboxRequest(
-                inboxWire.inboxPage(snapshotID: snapshotID, cursor: cursor, ref: ref), ref: ref)
-            try validate()
-            let page = try inboxWire.decodePage(reply, ref: ref,
-                                                snapshotID: snapshotID, highWater: highWater)
-            try await saveInboxPageRecoveringHeldEvents(page.items) { restored, skipped, onFailure in
-                var rejection: ConversationValidationRejection?
-                try store.saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater,
-                    cursor: cursor, items: page.items, nextCursor: page.nextCursor, context: context,
-                    validationRejection: &rejection, restoredTurns: restored,
-                    skippingHeldEvents: skipped, onHeldEventFailure: onFailure)
-            }
-            return true
-        } catch {
-            throw error
-        }
+        false
     }
 
     private func bootstrapInbox(using transport: any AuthenticatedInboxPagingSession,
                                 trackingAcceptedOperations accepted: [Submission]) async throws -> UInt64 {
-        let snapshot = try store.snapshot(context: context)
+        let snapshot = try await store.snapshot(context: context)
         if let candidate = snapshot.inboxCandidate {
             let isCurrentStartup = activeInboxStartupID == candidate.startupID
             if candidate.checkpointRequestStarted {
                 do {
                     try await recoverInboxCheckpoint(candidate, using: transport)
-                    if isCurrentStartup, let checkpoint = try store.snapshot(context: context).inboxCheckpoint,
+                    if isCurrentStartup, let checkpoint = try await store.snapshot(context: context).inboxCheckpoint,
                        checkpoint.checkpointAccepted, let high = checkpoint.highWater {
                         return try await replayInboxAndAcknowledge(
                             since: high,
@@ -615,7 +705,7 @@ public actor NativeRelayCore {
                     }
                 } catch InboxPagingWireError.serverRefused("snapshot_replaced") {
                     guard let snapshotID = candidate.snapshotID else { throw NativeRelayCoreError.invalidReplay }
-                    try store.discardReplacedInboxCandidate(snapshotID: snapshotID, context: context)
+                    try await store.discardReplacedInboxCandidate(snapshotID: snapshotID, context: context)
                 }
             } else if isCurrentStartup {
                 return try await completeInboxCandidate(candidate, using: transport,
@@ -624,7 +714,7 @@ public actor NativeRelayCore {
                 // A prior launch may have persisted page/receipt work before it
                 // requested the checkpoint. Keep that work and originals, then
                 // capture this launch's one fresh bounded B2 snapshot.
-                try store.discardInboxCandidate(context: context)
+                try await store.discardInboxCandidate(context: context)
             }
         }
         return try await createInboxCheckpoint(using: transport,
@@ -643,15 +733,15 @@ public actor NativeRelayCore {
         let accepted = try inboxWire.decodeCheckpointStatus(statusReply, ref: statusRef,
             snapshotID: snapshotID, highWater: highWater)
         if !accepted { try await acknowledgeInboxCheckpoint(candidate, using: transport) }
-        _ = try store.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: highWater,
+        _ = try await store.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: highWater,
                                             context: context)
     }
 
     private func createInboxCheckpoint(using transport: any AuthenticatedInboxPagingSession,
                                        trackingAcceptedOperations accepted: [Submission]) async throws -> UInt64 {
-        let cursor = try store.snapshot(context: context).cursor
-        let inventory = try store.inboxOperationInventory(context: context)
-        let candidate = try store.beginInboxCandidate(startupID: UUID().uuidString.lowercased(),
+        let cursor = try await store.snapshot(context: context).cursor
+        let inventory = try await store.inboxOperationInventory(context: context)
+        let candidate = try await store.beginInboxCandidate(startupID: UUID().uuidString.lowercased(),
             since: cursor, batches: Self.makeInboxBatches(inventory), context: context)
         activeInboxStartupID = candidate.startupID
 
@@ -671,11 +761,11 @@ public actor NativeRelayCore {
             let firstPage = try inboxWire.decodeStart(startReply, ref: startRef)
             try await saveInboxPageRecoveringHeldEvents(firstPage.items) { restored, skipped, onFailure in
                 var rejection: ConversationValidationRejection?
-                try store.saveInboxInitialPage(snapshotID: firstPage.snapshotID,
+                try await store.saveInboxInitialPage(snapshotID: firstPage.snapshotID,
                     highWater: firstPage.highWater, items: firstPage.items,
                     nextCursor: firstPage.nextCursor, receiptCursor: firstPage.receiptCursor,
                     context: context, validationRejection: &rejection, restoredTurns: restored,
-                    skippingHeldEvents: skipped, onHeldEventFailure: onFailure)
+                    skippingHeldEvents: skipped)
             }
         }
 
@@ -684,7 +774,7 @@ public actor NativeRelayCore {
         guard let snapshotID = eligible.snapshotID, let highWater = eligible.highWater else {
             throw NativeRelayCoreError.invalidReplay
         }
-        let high = try store.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: highWater,
+        let high = try await store.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: highWater,
                                                    context: context)
         return try await replayInboxAndAcknowledge(since: high,
             trackingAcceptedOperations: accepted, using: transport)
@@ -694,7 +784,7 @@ public actor NativeRelayCore {
     /// targets, skipped facts and page checkpoint in the same transaction.
     private func saveInboxPageRecoveringHeldEvents(_ items: [InboxSnapshotItem],
         save: ([UInt64: ConversationEvent], [UInt64: ConversationEvent],
-               ((ConversationEvent, ConversationValidationRejection?) -> Void)?) throws -> Void) async throws {
+               ((ConversationEvent, ConversationValidationRejection?) -> Void)?) async throws -> Void) async throws {
         var restored: [UInt64: ConversationEvent] = [:]
         var skipped: [UInt64: ConversationEvent] = [:]
         var historyOpened = false
@@ -702,7 +792,7 @@ public actor NativeRelayCore {
         while true {
             var heldFailure: (ConversationEvent, ConversationValidationRejection?)?
             do {
-                try save(restored, skipped) { event, rejection in heldFailure = (event, rejection) }
+                try await save(restored, skipped) { event, rejection in heldFailure = (event, rejection) }
             } catch {
                 guard let (event, rejection) = heldFailure,
                       isUnusableConversationMessage(error), skipped[event.sequence] == nil else { throw error }
@@ -750,7 +840,7 @@ public actor NativeRelayCore {
         using transport: any AuthenticatedConversationSession) async throws -> ConversationEvent? {
         let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
         conversationReplay = ConversationReplayProgress(expected: 0,
-            durableCursor: try store.conversationSnapshot(context: context).cursor,
+            durableCursor: try await store.currentConversationSnapshot(context: context).cursor,
             recoveryReceipt: receipt, recoveryRejection: rejection,
             recoveryOrigin: origin, recoveryHandle: handle, historyOnly: true)
         defer { conversationReplay = nil }
@@ -770,32 +860,32 @@ public actor NativeRelayCore {
         while true {
             try await reconcilePendingInboxBatches(using: transport)
             try await drainInboxReceiptCursor(using: transport)
-            let candidate = try currentInboxCandidate()
+            let candidate = try await currentInboxCandidate()
             let covered = Set(candidate.batches.flatMap(\.operationIDs))
-            let inventory = try store.inboxOperationInventory(context: context)
+            let inventory = try await store.inboxOperationInventory(context: context)
             let missing = inventory.filter { !covered.contains($0.operationID) }
             if !missing.isEmpty {
-                try store.appendInboxReceiptBatches(Self.makeInboxBatches(missing), context: context)
+                try await store.appendInboxReceiptBatches(Self.makeInboxBatches(missing), context: context)
                 continue
             }
             do {
-                return try store.prepareInboxCheckpointAcknowledgement(context: context)
+                return try await store.prepareInboxCheckpointAcknowledgement(context: context)
             } catch AttentionStoreError.inboxCheckpointIncomplete {
-                let refreshed = try store.inboxOperationInventory(context: context)
+                let refreshed = try await store.inboxOperationInventory(context: context)
                 let refreshedMissing = refreshed.filter { !covered.contains($0.operationID) }
                 guard !refreshedMissing.isEmpty else { throw AttentionStoreError.inboxCheckpointIncomplete }
-                try store.appendInboxReceiptBatches(Self.makeInboxBatches(refreshedMissing), context: context)
+                try await store.appendInboxReceiptBatches(Self.makeInboxBatches(refreshedMissing), context: context)
             }
         }
     }
 
     private func reconcilePendingInboxBatches(using transport: any AuthenticatedInboxPagingSession) async throws {
         while true {
-            let candidate = try currentInboxCandidate()
+            let candidate = try await currentInboxCandidate()
             guard let snapshotID = candidate.snapshotID,
                   let highWater = candidate.highWater else { throw NativeRelayCoreError.invalidReplay }
             guard let batch = candidate.batches.first(where: { $0.results == nil }) else { return }
-            let snapshot = try store.snapshot(context: context)
+            let snapshot = try await store.snapshot(context: context)
             let submissionsByOperation = Dictionary(uniqueKeysWithValues:
                 snapshot.intents.values.map { ($0.operationID, $0) })
             let submissions = try batch.operationIDs.map { operationID -> Submission in
@@ -900,7 +990,7 @@ public actor NativeRelayCore {
                          revision: submission.requestRevision, receipt: .pendingUnconfirmed)
             }
             do {
-                try store.saveInboxReceiptBatch(batch.batchID,
+                try await store.saveInboxReceiptBatch(batch.batchID,
                     results: reconciliation.receipts,
                     missingOperationIDs: reconciliation.missingOperationIDs,
                     context: context)
@@ -988,7 +1078,7 @@ public actor NativeRelayCore {
 
     private func drainInboxReceiptCursor(using transport: any AuthenticatedInboxPagingSession) async throws {
         while true {
-            let candidate = try currentInboxCandidate()
+            let candidate = try await currentInboxCandidate()
             guard let snapshotID = candidate.snapshotID,
                   let highWater = candidate.highWater,
                   let cursor = candidate.receiptCursor else { return }
@@ -1003,7 +1093,7 @@ public actor NativeRelayCore {
                 throw InboxPagingWireError.invalidFrame
             }
             let noCommentSubmissions = Dictionary(grouping:
-                try store.snapshot(context: context).intents.values.filter(\.isNoComment),
+                try await store.snapshot(context: context).intents.values.filter(\.isNoComment),
                 by: \.requestKey)
             let lifecycleEvents: [(event: RelayEvent,
                                    request: RequestKey,
@@ -1044,7 +1134,7 @@ public actor NativeRelayCore {
                          revision: lifecycle.submission?.requestRevision)
             }
             do {
-                try store.saveInboxReceiptChunk(snapshotID: snapshotID, cursor: cursor,
+                try await store.saveInboxReceiptChunk(snapshotID: snapshotID, cursor: cursor,
                     events: page.events, nextCursor: page.nextCursor, context: context)
             } catch {
                 for lifecycle in lifecycleEvents {
@@ -1085,8 +1175,8 @@ public actor NativeRelayCore {
                                           snapshotID: snapshotID, highWater: highWater)
     }
 
-    private func currentInboxCandidate() throws -> InboxPagingCheckpoint {
-        guard let candidate = try store.snapshot(context: context).inboxCandidate else {
+    private func currentInboxCandidate() async throws -> InboxPagingCheckpoint {
+        guard let candidate = try await store.snapshot(context: context).inboxCandidate else {
             throw AttentionStoreError.inboxCheckpointIncomplete
         }
         return candidate
@@ -1114,9 +1204,9 @@ public actor NativeRelayCore {
         onProgress(.nativeSyncReplayRequested)
         diagnose(.relay, .ordinaryReplay, .began)
         do {
-            let replayStart = try store.snapshot(context: context).cursor
+            let replayStart = try await store.snapshot(context: context).cursor
             guard replayStart == cursor else { throw NativeRelayCoreError.invalidReplay }
-            let checkpointHighWater = try currentInboxCheckpointHighWater()
+            let checkpointHighWater = try await currentInboxCheckpointHighWater()
             let high = try await replayInbox(since: replayStart, using: transport)
             onProgress(.nativeSyncResynced)
             let eventStream = transport as? any AuthenticatedInboxEventStreamSession
@@ -1139,13 +1229,13 @@ public actor NativeRelayCore {
                 openPostCheckpointAcknowledgementGate(through: high)
             }
             diagnose(.relay, .ordinaryReplay, .completed)
-            completeAcceptedOperationReplayDiagnostics(submissions)
+            await completeAcceptedOperationReplayDiagnostics(submissions)
             return high
         } catch {
             failPostCheckpointInbox(error)
             diagnose(.relay, .ordinaryReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
-            let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
+            let outstanding = try? await store.acceptedOperationsAwaitingTerminalReplay(context: context)
             let ids = outstanding.map { Set($0.map(\.operationID)) }
             for submission in submissions {
                 diagnoseOperationReplay(NativeDiagnosticCauseCode.failureTransition(for: error),
@@ -1156,8 +1246,8 @@ public actor NativeRelayCore {
         }
     }
 
-    private func currentInboxCheckpointHighWater() throws -> UInt64 {
-        guard let checkpoint = try store.snapshot(context: context).inboxCheckpoint,
+    private func currentInboxCheckpointHighWater() async throws -> UInt64 {
+        guard let checkpoint = try await store.snapshot(context: context).inboxCheckpoint,
               checkpoint.checkpointAccepted,
               let highWater = checkpoint.highWater else {
             throw NativeRelayCoreError.invalidReplay
@@ -1166,7 +1256,7 @@ public actor NativeRelayCore {
     }
 
     private func startPostCheckpointInboxConsumer(
-        from eventStream: any AuthenticatedInboxEventStreamSession,
+        from eventStream: any AuthenticatedLiveEventSession,
         baseline: UInt64
     ) {
         guard postCheckpointInboxConsumerTask == nil else { return }
@@ -1180,58 +1270,48 @@ public actor NativeRelayCore {
     }
 
     private func consumePostCheckpointInboxEvents(
-        from eventStream: any AuthenticatedInboxEventStreamSession
+        from eventStream: any AuthenticatedLiveEventSession
     ) async {
         do {
             while !Task.isCancelled {
-                let frame = try await eventStream.nextPostCheckpointInboxEvent()
+                let frame = try await eventStream.nextLiveEvent()
                 let update = try wire.decodeUpdate(frame)
                 if case let .viewChanged(revision) = update {
                     scheduleInboxViewRefresh(using: eventStream, noticedRevision: revision)
                     continue
                 }
                 if case .ignoredUnsequenced = update { continue }
-                let previousCursor = try validatedRelayCursor()
-                let durableCursor: UInt64
+                let previousCursor = try await validatedRelayCursor()
                 let sequence: UInt64
                 switch update {
                 case let .event(event):
                     sequence = event.sequence
-                    switch store.applyRelayEvent(event, context: context) {
-                    case let .committed(contiguousCursor, _),
-                         let .compatibleRepeat(contiguousCursor, _):
-                        durableCursor = contiguousCursor
+                    if sequence <= previousCursor { continue }
+                    guard previousCursor < UInt64.max, sequence == previousCursor + 1 else {
+                        throw NativeRelayCoreError.invalidReplay
+                    }
+                    switch await store.applyRelayEvent(event, context: context) {
+                    case .committed, .compatibleRepeat:
+                        break
                     case let .deferred(contiguousCursor) where contiguousCursor == event.sequence:
-                        durableCursor = contiguousCursor
+                        break
                     case .gap, .conflict, .repairRequired, .deferred:
                         throw NativeRelayCoreError.eventRejected
                     }
                 case let .ignored(ignoredSequence):
                     sequence = ignoredSequence
-                    durableCursor = try store.advanceRelayCursor(
-                        overIgnoredUpdateAt: ignoredSequence, context: context)
+                    if sequence <= previousCursor { continue }
+                    guard previousCursor < UInt64.max, sequence == previousCursor + 1 else {
+                        throw NativeRelayCoreError.invalidReplay
+                    }
+                    _ = try await store.advanceRelayCursor(overIgnoredUpdateAt: ignoredSequence, context: context)
                     diagnose(.relay, .ordinaryReplay, .observed, causeCode: "unknown_update_kind")
                 case .viewChanged:
                     continue
                 case .ignoredUnsequenced:
                     continue
                 }
-                if sequence > previousCursor {
-                    guard previousCursor < UInt64.max,
-                          sequence == previousCursor + 1,
-                          durableCursor == sequence else {
-                        throw NativeRelayCoreError.invalidReplay
-                    }
-                } else if durableCursor != previousCursor {
-                    throw NativeRelayCoreError.invalidReplay
-                }
-
-                if let acknowledged = postCheckpointAcknowledgedCursor,
-                   durableCursor > acknowledged {
-                    queuePostCheckpointAcknowledgement(through: durableCursor)
-                }
-                completeAcceptedOperationReplayDiagnostics(
-                    Array(acceptedReplaySubmissions.values))
+                _ = sequence
             }
         } catch {
             guard !Task.isCancelled else { return }
@@ -1241,7 +1321,7 @@ public actor NativeRelayCore {
         }
     }
 
-    private func scheduleInboxViewRefresh(using transport: any AuthenticatedInboxPagingSession,
+    private func scheduleInboxViewRefresh(using transport: any AuthenticatedInstallationSession,
                                          noticedRevision: ExactText) {
         guard active, !inboxViewUnsupportedForConnection else { return }
         latestInboxViewNotice = noticedRevision
@@ -1254,7 +1334,7 @@ public actor NativeRelayCore {
         }
     }
 
-    private func refreshNoticedInboxViews(using transport: any AuthenticatedInboxPagingSession) async {
+    private func refreshNoticedInboxViews(using transport: any AuthenticatedInstallationSession) async {
         defer { inboxViewNoticeTask = nil }
         while active, !Task.isCancelled, let revision = latestInboxViewNotice {
             latestInboxViewNotice = nil
@@ -1262,10 +1342,10 @@ public actor NativeRelayCore {
         }
     }
 
-    private func refreshInboxView(using transport: any AuthenticatedInboxPagingSession,
+    private func refreshInboxView(using transport: any AuthenticatedInstallationSession,
                                   noticedRevision: ExactText? = nil) async {
         guard !inboxViewUnsupportedForConnection else { return }
-        let heldRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
+        let heldRevision = (try? await store.snapshot(context: context).inboxView?.revision) ?? nil
         if let noticedRevision, heldRevision == noticedRevision { return }
         if inboxViewFetchInProgress {
             pendingInboxViewRevision = noticedRevision
@@ -1276,34 +1356,33 @@ public actor NativeRelayCore {
 
         var noticeToResolve = noticedRevision
         while active {
-            let knownRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
+            let knownRevision = (try? await store.snapshot(context: context).inboxView?.revision) ?? nil
             if let noticeToResolve, noticeToResolve == knownRevision { break }
             pendingInboxViewRevision = nil
             let ref = Self.inboxRef("view")
             do {
-                let reply = try await transport.inboxRequest(
+                let reply = try await transport.correlatedRequest(
                     inboxWire.viewGet(knownRevision: knownRevision, ref: ref), ref: ref)
                 guard active else { return }
                 switch inboxWire.decodeViewGet(reply, ref: ref, knownRevision: knownRevision) {
                 case let .updated(view):
-                    try store.setInboxView(view, context: context)
-                    scheduleInboxViewPageLoad()
+                    try await store.setInboxView(view, context: context)
                 case .unchanged:
-                    scheduleInboxViewPageLoad()
+                    break
                 case .unsupported:
                     inboxViewUnsupportedForConnection = true
-                    try? store.setInboxView(nil, context: context)
+                    try? await store.setInboxView(nil, context: context)
                 case .unavailable:
-                    try? store.setInboxView(nil, context: context)
+                    try? await store.setInboxView(nil, context: context)
                 }
                 if inboxViewUnsupportedForConnection { break }
             } catch {
-                try? store.setInboxView(nil, context: context)
+                try? await store.setInboxView(nil, context: context)
                 break
             }
             let pending = pendingInboxViewRevision
             pendingInboxViewRevision = nil
-            let currentRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
+            let currentRevision = (try? await store.snapshot(context: context).inboxView?.revision) ?? nil
             guard let pending, pending != currentRevision else {
                 break
             }
@@ -1319,7 +1398,7 @@ public actor NativeRelayCore {
 
     private func loadPagesUntilInboxViewIsHeld() async {
         while active {
-            guard let snapshot = try? store.snapshot(context: context),
+            guard let snapshot = try? await store.snapshot(context: context),
                   let view = snapshot.inboxView,
                   let checkpoint = snapshot.inboxCheckpoint,
                   checkpoint.checkpointAccepted,
@@ -1331,7 +1410,7 @@ public actor NativeRelayCore {
             guard checkpoint.nextCursor != nil else { return }
             let loadedBefore = checkpoint.loadedKeys
             guard (try? await fetchNextInboxPage()) == true else { return }
-            guard let next = try? store.snapshot(context: context),
+            guard let next = try? await store.snapshot(context: context),
                   let nextCheckpoint = next.inboxCheckpoint else { return }
             let newlyLoaded = nextCheckpoint.loadedKeys.subtracting(loadedBefore)
             if newlyLoaded.contains(where: { next.remoteStates[$0]?.isTerminal == true }) { return }
@@ -1426,9 +1505,9 @@ public actor NativeRelayCore {
         return sequence
     }
 
-    private func completeAcceptedOperationReplayDiagnostics(_ submissions: [Submission]) {
+    private func completeAcceptedOperationReplayDiagnostics(_ submissions: [Submission]) async {
         guard !submissions.isEmpty else { return }
-        let outstanding = try? store.acceptedOperationsAwaitingTerminalReplay(context: context)
+        let outstanding = try? await store.acceptedOperationsAwaitingTerminalReplay(context: context)
         let ids = outstanding.map { Set($0.map(\.operationID)) }
         for submission in submissions {
             let settled = ids.map { !$0.contains(submission.operationID) } ?? false
@@ -1444,7 +1523,7 @@ public actor NativeRelayCore {
     private func replayInbox(since cursor: UInt64,
                              using transport: any AuthenticatedInboxPagingSession) async throws -> UInt64 {
         try validate()
-        let snapshot = try store.snapshot(context: context)
+        let snapshot = try await store.snapshot(context: context)
         guard let checkpoint = snapshot.inboxCheckpoint,
               checkpoint.checkpointAccepted,
               let snapshotID = checkpoint.snapshotID,
@@ -1465,7 +1544,7 @@ public actor NativeRelayCore {
     }
 
     private func consumeInboxReplay(_ frame: Data, ref: String,
-                                    snapshotID: String, highWater: UInt64) throws {
+                                    snapshotID: String, highWater: UInt64) async throws {
         try validate()
         guard var replay = activeInboxReplay, replay.high == nil else {
             throw NativeRelayCoreError.invalidReplay
@@ -1475,7 +1554,7 @@ public actor NativeRelayCore {
                                                  snapshotID: snapshotID, highWater: highWater) else {
                 throw NativeRelayCoreError.invalidReplay
             }
-            try store.beginReplay(through: UInt64.max, context: context)
+            try await store.beginReplay(through: UInt64.max, context: context)
             replay.accepted = true
             activeInboxReplay = replay
             return
@@ -1484,7 +1563,7 @@ public actor NativeRelayCore {
             guard high >= replay.durableCursor, high == replay.expected else {
                 throw NativeRelayCoreError.invalidReplay
             }
-            try store.finishReplay(at: high, context: context)
+            try await store.finishReplay(at: high, context: context)
             replay.high = high
             activeInboxReplay = replay
             return
@@ -1494,7 +1573,7 @@ public actor NativeRelayCore {
             guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
                 throw NativeRelayCoreError.invalidReplay
             }
-            switch store.applyRelayEvent(event, context: context) {
+            switch await store.applyRelayEvent(event, context: context) {
             case .committed, .compatibleRepeat:
                 break
             case let .deferred(cursor) where cursor == event.sequence:
@@ -1507,7 +1586,7 @@ public actor NativeRelayCore {
             guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
                 throw NativeRelayCoreError.invalidReplay
             }
-            _ = try store.advanceRelayCursor(overIgnoredUpdateAt: sequence, context: context)
+            _ = try await store.advanceRelayCursor(overIgnoredUpdateAt: sequence, context: context)
             replay.expected = sequence
             diagnose(.relay, .ordinaryReplay, .observed, causeCode: "unknown_update_kind")
         case .viewChanged, .ignoredUnsequenced:
@@ -1517,28 +1596,20 @@ public actor NativeRelayCore {
         activeInboxReplay = replay
     }
 
-    private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession,
-                                                 drainReadPositions: Bool = true) async throws {
+    private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
         guard !conversationsUnavailable else { return }
         diagnose(.conversation, .conversationReplay, .began)
         let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
         do {
-            var high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
+            var high = try await replayConversation(since: store.currentConversationSnapshot(context: context).cursor,
                 using: transport, wire: wire)
-            flushCommittedLiveReplyArrivals()
+            await flushCommittedLiveReplyArrivals()
             do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
             catch InstallationTransportError.acknowledgementBehind {
                 diagnose(.conversation, .acknowledgement, .retrying,
                          error: InstallationTransportError.acknowledgementBehind)
                 high = try await replayConversation(since: 0, using: transport, wire: wire)
-                flushCommittedLiveReplyArrivals()
-                try await transport.acknowledgeConversation(wire.acknowledge(high))
-            }
-            if drainReadPositions,
-               try await sendPendingConversationReadPositions(using: transport) {
-                high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
-                    using: transport, wire: wire)
-                flushCommittedLiveReplyArrivals()
+                await flushCommittedLiveReplyArrivals()
                 try await transport.acknowledgeConversation(wire.acknowledge(high))
             }
             diagnose(.conversation, .acknowledgement, .completed)
@@ -1569,65 +1640,58 @@ public actor NativeRelayCore {
         }
     }
 
-    /// Chat read updates are account state, separate from this device's replay
-    /// ACK. The saved operation remains queued until its idempotent reply arrives.
-    public func sendPendingConversationReadPositions() async {
-        guard active else { return }
-        guard !busy else {
-            pendingConversationReadPositionDrain = true
-            return
+    /// Sends one debounced read mark from the open chat. The operation exists
+    /// only for this call; a missing reply is discarded and never replayed.
+    public func reportConversationReadPosition(_ request: RequestKey,
+                                               through turnID: ExactText) async {
+        guard active, conversationReadPositionSupportForSession,
+              let transport = session as? any AuthenticatedConversationSession else { return }
+        while busy && !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(10))
         }
-        guard let transport = session as? any AuthenticatedConversationSession else { return }
+        guard !Task.isCancelled, !busy else { return }
         busy = true
         defer { releaseBusy() }
         do {
-            if try await sendPendingConversationReadPositions(using: transport) {
-                try await replayConversationAndAcknowledge(using: transport, drainReadPositions: false)
-            }
-        } catch {
-            diagnose(.conversation, .conversationReadPosition,
-                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
-        }
-    }
-
-    private func sendPendingConversationReadPositions(
-        using transport: any AuthenticatedConversationSession
-    ) async throws -> Bool {
-        guard conversationReadPositionSupportForSession else { return false }
-        let snapshot = try store.conversationSnapshot(context: context)
-        guard snapshot.chatReadPositionSupport == true else { return false }
-        let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
-        var createdConversationEvents = false
-        for pending in snapshot.pendingChatReadPositions {
             try validate()
+            let snapshot = try await store.currentConversationSnapshot(context: context)
+            guard snapshot.chatReadPositionSupport == true,
+                  let turn = snapshot.threads[request]?.turns.first(where: {
+                      $0.id == turnID && $0.kind == .reply && $0.author == .origin
+                  }), let sequence = turn.conversationSequence, sequence > 0 else { return }
+            let pending = PendingConversationReadPosition(request: request,
+                operationID: UUID(), readThroughConversationSequence: sequence)
+            let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
             let frame = try wire.conversationReadPosition(pending)
             diagnose(.conversation, .conversationReadPosition, .began,
-                     operationID: pending.operationID, request: pending.request)
+                     operationID: pending.operationID, request: request)
             let result = await transport.sendConversationReadPosition(frame, operationID: pending.operationID)
+            try validate()
             switch result {
             case let .accepted(position, eventSequence, eventID, duplicate):
-                guard position >= pending.readThroughConversationSequence,
-                      (eventSequence == nil) == (eventID == nil) else {
+                guard position >= sequence, (eventSequence == nil) == (eventID == nil) else {
                     diagnose(.conversation, .conversationReadPosition, .unresolved,
                              causeCode: "read_position_response_mismatch",
-                             operationID: pending.operationID, request: pending.request)
-                    continue
+                             operationID: pending.operationID, request: request)
+                    return
                 }
-                try store.acceptConversationReadPosition(pending, serverPosition: position, context: context)
                 diagnose(.conversation, .conversationReadPosition, .completed,
                          causeCode: duplicate ? "duplicate_read_position" : nil,
-                         operationID: pending.operationID, request: pending.request)
-                createdConversationEvents = createdConversationEvents || eventSequence != nil
+                         operationID: pending.operationID, request: request)
+                if eventSequence != nil { try await replayConversationRouteA(using: transport) }
             case let .rejected(reason):
                 diagnose(.conversation, .conversationReadPosition, .rejected,
                          causeCode: "read_position_\(reason.rawValue)",
-                         operationID: pending.operationID, request: pending.request)
+                         operationID: pending.operationID, request: request)
             case .unresolved:
                 diagnose(.conversation, .conversationReadPosition, .unresolved,
-                         operationID: pending.operationID, request: pending.request)
+                         operationID: pending.operationID, request: request)
             }
+        } catch {
+            diagnose(.conversation, .conversationReadPosition,
+                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
+                     request: request)
         }
-        return createdConversationEvents
     }
 
     private func consumeLiveConversationSignals(from events: any AuthenticatedConversationEventSession) async {
@@ -1636,23 +1700,23 @@ public actor NativeRelayCore {
             do { signal = try await events.nextLiveConversationSignal() }
             catch { return }
             for arrival in signal.replyArrivals {
-                retainLiveReplyArrival(arrival)
+                await retainLiveReplyArrival(arrival)
             }
             await replayLiveConversation()
         }
     }
 
-    private func retainLiveReplyArrival(_ arrival: LiveConversationReplyArrival) {
+    private func retainLiveReplyArrival(_ arrival: LiveConversationReplyArrival) async {
         if pendingLiveReplyArrivals[arrival.conversationSequence] == nil {
             pendingLiveReplyArrivals[arrival.conversationSequence] = arrival
         }
-        flushCommittedLiveReplyArrivals()
+        await flushCommittedLiveReplyArrivals()
     }
 
-    private func flushCommittedLiveReplyArrivals() {
+    private func flushCommittedLiveReplyArrivals() async {
         let cursor: UInt64
         do {
-            cursor = try store.conversationSnapshot(context: context).cursor
+            cursor = try await store.currentConversationSnapshot(context: context).cursor
         } catch {
             diagnose(.conversation, .conversationReplay,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
@@ -1661,7 +1725,7 @@ public actor NativeRelayCore {
         for sequence in pendingLiveReplyArrivals.keys.sorted() where sequence <= cursor {
             guard let arrival = pendingLiveReplyArrivals[sequence] else { continue }
             do {
-                let isResolved = try store.recordLocalLiveReplyArrival(
+                let isResolved = try await store.recordLocalLiveReplyArrival(
                     request: arrival.request, turnID: arrival.turnID,
                     conversationSequence: arrival.conversationSequence,
                     receivedAtMilliseconds: arrival.receivedAtMilliseconds,
@@ -1689,8 +1753,8 @@ public actor NativeRelayCore {
         defer { releaseBusy() }
         // A failure leaves the durable cursor unchanged; the next live entry,
         // foreground or push resync replays from it.
-        try? await replayConversationAndAcknowledge(using: transport)
-        flushCommittedLiveReplyArrivals()
+        try? await replayConversationRouteA(using: transport)
+        await flushCommittedLiveReplyArrivals()
     }
 
     private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,
@@ -1700,7 +1764,7 @@ public actor NativeRelayCore {
         var since = cursor
         while true {
             conversationReplay = ConversationReplayProgress(expected: since,
-                durableCursor: try store.conversationSnapshot(context: context).cursor)
+                durableCursor: try await store.currentConversationSnapshot(context: context).cursor)
             try await transport.openConversation(wire.open(since: since)) { frame in
                 try await self.consumeConversationReplay(frame)
             }
@@ -1715,7 +1779,7 @@ public actor NativeRelayCore {
             // its suffix have not advanced the store or been acknowledged.
             conversationRecoveryAttempts.insert(receipt.sequence)
             conversationReplay = ConversationReplayProgress(expected: 0,
-                durableCursor: try store.conversationSnapshot(context: context).cursor,
+                durableCursor: try await store.currentConversationSnapshot(context: context).cursor,
                 recoveryReceipt: receipt, recoveryRejection: rejection,
                 recoveryOrigin: replay.recoveryOrigin, recoveryHandle: replay.recoveryHandle,
                 historyOnly: true)
@@ -1724,14 +1788,14 @@ public actor NativeRelayCore {
                     try await self.consumeConversationReplay(frame)
                 }
             } catch InstallationTransportError.serverRejected {
-                try skipConversationMessage(receipt.sequence, error: InstallationTransportError.serverRejected,
+                try await skipConversationMessage(receipt.sequence, error: InstallationTransportError.serverRejected,
                     event: receipt, rejection: rejection)
-                since = try store.conversationSnapshot(context: context).cursor
+                since = try await store.currentConversationSnapshot(context: context).cursor
                 continue
             } catch InstallationTransportError.conversationsUnavailable {
-                try skipConversationMessage(receipt.sequence, error: InstallationTransportError.conversationsUnavailable,
+                try await skipConversationMessage(receipt.sequence, error: InstallationTransportError.conversationsUnavailable,
                     event: receipt, rejection: rejection)
-                since = try store.conversationSnapshot(context: context).cursor
+                since = try await store.currentConversationSnapshot(context: context).cursor
                 continue
             }
             try validate()
@@ -1740,25 +1804,25 @@ public actor NativeRelayCore {
             }
             if let target = history.historyTarget, !history.historyUnusable {
                 do {
-                    try store.restoreReferencedConversationTurn(target, for: receipt,
+                    try await store.restoreReferencedConversationTurn(target, for: receipt,
                         origin: replay.recoveryOrigin, context: context)
                 } catch {
                     guard isUnusableConversationMessage(error) else { throw error }
-                    try skipConversationMessage(receipt.sequence, error: error,
+                    try await skipConversationMessage(receipt.sequence, error: error,
                         event: receipt, rejection: rejection)
                 }
             } else {
-                try skipConversationMessage(receipt.sequence, error: ConversationError.invalidBinding,
+                try await skipConversationMessage(receipt.sequence, error: ConversationError.invalidBinding,
                     event: receipt, rejection: rejection)
             }
             // History open moves the socket's stream position. Replay from the
             // durable cursor so neither the drained suffix nor events
             // arriving during recovery are mistaken for committed progress.
-            since = try store.conversationSnapshot(context: context).cursor
+            since = try await store.currentConversationSnapshot(context: context).cursor
         }
     }
 
-    private func consumeConversationReplay(_ frame: Data) throws {
+    private func consumeConversationReplay(_ frame: Data) async throws {
         try validate()
         guard var replay = conversationReplay, replay.high == nil else { throw NativeRelayCoreError.invalidReplay }
         let wire = try ConversationWire(profile: context, endpointHost: session.relayEndpointHost)
@@ -1768,7 +1832,7 @@ public actor NativeRelayCore {
             replay.accepted = true
         } else if let snapshot = try? wire.decodeResyncedSnapshot(frame) {
             let high = snapshot.highWater
-            let durableCursor = try store.conversationSnapshot(context: context).cursor
+            let durableCursor = try await store.currentConversationSnapshot(context: context).cursor
             guard high >= replay.durableCursor,
                   high == replay.expected else { throw NativeRelayCoreError.invalidReplay }
             if replay.historyOnly || replay.recoveryReceipt != nil {
@@ -1779,7 +1843,7 @@ public actor NativeRelayCore {
             guard high == durableCursor else { throw NativeRelayCoreError.invalidReplay }
             var validationRejection: ConversationValidationRejection?
             do {
-                try store.finishConversationReplay(at: high,
+                try await store.finishConversationReplay(at: high,
                     chatReadPositions: snapshot.chatReadPositions, context: context,
                     validationRejection: &validationRejection)
             } catch {
@@ -1815,7 +1879,7 @@ public actor NativeRelayCore {
                     diagnose(.conversation, .conversationReplay, .observed, error: error,
                         conversationSequence: sequence)
                 } else if replay.recoveryReceipt == nil {
-                    try skipConversationMessage(sequence, error: error)
+                    try await skipConversationMessage(sequence, error: error)
                 }
                 replay.expected = sequence
                 conversationReplay = replay
@@ -1863,11 +1927,11 @@ public actor NativeRelayCore {
                     } else {
                         locallyReceivedAtMilliseconds = nil
                     }
-                    _ = try store.applyConversation(event, context: context,
+                    _ = try await store.applyConversation(event, context: context,
                         validationRejection: &validationRejection,
                         locallyReceivedAtMilliseconds: locallyReceivedAtMilliseconds)
                     if let liveArrival,
-                       try store.recordLocalLiveReplyArrival(
+                       try await store.recordLocalLiveReplyArrival(
                            request: liveArrival.request, turnID: liveArrival.turnID,
                            conversationSequence: liveArrival.conversationSequence,
                            receivedAtMilliseconds: liveArrival.receivedAtMilliseconds,
@@ -1893,7 +1957,7 @@ public actor NativeRelayCore {
                             return
                         }
                     }
-                    try skipConversationMessage(event.sequence, error: error,
+                    try await skipConversationMessage(event.sequence, error: error,
                         event: event, rejection: validationRejection)
                 }
                 replay.expected = event.sequence
@@ -1902,7 +1966,7 @@ public actor NativeRelayCore {
                     throw NativeRelayCoreError.invalidReplay
                 }
                 if !replay.historyOnly && replay.recoveryReceipt == nil {
-                    _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
+                    _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
                 }
                 replay.expected = sequence
                 diagnose(.conversation, .conversationReplay, .observed, causeCode: "unknown_update_kind")
@@ -1933,13 +1997,13 @@ public actor NativeRelayCore {
 
     private func skipConversationMessage(_ sequence: UInt64, error: Error,
                                          event: ConversationEvent? = nil,
-                                         rejection: ConversationValidationRejection? = nil) throws {
+                                         rejection: ConversationValidationRejection? = nil) async throws {
         diagnose(.conversation, .conversationReplay, .observed, error: error,
             conversationSequence: sequence, conversationValidationRejection: rejection,
             request: event?.binding.request, revision: event?.binding.revision)
         // The existing cursor commit is the skip's durable accounting. If it
         // fails, propagate the error and never ACK this sequence.
-        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
+        _ = try await store.advanceConversationCursor(overIgnoredUpdateAt: sequence, context: context)
         diagnose(.conversation, .conversationReplay, .observed,
             causeCode: "conversation_message_skipped", conversationSequence: sequence,
             request: event?.binding.request, revision: event?.binding.revision)
@@ -1996,10 +2060,7 @@ public actor NativeRelayCore {
     @discardableResult
     public func sendPendingMessageOpens() async -> Int {
         guard let pagingSession = session as? any AuthenticatedInboxPagingSession else { return 0 }
-        guard !busy else {
-            pendingMessageOpenDrainRequested = true
-            return 0
-        }
+        guard !busy else { return 0 }
         busy = true
         defer { releaseBusy() }
         return await drainPendingMessageOpens(using: pagingSession)
@@ -2011,31 +2072,11 @@ public actor NativeRelayCore {
             pendingLiveConversationReplay = false
             Task { await replayLiveConversation() }
         }
-        if pendingConversationReadPositionDrain {
-            pendingConversationReadPositionDrain = false
-            Task { await sendPendingConversationReadPositions() }
-        }
-        if pendingMessageOpenDrainRequested {
-            pendingMessageOpenDrainRequested = false
-            Task { _ = await sendPendingMessageOpens() }
-        }
-        if !pendingInboxPageWaiters.isEmpty {
-            let waiters = pendingInboxPageWaiters
-            pendingInboxPageWaiters.removeAll()
-            Task {
-                do {
-                    let result = try await fetchNextInboxPage()
-                    for waiter in waiters { waiter.resume(returning: result) }
-                } catch {
-                    for waiter in waiters { waiter.resume(throwing: error) }
-                }
-            }
-        }
     }
 
     private func drainPending() async throws -> Int {
         try validate()
-        let pending = try store.snapshot(context: context).outbox
+        let pending = try await store.snapshot(context: context).outbox
         var attempted = 0
         for submission in pending {
             try validate()
@@ -2096,7 +2137,7 @@ public actor NativeRelayCore {
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
-                    try store.recordAcceptedOperation(submission.intentID,
+                    try await store.recordAcceptedOperation(submission.intentID,
                                                       operationID: operationID,
                                                       terminalSequence: terminalSequence,
                                                       context: context)
@@ -2121,7 +2162,7 @@ public actor NativeRelayCore {
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
-                    try store.recordAnswerRefusedByRetraction(submission.intentID,
+                    try await store.recordAnswerRefusedByRetraction(submission.intentID,
                         operationID: operationID,
                         retractedAtMilliseconds: retractedAtMilliseconds,
                         context: context)
@@ -2148,7 +2189,7 @@ public actor NativeRelayCore {
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
-                    try store.recordAnswerStaleRevision(submission.intentID,
+                    try await store.recordAnswerStaleRevision(submission.intentID,
                         operationID: operationID, currentRevision: currentRevision, context: context)
                 } catch {
                     diagnose(.localStore, .originalOperationDelivery, .failed, error: error,
@@ -2172,7 +2213,7 @@ public actor NativeRelayCore {
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
-                    try store.recordNoCommentUnsupported(submission.intentID,
+                    try await store.recordNoCommentUnsupported(submission.intentID,
                                                          operationID: operationID,
                                                          context: context)
                 } catch {
@@ -2186,6 +2227,20 @@ public actor NativeRelayCore {
                          causeCode: "no_comment_unsupported", operationID: operationID,
                          request: submission.requestKey, revision: submission.requestRevision,
                          receipt: .pendingUnconfirmed)
+            case let .operationConflict(operationID):
+                guard operationID == submission.operationID else {
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                try await store.recordAnswerNotDelivered(submission.intentID, operationID: operationID,
+                                                   context: context)
+                diagnose(.answer, .originalOperationDelivery, .rejected,
+                         causeCode: NativeDiagnosticCauseCode.serverReason("operation_conflict"),
+                         operationID: operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .terminal)
+            case .notTransmitted:
+                diagnose(.answer, .originalOperationDelivery, .unresolved,
+                         operationID: submission.operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .unknown)
             case let .failed(operationID):
                 guard operationID == submission.operationID else {
                     diagnose(.answer, .originalOperationDelivery, .unresolved,
@@ -2197,7 +2252,7 @@ public actor NativeRelayCore {
                     throw NativeRelayCoreError.mismatchedOperationResult
                 }
                 do {
-                    try store.recordAnswerNotDelivered(submission.intentID,
+                    try await store.recordAnswerNotDelivered(submission.intentID,
                                                        operationID: operationID,
                                                        context: context)
                 } catch {
@@ -2225,7 +2280,7 @@ public actor NativeRelayCore {
                     applied = .completed
                     receipt = .acceptedAwaitingReplay
                     terminalSequence = sequence
-                case .refusedByRetraction, .staleRevision, .failed:
+                case .refusedByRetraction, .staleRevision, .operationConflict, .failed:
                     applied = .rejected
                     receipt = .terminal
                     terminalSequence = nil
@@ -2234,6 +2289,10 @@ public actor NativeRelayCore {
                     receipt = .pendingUnconfirmed
                     terminalSequence = nil
                 case .unresolved:
+                    applied = .unresolved
+                    receipt = .unknown
+                    terminalSequence = nil
+                case .notTransmitted:
                     applied = .unresolved
                     receipt = .unknown
                     terminalSequence = nil
@@ -2250,7 +2309,7 @@ public actor NativeRelayCore {
 
     private func drainPendingMessageOpens(using pagingSession: any AuthenticatedInboxPagingSession) async -> Int {
         guard !messageOpenUnsupportedForConnection,
-              let pending = try? store.snapshot(context: context).pendingMessageOpens else { return 0 }
+              let pending = try? await store.snapshot(context: context).pendingMessageOpens else { return 0 }
         let wire = MessageOpenWire()
         var retired = 0
         for operation in pending {
@@ -2261,7 +2320,7 @@ public actor NativeRelayCore {
                     wire.request(for: operation), ref: MessageOpenWire.requestRef)
                 switch wire.decodeResult(response, for: operation) {
                 case .confirmed:
-                    _ = try store.retireMessageOpen(operation.operationID, context: context)
+                    _ = try await store.retireMessageOpen(operation.operationID, context: context)
                     retired += 1
                 case let .permanentlyRejected(reason):
                     diagnose(.relay, .messageOpen, .rejected,
@@ -2270,7 +2329,7 @@ public actor NativeRelayCore {
                              operationID: operation.operationID,
                              request: operation.requestKey, revision: operation.requestRevision,
                              receipt: .terminal)
-                    _ = try store.retireMessageOpen(operation.operationID, context: context)
+                    _ = try await store.retireMessageOpen(operation.operationID, context: context)
                     retired += 1
                 case .unsupported:
                     messageOpenUnsupportedForConnection = true
@@ -2346,15 +2405,18 @@ public actor NativeRelayCore {
             conversationValidationRejection: rejection)
     }
 
-    private func validatedRelayCursor() throws -> UInt64 {
+    private func validatedRelayCursor() async throws -> UInt64 {
         guard active else { throw NativeRelayCoreError.inactive }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
         }
-        return try store.relayCursor(context: context)
+        return try await store.relayCursor(context: context)
     }
 
     private func validate() throws {
-        _ = try validatedRelayCursor()
+        guard active else { throw NativeRelayCoreError.inactive }
+        guard session.authenticatedIdentity == context.identity else {
+            throw NativeRelayCoreError.wrongInstallation
+        }
     }
 }
