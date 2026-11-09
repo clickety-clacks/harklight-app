@@ -49,25 +49,48 @@ final class ConversationPresentationTests: XCTestCase {
     func testFailedComposerSaveKeepsTheLatestTextAvailableForRetryInThisSession() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"), deviceID: ExactText("device"))
-        let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("request"))
         let binding = ConversationBinding(request: key, revision: 1)
+        let payload = try JSONValue.parse(Data(#"{"title":"Question"}"#.utf8))
+        try await domain.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         try await domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
-            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
-        let model = try LivePresentationStore(localFixtureStore: domain, context: context)
-
-        persistence.failNextCommit()
-        XCTAssertFalse(model.updateConversation(for: key, revision: 1, text: "Latest unsent text"))
-        XCTAssertEqual(model.unsavedConversationText(for: binding), "Latest unsent text")
-        XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text, ExactText(""))
+            fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerDraftFailure-\(UUID().uuidString)")
+        try Data("block directory creation".utf8).write(to: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let persistence = ComposerDraftPersistence(rootDirectory: root)
+        let model = try LivePresentationStore(store: domain, context: context,
+            composerDraftPersistence: persistence)
+        try await model.refreshFromDurableStore()
 
         XCTAssertTrue(model.updateConversation(for: key, revision: 1, text: "Latest unsent text"))
-        XCTAssertNil(model.unsavedConversationText(for: binding))
+        await waitUntilMainActor("the failed composer write") {
+            model.conversationError == "Your latest discussion edit could not be saved. It remains in this session; nothing was sent."
+        }
         XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text,
                        ExactText("Latest unsent text"))
+
+        try FileManager.default.removeItem(at: root)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        XCTAssertTrue(model.updateConversation(for: key, revision: 1,
+            text: "Latest unsent text", flushImmediately: true))
+        let address = ComposerDraftAddress(identity: identity, request: key,
+            revision: 1, kind: .conversation)
+        var persisted: ConversationDraft?
+        for _ in 0..<400 {
+            persisted = try? await ComposerDraftPersistence(rootDirectory: root)
+                .load(ConversationDraft.self, at: address)
+            if persisted?.text == ExactText("Latest unsent text") { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(persisted?.text, ExactText("Latest unsent text"),
+                       "After storage recovers, the retained text can be saved without being sent.")
     }
 
     func testAcceptedDiscussionClearsOnlyTheSubmittedText() {
@@ -567,35 +590,53 @@ final class ConversationPresentationTests: XCTestCase {
         try await domain.applyConversation(ConversationEvent(sequence: 1,
             binding: ConversationBinding(request: key, revision: 1),
             fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
-        let live = try LivePresentationStore(store: domain, context: context)
-        let port = AttentionDomainPort(store: domain)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerDraftRevision-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let persistence = ComposerDraftPersistence(rootDirectory: root)
+        let live = try LivePresentationStore(store: domain, context: context,
+            composerDraftPersistence: persistence)
+        try await live.refreshFromDurableStore()
         live.selectAction(ExactText("old"), input: nil, for: key, requestRevision: 1)
         live.stageCompatibilityText("Old-version draft", action: ExactText("old"),
                                     for: key, requestRevision: 1)
+        _ = live.flushPendingDraft(for: key, requestRevision: 1)
+        let firstAddress = ComposerDraftAddress(identity: context.identity, request: key,
+            revision: 1, kind: .answer)
+        var savedOldDraft: AnswerComposerDraft?
+        for _ in 0..<400 {
+            savedOldDraft = try? await persistence.load(AnswerComposerDraft.self, at: firstAddress)
+            if savedOldDraft?.content.compatibility.selectedActionID == ExactText("old") { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(savedOldDraft?.content.compatibility.selectedActionID, ExactText("old"))
+        XCTAssertEqual(savedOldDraft?.content.compatibility.textByActionID[ExactText("old")],
+                       ExactText("Old-version draft"))
         try await domain.applyConversation(ConversationEvent(sequence: 2,
             binding: ConversationBinding(request: key, revision: 2),
             fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
+        try await live.refreshFromDurableStore()
 
         // A newer revision may reach the store before the displayed projection
         // catches up. Text staged against that old display must not be saved.
         live.stageCompatibilityText("Late old-version text", action: ExactText("old"),
                                     for: key, requestRevision: 1)
-        let flushed = await live.flushPendingDraft(for: key, requestRevision: 1)
-        XCTAssertFalse(flushed)
-        try await live.refreshFromDurableStore()
-
-        let historicalDraft = try await port.inspectAnswerDraft(context: port.context, request: key, revision: 1)
-        let historical = try XCTUnwrap(historicalDraft)
-        let currentInspection = try await port.inspect(context: port.context, request: key, revision: 2)
-        let current = try XCTUnwrap(currentInspection.requests.first)
-        XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
-        XCTAssertNil(current.draft.compatibility.selectedActionID,
-                     "Editing the version on screen must not apply its answer to the newer version.")
+        _ = live.flushPendingDraft(for: key, requestRevision: 1)
+        let current = try XCTUnwrap(live.draft(for: key))
+        XCTAssertNil(current.compatibility.selectedActionID,
+                     "Editing the old version must not apply its answer to the newer request.")
         XCTAssertNil(live.draft(for: key, revision: 2)?.compatibility.textByActionID[ExactText("old")],
                      "Text staged for the old request version must not appear under the revised message.")
         XCTAssertNil(live.draft(for: key, revision: 2)?.compatibility.textByActionID[ExactText("new")])
-        XCTAssertNil(historical.selector,
-                     "A new request version cannot issue an answer selector for the archived version.")
+        let updatedOldDraft = try await persistence.load(AnswerComposerDraft.self, at: firstAddress)
+        XCTAssertEqual(updatedOldDraft, savedOldDraft,
+                       "A stale editor cannot change its prior revision's saved draft.")
+        let secondAddress = ComposerDraftAddress(identity: context.identity, request: key,
+            revision: 2, kind: .answer)
+        let currentSavedDraft = try await persistence.load(AnswerComposerDraft.self, at: secondAddress)
+        XCTAssertNil(currentSavedDraft,
+                     "A request revision starts with its own answer draft.")
         let state = try await domain.snapshot(context: context)
         XCTAssertTrue(state.outbox.isEmpty)
     }
@@ -723,7 +764,7 @@ final class ConversationPresentationTests: XCTestCase {
         }
     }
 
-    func testAgentReplyStaysUnreadUntilChatShowsItAcrossForegroundAndRelaunch() async throws {
+    func testServerReadPositionControlsUnreadMarkerAcrossRelaunchAndLaterReplies() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -743,6 +784,7 @@ final class ConversationPresentationTests: XCTestCase {
         try await domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .turn(turn("2", .person, .discussion))), context: context)
         let model = try LivePresentationStore(store: domain, context: context)
+        try await model.refreshFromDurableStore()
         XCTAssertFalse(model.hasUnreadAgentReply(request), "The person's own turn does not light the marker.")
 
         // Foreground: the reply arrives while Chat is closed.
@@ -751,28 +793,24 @@ final class ConversationPresentationTests: XCTestCase {
         try await model.refreshFromDurableStore()
         XCTAssertTrue(model.hasUnreadAgentReply(request))
 
-        // Recording the shown reply clears it, and the cleared state survives a relaunch.
-        _ = try await domain.markConversationRead(request, context: context)
+        // Only the relay's account read-position fact changes the marker.
+        try await domain.applyConversation(ConversationEvent(sequence: 4,
+            binding: ConversationBinding(request: request, revision: 0),
+            fact: .readPosition(eventID: ExactText("server-read-position"),
+                readThroughConversationSequence: 3)), context: context)
         try await model.refreshFromDurableStore()
         XCTAssertFalse(model.hasUnreadAgentReply(request))
-        let relaunched = try LivePresentationStore(store: AttentionDomainStore(context: context, persistence: persistence),
+        let relaunchedStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let relaunched = try LivePresentationStore(store: relaunchedStore,
             context: context)
+        try await relaunched.refreshFromDurableStore()
         XCTAssertFalse(relaunched.hasUnreadAgentReply(request))
 
-        // Background: a later reply is replayed into durable state before the app shows it.
-        let replayed = try AttentionDomainStore(context: context, persistence: persistence)
-        try await replayed.applyConversation(ConversationEvent(sequence: 4, binding: binding,
-            fact: .turn(turn("4", .origin, .reply))), context: context)
-        let resumedStore = try AttentionDomainStore(context: context, persistence: persistence)
-        let resumed = try LivePresentationStore(store: resumedStore,
-            context: context)
-        XCTAssertTrue(resumed.hasUnreadAgentReply(request))
-        _ = try await resumedStore.markConversationRead(request, context: context)
-        try await resumed.refreshFromDurableStore()
-        await waitUntilMainActor("the persisted origin reply read position") {
-            !resumed.hasUnreadAgentReply(request)
-        }
-        XCTAssertFalse(resumed.hasUnreadAgentReply(request))
+        // A later server reply beyond that position becomes unread again.
+        try await relaunchedStore.applyConversation(ConversationEvent(sequence: 5, binding: binding,
+            fact: .turn(turn("5", .agent, .reply))), context: context)
+        try await relaunched.refreshFromDurableStore()
+        XCTAssertTrue(relaunched.hasUnreadAgentReply(request))
     }
 
     func testInboxChatMarkerNeedsAChatTurnAndKeepsClosedUnreadRepliesVisible() async throws {

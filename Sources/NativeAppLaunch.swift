@@ -86,6 +86,7 @@ enum ComposerDeliveryOutcome: Equatable, Sendable {
 actor ComposerDraftPersistence {
     static let shared = ComposerDraftPersistence()
 
+    private let rootDirectory: URL?
     private var latestGenerationByName: [String: UInt64] = [:]
     private var latestDataByName: [String: Data] = [:]
     private var addressesByName: [String: ComposerDraftAddress]?
@@ -96,6 +97,10 @@ actor ComposerDraftPersistence {
     private struct AddressIndex: Codable {
         var version = 1
         var addresses: [String: ComposerDraftAddress]
+    }
+
+    init(rootDirectory: URL? = nil) {
+        self.rootDirectory = rootDirectory
     }
 
     func load<Value: Decodable & Sendable>(_ type: Value.Type,
@@ -426,11 +431,16 @@ actor ComposerDraftPersistence {
     }
 
     private func fileURL(named name: String, createDirectory: Bool) throws -> URL {
-        guard let support = fileManager.urls(for: .applicationSupportDirectory,
-                                             in: .userDomainMask).first else {
-            throw CocoaError(.fileNoSuchFile)
+        let directory: URL
+        if let rootDirectory {
+            directory = rootDirectory
+        } else {
+            guard let support = fileManager.urls(for: .applicationSupportDirectory,
+                                                 in: .userDomainMask).first else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            directory = support.appendingPathComponent("Harklight/ComposerDrafts", isDirectory: true)
         }
-        let directory = support.appendingPathComponent("Harklight/ComposerDrafts", isDirectory: true)
         if createDirectory {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true,
                 attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
@@ -1715,7 +1725,7 @@ final class LivePresentationStore {
     @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
-    @ObservationIgnored private let composerDraftPersistence = ComposerDraftPersistence.shared
+    @ObservationIgnored private let composerDraftPersistence: ComposerDraftPersistence
     @ObservationIgnored private var loadedConversationDrafts = Set<ConversationBinding>()
     @ObservationIgnored private var editedConversationDrafts = Set<ConversationBinding>()
     // Reply edits remain local until submission, but must outlive a detail view
@@ -1737,12 +1747,14 @@ final class LivePresentationStore {
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
                      clearedRetractionDefaults: UserDefaults = .standard,
-                     newMessageAreaDefaults: UserDefaults? = nil) throws {
+                     newMessageAreaDefaults: UserDefaults? = nil,
+                     composerDraftPersistence: ComposerDraftPersistence = .shared) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
                       conversationAvailability: conversationAvailability,
                       clearedRetractionDefaults: clearedRetractionDefaults,
-                      newMessageAreaDefaults: newMessageAreaDefaults)
+                      newMessageAreaDefaults: newMessageAreaDefaults,
+                      composerDraftPersistence: composerDraftPersistence)
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
@@ -1839,7 +1851,8 @@ final class LivePresentationStore {
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                  clearedRetractionDefaults: UserDefaults = .standard,
                  newMessageAreaDefaults: UserDefaults? = nil,
-                 preparedInitialState: PreparedLivePresentationInitialState? = nil) throws {
+                 preparedInitialState: PreparedLivePresentationInitialState? = nil,
+                 composerDraftPersistence: ComposerDraftPersistence = .shared) throws {
         let areaStore = NewMessageAreaStore(defaults: newMessageAreaDefaults,
                                             initialLedger: preparedInitialState?.messageLedger)
         self.messageAreaStore = areaStore
@@ -1851,6 +1864,7 @@ final class LivePresentationStore {
         self.profileContext = context
         self.isReadOnly = isReadOnly
         self.diagnostics = diagnostics
+        self.composerDraftPersistence = composerDraftPersistence
         if let preparedInitialState {
             self.failedResponseWarnings = preparedInitialState.failedResponseWarnings
             self.staleAnswerDialog = preparedInitialState.staleAnswerDialog

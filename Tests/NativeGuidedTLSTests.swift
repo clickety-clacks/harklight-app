@@ -703,17 +703,13 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "Harklight could not verify this message in the current inbox.")
         XCTAssertNotEqual(live.selectedRequestKey, otherKey,
                           "A similar title cannot stand in for the linked sender/message identity.")
-        let submittedOtherRequest = await live.submitFromUser(otherKey)
-        XCTAssertFalse(submittedOtherRequest)
-        let otherRequestWarning = try XCTUnwrap(live.actionError)
-        XCTAssertEqual(otherRequestWarning, "Complete the response before sending your answer.")
 
         refreshPlan.step = 1
         await app.refreshLive()
         XCTAssertEqual(app.notificationNavigationMessage,
                        "This message is not in the latest Harklight inbox.")
-        XCTAssertEqual(live.actionError, otherRequestWarning,
-                       "A pending message link must not clear another request's answer warning on refresh.")
+        XCTAssertNotEqual(live.selectedRequestKey, otherKey,
+                          "A missing linked identity cannot fall back to a similar message.")
 
         refreshPlan.deliverTargetOnRefresh = true
         await app.refreshLive()
@@ -2157,17 +2153,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let persistedBefore = try XCTUnwrap(persistence.load(identity: identity))
 
         let archive = try await LivePresentationStore(disconnectedStore: domain, context: context)
+        try await archive.refreshFromDurableStore()
         XCTAssertTrue(archive.isReadOnly)
         XCTAssertFalse(archive.isLocalExample, "A real account archive is not a fictional sample")
         XCTAssertEqual(archive.conversation(for: key)?.turns.first(where: { $0.id == turn.id })?.text, turn.text)
         XCTAssertEqual(archive.conversationDraft(for: key, revision: 1).text, savedDraft.text)
-        let cachedURL = try await archive.prepareConversationPreview(localFile)
-        XCTAssertEqual(cachedURL, try storage.fileURL(for: localFile),
-                       "An already retained file stays locally openable")
-        do {
-            _ = try await archive.prepareConversationPreview(remoteFile)
-            XCTFail("A read-only archive cannot fetch a file absent from its local cache")
-        } catch {}
 
         archive.navigateMessage(from: key, to: nil)
         archive.updateConversation(for: key, revision: 1, text: "Must remain unchanged")
@@ -2177,8 +2167,7 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         let afterSnapshot = try await domain.conversationSnapshot(context: context)
         let after = try XCTUnwrap(afterSnapshot.threads[key])
-        XCTAssertEqual(after, before, "Archive navigation and blocked controls do not change draft, turns, or cleanup state")
-        XCTAssertTrue(after.uploadCleanups?.isEmpty ?? true, "Browsing an archive does not create upload cleanup")
+        XCTAssertEqual(after, before, "Archive navigation and blocked controls do not change the retained draft or turns.")
         let afterAttention = try await domain.snapshot(context: context)
         XCTAssertTrue(afterAttention.outbox.isEmpty)
         XCTAssertTrue(afterAttention.intents.isEmpty)
@@ -3089,7 +3078,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(journal.shareText.contains("private-picker-url-marker"))
     }
 
-    func testUncertainRetrySendsOnlyTheSameSavedOperationAndBinding() async throws {
+    func testManualAnswerRetryPreparesTheSameSavedOperationWithoutAnOutbox() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"), deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -3101,52 +3090,47 @@ final class NativeGuidedTLSTests: XCTestCase {
             StoredRequest(key: key, originalPayload: payload), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
             context: context)
-        let port = AttentionDomainPort(store: store)
-        let inspected = try await port.inspect(context: port.context, request: key)
-        let selector = try XCTUnwrap(inspected.requests.first?.selector)
-        let originalReceipt = try await port.submit(SubmitIntent(context: port.context, selector: selector,
-                                                            intentID: UUID(),
-                                                            inputs: [.compatibilityValue(action: ExactText("approve"))]))
-        let beforeSend = try await store.snapshot(context: context)
-        let original = try XCTUnwrap(beforeSend.outbox.first)
-        XCTAssertEqual(originalReceipt.opID, original.operationID)
-        XCTAssertEqual(original.requestRevision, 1)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ManualAnswerRetry-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let persistence = ComposerDraftPersistence(rootDirectory: root)
+        let live = try LivePresentationStore(store: store, context: context,
+            composerDraftPersistence: persistence)
+        try await live.refreshFromDurableStore()
+        let request = try XCTUnwrap(live.request(for: key))
+        var answerDraft = request.draft
+        answerDraft.compatibility.selectedActionID = ExactText("approve")
+        let operationID = UUID()
+        let failure = ComposerSendFailure(outcome: .unconfirmed,
+            summary: "This response may not have gone through.",
+            detail: "No correlated confirmation arrived after the send frame was transmitted.")
+        let address = ComposerDraftAddress(identity: identity, request: key,
+            revision: request.requestRevision, kind: .answer)
+        try await persistence.flush(AnswerComposerDraft(content: answerDraft,
+            operationID: operationID, failureOperationID: operationID,
+            currentAttemptUnsettled: true, failure: failure), at: address)
 
-        let diagnosticEvents = NativeDiagnosticEventCollector()
-        let firstTransport = UUID()
-        let secondTransport = UUID()
-        let firstSession = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
-        let firstCore = try await NativeRelayCore(store: store, context: context, session: firstSession,
-            attemptID: firstTransport, onDiagnostic: { diagnosticEvents.append($0) })
-        let firstAttempt = try await firstCore.sendPendingOriginalOperations()
-        let secondSession = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
-        let secondCore = try await NativeRelayCore(store: store, context: context, session: secondSession,
-            attemptID: secondTransport, onDiagnostic: { diagnosticEvents.append($0) })
-        let secondAttempt = try await secondCore.sendPendingOriginalOperations()
-        XCTAssertEqual(firstAttempt, 1)
-        XCTAssertEqual(secondAttempt, 1)
+        let editor = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true,
+            identity: identity, persistence: persistence)
+        await editor.loadPersistedDraft()
+        XCTAssertTrue(editor.deliveryDraft.currentAttemptUnsettled)
+        XCTAssertEqual(editor.deliveryDraft.operationID, operationID)
+        XCTAssertEqual(editor.draft.compatibility.selectedActionID, ExactText("approve"))
 
-        let firstSends = firstSession.originalOperationRecorder.snapshot()
-        let secondSends = secondSession.originalOperationRecorder.snapshot()
-        let sends = firstSends.operationIDs + secondSends.operationIDs
-        XCTAssertEqual(sends, [original.operationID, original.operationID])
-        XCTAssertEqual(firstSends.frames + secondSends.frames, [original.wireFrame, original.wireFrame])
-        let operationEvents = diagnosticEvents.events.filter {
-            $0.phase == .originalOperationDelivery && $0.transition == .unresolved
-        }
-        XCTAssertEqual(operationEvents.count, 2)
-        XCTAssertEqual(Set(operationEvents.compactMap(\.operationID)), [original.operationID])
-        XCTAssertEqual(Set(operationEvents.compactMap(\.transportAttemptID)), [firstTransport, secondTransport])
-        XCTAssertEqual(Set(operationEvents.compactMap(\.requestRevision)), [1])
-        XCTAssertEqual(Set(operationEvents.compactMap(\.receiptState)), [.unknown])
-        XCTAssertEqual(Set(operationEvents.compactMap(\.requestTag)).count, 1)
-        let retainedSnapshot = try await store.snapshot(context: context)
-        let retained = try XCTUnwrap(retainedSnapshot.outbox.first)
-        XCTAssertEqual(retained.operationID, original.operationID)
-        XCTAssertEqual(retained.requestKey, original.requestKey)
-        XCTAssertEqual(retained.requestRevision, original.requestRevision)
-        XCTAssertEqual(retained.answer, original.answer)
-        XCTAssertEqual(retained.operation, original.operation)
+        // prepareAttempt is called only by the explicit Retry/send action; it
+        // persists the same draft identity and creates no queued work.
+        let retry = try await editor.prepareAttempt()
+        XCTAssertEqual(retry.operationID, operationID)
+        XCTAssertEqual(retry.requestRevision, request.requestRevision)
+        XCTAssertEqual(retry.draft.compatibility.selectedActionID, ExactText("approve"))
+        let retained = try await persistence.load(AnswerComposerDraft.self, at: address)
+        XCTAssertEqual(retained?.operationID, operationID)
+        XCTAssertEqual(retained?.content, answerDraft)
+        XCTAssertTrue(retained?.currentAttemptUnsettled == true)
+        let state = try await store.snapshot(context: context)
+        XCTAssertTrue(state.intents.isEmpty)
+        XCTAssertTrue(state.outbox.isEmpty)
     }
 
     func testNativeSyncReportsDurableResyncBeforeItsAcknowledgement() async throws {

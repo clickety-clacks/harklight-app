@@ -18,17 +18,19 @@ private func assertThrowsAsync<T>(
 
 @MainActor
 final class LiveAnswerConfirmationTests: XCTestCase {
-    private func setup() async throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
+    private func setup(messageID: String = "sample") async throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
         let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
         let key = RequestKey(accountScope: context.identity.personID,
-                             senderID: ExactText("sender"), messageID: ExactText("sample"))
+                             senderID: ExactText("sender"), messageID: ExactText(messageID))
         let payload = try JSONValue.parse(Data(#"{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
         _ = try await store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message)), context: context)
-        return (context, store, try LivePresentationStore(store: store, context: context), key)
+        let live = try LivePresentationStore(store: store, context: context)
+        try await live.refreshFromDurableStore()
+        return (context, store, live, key)
     }
 
     private func setupReplyOnly() async throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
@@ -41,7 +43,9 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Reply-only request"}"#.utf8))
         _ = try await store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message)), context: context)
-        return (context, store, try LivePresentationStore(store: store, context: context), key)
+        let live = try LivePresentationStore(store: store, context: context)
+        try await live.refreshFromDurableStore()
+        return (context, store, live, key)
     }
 
     private func setupTextReplyOnly() async throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
@@ -54,7 +58,9 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Text reply request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         _ = try await store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message)), context: context)
-        return (context, store, try LivePresentationStore(store: store, context: context), key)
+        let live = try LivePresentationStore(store: store, context: context)
+        try await live.refreshFromDurableStore()
+        return (context, store, live, key)
     }
 
     private func commitAnswer(_ store: AttentionDomainStore, key: RequestKey) async throws -> IntentReceipt {
@@ -743,21 +749,24 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "The current open revision belongs in Inbox after the older No comment intent is superseded.")
     }
 
-    func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() async throws {
-        let (context, store, live, key) = try await setup()
+    func testDisconnectedInboxKeepsDraftEditableAndCannotCreateOrRetryAnAnswer() async throws {
+        let (context, store, live, key) = try await setup(messageID: "offline-\(UUID().uuidString)")
+        XCTAssertFalse(live.isOnline, "This fixture has no active relay connection.")
+        XCTAssertFalse(live.isReadOnly, "Offline use still allows draft editing.")
         live.selectAction(ExactText("got-it"), input: nil, for: key)
-        let savedDraft = try XCTUnwrap(live.request(for: key)?.draft)
-        XCTAssertTrue(savedDraft.hasEdits)
-
-        live.enterReadOnlyMode()
-        live.selectAction(ExactText("different"), input: nil, for: key)
         live.updateCompatibilityText("changed after disconnect", action: ExactText("got-it"), for: key)
-        await live.submitFromUser(key)
+        let staged = try XCTUnwrap(live.draft(for: key))
+        XCTAssertTrue(staged.hasEdits)
+        XCTAssertEqual(staged.compatibility.selectedActionID, ExactText("got-it"))
+        XCTAssertEqual(staged.compatibility.textByActionID[ExactText("got-it")],
+                       ExactText("changed after disconnect"))
 
-        XCTAssertTrue(live.isReadOnly)
-        XCTAssertEqual(live.request(for: key)?.draft, savedDraft)
+        let sent = await live.submitFromUser(key)
+        XCTAssertFalse(sent, "An offline user action cannot create or send an answer.")
+        XCTAssertFalse(live.isReadOnly)
+        XCTAssertEqual(live.draft(for: key), staged,
+                       "The editable draft remains available after the offline send attempt.")
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .open)
-        await assertThrowsAsync { try await live.submit(key) }
         let snapshot = try await store.snapshot(context: context)
         XCTAssertTrue(snapshot.intents.isEmpty)
         XCTAssertTrue(snapshot.outbox.isEmpty)

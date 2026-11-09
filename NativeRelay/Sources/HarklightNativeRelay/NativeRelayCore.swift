@@ -293,7 +293,12 @@ public actor NativeRelayCore {
             return .accepted(turnID: turn)
         }
         guard !draft.text.rawValue.isEmpty else { throw ConversationError.emptyDraft }
-        let wasUncertain = draft.currentAttemptUnsettled || draft.earlierVersionMayHaveBeenSent
+        // Only a still-unsettled attempt with this operation id makes this
+        // attempt uncertain. An earlier-version mark belongs to different
+        // content and must survive a local preparation failure without
+        // marking the new operation as transmitted.
+        let previousAttemptUnsettled = draft.currentAttemptUnsettled && draft.operationID != nil
+        let wasUncertain = previousAttemptUnsettled || draft.earlierVersionMayHaveBeenSent
         let operation = try await store.prepareDiscussion(binding, context: context)
         guard let frozen = try await store.currentConversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
@@ -344,8 +349,9 @@ public actor NativeRelayCore {
                 binding, operation: operation, context: context)
             try await persistDraft(transmittingDraft)
         } catch {
-            // No discussion frame has been sent by this attempt. A previous
-            // ambiguous attempt must still keep its exact operation frozen.
+            // No discussion frame has been sent by this attempt. Preserve an
+            // unsettled operation only when this draft still uses that same
+            // operation; an earlier-version mark remains separate after edits.
             // Uploads are not tracked for cleanup; a failed pre-send upload leaves
             // the draft available for Mike's next explicit Send.
             let names = frozen.files.map { $0.name.rawValue }.joined(separator: ", ")
@@ -356,7 +362,7 @@ public actor NativeRelayCore {
             do {
                 try await store.markDiscussionOutcome(binding, operation: operation,
                     rejection: ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
-                    preserveUnsettled: wasUncertain,
+                    preserveUnsettled: previousAttemptUnsettled,
                     context: context)
                 let savedDraft = try await store.currentConversationSnapshot(context: context)
                     .threads[binding.request]?.drafts[binding.revision]
