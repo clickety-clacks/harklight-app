@@ -14,20 +14,6 @@ struct HarklightConversationUITestHost: App {
     @State private var didPrepareNotificationFixture = false
     @State private var didInjectReplyWhileChatWasOpen = false
 
-    init() {
-        let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("--harklight-test-inbox-list-column") || arguments.contains("--free-rendered") {
-            _prototypeFixture = State(initialValue: nil)
-            _conversationFixture = State(initialValue: nil)
-        } else if arguments.contains("--attention-fixture") || arguments.contains("--reset-attention-fixture") {
-            _prototypeFixture = State(initialValue: PrototypeStore.loadFromBundle())
-            _conversationFixture = State(initialValue: nil)
-        } else {
-            _prototypeFixture = State(initialValue: nil)
-            _conversationFixture = State(initialValue: nil)
-        }
-    }
-
     var body: some Scene {
         WindowGroup {
             Group {
@@ -70,6 +56,7 @@ struct HarklightConversationUITestHost: App {
             .task {
                 if ProcessInfo.processInfo.arguments.contains("--harklight-samples") { await samples.populate() }
                 await loadConversationFixtureIfNeeded()
+                await loadPrototypeFixtureIfNeeded()
                 prepareTestChatIndicatorIfRequested()
             }
         }
@@ -89,6 +76,14 @@ struct HarklightConversationUITestHost: App {
         } catch {
             fixtureLoadError = "The isolated conversation test host could not load its local model: \(error)"
         }
+    }
+
+    private func loadPrototypeFixtureIfNeeded() async {
+        guard prototypeFixture == nil else { return }
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains("--attention-fixture") ||
+              arguments.contains("--reset-attention-fixture") else { return }
+        prototypeFixture = await PrototypeStore.loadFromBundle()
     }
 
     private var testColorScheme: ColorScheme? {

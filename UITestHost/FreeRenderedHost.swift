@@ -83,7 +83,7 @@ private final class FreeRenderedFixture {
         // Generated replay completion advertises the existing read-position
         // capability. Local visibility can then queue its real read operation.
         try await domain.finishConversationReplay(at: sequence, chatReadPositions: [], context: context)
-        try viewModel.refreshFromDurableStore()
+        try await viewModel.refreshFromDurableStore()
     }
 
     private func key(_ id: String) -> RequestKey {
@@ -164,7 +164,7 @@ private final class FreeRenderedFixture {
         // position, triggered only by the production chat's actual read effect.
         try await domain.acceptConversationReadPosition(pending, serverPosition: 2, context: context)
         try await setCapturedView("free-history")
-        try viewModel.refreshFromDurableStore()
+        try await viewModel.refreshFromDurableStore()
         phase = "Captured history view · generated acknowledgement · read=2"
     }
 
