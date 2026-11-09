@@ -23,6 +23,53 @@ private func assertThrowsAsync<T>(
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testComposerDraftAddressNameIsStableAcrossEncodings() {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("request"))
+        let names = (0..<64).map { _ in
+            ComposerDraftAddress(identity: identity, request: key, revision: 1,
+                                 kind: .conversation).stableName
+        }
+        XCTAssertEqual(Set(names).count, 1,
+                       "The persisted draft path must not depend on JSON object-key ordering.")
+    }
+
+    func testComposerDraftLoadsAndRewritesAnUnstableLegacyAddress() async throws {
+        struct LegacyAddressIndex: Codable {
+            let version: Int
+            let addresses: [String: ComposerDraftAddress]
+        }
+
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("legacy-request"))
+        let address = ComposerDraftAddress(identity: identity, request: key, revision: 1,
+                                           kind: .conversation)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerDraftLegacyAddress-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let oldName = "legacy-unsorted-address-name"
+        let draft = ConversationDraft(binding: ConversationBinding(request: key, revision: 1),
+                                      text: ExactText("Keep this saved note."))
+        try JSONEncoder().encode(draft).write(to: root.appendingPathComponent(oldName).appendingPathExtension("json"))
+        try JSONEncoder().encode(LegacyAddressIndex(version: 1, addresses: [oldName: address]))
+            .write(to: root.appendingPathComponent("draft-index.json"))
+
+        let persistence = ComposerDraftPersistence(rootDirectory: root)
+        let restored = try await persistence.load(ConversationDraft.self, at: address)
+
+        XCTAssertEqual(restored?.text, ExactText("Keep this saved note."))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(address.stableName)
+            .appendingPathExtension("json").path), "The draft is copied to its stable address.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(oldName)
+            .appendingPathExtension("json").path), "Migration preserves the previous copy.")
+    }
+
     func testPastedNewlineRemainsInTheComposerWithoutSending() {
         var text = "Before "
         var sendCount = 0

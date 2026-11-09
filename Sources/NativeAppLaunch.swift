@@ -19,7 +19,9 @@ struct ComposerDraftAddress: Codable, Hashable, Sendable {
     let kind: ComposerDraftKind
 
     var stableName: String {
-        let bytes = (try? JSONEncoder().encode(ComposerDraftStorageKey(
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let bytes = (try? encoder.encode(ComposerDraftStorageKey(
             identity: identity, request: request, kind: kind))) ?? Data()
         return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
@@ -114,8 +116,33 @@ actor ComposerDraftPersistence {
         let name = address.stableName
         if let data = latestDataByName[name] { return try JSONDecoder().decode(type, from: data) }
         let file = try fileURL(named: name, createDirectory: false)
-        guard fileManager.fileExists(atPath: file.path) else { return nil }
-        return try JSONDecoder().decode(type, from: Data(contentsOf: file, options: .mappedIfSafe))
+        if fileManager.fileExists(atPath: file.path) {
+            return try JSONDecoder().decode(type, from: Data(contentsOf: file, options: .mappedIfSafe))
+        }
+
+        // Older builds hashed JSONEncoder's unsorted object bytes for the
+        // filename. Find a matching address-index entry and copy its draft to
+        // the canonical sorted-key name without deleting the prior copy.
+        let legacyFiles = try loadAddressIndex().compactMap { legacyName, storedAddress
+            -> (name: String, url: URL, modified: Date)? in
+            guard legacyName != name, storedAddress == address else { return nil }
+            let legacyFile = try fileURL(named: legacyName, createDirectory: false)
+            guard fileManager.fileExists(atPath: legacyFile.path) else { return nil }
+            let attributes = try? fileManager.attributesOfItem(atPath: legacyFile.path)
+            let modified = attributes?[.modificationDate] as? Date ?? .distantPast
+            return (legacyName, legacyFile, modified)
+        }.sorted {
+            if $0.modified == $1.modified { return $0.name < $1.name }
+            return $0.modified < $1.modified
+        }
+        guard let legacyFile = legacyFiles.last else { return nil }
+        let data = try Data(contentsOf: legacyFile.url, options: .mappedIfSafe)
+        let value = try JSONDecoder().decode(type, from: data)
+        let generation = latestGenerationByName[name, default: 0] &+ 1
+        latestGenerationByName[name] = generation
+        latestDataByName[name] = data
+        try write(data, named: name, address: address, generation: generation)
+        return value
     }
 
     func scheduleSave<Value: Encodable & Sendable>(_ value: Value,

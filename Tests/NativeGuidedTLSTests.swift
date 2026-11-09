@@ -720,15 +720,15 @@ final class NativeGuidedTLSTests: XCTestCase {
 
         await app.receiveInvitation(URL(string: "harklight://message/app%3Aone/never-sent")!)
         XCTAssertEqual(app.notificationNavigationMessage,
-                       "This message was never sent to this Harklight inbox.")
+                       "This message is not in the latest Harklight inbox.")
         let lateKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:one"),
                                  messageID: ExactText("never-sent"))
         refreshPlan.step = 2
         await app.refreshLive()
         XCTAssertEqual(app.notificationNavigation?.request, lateKey)
         XCTAssertEqual(live.selectedRequestKey, lateKey)
-        XCTAssertEqual(app.notificationNavigationMessage,
-                       "This message is not in the latest Harklight inbox.")
+        XCTAssertNil(app.notificationNavigationMessage,
+                     "The exact message delivered during refresh opens without a warning.")
 
         let retractedKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:gone"),
                                       messageID: ExactText("retracted"))
