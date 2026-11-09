@@ -1015,7 +1015,11 @@ final class NativeRelayLifecycle {
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink())
+                                           onDiagnostic: diagnosticSink()
+#if DEBUG
+                                           , onReadinessObservation: readinessObservationSink()
+#endif
+        )
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -1685,7 +1689,11 @@ final class NativeRelayLifecycle {
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink())
+                                           onDiagnostic: diagnosticSink()
+#if DEBUG
+                                           , onReadinessObservation: readinessObservationSink()
+#endif
+        )
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -1709,6 +1717,9 @@ final class NativeRelayLifecycle {
             Task { @MainActor [weak self] in
                 guard let self, self.refreshGeneration == generation,
                       self.activeTransportAttemptID == transportAttemptID else { return }
+#if DEBUG
+                NativeRouteAReadinessObservation.shared.beginConnection(transportAttemptID)
+#endif
                 self.foregroundDeadline.observe(event, transportAttemptID: transportAttemptID)
                 switch event {
                 case .serverTrustValidated:
@@ -1752,6 +1763,18 @@ final class NativeRelayLifecycle {
             Task { @MainActor [weak diagnosticJournal] in diagnosticJournal?.record(event) }
         }
     }
+
+#if DEBUG
+    private func readinessObservationSink()
+        -> (@Sendable (NativeRelayReadinessObservation) -> Void)? {
+        guard NativeRouteAReadinessObservation.shared.isEnabled else { return nil }
+        return { observation in
+            Task { @MainActor in
+                NativeRouteAReadinessObservation.shared.observe(observation)
+            }
+        }
+    }
+#endif
 
     private func recordDiagnostic(_ area: NativeDiagnosticArea,
                                   _ phase: NativeDiagnosticPhase,

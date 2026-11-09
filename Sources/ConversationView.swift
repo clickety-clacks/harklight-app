@@ -363,16 +363,26 @@ private struct ConversationHistoricalAnswerLoadKey: Hashable {
 @MainActor
 private struct ReadOnlyConversationDraftView: View {
     let draft: ConversationDraft
+    var textOverride: String? = nil
+    var statusLine: LocalizedStringResource = "This account is disconnected. Its saved discussion cannot be edited or sent."
+    var warningAction: (() -> Void)? = nil
     let inspect: (ConversationFile) -> Void
 
     var body: some View {
+        let text = textOverride ?? draft.text.rawValue
         VStack(alignment: .leading, spacing: 8) {
             Label(ConversationDraftPresentationText.readOnlyHeading, systemImage: "lock")
                 .font(.caption).foregroundStyle(.secondary)
-            if !draft.text.rawValue.isEmpty {
-                Text(draft.text.rawValue)
+            if !text.isEmpty {
+                Text(text)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
+                Button("Copy message") { UIPasteboard.general.string = text }
+                    .accessibilityIdentifier("read-only-conversation-copy")
+            }
+            if let warningAction {
+                Button("Delivery details", action: warningAction)
+                    .accessibilityIdentifier("closed-conversation-delivery-details")
             }
             ForEach(draft.files) { file in
                 Button { inspect(file) } label: {
@@ -381,7 +391,7 @@ private struct ReadOnlyConversationDraftView: View {
                 }
                 .buttonStyle(.plain)
             }
-            Text("This account is disconnected. Its saved discussion cannot be edited or sent.")
+            Text(statusLine)
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.horizontal)
@@ -499,73 +509,87 @@ private struct ConversationComposer: View {
     private var isOnline: Bool { store.isOnline }
 
     var body: some View {
-        // Each regular glass button adds 7 points around its label, for a 44-point target.
-        HStack(alignment: .bottom, spacing: 10) {
-            Button {
-                guard persistStagedText() else { return }
-                if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: 30, height: 30)
-                    .contentShape(Circle())
-            }
-                .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
-                .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
-                .accessibilityIdentifier("sample-chat-add-attachment")
-                .disabled(!allowsDiscussion)
-                .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
-                    Button("Sample photo") { addExample("Photo") }
-                    Button("Sample file") { addExample("Document") }
-                    Button("Sample camera image") { addExample("Camera") }
-                    Button("Cancel", role: .cancel) {}
-                }
-            VStack(alignment: .leading, spacing: 8) {
-                if !draft.files.isEmpty {
-                    ScrollView(.horizontal) {
-                        HStack {
-                            ForEach(draft.files) { file in
-                                VStack(spacing: 4) {
-                                    Button { inspect(file, revision) } label: {
+        Group {
+            if allowsDiscussion {
+                // Each regular glass button adds 7 points around its label, for a 44-point target.
+                HStack(alignment: .bottom, spacing: 10) {
+                    Button {
+                        guard persistStagedText() else { return }
+                        if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 30, height: 30)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
+                    .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
+                    .accessibilityIdentifier("sample-chat-add-attachment")
+                    .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
+                        Button("Sample photo") { addExample("Photo") }
+                        Button("Sample file") { addExample("Document") }
+                        Button("Sample camera image") { addExample("Camera") }
+                        Button("Cancel", role: .cancel) {}
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !draft.files.isEmpty {
+                            ScrollView(.horizontal) {
+                                HStack {
+                                    ForEach(draft.files) { file in
                                         VStack(spacing: 4) {
-                                            ConversationAttachmentThumbnail(file: file, local: store.isLocalExample)
-                                            Text(file.name.rawValue).lineLimit(1)
+                                            Button { inspect(file, revision) } label: {
+                                                VStack(spacing: 4) {
+                                                    ConversationAttachmentThumbnail(file: file, local: store.isLocalExample)
+                                                    Text(file.name.rawValue).lineLimit(1)
+                                                }
+                                            }.font(.caption)
+                                            Button("Remove", systemImage: "xmark.circle.fill") {
+                                                guard persistStagedText() else { return }
+                                                store.updateConversation(for: key, revision: revision,
+                                                    files: draft.files.filter { $0.id != file.id })
+                                            }.labelStyle(.iconOnly).disabled(!allowsDiscussion)
                                         }
-                                    }.font(.caption)
-                                    Button("Remove", systemImage: "xmark.circle.fill") {
-                                        guard persistStagedText() else { return }
-                                        store.updateConversation(for: key, revision: revision,
-                                            files: draft.files.filter { $0.id != file.id })
-                                    }.labelStyle(.iconOnly).disabled(!allowsDiscussion)
+                                    }
                                 }
                             }
+                            .padding(.top, 8)
                         }
+                        ConversationComposerTextInput(session: textSession,
+                            isEnabled: allowsDiscussion,
+                            onTextChange: scheduleTextSave, onReturn: sendStagedText)
                     }
-                    .padding(.top, 8)
+                    .padding(.horizontal, 12)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("sample-chat-input-surface")
+                    ConversationComposerSendButton(session: textSession,
+                        isLocalExample: store.isLocalExample, hasFailure: draft.failure != nil,
+                        isSendingDiscussion: store.isSendingDiscussion,
+                        isOnline: isOnline,
+                        allowsDiscussion: allowsDiscussion,
+                        hasFiles: !draft.files.isEmpty,
+                        action: {
+                            if draft.failure != nil { sendWarningPresented = true }
+                            else { sendStagedText() }
+                        })
                 }
-                ConversationComposerTextInput(session: textSession,
-                    isEnabled: allowsDiscussion,
-                    onTextChange: scheduleTextSave, onReturn: sendStagedText)
+            } else {
+                ReadOnlyConversationDraftView(draft: draft,
+                    textOverride: textSession.stagedText,
+                    statusLine: closedChatStatusLine,
+                    warningAction: draft.failure == nil ? nil : { sendWarningPresented = true }) { file in
+                        inspect(file, revision)
+                    }
+                    .padding(.vertical, 8)
             }
-            .padding(.horizontal, 12)
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
-            .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
-            ConversationComposerSendButton(session: textSession,
-                isLocalExample: store.isLocalExample, hasFailure: draft.failure != nil,
-                isSendingDiscussion: store.isSendingDiscussion,
-                isOnline: isOnline,
-                allowsDiscussion: allowsDiscussion,
-                hasFiles: !draft.files.isEmpty,
-                action: {
-                    if draft.failure != nil { sendWarningPresented = true }
-                    else { sendStagedText() }
-                })
         }
         .task(id: ConversationBinding(request: key, revision: revision)) {
             await store.loadPersistedConversationDraft(
                 for: ConversationBinding(request: key, revision: revision))
         }
         .onChange(of: ConversationBinding(request: key, revision: revision), initial: true) { _, binding in
-            if let stagedBinding = textSession.stagedBinding, stagedBinding != binding { _ = persistStagedText() }
+            if let stagedBinding = textSession.stagedBinding, stagedBinding != binding {
+                _ = persistStagedText(flushImmediately: true)
+            }
             textSession.textSaveTask?.cancel()
             textSession.stagedBinding = binding
             let current = store.conversationDraft(for: binding.request, revision: binding.revision)
@@ -583,6 +607,11 @@ private struct ConversationComposer: View {
                 textSession.savedText = textSession.stagedText
             }
         }
+        .onChange(of: allowsDiscussion) { _, canDiscuss in
+            guard !canDiscuss else { return }
+            textSession.textSaveTask?.cancel()
+            _ = persistStagedText(flushImmediately: true)
+        }
         .onChange(of: draft.text) { old, new in
             guard textSession.stagedText == textSession.savedText else { return }
             if old != new {
@@ -596,12 +625,12 @@ private struct ConversationComposer: View {
         }
         .onDisappear {
             textSession.textSaveTask?.cancel()
-            _ = persistStagedText()
+            _ = persistStagedText(flushImmediately: true)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
                 textSession.textSaveTask?.cancel()
-                _ = persistStagedText()
+                _ = persistStagedText(flushImmediately: true)
             }
         }
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
@@ -638,12 +667,24 @@ private struct ConversationComposer: View {
         }
     }
 
+    private var closedChatStatusLine: LocalizedStringResource {
+        return switch draft.disposition {
+        case .submitting, .outcomeUnknown:
+            "This request's chat is closed. Your message may have been sent."
+        case .acceptedPendingReplay:
+            "This request's chat is closed. The server accepted your message."
+        case .saved, .rejected:
+            "This request's chat is closed. Your message was not sent."
+        }
+    }
+
     @discardableResult
-    private func persistStagedText() -> Bool {
+    private func persistStagedText(flushImmediately: Bool = false) -> Bool {
         guard let binding = textSession.stagedBinding else { return false }
         guard textSession.stagedText != textSession.savedText else { return true }
         guard store.updateConversation(for: binding.request, revision: binding.revision,
-                                       text: textSession.stagedText) else { return false }
+                                       text: textSession.stagedText,
+                                       flushImmediately: flushImmediately) else { return false }
         textSession.savedText = textSession.stagedText
         return true
     }

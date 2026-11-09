@@ -240,6 +240,10 @@ final class NativeRelayCoreTests: XCTestCase {
             }
         }
 
+        func correlatedRequest(_ request: Data, ref: String) async throws -> Data {
+            try await inboxRequest(request, ref: ref)
+        }
+
         func attachInboxReplay(_ request: Data, ref: String,
                                consume: @Sendable (Data) async throws -> Void) async throws {
             requests.append(request)

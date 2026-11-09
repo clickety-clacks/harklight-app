@@ -392,6 +392,105 @@ final class NativeClientDiagnosticJournal {
     }
 }
 
+#if DEBUG
+/// In-memory and opt-in only. This exposes replay barriers and row counts but
+/// never message bodies, account identifiers, or request identifiers.
+@MainActor
+@Observable
+final class NativeRouteAReadinessObservation {
+    static let shared = NativeRouteAReadinessObservation()
+
+    let isEnabled = ProcessInfo.processInfo.arguments.contains("--harklight-routea-readiness")
+
+    private(set) var connectionGeneration: UUID?
+    private(set) var inboxHighWater: UInt64?
+    private(set) var inboxAppliedEventCount: UInt64?
+    private(set) var conversationHighWater: UInt64?
+    private(set) var conversationAppliedEventCount: UInt64?
+    private(set) var uiPublicationState = "unobserved"
+    private(set) var uiRowCount = 0
+    private(set) var uiRequestCount = 0
+    private(set) var currentRequestCount = 0
+    private(set) var retainedRequestCount = 0
+    private(set) var inboxCursor: UInt64?
+    private(set) var presentationRevision: UInt64?
+
+    private init() {}
+
+    func beginConnection(_ generation: UUID) {
+        guard isEnabled, connectionGeneration != generation else { return }
+        let retainedRequestCount = uiRequestCount
+        connectionGeneration = generation
+        inboxHighWater = nil
+        inboxAppliedEventCount = nil
+        conversationHighWater = nil
+        conversationAppliedEventCount = nil
+        uiPublicationState = presentationRevision == nil ? "waiting" : "retained"
+        currentRequestCount = 0
+        self.retainedRequestCount = retainedRequestCount
+        inboxCursor = nil
+        presentationRevision = nil
+    }
+
+    func observe(_ event: NativeRelayReadinessObservation) {
+        guard isEnabled else { return }
+        if connectionGeneration != event.connectionGeneration {
+            beginConnection(event.connectionGeneration)
+        }
+        guard connectionGeneration == event.connectionGeneration else { return }
+        switch event.barrier {
+        case .inbox:
+            inboxHighWater = event.highWater
+            inboxAppliedEventCount = event.appliedEventCount
+        case .conversation:
+            conversationHighWater = event.highWater
+            conversationAppliedEventCount = event.appliedEventCount
+        }
+    }
+
+    func publishUI(generation: UUID, revision: UInt64, cursor: UInt64, rowCount: Int,
+                   requestCount: Int, currentCount: Int?) {
+        guard isEnabled, connectionGeneration == generation,
+              let inboxHighWater, conversationHighWater != nil,
+              cursor >= inboxHighWater else { return }
+        uiPublicationState = "refreshed"
+        uiRowCount = rowCount
+        uiRequestCount = requestCount
+        inboxCursor = cursor
+        presentationRevision = revision
+        if let currentCount {
+            self.currentRequestCount = min(max(currentCount, 0), max(requestCount, 0))
+            retainedRequestCount = max(requestCount - self.currentRequestCount, 0)
+        } else {
+            self.currentRequestCount = 0
+            retainedRequestCount = 0
+        }
+    }
+
+    var accessibilityValue: String {
+        let generation = connectionGeneration?.uuidString.lowercased() ?? "unavailable"
+        let inbox = if let high = inboxHighWater, let count = inboxAppliedEventCount {
+            "applied high=\(high) count=\(count)"
+        } else {
+            "unobserved"
+        }
+        let conversation = if let high = conversationHighWater,
+                              let count = conversationAppliedEventCount {
+            "applied high=\(high) count=\(count)"
+        } else {
+            "unobserved"
+        }
+        let cursor = inboxCursor.map(String.init) ?? "unavailable"
+        let revision = presentationRevision.map(String.init) ?? "unavailable"
+        return "generation=\(generation) inbox_resynced=\(inbox) " +
+            "conversation_resynced=\(conversation) ui=\(uiPublicationState) " +
+            "rows=\(uiRowCount) requests=\(uiRequestCount) " +
+            "current_requests=\(currentRequestCount) retained_requests=\(retainedRequestCount) " +
+            "cursor=\(cursor) revision=\(revision)"
+    }
+}
+#endif
+
 private extension JSONEncoder {
     static var sorted: JSONEncoder {
         let encoder = JSONEncoder()

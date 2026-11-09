@@ -88,7 +88,6 @@ actor ComposerDraftPersistence {
 
     private var latestGenerationByName: [String: UInt64] = [:]
     private var latestDataByName: [String: Data] = [:]
-    private var pendingWritesByName: [String: Task<Void, Never>] = [:]
     private var addressesByName: [String: ComposerDraftAddress]?
     private var legacyMigrationTask: Task<Void, Never>?
     private var legacyMigrationFailure: String?
@@ -125,12 +124,7 @@ actor ComposerDraftPersistence {
         let generation = latestGenerationByName[name, default: 0] &+ 1
         latestGenerationByName[name] = generation
         latestDataByName[name] = data
-        pendingWritesByName[name]?.cancel()
-        pendingWritesByName[name] = Task {
-            do { try await Task.sleep(for: .milliseconds(450)) }
-            catch { return }
-            try? await self.write(data, named: name, address: address, generation: generation)
-        }
+        try write(data, named: name, address: address, generation: generation)
     }
 
     func flush<Value: Encodable & Sendable>(_ value: Value,
@@ -141,7 +135,6 @@ actor ComposerDraftPersistence {
         let generation = latestGenerationByName[name, default: 0] &+ 1
         latestGenerationByName[name] = generation
         latestDataByName[name] = data
-        pendingWritesByName.removeValue(forKey: name)?.cancel()
         try write(data, named: name, address: address, generation: generation)
     }
 
@@ -151,7 +144,6 @@ actor ComposerDraftPersistence {
         if let legacyMigrationTask { await legacyMigrationTask.value }
         let name = address.stableName
         latestGenerationByName[name, default: 0] &+= 1
-        pendingWritesByName.removeValue(forKey: name)?.cancel()
         let file = try fileURL(named: name, createDirectory: false)
         if fileManager.fileExists(atPath: file.path) { try fileManager.removeItem(at: file) }
         try updateAddressIndex(name: name, address: nil)
@@ -171,7 +163,6 @@ actor ComposerDraftPersistence {
         }
         guard !stale.isEmpty else { return }
         for name in stale.keys {
-            pendingWritesByName.removeValue(forKey: name)?.cancel()
             let file = try fileURL(named: name, createDirectory: false)
             if fileManager.fileExists(atPath: file.path) { try fileManager.removeItem(at: file) }
             latestGenerationByName[name, default: 0] &+= 1
@@ -389,7 +380,6 @@ actor ComposerDraftPersistence {
         let generation = latestGenerationByName[name, default: 0] &+ 1
         latestGenerationByName[name] = generation
         latestDataByName[name] = data
-        pendingWritesByName.removeValue(forKey: name)?.cancel()
         try write(data, named: name, address: address, generation: generation)
     }
 
@@ -2186,7 +2176,7 @@ final class LivePresentationStore {
         }
     }
 
-    private func persistConversationDraft(_ draft: ConversationDraft) {
+    private func persistConversationDraft(_ draft: ConversationDraft, flushImmediately: Bool = false) {
         guard permitsDelivery, !isReadOnly else { return }
         let binding = draft.binding
         let address = ComposerDraftAddress(identity: profileContext.identity,
@@ -2194,7 +2184,11 @@ final class LivePresentationStore {
         let persistence = composerDraftPersistence
         Task { [weak self, persistence] in
             do {
-                try await persistence.scheduleSave(draft, at: address)
+                if flushImmediately {
+                    try await persistence.flush(draft, at: address)
+                } else {
+                    try await persistence.scheduleSave(draft, at: address)
+                }
             } catch {
                 await MainActor.run {
                     guard let self else { return }
@@ -2212,7 +2206,8 @@ final class LivePresentationStore {
 
     @discardableResult
     func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
-                            files: [ConversationFile]? = nil) -> Bool {
+                            files: [ConversationFile]? = nil,
+                            flushImmediately: Bool = false) -> Bool {
         guard !isReadOnly else { return false }
         let binding = ConversationBinding(request: key, revision: revision)
         editedConversationDrafts.insert(binding)
@@ -2224,7 +2219,7 @@ final class LivePresentationStore {
         thread.drafts[revision] = draft
         conversationThreads[key] = thread
         pendingConversationTextByBinding.removeValue(forKey: binding)
-        persistConversationDraft(draft)
+        persistConversationDraft(draft, flushImmediately: flushImmediately)
         conversationError = nil
         return true
     }
@@ -2584,7 +2579,7 @@ final class LivePresentationStore {
     private func cachedOperationStatus(_ state: LocalIntentState?) -> String? {
         guard let state else { return nil }
         return switch state {
-        case .durable, .queuedForRelay: "Answer pending on this device"
+        case .durable, .queuedForRelay: "Answer not confirmed"
         case .accepted: "Answer accepted"
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer sent · result not confirmed"
@@ -2818,6 +2813,9 @@ final class LivePresentationStore {
                         carriedOver, for: request)
                     self.failedResponseWarningGeneration &+= 1
                 }
+            },
+            onPersistenceFailure: { [weak self] error in
+                self?.recordDraftSaveFailure(error, for: request.key)
             })
         replyEditorSessions[request.key] = session
         Task { await session.loadPersistedDraft() }
@@ -3317,10 +3315,10 @@ final class LivePresentationStore {
                 if operationConflict {
                     carriedOver.operationID = UUID()
                     carriedOver.currentAttemptUnsettled = false
-                    carriedOver.earlierVersionMayHaveBeenSent = false
+                    carriedOver.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
                 } else if correlated {
                     carriedOver.currentAttemptUnsettled = false
-                    carriedOver.earlierVersionMayHaveBeenSent = false
+                    carriedOver.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
                 } else {
                     carriedOver.currentAttemptUnsettled = attempt.wasUnsettled
                     carriedOver.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
@@ -3361,7 +3359,7 @@ final class LivePresentationStore {
                     draft.currentAttemptUnsettled = false
                 } else if correlated {
                     draft.currentAttemptUnsettled = false
-                    draft.earlierVersionMayHaveBeenSent = false
+                    draft.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
                 } else {
                     draft.currentAttemptUnsettled = attempt.wasUnsettled
                 }

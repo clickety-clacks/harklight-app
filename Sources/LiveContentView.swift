@@ -266,11 +266,13 @@ final class ReplyEditorDraftSession {
     @ObservationIgnored private var didLoadPersistedDraft = false
     private(set) var isDraftLoaded: Bool
     @ObservationIgnored private let onDraftLoaded: ((AnswerComposerDraft) -> Void)?
+    @ObservationIgnored private let onPersistenceFailure: ((Error) -> Void)?
 
     init(request: PresentedRequest, canSubmitFromSnapshot: Bool,
          identity: ProfileIdentity? = nil,
          persistence: ComposerDraftPersistence? = nil,
-         onDraftLoaded: ((AnswerComposerDraft) -> Void)? = nil) {
+         onDraftLoaded: ((AnswerComposerDraft) -> Void)? = nil,
+         onPersistenceFailure: ((Error) -> Void)? = nil) {
         requestKey = request.key
         requestRevision = request.requestRevision
         self.canSubmitFromSnapshot = canSubmitFromSnapshot
@@ -281,6 +283,7 @@ final class ReplyEditorDraftSession {
         deliveryDraft = AnswerComposerDraft(content: initialDraft)
         self.persistence = persistence
         self.onDraftLoaded = onDraftLoaded
+        self.onPersistenceFailure = onPersistenceFailure
         isDraftLoaded = persistence == nil
         persistenceAddress = identity.map {
             ComposerDraftAddress(identity: $0, request: request.key,
@@ -417,8 +420,13 @@ final class ReplyEditorDraftSession {
         let value = deliveryDraft
         persistenceTask?.cancel()
         persistenceTask = Task { [weak self] in
-            try? await persistence.scheduleSave(value, at: persistenceAddress)
-            await MainActor.run { self?.persistenceTask = nil }
+            guard !Task.isCancelled else { return }
+            do {
+                try await persistence.scheduleSave(value, at: persistenceAddress)
+            } catch {
+                self?.onPersistenceFailure?(error)
+            }
+            self?.persistenceTask = nil
         }
     }
 
@@ -427,7 +435,13 @@ final class ReplyEditorDraftSession {
         persistenceTask?.cancel()
         persistenceTask = nil
         let value = deliveryDraft
-        Task { try? await persistence.flush(value, at: persistenceAddress) }
+        Task { [weak self] in
+            do {
+                try await persistence.flush(value, at: persistenceAddress)
+            } catch {
+                self?.onPersistenceFailure?(error)
+            }
+        }
     }
 
     func prepareAttempt() async throws -> PreparedAnswerAttempt {
@@ -541,7 +555,7 @@ final class ReplyEditorDraftSession {
                 if deliveryDraft.operationID == attempt.operationID {
                     deliveryDraft.currentAttemptUnsettled = false
                 }
-                deliveryDraft.earlierVersionMayHaveBeenSent = false
+                deliveryDraft.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
             } else if deliveryDraft.operationID == attempt.operationID {
                 deliveryDraft.currentAttemptUnsettled = attempt.wasUnsettled
             }
@@ -575,10 +589,10 @@ final class ReplyEditorDraftSession {
             if operationConflict {
                 carriedOver.operationID = UUID()
                 carriedOver.currentAttemptUnsettled = false
-                carriedOver.earlierVersionMayHaveBeenSent = false
+                carriedOver.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
             } else if correlated {
                 carriedOver.currentAttemptUnsettled = false
-                carriedOver.earlierVersionMayHaveBeenSent = false
+                carriedOver.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
             } else {
                 carriedOver.currentAttemptUnsettled = attempt.wasUnsettled
                 carriedOver.earlierVersionMayHaveBeenSent = attempt.earlierVersionMayHaveBeenSent
@@ -862,8 +876,9 @@ struct LiveContentView: View {
         if let loadError = fixtureStore?.loadError {
             ContentUnavailableView(loadError, systemImage: "exclamationmark.triangle")
         } else {
+            let inboxRows = store.inboxRows
             HarklightInbox(
-                requests: store.inboxRows,
+                requests: inboxRows,
                 showsBasicOrderMarker: store.presentation.showsBasicOrderMarker,
                 samples: samples, selectRequest: { store.selectRequest($0) },
                 markSeenRequest: { key, revision in markSeen(key, requestRevision: revision) },
@@ -908,6 +923,38 @@ struct LiveContentView: View {
                 },
                 testNotificationRouter: testNotificationRouter,
                 testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if !store.isOnline && !store.isReadOnly && !store.isLocalExample {
+                        HStack(spacing: 12) {
+                            Label("Offline · messages may be out of date. Send is disabled.",
+                                  systemImage: "wifi.slash")
+                                .font(.callout)
+                                .accessibilityIdentifier("routea-offline-status")
+                            Spacer(minLength: 8)
+                            if let retry = inboxRefreshAction {
+                                Button("Retry") { Task { await retry() } }
+                                    .disabled(store.isRefreshing)
+                                    .accessibilityIdentifier("routea-offline-retry")
+                            }
+                        }
+                        .padding(10)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                        .padding(.bottom, 8)
+                    }
+                }
+#if DEBUG
+                .overlay(alignment: .topLeading) {
+                    RouteAReadinessAccessibilityProbe(
+                        observation: NativeRouteAReadinessObservation.shared,
+                        revision: store.presentation.revision,
+                        cursor: store.presentation.cursor,
+                        rowCount: inboxRows.count,
+                        requestCount: store.presentation.requests.count,
+                        currentRequestCount: store.presentation.currentRequestCount)
+                }
+#endif
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
                 Button("Copy details") {
@@ -1311,6 +1358,47 @@ private struct ReplacedByMessagesSection: View {
         }
     }
 }
+
+#if DEBUG
+@MainActor
+private struct RouteAReadinessAccessibilityProbe: View {
+    let observation: NativeRouteAReadinessObservation
+    let revision: UInt64
+    let cursor: UInt64
+    let rowCount: Int
+    let requestCount: Int
+    let currentRequestCount: Int?
+
+    private var publicationKey: String {
+        "\(observation.connectionGeneration?.uuidString ?? "unavailable")-" +
+            "\(observation.inboxHighWater.map(String.init) ?? "unavailable")-" +
+            "\(observation.inboxAppliedEventCount.map(String.init) ?? "unavailable")-" +
+            "\(observation.conversationHighWater.map(String.init) ?? "unavailable")-" +
+            "\(observation.conversationAppliedEventCount.map(String.init) ?? "unavailable")-" +
+            "\(cursor)-\(revision)-\(rowCount)-\(requestCount)-" +
+            "\(currentRequestCount.map(String.init) ?? "unavailable")"
+    }
+
+    @ViewBuilder
+    var body: some View {
+        if observation.isEnabled {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(verbatim: "Route A readiness"))
+                .accessibilityValue(Text(verbatim: observation.accessibilityValue))
+                .accessibilityIdentifier("routea-readiness-observation")
+                .allowsHitTesting(false)
+                .task(id: publicationKey) {
+                    guard let generation = observation.connectionGeneration else { return }
+                    observation.publishUI(generation: generation, revision: revision,
+                        cursor: cursor, rowCount: rowCount, requestCount: requestCount,
+                        currentCount: currentRequestCount)
+                }
+        }
+    }
+}
+#endif
 
 struct LiveRequestDetail: View {
     private struct StorePresentationSnapshot: Equatable {
@@ -2525,7 +2613,7 @@ struct LiveRequestDetail: View {
     private static func cachedOperationStatus(_ state: LocalIntentState?) -> String? {
         guard let state else { return nil }
         return switch state {
-        case .durable, .queuedForRelay: "Answer pending on this device"
+        case .durable, .queuedForRelay: "Answer not confirmed"
         case .accepted: "Answer accepted"
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Answer sent · result not confirmed"

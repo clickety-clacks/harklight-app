@@ -486,6 +486,10 @@ public struct PresentationSnapshot: Equatable, Sendable {
     public let inboxViewListItems: [InboxViewListItem]?
     public let inboxFreeOrderVersion: Int?
     public let requests: [PresentedRequest]
+#if DEBUG
+    /// Computed during projection only for the opt-in Route A readiness probe.
+    public let currentRequestCount: Int?
+#endif
 
     public var showsBasicOrderMarker: Bool {
         inboxViewBasis == ExactText("fallback")
@@ -498,6 +502,9 @@ public struct PresentationSnapshot: Equatable, Sendable {
                 inboxViewBasis: ExactText? = nil,
                 inboxViewListItems: [InboxViewListItem]? = nil,
                 inboxFreeOrderVersion: Int? = nil,
+#if DEBUG
+                currentRequestCount: Int? = nil,
+#endif
                 requests: [PresentedRequest]) {
         self.revision = revision
         self.cursor = cursor
@@ -506,6 +513,9 @@ public struct PresentationSnapshot: Equatable, Sendable {
         self.inboxViewBasis = inboxViewBasis
         self.inboxViewListItems = inboxViewListItems
         self.inboxFreeOrderVersion = inboxFreeOrderVersion
+#if DEBUG
+        self.currentRequestCount = currentRequestCount
+#endif
         self.requests = requests
     }
 }
@@ -1069,6 +1079,14 @@ public struct AttentionDomainPort: Sendable {
                 sourceOrderedRequests[position] = row
             }
         }
+#if DEBUG
+        let currentRequestCount: Int? = ProcessInfo.processInfo.arguments
+            .contains("--harklight-routea-readiness")
+            ? sourceOrderedRequests.reduce(into: 0) { count, request in
+                if request.inboxStateIsCurrent { count += 1 }
+            }
+            : nil
+#endif
         return PresentationSnapshot(revision: snapshot.revision,
                                     cursor: snapshot.cursor,
                                     replayBarrier: snapshot.replayBarrier,
@@ -1076,6 +1094,9 @@ public struct AttentionDomainPort: Sendable {
                                     inboxViewBasis: snapshot.inboxView?.basis,
                                     inboxViewListItems: snapshot.inboxView?.listItems,
                                     inboxFreeOrderVersion: snapshot.inboxView?.freeOrderVersion,
+#if DEBUG
+                                    currentRequestCount: currentRequestCount,
+#endif
                                     requests: sourceOrderedRequests)
     }
 

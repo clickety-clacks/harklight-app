@@ -63,6 +63,29 @@ public extension AuthenticatedConversationSession {
     }
 }
 
+#if DEBUG
+/// Content-free Route A replay evidence used by the debug readiness probe.
+public struct NativeRelayReadinessObservation: Equatable, Sendable {
+    public enum Barrier: String, Sendable, Equatable {
+        case inbox
+        case conversation
+    }
+
+    public let connectionGeneration: UUID
+    public let barrier: Barrier
+    public let highWater: UInt64
+    public let appliedEventCount: UInt64
+
+    public init(connectionGeneration: UUID, barrier: Barrier,
+                highWater: UInt64, appliedEventCount: UInt64) {
+        self.connectionGeneration = connectionGeneration
+        self.barrier = barrier
+        self.highWater = highWater
+        self.appliedEventCount = appliedEventCount
+    }
+}
+#endif
+
 /// A post-checkpoint signal asks the core to replay from its durable cursor.
 /// It includes every origin reply received since the last signal was consumed,
 /// so replayed backlog cannot borrow a later fetch time.
@@ -156,6 +179,9 @@ public actor NativeRelayCore {
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
     private let attemptID: UUID?
+#if DEBUG
+    private let onReadinessObservation: (@Sendable (NativeRelayReadinessObservation) -> Void)?
+#endif
     private var active = true
     private var busy = false
     private var postAckFailureDetails: NativePostAckFailureDetails?
@@ -393,6 +419,9 @@ public actor NativeRelayCore {
         let durableCursor: UInt64
         var accepted = false
         var high: UInt64?
+#if DEBUG
+        var appliedEventCount: UInt64 = 0
+#endif
         var recoveryReceipt: ConversationEvent?
         var recoveryRejection: ConversationValidationRejection?
         var recoveryOrigin: ExactText?
@@ -411,6 +440,9 @@ public actor NativeRelayCore {
         let durableCursor: UInt64
         var accepted = false
         var high: UInt64?
+#if DEBUG
+        var appliedEventCount: UInt64 = 0
+#endif
     }
 
     public init(store: AttentionDomainStore,
@@ -418,7 +450,11 @@ public actor NativeRelayCore {
                 session: any AuthenticatedInstallationSession,
                 attemptID: UUID? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) async throws {
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }
+#if DEBUG
+                , onReadinessObservation: (@Sendable (NativeRelayReadinessObservation) -> Void)? = nil
+#endif
+                ) async throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
@@ -429,6 +465,9 @@ public actor NativeRelayCore {
         self.onProgress = onProgress
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
+#if DEBUG
+        self.onReadinessObservation = onReadinessObservation
+#endif
         self.wire = try RelayWire(profile: context)
         self.inboxWire = try InboxPagingWire(profile: context)
         _ = try await store.snapshot(context: context)
@@ -474,8 +513,17 @@ public actor NativeRelayCore {
             try await session.resync(wire.resync(since: 0)) { frame in
                 try await self.consumeRouteAInboxReplay(frame)
             }
-            guard let high = activeInboxReplay?.high else { throw NativeRelayCoreError.invalidReplay }
+            guard let replay = activeInboxReplay, let high = replay.high else {
+                throw NativeRelayCoreError.invalidReplay
+            }
             activeInboxReplay = nil
+            #if DEBUG
+            if let attemptID, let onReadinessObservation {
+                onReadinessObservation(NativeRelayReadinessObservation(
+                    connectionGeneration: attemptID, barrier: .inbox,
+                    highWater: high, appliedEventCount: replay.appliedEventCount))
+            }
+            #endif
             onProgress(.nativeSyncResynced)
 
             if let eventStream = session as? any AuthenticatedLiveEventSession {
@@ -637,12 +685,18 @@ public actor NativeRelayCore {
                 throw NativeRelayCoreError.eventRejected
             }
             replay.expected = event.sequence
+#if DEBUG
+            replay.appliedEventCount &+= 1
+#endif
         case let .ignored(sequence):
             guard replay.expected < UInt64.max, sequence == replay.expected + 1 else {
                 throw NativeRelayCoreError.invalidReplay
             }
             _ = try await store.advanceRelayCursor(overIgnoredUpdateAt: sequence, context: context)
             replay.expected = sequence
+#if DEBUG
+            replay.appliedEventCount &+= 1
+#endif
         case .viewChanged, .ignoredUnsequenced:
             break
         }
@@ -1858,6 +1912,14 @@ public actor NativeRelayCore {
                          causeCode: "invalid_chat_read_positions")
             }
             replay.high = high
+#if DEBUG
+            if let attemptID, let onReadinessObservation,
+               !replay.historyOnly, replay.recoveryReceipt == nil {
+                onReadinessObservation(NativeRelayReadinessObservation(
+                    connectionGeneration: attemptID, barrier: .conversation,
+                    highWater: high, appliedEventCount: replay.appliedEventCount))
+            }
+#endif
         } else {
             let update: ConversationWireUpdate
             do {
@@ -1885,6 +1947,9 @@ public actor NativeRelayCore {
                 conversationReplay = replay
                 return
             }
+            #if DEBUG
+            replay.appliedEventCount &+= 1
+            #endif
             switch update {
             case let .event(event):
                 guard replay.expected < UInt64.max, event.sequence == replay.expected + 1 else {
