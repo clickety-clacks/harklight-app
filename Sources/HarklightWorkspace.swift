@@ -100,6 +100,7 @@ struct LighthouseMark: Shape {
 enum InboxSelection: Hashable {
     case request(RequestKey)
     case sample(String)
+    case notificationPending(UInt64)
 }
 
 enum RelatedMessageTarget: Hashable {
@@ -162,7 +163,7 @@ struct InboxNotificationDestination: Equatable {
 
     init(route: NativeInboxNavigation, rows: [InboxItem], usesFreeOrder: Bool = false) {
         guard let key = route.request else {
-            selection = nil
+            selection = .notificationPending(route.serial)
             selectedTab = .inbox
             workspaceTab = .inbox
             return
@@ -174,6 +175,191 @@ struct InboxNotificationDestination: Equatable {
         self.selection = selection
         selectedTab = messageTab
         workspaceTab = isReplied ? .replied : .inbox
+    }
+}
+
+struct InboxNotificationPendingPresentation: Equatable {
+    enum Target: Equatable {
+        case message
+        case chat
+    }
+
+    enum State: Equatable {
+        case opening
+        case checkingAgain
+        case invalid
+        case accountUnavailable
+        case messageUnavailable
+        case retracted
+    }
+
+    let serial: UInt64
+    let locator: NativeNotificationLocator?
+    let profile: NativeNotificationProfile?
+    let target: Target
+    let state: State
+
+    init(route: NativeInboxNavigation, intent: NativeNotificationIntent?,
+         statusMessage: String?) {
+        let matchingIntent = intent.flatMap { $0.serial == route.serial ? $0 : nil }
+        serial = route.serial
+        locator = matchingIntent?.locator
+        profile = matchingIntent?.profile
+        target = matchingIntent?.locator?.target == "chat" ? .chat : .message
+        state = Self.presentationState(for: statusMessage,
+                                       hasMatchingIntent: matchingIntent != nil,
+                                       hasLocator: matchingIntent?.locator != nil)
+    }
+
+    static func isNotificationStatusMessage(_ message: String) -> Bool {
+        switch message {
+        case "Checking this notification.",
+             "Could not verify notification. Checking again while open.",
+             "Could not check this notification's account.",
+             "This notification's message has not loaded yet.",
+             "This message link couldn't be opened.",
+             "The sender retracted this message.",
+             "Looking for this message.":
+            true
+        default:
+            false
+        }
+    }
+
+    private static func presentationState(for message: String?,
+                                          hasMatchingIntent: Bool,
+                                          hasLocator: Bool) -> State {
+        guard hasMatchingIntent, hasLocator else { return .invalid }
+        switch message {
+        case "Could not verify notification. Checking again while open.":
+            return .checkingAgain
+        case "Could not check this notification's account.":
+            return .accountUnavailable
+        case "This notification's message has not loaded yet.":
+            return .messageUnavailable
+        case "This message link couldn't be opened.":
+            return .invalid
+        case "The sender retracted this message.":
+            return .retracted
+        default:
+            return .opening
+        }
+    }
+}
+
+enum InboxNotificationNavigationPolicy {
+    static func dismissalSerial(from previous: InboxSelection?,
+                                to next: InboxSelection?) -> UInt64? {
+        guard previous != next,
+              case let .notificationPending(serial)? = previous else { return nil }
+        return serial
+    }
+
+    static func shouldApply(_ route: NativeInboxNavigation,
+                            afterDismissedSerial dismissedSerial: UInt64?) -> Bool {
+        dismissedSerial != route.serial
+    }
+}
+
+private struct InboxNotificationPendingDetail: View {
+    let presentation: InboxNotificationPendingPresentation
+    let canRefreshInbox: Bool
+    let onRefreshInbox: () -> Void
+    let onReturnToInbox: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            InboxNotificationPendingStatusContent(presentation: presentation)
+            if presentation.state == .messageUnavailable, canRefreshInbox {
+                Button("Refresh inbox", action: onRefreshInbox)
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("notification-pending-refresh")
+            }
+            Button("Back to inbox", action: onReturnToInbox)
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("notification-pending-back")
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("notification-pending-detail")
+    }
+}
+
+private struct InboxNotificationPendingStatusContent: View {
+    let presentation: InboxNotificationPendingPresentation
+
+    @ViewBuilder
+    var body: some View {
+        switch presentation.state {
+        case .opening:
+            ProgressView()
+                .controlSize(.large)
+            targetTitle
+            Text("Verifying this notification before showing its destination.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        case .checkingAgain:
+            ProgressView()
+                .controlSize(.large)
+            targetTitle
+            Text("Harklight is checking this notification again.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        case .invalid:
+            Image(systemName: "bell.slash")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("This message link couldn't be opened.")
+                .font(.title2)
+                .accessibilityIdentifier("notification-pending-title")
+            Text("Return to your inbox to continue.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        case .accountUnavailable:
+            Image(systemName: "person.crop.circle.badge.questionmark")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("Could not check this notification's account.")
+                .font(.title2)
+                .accessibilityIdentifier("notification-pending-title")
+            Text("Return to your inbox and try again.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        case .messageUnavailable:
+            Image(systemName: "clock")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("This notification's message has not loaded yet.")
+                .font(.title2)
+                .accessibilityIdentifier("notification-pending-title")
+            Text("Refresh the inbox or return to it.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        case .retracted:
+            Image(systemName: "arrow.uturn.backward")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("The sender retracted this message.")
+                .font(.title2)
+                .accessibilityIdentifier("notification-pending-title")
+            Text("Return to your inbox to continue.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    @ViewBuilder
+    private var targetTitle: some View {
+        switch presentation.target {
+        case .message:
+            Text("Opening message")
+                .font(.title2)
+                .accessibilityIdentifier("notification-pending-title")
+        case .chat:
+            Text("Opening chat")
+                .font(.title2)
+                .accessibilityIdentifier("notification-pending-title")
+        }
     }
 }
 
@@ -408,13 +594,19 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var navigatedBetweenMessages = false
     @State private var restoreLastViewedOnReturn = false
     @State private var replyChatRoute: ReplyChatRoute?
+    @State private var dismissedNotificationSerial: UInt64?
 
     private var rows: [InboxItem] {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
     }
 
     private var visibleWarnings: [String] {
-        warnings + [samples.loadError].compactMap { $0 }
+        let messages = warnings + [samples.loadError].compactMap { $0 }
+        guard let route = activeNotificationNavigation,
+              dismissedNotificationSerial == route.serial else { return messages }
+        return messages.filter {
+            !InboxNotificationPendingPresentation.isNotificationStatusMessage($0)
+        }
     }
 
     private func warningPresentationBinding(for tab: InboxWorkspaceTab) -> Binding<Bool> {
@@ -462,6 +654,26 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private var activeNotificationNavigation: NativeInboxNavigation? {
         notificationNavigation ?? testNotificationNavigation
     }
+    private var visibleNotificationNavigation: NativeInboxNavigation? {
+        guard let route = activeNotificationNavigation,
+              InboxNotificationNavigationPolicy.shouldApply(
+                route, afterDismissedSerial: dismissedNotificationSerial) else { return nil }
+        return route
+    }
+    private var activeNotificationIntent: NativeNotificationIntent? {
+        guard let route = activeNotificationNavigation else { return nil }
+        let intent = (testNotificationRouter ?? NativeNotificationRouter.shared).intent
+        return intent?.serial == route.serial ? intent : nil
+    }
+    private func notificationPendingPresentation(for serial: UInt64) -> InboxNotificationPendingPresentation? {
+        guard let route = activeNotificationNavigation, route.serial == serial,
+              route.request == nil, visibleNotificationNavigation != nil else { return nil }
+        let statusMessage = visibleWarnings.first {
+            InboxNotificationPendingPresentation.isNotificationStatusMessage($0)
+        }
+        return InboxNotificationPendingPresentation(route: route, intent: activeNotificationIntent,
+                                                    statusMessage: statusMessage)
+    }
     private var newMessageAreaExpiryTaskKey: NewMessageAreaExpiryTaskKey {
         NewMessageAreaExpiryTaskKey(
             scenePhase: String(describing: scenePhase),
@@ -494,8 +706,16 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         navigate(from: selection, to: next)
     }
 
+    private func dismissPendingNotification() {
+        guard let selection, case .notificationPending = selection else { return }
+        navigate(to: nil)
+    }
+
     private func navigate(from previous: InboxSelection?, to next: InboxSelection?) {
         guard previous != next else { return }
+        if let serial = InboxNotificationNavigationPolicy.dismissalSerial(from: previous, to: next) {
+            dismissedNotificationSerial = serial
+        }
         UIDiagnostics.shared.record("inbox.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next))")
         if case let .request(key) = previous { conversationStore?.flushPendingDraft(for: key) }
         if next != nil {
@@ -575,6 +795,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canMarkSeenLocally else { return }
             response.finishLocally()
+        case .notificationPending:
+            return
         }
     }
 
@@ -587,6 +809,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canDeclineLocally else { return }
             response.declineLocally()
+        case .notificationPending:
+            return
         }
     }
 
@@ -599,6 +823,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             guard let response = samples.responses[sampleID],
                   response.inboxRow?.isRetracted == true else { return }
             response.clearRetractedLocally()
+        case .notificationPending:
+            return
         }
     }
 
@@ -658,6 +884,20 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                         SampleCardScreen(response: response,
                             context: cardContext(for: .sample(id), inlineChat: inlineChat))
                             .id(id)
+                    }
+                case let .notificationPending(serial)?:
+                    if let presentation = notificationPendingPresentation(for: serial) {
+                        InboxNotificationPendingDetail(
+                            presentation: presentation,
+                            canRefreshInbox: refreshInbox != nil,
+                            onRefreshInbox: {
+                                guard let refreshInbox else { return }
+                                Task { await refreshInbox() }
+                            },
+                            onReturnToInbox: { navigate(to: nil) })
+                    } else {
+                        ContentUnavailableView("Notification no longer available",
+                                               systemImage: "bell.slash")
                     }
                 case nil:
                     HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -724,11 +964,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       lastViewedSelection: lastViewedSelection,
                       restoreLastViewed: restoreLastViewedOnReturn,
                       didRestoreLastViewed: { restoreLastViewedOnReturn = false },
-                      showSettings: { settings = true }, markSeen: markSeen,
+                      showSettings: { dismissPendingNotification(); settings = true },
+                      markSeen: markSeen,
                       markNoComment: markNoComment,
                       clearRetracted: clearRetracted,
                       fetchOlderInboxPage: fetchOlderInboxPage,
-                      notificationNavigation: activeNotificationNavigation,
+                      notificationNavigation: visibleNotificationNavigation,
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
         } detail: {
@@ -759,7 +1000,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         var chatScrollTargetTurnID: ExactText? = nil
         var chatRouteDidOpen: (() -> Void)? = nil
         if case let .request(key) = id,
-           let route = activeNotificationNavigation,
+           let route = visibleNotificationNavigation,
            route.opensChat, route.request == key {
             chatRouteSerial = route.serial
             chatRouteDidOpen = { [self] in self.notificationChatRouteDidOpen(route.serial) }
@@ -820,6 +1061,18 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: workspaceTab) { oldTab, newTab in
                 if oldTab != newTab { isWarningPresented = false }
                 selectedTab = newTab.messageTab
+                guard newTab != .inbox,
+                      let route = activeNotificationNavigation, route.request == nil,
+                      case let .notificationPending(serial)? = selection,
+                      serial == route.serial else { return }
+                dismissPendingNotification()
+            }
+            .onChange(of: search) { _, newSearch in
+                guard !newSearch.isEmpty,
+                      let route = activeNotificationNavigation, route.request == nil,
+                      case let .notificationPending(serial)? = selection,
+                      serial == route.serial else { return }
+                dismissPendingNotification()
             }
             .onChange(of: selectedTab) { _, tab in
                 workspaceTab = tab == .replied ? .replied : .inbox
@@ -829,7 +1082,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             tabs
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
-                guard let route else { return }
+                guard let route,
+                      InboxNotificationNavigationPolicy.shouldApply(
+                        route, afterDismissedSerial: dismissedNotificationSerial) else { return }
+                if dismissedNotificationSerial != route.serial { dismissedNotificationSerial = nil }
                 settings = false
                 // Notification routing changes presentation only. Keep it out
                 // of ordinary navigation cleanup so a tap cannot mutate the domain.
@@ -1714,6 +1970,19 @@ struct InboxList: View {
         let areaRows = combinedNewMessageAreaRows
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
+            if tab == .inbox, let route = notificationNavigation, route.request == nil {
+                NavigationLink(value: InboxSelection.notificationPending(route.serial)) {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Opening notification")
+                    }
+                }
+                .buttonStyle(.plain)
+                .navigationLinkIndicatorVisibility(.hidden)
+                .listRowSeparator(.hidden)
+                .accessibilityIdentifier("notification-pending-row")
+            }
             if !areaRows.isEmpty {
                 Section {
                     ForEach(shownAreaRows) { combined in
