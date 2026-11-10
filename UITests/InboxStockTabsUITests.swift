@@ -82,14 +82,42 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
         searchField.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.typeText("assistant\n")
+        let list = app.collectionViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        // Every standard sample sender contains “assistant”; completed-2 is the
+        // final row in the third sample set and exercises the list's end.
+        let lastFilteredResult = app.descendants(matching: .any)["sample-completed-2"]
+        XCTAssertTrue(lastFilteredResult.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(lastFilteredResult.isHittable,
+                       "The final matching sample begins below the initially visible results.")
+        let tabBar = app.tabBars.firstMatch
+        XCTAssertTrue(tabBar.exists, app.debugDescription)
+        for _ in 0..<12 {
+            if lastFilteredResult.isHittable && lastFilteredResult.frame.maxY <= tabBar.frame.minY {
+                break
+            }
+            list.swipeUp()
+        }
+        XCTAssertTrue(lastFilteredResult.isHittable, app.debugDescription)
+        XCTAssertLessThanOrEqual(lastFilteredResult.frame.maxY, tabBar.frame.minY,
+                                 "The last filtered result clears the bottom message filter.")
+        XCTAssertTrue(inboxTab.isHittable, app.debugDescription)
+        XCTAssertTrue(repliedTab.isHittable, app.debugDescription)
+        attachScreenshot("Inbox filtered results above bottom message filter", from: app)
+
+        for _ in 0..<12 {
+            if searchField.isHittable { break }
+            list.swipeDown()
+        }
+        XCTAssertTrue(searchField.isHittable, app.debugDescription)
+        let clearSearch = searchField.buttons["Clear text"]
+        XCTAssertTrue(clearSearch.waitForExistence(timeout: 5), app.debugDescription)
+        clearSearch.tap()
+        searchField.tap()
         searchField.typeText("Archive\n")
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(approval.isHittable, app.debugDescription)
-        XCTAssertLessThanOrEqual(approval.frame.maxY, inboxTab.frame.minY,
-                                 "The final filtered row stays above the bottom message filter.")
-        XCTAssertTrue(inboxTab.isHittable, app.debugDescription)
-        XCTAssertTrue(repliedTab.isHittable, app.debugDescription)
         attachScreenshot("Inbox results for Archive", from: app)
 
         approval.tap()
