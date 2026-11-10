@@ -1070,6 +1070,13 @@ struct LiveRequestDetail: View {
         .accessibilityHint("View earlier versions of this message")
     }
 
+    @ViewBuilder
+    private var historicalVersionControl: some View {
+        if let revision = storePresentationSnapshot.conversationRevision, revision > 1 {
+            historicalVersionMenu(for: revision)
+        }
+    }
+
     init(request: PresentedRequest,
          store: LivePresentationStore,
          context: InboxCardContext = .standalone,
@@ -1692,9 +1699,7 @@ struct LiveRequestDetail: View {
                                 : "request-local-answer-status")
                     }
                 }
-                if let revision = storePresentationSnapshot.conversationRevision, revision > 1 {
-                    historicalVersionMenu(for: revision)
-                }
+                historicalVersionControl
                 if storePresentationSnapshot.isRetracted {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
                         .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
