@@ -604,6 +604,7 @@ actor ComposerDraftPersistence {
             }
             let rebound = ConversationDraft(binding: ConversationBinding(request: key, revision: currentRevision),
                 text: migrated.text, files: migrated.files, disposition: migrated.disposition,
+                draftRequestRevision: migrated.draftRequestRevision ?? currentRevision,
                 operationID: migrated.operationID,
                 operationRequestRevision: migrated.operationRequestRevision,
                 inFlightOperationID: migrated.inFlightOperationID,
