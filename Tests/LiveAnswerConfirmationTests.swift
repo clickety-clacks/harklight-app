@@ -426,7 +426,17 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testAccountSeenOutcomeConfirmsOnAnyDeviceWithoutLocalAnswerReceipt() throws {
-        let (context, store, live, key) = try setup()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("sample"))
+        // Seen presentation requires the explicit informational Seen descriptor.
+        let payload = try JSONValue.parse(Data(#"{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let live = try LivePresentationStore(store: store, context: context)
         _ = try store.apply(RelayEvent(sequence: 2,
             body: .terminal(key, .answered, nil)), context: context)
         let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"seen"}}"#.utf8)
