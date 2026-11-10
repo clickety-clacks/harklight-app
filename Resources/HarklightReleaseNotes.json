@@ -100,7 +100,7 @@
       ]
     },
     {
-      "id": "post-148-notification-loading",
+      "id": "post-148-inbox-notification-updates",
       "marketingVersion": "0.1.0",
       "testFlightBuildNumber": null,
       "highlights": [
@@ -109,6 +109,12 @@
           "symbol": "bell",
           "title": "See when a notification is opening",
           "detail": "When a notification’s message or chat is still loading, Harklight shows progress in Inbox."
+        },
+        {
+          "id": "inbox-message-position",
+          "symbol": "list.number",
+          "title": "See your position in Inbox",
+          "detail": "The message count and position reflect only items in Inbox. The counter disappears when an open item leaves Inbox."
         }
       ]
     }
