@@ -55,19 +55,14 @@ final class ComposerDraftMigrationTests: XCTestCase {
                 context: context)
         }
 
-        let port = AttentionDomainPort(store: legacyStore)
         let oldAnswerID = ExactText("old-choice")
         let middleAnswerID = ExactText("middle-choice")
-        for (revision, actionID, answer) in [(UInt64(1), oldAnswerID, "Archived answer from version one"),
-                                             (UInt64(2), middleAnswerID, "Current answer from version two")] {
-            let snapshot = try await port.inspect(context: port.context, request: key,
-                revision: revision)
-            let selector = try XCTUnwrap(snapshot.requests.first?.selector)
-            let draft = RequestDraft(inputs: [:], compatibility: CompatibilityDraft(
-                selectedActionID: actionID, textByActionID: [actionID: ExactText(answer)]))
-            try await port.saveDraft(context: port.context, selector: selector,
-                completeDraft: draft)
-        }
+        let oldAnswerDraft = RequestDraft(inputs: [:], compatibility: CompatibilityDraft(
+            selectedActionID: oldAnswerID,
+            textByActionID: [oldAnswerID: ExactText("Archived answer from version one")]))
+        let middleAnswerDraft = RequestDraft(inputs: [:], compatibility: CompatibilityDraft(
+            selectedActionID: middleAnswerID,
+            textByActionID: [middleAnswerID: ExactText("Current answer from version two")]))
 
         // Recreate the earlier build's revision-keyed chat drafts in its
         // persisted profile. The current store normally advances one composer
@@ -91,6 +86,7 @@ final class ComposerDraftMigrationTests: XCTestCase {
         var archivedThread = try XCTUnwrap(archivedConversation.threads[key])
         archivedThread.drafts = [1: oldRevisionOneDraft, 2: oldRevisionTwoDraft,
                                  3: oldRevisionThreeDraft]
+        archivedThread.answerDrafts = [1: oldAnswerDraft, 2: middleAnswerDraft]
         archivedConversation.threads[key] = archivedThread
         let updatedConversation = try JSONEncoder().encode(archivedConversation)
         legacyProfile["conversation"] = try JSONSerialization.jsonObject(with: updatedConversation)
@@ -228,6 +224,16 @@ final class ComposerDraftMigrationTests: XCTestCase {
         try await store.saveConversationDraft(ConversationDraft(binding: binding,
             text: ExactText("Newest composer text"), carriedOverSends: [acceptedSend, conflictSend]),
             context: context)
+
+        let beforeRetry = try await store.currentConversationSnapshot(context: context)
+        let threadBeforeRetry = try XCTUnwrap(beforeRetry.threads[key])
+        XCTAssertEqual(threadBeforeRetry.currentRevision, binding.revision)
+        XCTAssertTrue(threadBeforeRetry.allowsDiscussion)
+        let draftBeforeRetry = try XCTUnwrap(threadBeforeRetry.drafts[binding.revision])
+        XCTAssertEqual(draftBeforeRetry.binding, binding)
+        XCTAssertEqual(draftBeforeRetry.carriedOverSends.map(\.id).sorted(),
+                       [acceptedSend.id, conflictSend.id].sorted(),
+                       "Both separately retryable sends must be stored before a Retry begins.")
 
         let retryID = try await store.prepareCarriedOverDiscussion(binding,
             entryID: acceptedSend.id, context: context)
