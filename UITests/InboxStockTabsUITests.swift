@@ -65,10 +65,18 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["sample-approval-0"]
+            .waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(app.tabBars.buttons["Search"].exists,
                        "Search belongs to the message list, not a separate tab.")
         assertListHeader(in: app)
         attachScreenshot("Inbox with native list search", from: app)
+
+        // Exercise the bottom message filter instead of relying on the launch default.
+        repliedTab.tap()
+        XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
+        inboxTab.tap()
+        XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
 
         let searchField = workspaceSearchField(in: app)
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
@@ -77,6 +85,11 @@ final class InboxStockTabsUITests: XCTestCase {
         searchField.typeText("Archive\n")
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(approval.isHittable, app.debugDescription)
+        XCTAssertLessThanOrEqual(approval.frame.maxY, inboxTab.frame.minY,
+                                 "The final filtered row stays above the bottom message filter.")
+        XCTAssertTrue(inboxTab.isHittable, app.debugDescription)
+        XCTAssertTrue(repliedTab.isHittable, app.debugDescription)
         attachScreenshot("Inbox results for Archive", from: app)
 
         approval.tap()
