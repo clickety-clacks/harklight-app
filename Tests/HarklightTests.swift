@@ -320,6 +320,8 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(presentation.profile, profile)
         XCTAssertEqual(presentation.target, .chat)
         XCTAssertEqual(presentation.state, .opening)
+        XCTAssertEqual(presentation.listRowState, .opening(.chat))
+        XCTAssertTrue(presentation.listRowState.showsProgress)
 
         let resolved = InboxNotificationDestination(
             route: NativeInboxNavigation(serial: 50, request: locator.request, opensChat: true),
@@ -336,22 +338,33 @@ final class HarklightTests: XCTestCase {
         let route = NativeInboxNavigation(serial: 70, request: nil)
         let intent = NativeNotificationIntent(serial: 70, locator: locator, profile: nil)
 
-        let states: [(String, InboxNotificationPendingPresentation.State)] = [
-            ("Could not verify notification. Checking again while open.", .checkingAgain),
-            ("Could not check this notification's account.", .accountUnavailable),
-            ("This notification's message has not loaded yet.", .messageUnavailable),
-            ("The sender retracted this message.", .retracted),
+        let states: [(String, InboxNotificationPendingPresentation.State,
+                      InboxNotificationPendingPresentation.ListRowState)] = [
+            ("Could not verify notification. Checking again while open.",
+             .checkingAgain, .checkingAgain),
+            ("This message link couldn't be opened.", .invalid, .invalid),
+            ("Could not check this notification's account.",
+             .accountUnavailable, .accountUnavailable),
+            ("This notification's message has not loaded yet.",
+             .messageUnavailable, .messageUnavailable),
+            ("The sender retracted this message.", .retracted, .retracted),
         ]
-        for (message, expected) in states {
+        for (message, expected, expectedRowState) in states {
             let presentation = InboxNotificationPendingPresentation(
                 route: route, intent: intent, statusMessage: message)
             XCTAssertEqual(presentation.state, expected, message)
+            XCTAssertEqual(presentation.listRowState, expectedRowState, message)
+            XCTAssertEqual(presentation.listRowState.showsProgress,
+                           expectedRowState == .checkingAgain, message)
         }
 
         let staleIntent = NativeNotificationIntent(serial: 69, locator: locator, profile: nil)
-        XCTAssertEqual(InboxNotificationPendingPresentation(
-            route: route, intent: staleIntent, statusMessage: "Checking this notification.").state,
-            .invalid, "A different notification's locator must never be shown as this target.")
+        let invalid = InboxNotificationPendingPresentation(
+            route: route, intent: staleIntent, statusMessage: "Checking this notification.")
+        XCTAssertEqual(invalid.state, .invalid,
+                       "A different notification's locator must never be shown as this target.")
+        XCTAssertEqual(invalid.listRowState, .invalid)
+        XCTAssertFalse(invalid.listRowState.showsProgress)
     }
 
     func testDismissingPendingNotificationSuppressesItsLateResolution() {

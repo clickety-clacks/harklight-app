@@ -193,6 +193,44 @@ struct InboxNotificationPendingPresentation: Equatable {
         case retracted
     }
 
+    enum ListRowState: Equatable {
+        case opening(Target)
+        case checkingAgain
+        case invalid
+        case accountUnavailable
+        case messageUnavailable
+        case retracted
+
+        var showsProgress: Bool {
+            switch self {
+            case .opening, .checkingAgain: true
+            case .invalid, .accountUnavailable, .messageUnavailable, .retracted: false
+            }
+        }
+
+        var title: LocalizedStringResource {
+            switch self {
+            case .opening(.message): "Opening message"
+            case .opening(.chat): "Opening chat"
+            case .checkingAgain: "Checking notification again"
+            case .invalid: "Message link unavailable"
+            case .accountUnavailable: "Account unavailable"
+            case .messageUnavailable: "Message unavailable"
+            case .retracted: "Message retracted"
+            }
+        }
+
+        var symbolName: String? {
+            switch self {
+            case .opening, .checkingAgain: nil
+            case .invalid: "bell.slash"
+            case .accountUnavailable: "person.crop.circle.badge.questionmark"
+            case .messageUnavailable: "clock"
+            case .retracted: "arrow.uturn.backward"
+            }
+        }
+    }
+
     let serial: UInt64
     let locator: NativeNotificationLocator?
     let profile: NativeNotificationProfile?
@@ -209,6 +247,17 @@ struct InboxNotificationPendingPresentation: Equatable {
         state = Self.presentationState(for: statusMessage,
                                        hasMatchingIntent: matchingIntent != nil,
                                        hasLocator: matchingIntent?.locator != nil)
+    }
+
+    var listRowState: ListRowState {
+        switch state {
+        case .opening: .opening(target)
+        case .checkingAgain: .checkingAgain
+        case .invalid: .invalid
+        case .accountUnavailable: .accountUnavailable
+        case .messageUnavailable: .messageUnavailable
+        case .retracted: .retracted
+        }
     }
 
     static func isNotificationStatusMessage(_ message: String) -> Bool {
@@ -282,6 +331,24 @@ private struct InboxNotificationPendingDetail: View {
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("notification-pending-detail")
+    }
+}
+
+private struct InboxNotificationPendingListRow: View {
+    let state: InboxNotificationPendingPresentation.ListRowState
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if state.showsProgress {
+                ProgressView()
+                    .controlSize(.small)
+            } else if let symbolName = state.symbolName {
+                Image(systemName: symbolName)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            Text(state.title)
+        }
     }
 }
 
@@ -674,6 +741,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return InboxNotificationPendingPresentation(route: route, intent: activeNotificationIntent,
                                                     statusMessage: statusMessage)
     }
+    private var notificationPendingListPresentation: InboxNotificationPendingPresentation? {
+        guard let route = visibleNotificationNavigation, route.request == nil else { return nil }
+        return notificationPendingPresentation(for: route.serial)
+    }
     private var newMessageAreaExpiryTaskKey: NewMessageAreaExpiryTaskKey {
         NewMessageAreaExpiryTaskKey(
             scenePhase: String(describing: scenePhase),
@@ -970,6 +1041,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       clearRetracted: clearRetracted,
                       fetchOlderInboxPage: fetchOlderInboxPage,
                       notificationNavigation: visibleNotificationNavigation,
+                      notificationPendingPresentation: notificationPendingListPresentation,
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
         } detail: {
@@ -1197,6 +1269,7 @@ struct InboxList: View {
     let clearRetracted: (InboxSelection) -> Void
     let fetchOlderInboxPage: (() async -> Bool)?
     let notificationNavigation: NativeInboxNavigation?
+    var notificationPendingPresentation: InboxNotificationPendingPresentation? = nil
     let triggerNotification: (() -> Void)?
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
@@ -1971,12 +2044,11 @@ struct InboxList: View {
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
             if tab == .inbox, let route = notificationNavigation, route.request == nil {
+                let rowState = notificationPendingPresentation.flatMap {
+                    $0.serial == route.serial ? $0.listRowState : nil
+                } ?? .invalid
                 NavigationLink(value: InboxSelection.notificationPending(route.serial)) {
-                    HStack(spacing: 12) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Opening notification")
-                    }
+                    InboxNotificationPendingListRow(state: rowState)
                 }
                 .buttonStyle(.plain)
                 .navigationLinkIndicatorVisibility(.hidden)
