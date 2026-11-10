@@ -85,9 +85,9 @@ final class InboxStockTabsUITests: XCTestCase {
         searchField.typeText("assistant\n")
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-        // Every standard sample sender contains “assistant”; completed-2 is the
-        // final row in the third sample set and exercises the list's end.
-        let lastFilteredResult = app.descendants(matching: .any)["sample-completed-2"]
+        // Every standard sample sender contains “assistant”. Samples are displayed
+        // by descending acceptance order, so approval-0 is the final matching row.
+        let lastFilteredResult = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(lastFilteredResult.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(lastFilteredResult.isHittable,
                        "The final matching sample begins below the initially visible results.")
