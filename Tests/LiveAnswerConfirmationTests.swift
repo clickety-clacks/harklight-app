@@ -594,7 +594,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "Answered by default: Hold for now")
     }
 
-    func testOlderServerOriginOnlyAnswerDoesNotCreatePhoneSpecificSeenState() throws {
+    func testOlderServerOriginOnlySeenAnswerConfirmsWithoutPhoneSpecificReceipt() throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
@@ -612,14 +612,14 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(request.lifecycleStatus, .answered)
         XCTAssertNil(request.accountAnswerOutcome)
-        XCTAssertNil(request.informationalSeenStatus,
-                     "An older server's origin-only answer is not the shared account outcome.")
+        XCTAssertEqual(request.informationalSeenStatus, .confirmed,
+                       "An authorized older-server Seen answer is truthful even without accountAnswerOutcome.")
         XCTAssertNil(request.intentReceipt)
         XCTAssertNil(request.receiptFacts)
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).status.contains("Answered"))
         XCTAssertEqual(String(localized: LiveRequestDetail.answeredConfirmationTitle(
             isDefaultAnswered: request.isDefaultAnswered)), "Answered",
-            "An older server's terminal stays generic instead of claiming Replied or Seen.")
+            "The generic answered title remains unchanged; Seen status is presented separately.")
     }
 
     func testRemoteRequestStateReadsPersistedRecordsWithoutAccountOutcome() throws {
