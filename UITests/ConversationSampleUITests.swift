@@ -1275,15 +1275,19 @@ final class ConversationSampleUITests: XCTestCase {
         let conversationHistory = app.scrollViews["conversation-history-scroll"]
         XCTAssertTrue(conversationHistory.waitForExistence(timeout: 5), app.debugDescription)
         let inputSurface = app.otherElements["sample-chat-input-surface"]
+        let keyboard = app.keyboards.firstMatch
+        if keyboard.exists {
+            let keyboardDismissalStart = conversationHistory.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
+            let keyboardDismissalEnd = keyboard.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+            keyboardDismissalStart.press(forDuration: 0.1, thenDragTo: keyboardDismissalEnd)
+            XCTAssertFalse(keyboard.waitForExistence(timeout: 1.5), app.debugDescription)
+        }
         func dragChatDown() {
             let start = conversationHistory.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
             let end = conversationHistory.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
             start.press(forDuration: 0.1, thenDragTo: end)
-        }
-        let keyboard = app.keyboards.firstMatch
-        if keyboard.exists {
-            dragChatDown()
-            XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), app.debugDescription)
         }
         if inputSurface.exists { dragChatDown() }
         XCTAssertTrue(inputSurface.waitForNonExistence(timeout: 5), app.debugDescription)
