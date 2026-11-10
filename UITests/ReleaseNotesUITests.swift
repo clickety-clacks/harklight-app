@@ -28,6 +28,7 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
+        attachScreenshot("release-notes-settings-unconfirmed-history", from: app)
         let buildHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
         revealHistoryElement(buildHeader, in: app)
         XCTAssertTrue(buildHeader.exists,
@@ -123,8 +124,8 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         let currentUnconfirmedHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
         XCTAssertTrue(currentUnconfirmedHeader.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
-                       "Synthetic current-build metadata does not establish the note's source build.")
+        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
+                      "Settings preserves the existing entry for this numbered build.")
         XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
@@ -176,7 +177,7 @@ final class ReleaseNotesUITests: XCTestCase {
     }
 
     private func revealHistoryElement(_ element: XCUIElement, in app: XCUIApplication) {
-        let list = app.collectionViews.firstMatch
+        let list = app.collectionViews["release-notes-history"]
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
         for _ in 0..<24 where !element.isHittable {
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))

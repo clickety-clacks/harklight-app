@@ -843,6 +843,7 @@ struct ReleaseNotesHistoryView: View {
                 ReleaseNoteSection(note: note)
             }
         }
+        .accessibilityIdentifier("release-notes-history")
         .navigationTitle("Release notes")
         .navigationBarTitleDisplayMode(.inline)
     }
