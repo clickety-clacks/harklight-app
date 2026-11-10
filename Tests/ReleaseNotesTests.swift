@@ -99,7 +99,7 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(secondLaunch.notesToShow.isEmpty)
     }
 
-    func testBundledReleaseNotesPreserveBuild144AndAddPendingInboxLiveUpdatesNote() throws {
+    func testBundledReleaseNotesPreserveBuild144AndRecordBuild148InboxLiveUpdates() throws {
         let bundle = Bundle(for: ReleaseNotesTests.self)
         let url = try XCTUnwrap(bundle.url(
             forResource: "HarklightReleaseNotes", withExtension: "json"))
@@ -110,14 +110,17 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertNil(entries.first { $0["id"] as? String == "fresh-release-notes" })
         let build139Identifier = "fresh-release-notes-follow-up"
         let pendingEntries = entries.filter { $0["testFlightBuildNumber"] is NSNull }
-        XCTAssertEqual(pendingEntries.compactMap { $0["id"] as? String }, [
-            "post-144-inbox-live-updates"
-        ])
+        XCTAssertTrue(pendingEntries.isEmpty,
+                      "The catalog can be between post-merge note-owner updates.")
+        let inboxLiveUpdatesIdentifier = "post-144-inbox-live-updates"
         let rawStampedEntry = try XCTUnwrap(
+            entries.first { $0["id"] as? String == inboxLiveUpdatesIdentifier })
+        XCTAssertEqual(rawStampedEntry["testFlightBuildNumber"] as? Int, 148)
+        let rawBuild139Entry = try XCTUnwrap(
             entries.first { $0["id"] as? String == build139Identifier })
-        XCTAssertEqual(rawStampedEntry["testFlightBuildNumber"] as? Int, 139)
+        XCTAssertEqual(rawBuild139Entry["testFlightBuildNumber"] as? Int, 139)
 
-        // This synthetic build exercises the pending-note fallback only; it is not a release attribution.
+        // This later synthetic build confirms stamped notes keep their source-associated build labels.
         let numberedEntries = HarklightReleaseNotes.numberedEntries(
             currentBuildIdentifier: "9000", in: bundle)
         let build139Note = try XCTUnwrap(numberedEntries.first { $0.id == build139Identifier })
@@ -151,20 +154,20 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertEqual(String(localized: build144Note.highlights[4].detail),
                        "There’s less extra space around the New section.")
 
-        let inboxCatchUpNote = try XCTUnwrap(
-            numberedEntries.first { $0.id == "post-144-inbox-live-updates" })
-        XCTAssertEqual(inboxCatchUpNote.buildIdentifier, 9000)
-        XCTAssertEqual(inboxCatchUpNote.highlights.map(\.id), [
+        let inboxLiveUpdatesNote = try XCTUnwrap(
+            numberedEntries.first { $0.id == inboxLiveUpdatesIdentifier })
+        XCTAssertEqual(inboxLiveUpdatesNote.buildIdentifier, 148)
+        XCTAssertEqual(inboxLiveUpdatesNote.highlights.map(\.id), [
             "inbox-catch-up-background-preparation",
             "inbox-deliveries-during-refresh"
         ])
-        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[0].title),
+        XCTAssertEqual(String(localized: inboxLiveUpdatesNote.highlights[0].title),
                        "Prepare Inbox history in the background")
-        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[0].detail),
+        XCTAssertEqual(String(localized: inboxLiveUpdatesNote.highlights[0].detail),
                        "Inbox prepares messages and conversation history in the background as it catches up.")
-        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[1].title),
+        XCTAssertEqual(String(localized: inboxLiveUpdatesNote.highlights[1].title),
                        "Receive new messages during refresh")
-        XCTAssertEqual(String(localized: inboxCatchUpNote.highlights[1].detail),
+        XCTAssertEqual(String(localized: inboxLiveUpdatesNote.highlights[1].detail),
                        "Inbox continues receiving new messages while its current view refreshes.")
 
         let messageTextDetail = try XCTUnwrap(build139Note.highlights.first {

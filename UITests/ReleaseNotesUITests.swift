@@ -3,7 +3,7 @@ import XCTest
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
     func testCurrentReleaseOpensOnFirstInstallAndShowsItsBuildInSettings() {
-        let simulatedCurrentBuild = "9000" // Synthetic metadata; no archive mapping is claimed.
+        let simulatedCurrentBuild = "148" // The catalog's directly source-associated note build.
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
@@ -23,7 +23,7 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
                       app.debugDescription)
         XCTAssertFalse(app.staticTexts["Keep track of replies across conversations"].exists,
-                       "A fresh install shows only the current pending entry.")
+                       "A fresh install shows only the current release entry.")
         XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
                        "A fresh install does not show highlights from an earlier release.")
 
@@ -116,7 +116,7 @@ final class ReleaseNotesUITests: XCTestCase {
 
     func testUpdateSheetAndSettingsHistoryShowReleasedNotes() {
         let app = XCUIApplication()
-        let simulatedCurrentBuild = "62" // Synthetic metadata; no archive mapping is claimed.
+        let simulatedCurrentBuild = "148" // The catalog's directly source-associated note build.
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = simulatedCurrentBuild
@@ -134,7 +134,7 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
                       app.debugDescription)
         XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
-                       "The stamped Build139 entry is future history at this synthetic build.")
+                       "Earlier release highlights do not appear in the current update sheet.")
         XCTAssertFalse(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
                        "Earlier build notes do not appear in the current update sheet.")
         XCTAssertFalse(app.staticTexts["See clearer release notes"].exists,
