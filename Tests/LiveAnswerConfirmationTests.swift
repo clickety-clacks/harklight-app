@@ -426,7 +426,17 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testAccountSeenOutcomeConfirmsOnAnyDeviceWithoutLocalAnswerReceipt() throws {
-        let (context, store, live, key) = try setup()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("sample"))
+        // Seen presentation requires the explicit informational Seen descriptor.
+        let payload = try JSONValue.parse(Data(#"{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let live = try LivePresentationStore(store: store, context: context)
         _ = try store.apply(RelayEvent(sequence: 2,
             body: .terminal(key, .answered, nil)), context: context)
         let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"seen"}}"#.utf8)
@@ -584,7 +594,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "Answered by default: Hold for now")
     }
 
-    func testOlderServerOriginOnlyAnswerDoesNotCreatePhoneSpecificSeenState() throws {
+    func testOlderServerOriginOnlySeenAnswerConfirmsWithoutPhoneSpecificReceipt() throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
@@ -602,14 +612,14 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(request.lifecycleStatus, .answered)
         XCTAssertNil(request.accountAnswerOutcome)
-        XCTAssertNil(request.informationalSeenStatus,
-                     "An older server's origin-only answer is not the shared account outcome.")
+        XCTAssertEqual(request.informationalSeenStatus, .confirmed,
+                       "An authorized older-server Seen answer is truthful even without accountAnswerOutcome.")
         XCTAssertNil(request.intentReceipt)
         XCTAssertNil(request.receiptFacts)
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).status.contains("Answered"))
         XCTAssertEqual(String(localized: LiveRequestDetail.answeredConfirmationTitle(
             isDefaultAnswered: request.isDefaultAnswered)), "Answered",
-            "An older server's terminal stays generic instead of claiming Replied or Seen.")
+            "The generic answered title remains unchanged; Seen status is presented separately.")
     }
 
     func testRemoteRequestStateReadsPersistedRecordsWithoutAccountOutcome() throws {

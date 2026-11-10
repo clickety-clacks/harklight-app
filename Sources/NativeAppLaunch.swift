@@ -1824,14 +1824,16 @@ final class LivePresentationStore {
         }
     }
 
+    // Bulk projection already has each request. Looking it up again by key
+    // scans the entire inbox once per row and stalls large inbox launches.
     var inboxRows: [InboxRequestRow] {
         let skippedMessageRequestTags = completedSkippedMessageRequestTags
         return presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
             .filter { request in
-                guard isRetracted(request.key) else { return true }
+                guard isRetracted(request) else { return true }
                 return !Self.isRetractionExpired(
-                    retractionDate: retractionDate(request.key), at: retractionVisibilityTime)
+                    retractionDate: retractionDate(request), at: retractionVisibilityTime)
             }
             .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
     }
@@ -1841,9 +1843,9 @@ final class LivePresentationStore {
         return presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
             .filter { request in
-                isRetracted(request.key) &&
+                isRetracted(request) &&
                     Self.isRetractionExpired(
-                        retractionDate: retractionDate(request.key), at: retractionVisibilityTime)
+                        retractionDate: retractionDate(request), at: retractionVisibilityTime)
             }
             .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
     }
@@ -1851,9 +1853,9 @@ final class LivePresentationStore {
     var nextRetractionExpiry: Date? {
         presentation.requests.compactMap { request -> Date? in
             guard request.lifecycleStatus != .superseded,
-                  isRetracted(request.key),
+                  isRetracted(request),
                   !clearedRetractions.contains(request.key),
-                  let expiry = Self.retractionExpiryDate(for: retractionDate(request.key)),
+                  let expiry = Self.retractionExpiryDate(for: retractionDate(request)),
                   expiry > retractionVisibilityTime else { return nil }
             return expiry
         }.min()
@@ -2004,6 +2006,17 @@ final class LivePresentationStore {
         if let outcome = request.intentReceipt?.relayOutcome,
            case .refusedByRetraction = outcome { return true }
         return false
+    }
+
+    private func retractionDate(_ request: PresentedRequest) -> Date? {
+        let thread = conversationThreads[request.key]
+        let timestamp = thread?.retraction?.retractedAtMilliseconds ?? thread?.reportedRetractedAtMilliseconds ?? {
+            guard let outcome = request.intentReceipt?.relayOutcome,
+                  case let .refusedByRetraction(retractedAtMilliseconds) = outcome else { return nil }
+            return retractedAtMilliseconds
+        }()
+        guard let timestamp else { return nil }
+        return Date(timeIntervalSince1970: Double(timestamp) / 1_000)
     }
 
     private func retractionLabel(for request: PresentedRequest) -> String {
@@ -2471,7 +2484,11 @@ final class LivePresentationStore {
                 diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key)
                 current = nil
             }
-            if let current, current.intentReceipt != nil {
+            // Completed account answers intentionally hide device receipts.
+            // Keep the retained submission as evidence that this is a duplicate
+            // callback, rather than a first attempt after another device answered.
+            if let current, current.intentReceipt != nil ||
+                (current.lifecycleStatus == .answered && current.submittedAnswer != nil) {
                 clearActionError()
                 return true
             } else {

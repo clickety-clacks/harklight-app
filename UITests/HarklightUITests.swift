@@ -835,3 +835,35 @@ final class HarklightUITests: XCTestCase {
     }
 
 }
+
+/// Uses an expanded bundled fixture supplied by the benchmark runner. Measures
+/// process-cold launches; simulator caches and the booted OS remain warm.
+@MainActor
+final class InboxColdLaunchTests: XCTestCase {
+    func testColdLaunchReachesInteractiveInbox() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        // Establish durable local data before the measured process launches.
+        app.launchArguments = ["--reset-attention-fixture"]
+        app.launch()
+        XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 180))
+        app.terminate()
+        for run in 1...3 {
+            app.launchArguments = ["--attention-fixture"]
+            let start = ProcessInfo.processInfo.systemUptime
+            app.launch()
+            let row = app.descendants(matching: .any)["request-row-review-01"].firstMatch
+            XCTAssertTrue(row.waitForExistence(timeout: 180))
+            XCTAssertTrue(row.isHittable)
+            let inboxSeconds = ProcessInfo.processInfo.systemUptime - start
+            row.tap()
+            XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 30))
+            print("INBOX_COLD_RUN run=\(run) inbox_seconds=\(inboxSeconds) interactive_seconds=\(ProcessInfo.processInfo.systemUptime - start)")
+            let capture = XCTAttachment(screenshot: app.screenshot())
+            capture.name = "Cold launch interactive detail run \(run)"
+            capture.lifetime = .keepAlways
+            add(capture)
+            app.terminate()
+        }
+    }
+}
