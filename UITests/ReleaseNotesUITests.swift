@@ -17,6 +17,7 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["See what’s new after an update"].exists,
                       app.debugDescription)
+        attachScreenshot("release-notes-unconfirmed-update", from: app)
 
         app.buttons["Done"].tap()
         let settings = app.buttons["inbox-settings"]
@@ -55,9 +56,12 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         let updateHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
         XCTAssertTrue(updateHeader.exists, app.debugDescription)
+        attachScreenshot("release-notes-post79-update", from: app)
         XCTAssertTrue(app.staticTexts["See when Chat needs attention"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
+        let exampleMessagesNote = app.staticTexts["Example messages are gone from the app"]
+        revealHistoryElement(exampleMessagesNote, in: app)
+        XCTAssertTrue(exampleMessagesNote.exists,
                       app.debugDescription)
         XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                        "A later installed build must not relabel this update.")
@@ -117,10 +121,10 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        let currentBuildHeader = app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"]
-        XCTAssertTrue(currentBuildHeader.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(currentBuildHeader.exists,
-                      "Settings history identifies the build attached to this release note.")
+        let currentUnconfirmedHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
+        XCTAssertTrue(currentUnconfirmedHeader.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
+                       "Synthetic current-build metadata does not establish the note's source build.")
         XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
@@ -150,10 +154,12 @@ final class ReleaseNotesUITests: XCTestCase {
         revealHistoryElement(settingsTitle, in: app)
         XCTAssertTrue(settingsTitle.isHittable,
                       "Settings history retains the confirmed Build 59 entry.")
-        let datedHistoryHeader = app.staticTexts["Version 0.1.0 · Earlier on October 25, 2026"]
-        revealHistoryElement(datedHistoryHeader, in: app)
-        XCTAssertTrue(datedHistoryHeader.isHittable,
-                      "Settings history identifies the dated entry without a build number.")
+        let datedHistorySection = app.cells.containing(
+            .staticText, identifier: "Earlier on October 25, 2026").firstMatch
+        revealHistoryElement(datedHistorySection, in: app)
+        XCTAssertTrue(datedHistorySection.staticTexts[
+            "Version 0.1.0 · Build UNCONFIRMED"
+        ].exists, "Settings shows the dated entry and marks its build number unconfirmed.")
         let replyTitle = app.staticTexts["Reply right from the message"]
         revealHistoryElement(replyTitle, in: app)
         XCTAssertTrue(replyTitle.isHittable,
@@ -170,9 +176,11 @@ final class ReleaseNotesUITests: XCTestCase {
     }
 
     private func revealHistoryElement(_ element: XCUIElement, in app: XCUIApplication) {
-        for _ in 0..<8 where !element.isHittable {
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.70))
-            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.56))
+        let list = app.collectionViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<24 where !element.isHittable {
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
+            let end = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.50))
             start.press(forDuration: 0.05, thenDragTo: end)
         }
         XCTAssertTrue(element.isHittable,

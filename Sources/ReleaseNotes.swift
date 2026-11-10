@@ -893,7 +893,8 @@ private struct ReleaseNoteSection: View {
                     Text("Version \(note.marketingVersion) · \(historyDateDescription)",
                          comment: "Marketing version and date associated with this history-only entry.")
                 }
-                if note.buildIdentifier != nil || note.confirmedContainingBuildIdentifier != nil,
+                if note.buildIdentifier != nil || note.confirmedContainingBuildIdentifier != nil ||
+                    note.buildNumberIsUnconfirmed,
                    let historyDateDescription = note.historyDateDescription {
                     Text(historyDateDescription)
                 }
