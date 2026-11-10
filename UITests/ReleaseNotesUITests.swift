@@ -18,8 +18,12 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(unconfirmedUpdateHeader.exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["See why a response was not accepted"].exists,
                       app.debugDescription)
-        let updateHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
-        XCTAssertTrue(updateHeader.exists, app.debugDescription)
+        let confirmedUpdateHeader = app.staticTexts[
+            "Version 0.1.0 · First confirmed in Build 106"
+        ]
+        XCTAssertTrue(confirmedUpdateHeader.exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Unknown build numbers are marked UNCONFIRMED."].exists,
+                      app.debugDescription)
         attachScreenshot("release-notes-post79-update", from: app)
         XCTAssertTrue(app.staticTexts["See when Chat needs attention"].exists,
                       app.debugDescription)
@@ -43,8 +47,8 @@ final class ReleaseNotesUITests: XCTestCase {
             .staticText, identifier: "Changes since Build 79").firstMatch
         revealHistoryElement(historicalSection, in: app)
         XCTAssertTrue(historicalSection.staticTexts[
-            "Version 0.1.0 · Build UNCONFIRMED"
-        ].exists, "Settings keeps unknown historical build numbers explicit.")
+            "Version 0.1.0 · First confirmed in Build 106"
+        ].exists, "Settings keeps the confirmed containing build association.")
         attachScreenshot("release-notes-settings-post79-history", from: app)
         let earlierHighlight = app.staticTexts["More details for each message"]
         revealHistoryElement(earlierHighlight, in: app)

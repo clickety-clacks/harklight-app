@@ -60,7 +60,9 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 
 enum HarklightReleaseNotes {
     /// Keep these older updates' identifiers stable for existing installations.
-    /// Keep unknown build numbers explicit until an archived source mapping verifies them.
+    /// Build 106 is the earliest confirmed containing build for the existing updates below;
+    /// it does not establish when they first shipped.
+    /// Keep other unknown build numbers explicit until an archived source mapping verifies them.
     static let updateEntries: [HarklightReleaseNote] = [
         HarklightReleaseNote(
             historyIdentifier: "whats-new-per-build",
@@ -77,7 +79,7 @@ enum HarklightReleaseNotes {
                         "See what’s new after an update",
                         comment: "Release-note title for showing new notes after an app update."),
                     detail: LocalizedStringResource(
-                        "Build numbers appear only when verified; unknown numbers are marked UNCONFIRMED.",
+                        "Unknown build numbers are marked UNCONFIRMED.",
                         comment: "Release-note detail for verified and unconfirmed build labels."))
             ]),
         HarklightReleaseNote(
@@ -105,6 +107,7 @@ enum HarklightReleaseNotes {
                 "Reply drafts stay while you browse",
                 comment: "Release-note heading for unfinished replies retained during navigation."),
             visibleFromBuildIdentifier: 79,
+            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "reply-drafts-after-navigation",
@@ -123,6 +126,7 @@ enum HarklightReleaseNotes {
                 "Chat activity in the Inbox",
                 comment: "Release-note heading for message-row Chat activity."),
             visibleFromBuildIdentifier: 79,
+            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "chat-row-activity",
@@ -141,6 +145,7 @@ enum HarklightReleaseNotes {
                 "Example messages removed",
                 comment: "Release-note heading for removal of local example messages."),
             visibleFromBuildIdentifier: 79,
+            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "example-messages-removed",
@@ -159,6 +164,7 @@ enum HarklightReleaseNotes {
                 "Changes since Build 79",
                 comment: "Release-note heading for changes after the last numbered update."),
             visibleFromBuildIdentifier: 79,
+            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "inbox-message-context",

@@ -41,6 +41,9 @@ final class ReleaseNotesTests: XCTestCase {
         let chatNote = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "chat-row-activity"
         })
+        let whatIsNewNote = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
+            $0.id == "whats-new-per-build"
+        })
         let draftNote = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "reply-drafts-after-navigation"
         })
@@ -54,10 +57,18 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertEqual(failedResponseNote.visibleFromBuildIdentifier, 79)
         XCTAssertEqual(failedResponseNote.highlights.map(\.id), ["failed-response-retry"])
         XCTAssertEqual(HarklightReleaseNotes.updateEntries.map(\.confirmedContainingBuildIdentifier),
-                       [nil, nil, nil, nil, nil, nil])
-        XCTAssertTrue(HarklightReleaseNotes.updateEntries.allSatisfy(\.buildNumberIsUnconfirmed))
+                       [nil, nil, 106, 106, 106, 106])
+        XCTAssertEqual(HarklightReleaseNotes.updateEntries.map(\.buildNumberIsUnconfirmed),
+                       [true, true, false, false, false, false])
         XCTAssertEqual(HarklightReleaseNotes.updateEntries.map(\.visibleFromBuildIdentifier),
                        [79, 79, 79, 79, 79, 79])
+        XCTAssertEqual(String(localized: whatIsNewNote.highlights[0].detail),
+                       "Unknown build numbers are marked UNCONFIRMED.")
+        XCTAssertNil(whatIsNewNote.confirmedContainingBuildIdentifier)
+        XCTAssertTrue(whatIsNewNote.buildNumberIsUnconfirmed)
+        XCTAssertEqual(draftNote.confirmedContainingBuildIdentifier, 106)
+        XCTAssertEqual(chatNote.confirmedContainingBuildIdentifier, 106)
+        XCTAssertEqual(note.confirmedContainingBuildIdentifier, 106)
         XCTAssertEqual(String(localized: draftNote.highlights[0].title),
                        "Keep an unfinished Reply")
         XCTAssertEqual(note.highlights.map(\.id),
@@ -93,13 +104,13 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(laterBuild.notesToShow.isEmpty)
     }
 
-    func testExampleRemovalNotePreservesItsContentAndMarksBuildUnconfirmed() throws {
+    func testExampleRemovalNotePreservesItsContentAndConfirmedBuild() throws {
         let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "example-messages-removed"
         })
         XCTAssertNil(note.buildIdentifier)
-        XCTAssertNil(note.confirmedContainingBuildIdentifier)
-        XCTAssertTrue(note.buildNumberIsUnconfirmed)
+        XCTAssertEqual(note.confirmedContainingBuildIdentifier, 106)
+        XCTAssertFalse(note.buildNumberIsUnconfirmed)
         XCTAssertEqual(note.highlights.map(\.id), ["example-messages-removed"])
         let highlight = try XCTUnwrap(note.highlights.first)
         XCTAssertEqual(highlight.symbol, "tray")

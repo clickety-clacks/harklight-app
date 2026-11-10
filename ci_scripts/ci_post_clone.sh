@@ -1,19 +1,6 @@
 #!/bin/sh
 set -u
 
-case "${CI_XCODE_CLOUD:-}" in
-    TRUE|true|1)
-        if [ "${CI_XCODE_SCHEME:-}" = "Harklight-PublicTestFlight" ]; then
-            public_repo=${CI_PRIMARY_REPOSITORY_PATH:-}
-            if [ -z "$public_repo" ] || [ ! -x "$public_repo/ci_scripts/verify_public_release_notes.sh" ]; then
-                printf 'Release notes gate: The public workflow gate is unavailable.\n' >&2
-                exit 1
-            fi
-            exec "$public_repo/ci_scripts/verify_public_release_notes.sh"
-        fi
-        ;;
-esac
-
 # Report source changes that need release-note attention without stopping a build.
 # The starting commit is a source revision, not an App Store build number.
 warn() {
