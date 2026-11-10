@@ -28,15 +28,20 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        attachScreenshot("release-notes-settings-unconfirmed-history", from: app)
-        let buildHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
-        revealHistoryElement(buildHeader, in: app)
-        XCTAssertTrue(buildHeader.exists,
-                      "Settings keeps the current release's build label.")
-        let updateTitle = app.staticTexts["See what’s new after an update"]
-        revealHistoryElement(updateTitle, in: app)
-        XCTAssertTrue(updateTitle.exists,
+        scrollHistoryToNewest(in: app)
+        let releaseImprovementsHeader = app.cells.containing(
+            .staticText, identifier: "Release note improvements").firstMatch
+        XCTAssertTrue(releaseImprovementsHeader.waitForExistence(timeout: 5),
                       app.debugDescription)
+        XCTAssertTrue(releaseImprovementsHeader.staticTexts[
+            "Version 0.1.0 · Build UNCONFIRMED"
+        ].exists, "Settings keeps the current release's build label.")
+        let updateTitle = app.staticTexts["See what’s new after an update"]
+        XCTAssertTrue(updateTitle.waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertTrue(updateTitle.isHittable,
+                      app.debugDescription)
+        attachScreenshot("release-notes-settings-unconfirmed-history", from: app)
     }
 
     func testPost79UpdateLabelsUnknownBuildNumbersWithoutGuessing() {
@@ -61,7 +66,7 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["See when Chat needs attention"].exists,
                       app.debugDescription)
         let exampleMessagesNote = app.staticTexts["Example messages are gone from the app"]
-        revealHistoryElement(exampleMessagesNote, in: app)
+        revealUpdateSheetElement(exampleMessagesNote, in: app)
         XCTAssertTrue(exampleMessagesNote.exists,
                       app.debugDescription)
         XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
@@ -82,6 +87,7 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(historicalSection.staticTexts[
             "Version 0.1.0 · Build UNCONFIRMED"
         ].exists, "Settings keeps unknown historical build numbers explicit.")
+        attachScreenshot("release-notes-settings-post79-history", from: app)
         let earlierHighlight = app.staticTexts["More details for each message"]
         revealHistoryElement(earlierHighlight, in: app)
         XCTAssertTrue(earlierHighlight.exists,
@@ -179,6 +185,26 @@ final class ReleaseNotesUITests: XCTestCase {
     private func revealHistoryElement(_ element: XCUIElement, in app: XCUIApplication) {
         let list = app.collectionViews["release-notes-history"]
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        reveal(element, in: list)
+    }
+
+    private func revealUpdateSheetElement(_ element: XCUIElement, in app: XCUIApplication) {
+        let list = app.collectionViews["release-notes-update-sheet"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        reveal(element, in: list)
+    }
+
+    private func scrollHistoryToNewest(in app: XCUIApplication) {
+        let list = app.collectionViews["release-notes-history"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<10 {
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+            let end = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+    }
+
+    private func reveal(_ element: XCUIElement, in list: XCUIElement) {
         for _ in 0..<24 where !element.isHittable {
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
             let end = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.50))

@@ -860,6 +860,7 @@ struct ReleaseNotesSheet: View {
                     ReleaseNoteSection(note: note)
                 }
             }
+            .accessibilityIdentifier("release-notes-update-sheet")
             .navigationTitle("What’s New")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
