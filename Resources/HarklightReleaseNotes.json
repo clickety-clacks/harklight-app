@@ -98,6 +98,19 @@
           "detail": "Inbox continues receiving new messages while its current view refreshes."
         }
       ]
+    },
+    {
+      "id": "post-148-notification-loading",
+      "marketingVersion": "0.1.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "notification-tap-loading",
+          "symbol": "bell",
+          "title": "See when a notification is opening",
+          "detail": "When a notification’s message or chat is still loading, Harklight shows progress in Inbox."
+        }
+      ]
     }
   ]
 }
