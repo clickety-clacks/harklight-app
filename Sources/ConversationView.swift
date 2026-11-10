@@ -49,7 +49,6 @@ struct ConversationPanel: View {
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     var testConversationSheetDidAppear: (() -> Void)? = nil
     var discussionUnavailableReason: LocalizedStringResource? = nil
-    @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
     @State private var inspectedFileRevision: UInt64?
     @State private var previewURL: URL?
@@ -60,7 +59,7 @@ struct ConversationPanel: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private var thread: ConversationThread? { store.conversation(for: key) }
-    private var revision: UInt64 { selectedRevision ?? thread?.currentRevision ?? 1 }
+    private var revision: UInt64 { thread?.currentRevision ?? 1 }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var conversationFilesForPreviewChecks: [ConversationFile] {
         (thread?.turns.flatMap(\.files) ?? []) + draft.files
@@ -76,44 +75,12 @@ struct ConversationPanel: View {
         self.previewURL = nil
     }
 
-    private func hasNotAcceptedCardForRetainedAnswer(thread: ConversationThread,
-                                                      request: PresentedRequest?) -> Bool {
-        guard thread.isRetracted,
-              let request,
-              request.lifecycleStatus != .superseded,
-              request.supersededByMessageKeys.isEmpty else { return false }
-        let attemptedAnswer = AnswerConfirmationText.formatted(
-            accountAnswerOutcome: nil,
-            submittedAnswer: request.submittedAnswer,
-            projection: request.projection)
-        return LiveRequestDetail.shouldShowNotAcceptedConfirmation(
-            isRetracted: true,
-            isSupersedesReadOnly: false,
-            ownOutcome: request.receiptFacts?.ownOutcome,
-            relayOutcome: request.intentReceipt?.relayOutcome,
-            attemptedAnswerText: attemptedAnswer,
-            ownAnswerWasRefusedByRetraction: request.ownAnswerWasRefusedByRetraction)
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             if let thread {
-                let request = store.request(for: key)
-                let hasNotAcceptedCard = hasNotAcceptedCardForRetainedAnswer(thread: thread,
-                                                                              request: request)
-                if thread.revisionNumbers.count > 1 {
-                    Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
-                        ForEach(thread.revisionNumbers, id: \.self) { value in
-                            let hasDraft = thread.drafts[value] != nil || thread.answerDrafts?[value] != nil
-                            let revisionLabel = value == 1 ? "Original" : "Version \(value)"
-                            Text(revisionLabel + (hasDraft ? " · draft" : "")).tag(value)
-                    }
-                    }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
-                }
                 ConversationHistoryContent(store: store, key: key, revision: revision,
-                    thread: thread, request: request, sender: sender,
+                    thread: thread, sender: sender,
                     local: store.isLocalExample,
-                    hasNotAcceptedCardForRetainedAnswer: hasNotAcceptedCard,
                     initialScrollTurnID: initialScrollTurnID,
                     dynamicTypeSize: dynamicTypeSize,
                     inspect: { file, fileRevision in
@@ -199,7 +166,6 @@ struct ConversationPanel: View {
             store.checkCachedConversationPreviews(conversationFilesForPreviewChecks)
         }
         .onAppear {
-            if selectedRevision == nil { selectedRevision = thread?.currentRevision }
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
             testConversationSheetDidAppear?()
         }
@@ -266,15 +232,12 @@ struct ConversationPanel: View {
 
 @MainActor
 private struct ConversationHistoryContent: View, Equatable {
-    @State private var earlierAnswerDraft: PresentedRequest?
     let store: LivePresentationStore
     let key: RequestKey
     let revision: UInt64
     let thread: ConversationThread
-    let request: PresentedRequest?
     let sender: String
     let local: Bool
-    let hasNotAcceptedCardForRetainedAnswer: Bool
     let initialScrollTurnID: ExactText?
     let dynamicTypeSize: DynamicTypeSize
     let inspect: (ConversationFile, UInt64) -> Void
@@ -289,14 +252,11 @@ private struct ConversationHistoryContent: View, Equatable {
         lhs.thread.revisions == rhs.thread.revisions &&
         lhs.thread.turns == rhs.thread.turns &&
         lhs.thread.facts == rhs.thread.facts &&
-        lhs.thread.answerDrafts == rhs.thread.answerDrafts &&
         lhs.thread.latestReportedAvailabilityObservation == rhs.thread.latestReportedAvailabilityObservation &&
         lhs.thread.terminalTurn == rhs.thread.terminalTurn &&
         lhs.thread.isRetracted == rhs.thread.isRetracted &&
-        lhs.request == rhs.request &&
         lhs.sender == rhs.sender &&
         lhs.local == rhs.local &&
-        lhs.hasNotAcceptedCardForRetainedAnswer == rhs.hasNotAcceptedCardForRetainedAnswer &&
         lhs.initialScrollTurnID == rhs.initialScrollTurnID &&
         lhs.dynamicTypeSize == rhs.dynamicTypeSize
         // `inspect` writes through the same ConversationPanel @State slots;
@@ -317,12 +277,6 @@ private struct ConversationHistoryContent: View, Equatable {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    if let earlier = earlierAnswerDraft,
-                       !hasNotAcceptedCardForRetainedAnswer {
-                        DisclosureGroup(thread.isRetracted ? "Saved answer draft · request retracted" : "Earlier answer draft") {
-                            HistoricalAnswerDraftView(request: earlier, store: store, retracted: thread.isRetracted)
-                        }.accessibilityIdentifier("conversation-earlier-answer")
-                    }
                     ForEach(thread.turns) { turn in
                         ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
                             sender: sender, local: local,
@@ -348,16 +302,8 @@ private struct ConversationHistoryContent: View, Equatable {
                 guard let target, turnIDs.contains(target) else { return }
                 proxy.scrollTo(target, anchor: .center)
             }
-            .task(id: ConversationHistoricalAnswerLoadKey(request: key, revision: revision)) {
-                earlierAnswerDraft = await store.historicalAnswerDraft(for: key, revision: revision)
-            }
         }
     }
-}
-
-private struct ConversationHistoricalAnswerLoadKey: Hashable {
-    let request: RequestKey
-    let revision: UInt64
 }
 
 @MainActor
@@ -470,7 +416,6 @@ private struct ConversationComposerTextInput: View {
 private struct ConversationComposerSendButton: View {
     let session: ConversationComposerTextSession
     let isLocalExample: Bool
-    let hasFailure: Bool
     let isSendingDiscussion: Bool
     let isOnline: Bool
     let allowsDiscussion: Bool
@@ -479,13 +424,13 @@ private struct ConversationComposerSendButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: hasFailure ? "exclamationmark.triangle" : "arrow.up")
+            Image(systemName: "arrow.up")
                 .font(.headline)
                 .frame(width: 30, height: 30)
                 .contentShape(Circle())
         }
         .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
-        .accessibilityLabel(isLocalExample ? "Send locally" : hasFailure ? "Review message delivery" : "Send message")
+        .accessibilityLabel(isLocalExample ? "Send locally" : "Send message")
         .accessibilityIdentifier("sample-chat-send")
         .disabled(isSendingDiscussion || !allowsDiscussion || !isOnline ||
                   (session.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasFiles))
@@ -561,22 +506,34 @@ private struct ConversationComposer: View {
                     .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("sample-chat-input-surface")
-                    ConversationComposerSendButton(session: textSession,
-                        isLocalExample: store.isLocalExample, hasFailure: draft.failure != nil,
-                        isSendingDiscussion: store.isSendingDiscussion,
-                        isOnline: isOnline,
-                        allowsDiscussion: allowsDiscussion,
-                        hasFiles: !draft.files.isEmpty,
-                        action: {
-                            if draft.failure != nil { sendWarningPresented = true }
-                            else { sendStagedText() }
-                        })
+                    HStack(spacing: 8) {
+                        if draft.failure != nil || !draft.carriedOverSends.isEmpty {
+                            Button { sendWarningPresented = true } label: {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.headline)
+                                    .frame(width: 30, height: 30)
+                                    .contentShape(Circle())
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.circle)
+                            .accessibilityLabel("Review message delivery")
+                            .accessibilityIdentifier("conversation-send-warning-open")
+                        }
+                        ConversationComposerSendButton(session: textSession,
+                            isLocalExample: store.isLocalExample,
+                            isSendingDiscussion: store.isSendingDiscussion,
+                            isOnline: isOnline,
+                            allowsDiscussion: allowsDiscussion,
+                            hasFiles: !draft.files.isEmpty,
+                            action: sendStagedText)
+                    }
                 }
             } else {
                 ReadOnlyConversationDraftView(draft: draft,
                     textOverride: textSession.stagedText,
                     statusLine: closedChatStatusLine,
-                    warningAction: draft.failure == nil ? nil : { sendWarningPresented = true }) { file in
+                    warningAction: draft.failure == nil && draft.carriedOverSends.isEmpty
+                        ? nil : { sendWarningPresented = true }) { file in
                         inspect(file, revision)
                     }
                     .padding(.vertical, 8)
@@ -642,21 +599,112 @@ private struct ConversationComposer: View {
             }
         }
         .sheet(isPresented: $sendWarningPresented) {
-            if let failure = draft.failure {
+            if !draft.carriedOverSends.isEmpty {
+                CarriedOverDiscussionDialog(entries: draft.carriedOverSends,
+                    canRetry: isOnline && allowsDiscussion && !store.isSendingDiscussion,
+                    allowsRetry: allowsDiscussion,
+                    onRetry: { entryID in
+                        Task { await store.retryCarriedOverDiscussion(for: key,
+                            revision: revision, entryID: entryID) }
+                    },
+                    onCopy: { UIPasteboard.general.string = $0 })
+            } else if let failure = draft.failure {
                 FailedResponseDialog(title: "Message delivery",
                     summary: LocalizedStringResource(stringLiteral: failure.summary),
                     detail: .plain(failure.detail),
                     accessibilityPrefix: "conversation-send-warning",
                     canRetry: isOnline && allowsDiscussion && !store.isSendingDiscussion,
-                    onRetry: { sendStagedText() },
+                    onRetry: allowsDiscussion ? { sendStagedText() } : nil,
                     onCopy: { UIPasteboard.general.string = $0 })
             }
         }
     }
 
+private struct CarriedOverDiscussionDialog: View {
+    let entries: [CarriedOverConversationSend]
+    let canRetry: Bool
+    let allowsRetry: Bool
+    let onRetry: (String) -> Void
+    let onCopy: (String) -> Void
+
+    private func status(for entry: CarriedOverConversationSend) -> String {
+        if entry.currentAttemptUnsettled {
+            return entry.earlierVersionMayHaveBeenSent
+                ? "This message or an earlier version may have been sent."
+                : "This message may not have gone through."
+        }
+        if entry.earlierVersionMayHaveBeenSent {
+            return "This message or an earlier version may have been sent."
+        }
+        return entry.failure.summary
+    }
+
+    private var copyText: String {
+        entries.map { entry in
+            let version = entry.requestRevision.map { "Version \($0)" } ?? "Version unavailable"
+            let files = entry.files.map { $0.name.rawValue }.joined(separator: ", ")
+            let attachmentLine = files.isEmpty ? "" : "\nAttachments: \(files)"
+            return "\(version) · \(status(for: entry))\n\(entry.failure.detail)\n" +
+                "\(entry.text.rawValue)\(attachmentLine)"
+        }.joined(separator: "\n\n")
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Message delivery").font(.headline)
+                    .accessibilityIdentifier("conversation-send-warning-title")
+                Spacer()
+                Button("Copy") { onCopy(copyText) }
+                    .accessibilityIdentifier("conversation-send-warning-copy")
+            }
+            .padding()
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(entries) { entry in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(entry.requestRevision.map { "Version \($0)" } ?? "Version unavailable")
+                                .font(.caption.weight(.semibold))
+                            Text(status(for: entry))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(entry.failure.detail)
+                                .font(.caption2)
+                                .textSelection(.enabled)
+                            Text(entry.text.rawValue)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if !entry.files.isEmpty {
+                                Text(entry.files.map { $0.name.rawValue }.joined(separator: ", "))
+                                    .font(.caption2).foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                            if allowsRetry {
+                                Button("Retry") { onRetry(entry.id) }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(!canRetry || entry.inFlightOperationID != nil)
+                                    .accessibilityIdentifier("conversation-carried-over-retry-\(entry.id)")
+                            }
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+                .padding()
+            }
+        }
+        .frame(minWidth: 320, minHeight: 280)
+        .accessibilityIdentifier("conversation-send-warning-dialog")
+    }
+}
+
     private func scheduleTextSave() {
         textSession.textSaveTask?.cancel()
-        if let binding = textSession.stagedBinding { store.noteConversationDraftEdit(binding) }
+        if let binding = textSession.stagedBinding {
+            store.noteConversationDraftEdit(binding, text: textSession.stagedText)
+        }
         let expected = textSession.stagedText
         let binding = textSession.stagedBinding
         textSession.textSaveTask = Task { @MainActor in
@@ -668,6 +716,9 @@ private struct ConversationComposer: View {
     }
 
     private var closedChatStatusLine: LocalizedStringResource {
+        if draft.currentAttemptUnsettled || draft.earlierVersionMayHaveBeenSent {
+            return "This request's chat is closed. Your message, or an earlier version of it, may have been sent."
+        }
         return switch draft.disposition {
         case .submitting, .outcomeUnknown:
             "This request's chat is closed. Your message may have been sent."

@@ -2039,12 +2039,30 @@ public actor AttentionDomainStore {
         if var conversation = next.conversation, let previous = routeAReplayPublishedConversation {
             for (request, oldThread) in previous.threads {
                 guard var current = conversation.threads[request] else { continue }
-                var drafts = current.drafts ?? [:]
-                for (revision, draft) in oldThread.drafts ?? [:]
-                where current.revisions[revision] != nil {
-                    drafts[revision] = draft
+                let retainedDraft = oldThread.drafts[oldThread.currentRevision] ??
+                    oldThread.drafts.sorted(by: { $0.key < $1.key }).last?.value
+                if let retainedDraft {
+                    let revision = current.currentRevision
+                    let binding = ConversationBinding(request: request, revision: revision)
+                    if var currentDraft = current.drafts[revision] {
+                        if currentDraft.text.rawValue.isEmpty && currentDraft.files.isEmpty &&
+                            currentDraft.operationID == nil {
+                            currentDraft = retainedDraft.rebound(to: binding)
+                        } else {
+                            currentDraft.carriedOverSends = Self.mergingCarriedOverSends(
+                                retainedDraft.carriedOverSends, with: currentDraft.carriedOverSends)
+                            currentDraft.earlierEntries = Self.mergingEarlierEntries(
+                                retainedDraft.earlierEntries, with: currentDraft.earlierEntries)
+                            if let oldAttempt = Self.carriedOverAttempt(from: retainedDraft),
+                               !currentDraft.carriedOverSends.contains(where: { $0.id == oldAttempt.id }) {
+                                currentDraft.carriedOverSends.append(oldAttempt)
+                            }
+                        }
+                        current.drafts[revision] = currentDraft
+                    } else {
+                        current.drafts[revision] = retainedDraft.rebound(to: binding)
+                    }
                 }
-                current.drafts = drafts
                 conversation.threads[request] = current
             }
             next.conversation = conversation
@@ -3047,22 +3065,35 @@ public actor AttentionDomainStore {
         var draft = try Self.externalizingConversationFiles(in: draft,
             using: conversationFileReferences,
             allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+        if draft.draftRequestRevision == nil { draft.draftRequestRevision = draft.binding.revision }
         try validate(draft.binding.request, in: context.identity)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
-              thread.revisions[draft.binding.revision] != nil else { throw ConversationError.missingRequest }
+              thread.revisions[draft.binding.revision] != nil,
+              thread.currentRevision == draft.binding.revision else { throw ConversationError.missingRequest }
         if let previous = thread.drafts[draft.binding.revision] {
             let contentChanged = previous.text != draft.text || previous.files != draft.files
             if contentChanged {
-                if previous.currentAttemptUnsettled || previous.inFlightOperationID != nil {
-                    draft.earlierVersionMayHaveBeenSent = true
-                    draft.currentAttemptUnsettled = false
+                if let carried = Self.carriedOverAttempt(from: previous) {
+                    if !draft.carriedOverSends.contains(where: { $0.id == carried.id }) {
+                        draft.carriedOverSends.append(carried)
+                    }
                 }
                 draft.operationID = nil
+                draft.operationRequestRevision = nil
+                draft.inFlightOperationID = nil
+                draft.currentAttemptUnsettled = false
+                draft.earlierVersionMayHaveBeenSent = false
+                draft.failure = nil
+                draft.draftRequestRevision = draft.binding.revision
             }
-            if previous.inFlightOperationID != nil {
+            if !contentChanged, previous.inFlightOperationID != nil {
                 draft.inFlightOperationID = previous.inFlightOperationID
             }
+            draft.carriedOverSends = Self.mergingCarriedOverSends(
+                previous.carriedOverSends, with: draft.carriedOverSends)
+            draft.earlierEntries = Self.mergingEarlierEntries(
+                previous.earlierEntries, with: draft.earlierEntries)
         }
         draft.disposition = .saved
         try validateConversationFiles(draft.files)
@@ -3083,16 +3114,24 @@ public actor AttentionDomainStore {
         guard var conversation = next.conversation,
               var thread = conversation.threads[binding.request],
               thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
+        guard thread.currentRevision == binding.revision else { throw ConversationError.invalidBinding }
         guard thread.allowsDiscussion else { throw ConversationError.closed }
         var draft = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
         guard draft.binding == binding else { throw ConversationError.invalidBinding }
         if draft.text != text {
-            if draft.currentAttemptUnsettled || draft.inFlightOperationID != nil {
-                draft.earlierVersionMayHaveBeenSent = true
-                draft.currentAttemptUnsettled = false
+            if let carried = Self.carriedOverAttempt(from: draft) {
+                if !draft.carriedOverSends.contains(where: { $0.id == carried.id }) {
+                    draft.carriedOverSends.append(carried)
+                }
             }
             draft.operationID = nil
+            draft.operationRequestRevision = nil
+            draft.inFlightOperationID = nil
+            draft.currentAttemptUnsettled = false
+            draft.earlierVersionMayHaveBeenSent = false
+            draft.failure = nil
             draft.text = text
+            draft.draftRequestRevision = binding.revision
         }
         draft.disposition = .saved
         thread.drafts[binding.revision] = draft
@@ -3245,13 +3284,206 @@ public actor AttentionDomainStore {
 
     /// Freeze a durable operation before transport. Local examples may edit drafts,
     /// but cannot enter this submission path or acquire a delivery operation.
+    public func prepareCarriedOverDiscussion(_ binding: ConversationBinding, entryID: String,
+        context suppliedContext: ProfileContext) throws -> UUID {
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              thread.currentRevision == binding.revision,
+              thread.allowsDiscussion,
+              var draft = thread.drafts[binding.revision],
+              let index = draft.carriedOverSends.firstIndex(where: { $0.id == entryID }) else {
+            throw ConversationError.invalidBinding
+        }
+        var send = draft.carriedOverSends[index]
+        guard send.inFlightOperationID == nil else { throw ConversationError.pendingSubmission }
+        let operation = send.operationID ?? UUID()
+        guard isUUIDv4(operation) else { throw ConversationError.pendingSubmission }
+        send.operationID = operation
+        send.inFlightOperationID = operation
+        send.failureOperationID = nil
+        draft.carriedOverSends[index] = send
+        draft.retryingCarriedOverSendID = entryID
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return operation
+    }
+
+    public func recordUploadedCarriedOverConversationFile(_ file: ConversationFile,
+        binding: ConversationBinding, entryID: String, operation: UUID,
+        context suppliedContext: ProfileContext) throws -> ConversationDraft {
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision],
+              let sendIndex = draft.carriedOverSends.firstIndex(where: { $0.id == entryID }) else {
+            throw ConversationError.conflict
+        }
+        var send = draft.carriedOverSends[sendIndex]
+        guard send.inFlightOperationID == operation,
+              let fileIndex = send.files.firstIndex(where: { $0.id == file.id }),
+              send.files[fileIndex].name == file.name,
+              send.files[fileIndex].byteCount == file.byteCount,
+              send.files[fileIndex].sha256 == file.sha256,
+              case .uploaded = file.content else { throw ConversationError.fileMismatch }
+        send.files[fileIndex] = file
+        try validateConversationFiles(send.files)
+        draft.carriedOverSends[sendIndex] = send
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return draft
+    }
+
+    public func markCarriedOverDiscussionTransmissionStarting(_ binding: ConversationBinding,
+        entryID: String, operation: UUID, context suppliedContext: ProfileContext) throws {
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision],
+              let index = draft.carriedOverSends.firstIndex(where: { $0.id == entryID }) else {
+            throw ConversationError.conflict
+        }
+        var send = draft.carriedOverSends[index]
+        guard send.inFlightOperationID == operation else { throw ConversationError.conflict }
+        send.currentAttemptUnsettled = true
+        draft.carriedOverSends[index] = send
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func markCarriedOverDiscussionOutcome(_ binding: ConversationBinding, entryID: String,
+        operation: UUID, rejection: ExactText?, preserveUnsettled: Bool = false,
+        context suppliedContext: ProfileContext) throws {
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision],
+              let index = draft.carriedOverSends.firstIndex(where: { $0.id == entryID }) else {
+            throw ConversationError.conflict
+        }
+        var send = draft.carriedOverSends[index]
+        guard send.inFlightOperationID == operation else { throw ConversationError.conflict }
+        send.inFlightOperationID = nil
+        send.failureOperationID = operation
+        draft.retryingCarriedOverSendID = nil
+        if let rejection {
+            if preserveUnsettled {
+                send.failure = ComposerSendFailure(outcome: send.currentAttemptUnsettled ? .unconfirmed : .notSent,
+                    summary: send.currentAttemptUnsettled
+                        ? "This attempt was not sent. The message may have been sent."
+                        : (send.earlierVersionMayHaveBeenSent
+                            ? "The message, or an earlier version, may have been sent."
+                            : "The message was not sent."),
+                    detail: rejection.rawValue)
+            } else {
+                send.currentAttemptUnsettled = false
+                send.failure = ComposerSendFailure(outcome: .notSent,
+                    summary: send.earlierVersionMayHaveBeenSent
+                        ? "The message, or an earlier version, may have been sent."
+                        : "The message was not sent.",
+                    detail: rejection.rawValue)
+            }
+        } else {
+            send.currentAttemptUnsettled = true
+            send.failure = ComposerSendFailure(outcome: .unconfirmed,
+                summary: send.earlierVersionMayHaveBeenSent
+                    ? "An earlier version of this message may have been sent."
+                    : "The send may not have gone through.",
+                detail: "No correlated confirmation arrived after the send frame was transmitted.")
+        }
+        draft.carriedOverSends[index] = send
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func markCarriedOverDiscussionConflict(_ binding: ConversationBinding, entryID: String,
+        operation: UUID, context suppliedContext: ProfileContext) throws {
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard var conversation = state.conversation,
+              var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision],
+              let index = draft.carriedOverSends.firstIndex(where: { $0.id == entryID }) else {
+            throw ConversationError.conflict
+        }
+        var send = draft.carriedOverSends[index]
+        guard send.inFlightOperationID == operation else { throw ConversationError.conflict }
+        send.failureOperationID = operation
+        send.inFlightOperationID = nil
+        send.operationID = UUID()
+        send.currentAttemptUnsettled = false
+        send.failure = ComposerSendFailure(outcome: .notSent,
+            summary: send.earlierVersionMayHaveBeenSent
+                ? "The message, or an earlier version, may have been sent."
+                : "The message was not sent.",
+            detail: "The server rejected this operation because its id was already used for different content.")
+        draft.carriedOverSends[index] = send
+        draft.retryingCarriedOverSendID = nil
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        var next = state
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    public func markCarriedOverDiscussionAccepted(_ binding: ConversationBinding, entryID: String,
+        operation: UUID, turn: ExactText, context suppliedContext: ProfileContext,
+        acceptanceObservedAtMilliseconds: UInt64? = nil) throws {
+        try validate(suppliedContext)
+        guard context.transportMode == .relay, !turn.rawValue.isEmpty else {
+            throw ConversationError.invalidBinding
+        }
+        var next = state
+        guard var conversation = next.conversation,
+              var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision],
+              let index = draft.carriedOverSends.firstIndex(where: { $0.id == entryID }),
+              draft.carriedOverSends[index].inFlightOperationID == operation else {
+            throw ConversationError.conflict
+        }
+        var facts = thread.facts[turn] ?? ConversationTurnFacts()
+        if facts.acceptedAtMilliseconds == nil {
+            facts.acceptedAtMilliseconds = acceptanceObservedAtMilliseconds ??
+                UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
+        }
+        thread.facts[turn] = facts
+        draft.carriedOverSends.remove(at: index)
+        draft.retryingCarriedOverSendID = nil
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
     public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws -> UUID {
         try validate(suppliedContext)
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
-              var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+              var draft = thread.drafts[binding.revision],
+              thread.currentRevision == binding.revision else { throw ConversationError.missingRequest }
         guard thread.allowsDiscussion else { throw ConversationError.closed }
+        if let entryID = draft.retryingCarriedOverSendID,
+           let carried = draft.carriedOverSends.first(where: { $0.id == entryID }),
+           let operation = carried.inFlightOperationID, operation == carried.operationID {
+            return operation
+        }
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
@@ -3261,6 +3493,9 @@ public actor AttentionDomainStore {
             throw ConversationError.pendingSubmission
         }
         draft.operationID = operation
+        if !draft.currentAttemptUnsettled || draft.operationRequestRevision == nil {
+            draft.operationRequestRevision = binding.revision
+        }
         draft.inFlightOperationID = operation
         draft.disposition = .submitting(operation)
         thread.drafts[binding.revision] = draft
@@ -3409,8 +3644,41 @@ public actor AttentionDomainStore {
         try validate(suppliedContext)
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
-        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
-              var draft = thread.drafts[binding.revision],
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request] else {
+            throw ConversationError.conflict
+        }
+        if var carryDraft = thread.drafts[binding.revision],
+           let index = carryDraft.carriedOverSends.firstIndex(where: {
+               $0.inFlightOperationID == operation
+           }) {
+            var carried = carryDraft.carriedOverSends[index]
+            carried.inFlightOperationID = nil
+            if let rejection {
+                carried.currentAttemptUnsettled = preserveUnsettled
+                carried.failure = ComposerSendFailure(
+                    outcome: preserveUnsettled ? .unconfirmed : .notSent,
+                    summary: preserveUnsettled
+                        ? "This attempt was not sent. The message may have been sent."
+                        : (carried.earlierVersionMayHaveBeenSent
+                            ? "The message, or an earlier version, may have been sent."
+                            : "The message was not sent."),
+                    detail: rejection.rawValue)
+            } else {
+                carried.currentAttemptUnsettled = true
+                carried.failure = ComposerSendFailure(outcome: .unconfirmed,
+                    summary: carried.earlierVersionMayHaveBeenSent
+                        ? "An earlier version of this message may have been sent."
+                        : "The send may not have gone through.",
+                    detail: "No correlated confirmation arrived after the send frame was transmitted.")
+            }
+            carryDraft.carriedOverSends[index] = carried
+            thread.drafts[binding.revision] = carryDraft
+            conversation.threads[binding.request] = thread
+            next.conversation = conversation
+            try commit(next)
+            return
+        }
+        guard var draft = thread.drafts[binding.revision],
               draft.inFlightOperationID == operation else { throw ConversationError.conflict }
         draft.inFlightOperationID = nil
         if let rejection {
@@ -3453,8 +3721,29 @@ public actor AttentionDomainStore {
                                       context suppliedContext: ProfileContext) throws {
         try validate(suppliedContext)
         guard var conversation = state.conversation,
-              var thread = conversation.threads[binding.request],
-              var draft = thread.drafts[binding.revision],
+              var thread = conversation.threads[binding.request] else { throw ConversationError.conflict }
+        if var carryDraft = thread.drafts[binding.revision],
+           let index = carryDraft.carriedOverSends.firstIndex(where: {
+               $0.inFlightOperationID == operation
+           }) {
+            var carried = carryDraft.carriedOverSends[index]
+            carried.inFlightOperationID = nil
+            carried.operationID = UUID()
+            carried.currentAttemptUnsettled = false
+            carried.failure = ComposerSendFailure(outcome: .notSent,
+                summary: carried.earlierVersionMayHaveBeenSent
+                    ? "The message, or an earlier version, may have been sent."
+                    : "The message was not sent.",
+                detail: "The server rejected this operation because its id was already used for different content.")
+            carryDraft.carriedOverSends[index] = carried
+            thread.drafts[binding.revision] = carryDraft
+            conversation.threads[binding.request] = thread
+            var next = state
+            next.conversation = conversation
+            try commit(next)
+            return
+        }
+        guard var draft = thread.drafts[binding.revision],
               draft.inFlightOperationID == operation else { throw ConversationError.conflict }
         draft.inFlightOperationID = nil
         draft.operationID = UUID()
@@ -3478,8 +3767,27 @@ public actor AttentionDomainStore {
         try validate(suppliedContext)
         guard context.transportMode == .relay, !turn.rawValue.isEmpty else { throw ConversationError.invalidBinding }
         var next = state
-        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
-              var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request] else {
+            throw ConversationError.missingRequest
+        }
+        if var carryDraft = thread.drafts[binding.revision],
+           let index = carryDraft.carriedOverSends.firstIndex(where: {
+               $0.inFlightOperationID == operation
+           }) {
+            var facts = thread.facts[turn] ?? ConversationTurnFacts()
+            if facts.acceptedAtMilliseconds == nil {
+                facts.acceptedAtMilliseconds = acceptanceObservedAtMilliseconds ??
+                    UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
+            }
+            thread.facts[turn] = facts
+            carryDraft.carriedOverSends.remove(at: index)
+            thread.drafts[binding.revision] = carryDraft
+            conversation.threads[binding.request] = thread
+            next.conversation = conversation
+            try commit(next)
+            return
+        }
+        guard var draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
         guard draft.inFlightOperationID == operation || draft.operationID == operation else {
             throw ConversationError.conflict
         }
@@ -3506,6 +3814,49 @@ public actor AttentionDomainStore {
         conversation.threads[binding.request] = thread
         next.conversation = conversation
         try commit(next)
+    }
+
+    private static func carriedOverAttempt(from draft: ConversationDraft) -> CarriedOverConversationSend? {
+        guard !draft.text.rawValue.isEmpty || !draft.files.isEmpty else { return nil }
+        let operation = draft.operationID ?? draft.inFlightOperationID
+        let hasRecoverableOutcome = draft.currentAttemptUnsettled || draft.earlierVersionMayHaveBeenSent ||
+            draft.inFlightOperationID != nil || draft.failure != nil || operation != nil
+        guard hasRecoverableOutcome else { return nil }
+        let unsettled: Bool
+        switch draft.disposition {
+        case .submitting, .outcomeUnknown: unsettled = true
+        case .saved, .acceptedPendingReplay, .rejected:
+            unsettled = draft.currentAttemptUnsettled || draft.failure?.outcome == .unconfirmed
+        }
+        let failure = draft.failure ?? ComposerSendFailure(
+            outcome: unsettled ? .unconfirmed : .notSent,
+            summary: unsettled ? "This message may not have gone through." : "The message was not sent.",
+            detail: "This send was retained separately when the composer draft changed.")
+        let id = operation.map { "attempt:\($0.uuidString.lowercased())" } ??
+            "attempt:\(draft.binding.revision):\(draft.text.rawValue.utf8.count):\(draft.files.map(\.id.rawValue).joined(separator: ","))"
+        return CarriedOverConversationSend(id: id,
+            requestRevision: draft.operationRequestRevision ?? draft.binding.revision,
+            text: draft.text, files: draft.files, operationID: operation,
+            inFlightOperationID: draft.inFlightOperationID,
+            currentAttemptUnsettled: unsettled,
+            earlierVersionMayHaveBeenSent: draft.earlierVersionMayHaveBeenSent,
+            failure: failure)
+    }
+
+    private static func mergingCarriedOverSends(_ earlier: [CarriedOverConversationSend],
+                                                with current: [CarriedOverConversationSend]) -> [CarriedOverConversationSend] {
+        var merged: [String: CarriedOverConversationSend] = [:]
+        for send in earlier + current { merged[send.id] = send }
+        return merged.values.sorted {
+            ($0.requestRevision ?? 0, $0.id) < ($1.requestRevision ?? 0, $1.id)
+        }
+    }
+
+    private static func mergingEarlierEntries(_ earlier: [EarlierComposerEntry],
+                                              with current: [EarlierComposerEntry]) -> [EarlierComposerEntry] {
+        var merged: [String: EarlierComposerEntry] = [:]
+        for entry in earlier + current { merged[entry.id] = entry }
+        return merged.values.sorted { ($0.requestRevision, $0.id) < ($1.requestRevision, $1.id) }
     }
 
     private func validateConversationFiles(_ files: [ConversationFile]) throws {

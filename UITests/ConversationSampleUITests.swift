@@ -1051,22 +1051,9 @@ final class ConversationSampleUITests: XCTestCase {
         capture("sender-updated-current-request", app)
         app.buttons["Chat"].tap()
         XCTAssertTrue(app.staticTexts["Updated"].waitForExistence(timeout: 5))
-        app.buttons["conversation-revision-picker"].tap()
-        app.buttons["Original · draft"].tap()
-        app.buttons["conversation-earlier-answer"].tap()
-        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
-        let earlierTitle = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "Archive the old")
-        ).firstMatch
-        let earlierBody = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "earlier sketches")
-        ).firstMatch
-        XCTAssertTrue(earlierTitle.waitForExistence(timeout: 5), earlierTitle.debugDescription)
-        XCTAssertFalse(earlierTitle.label.contains("*"), earlierTitle.debugDescription)
-        XCTAssertTrue(earlierBody.waitForExistence(timeout: 5), earlierBody.debugDescription)
-        XCTAssertTrue(earlierBody.label.contains("new collection"), earlierBody.debugDescription)
-        XCTAssertFalse(earlierBody.label.contains("*"), earlierBody.debugDescription)
-        capture("sender-updated-earlier-question-and-draft", app)
+        XCTAssertFalse(app.buttons["conversation-revision-picker"].exists,
+                       "Chat keeps the item's conversation history without a version selector.")
+        capture("sender-updated-chat-has-no-version-selector", app)
     }
 
     func testMixedCleanupRetainsUnidentifiedFilesWithoutInventedCommittedHistory() {
@@ -1278,13 +1265,38 @@ final class ConversationSampleUITests: XCTestCase {
         open("sample-approval-2", search: "Archive")
         XCTAssertTrue(app.staticTexts["Please review the sketches before archiving. The earlier answer draft is retained."].exists)
         capture("conversation-current-revision", app)
-        let picker = app.buttons["conversation-revision-picker"]
-        XCTAssertTrue(picker.exists, app.debugDescription)
-        picker.tap()
-        app.buttons["Original · draft"].tap()
-        app.buttons["conversation-earlier-answer"].tap()
-        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
-        capture("conversation-archived-answer", app)
+        let chatComposer = app.textViews["sample-chat-composer"]
+        XCTAssertFalse(app.buttons["conversation-revision-picker"].exists,
+                       "Conversation history does not expose a version picker.")
+        let draft = "Keep this chat draft while I read the earlier version."
+        chatComposer.tap()
+        chatComposer.typeText(draft)
+        XCTAssertEqual(chatComposer.value as? String, draft)
+        dismissChatSheet(app)
+
+        let detailVersionIndicator = app.buttons["request-update-fact"]
+        XCTAssertTrue(detailVersionIndicator.waitForExistence(timeout: 5), app.debugDescription)
+        detailVersionIndicator.tap()
+        let versionHistory = app.scrollViews["request-version-history"]
+        XCTAssertTrue(versionHistory.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["request-version-card-1"].exists,
+                      app.debugDescription)
+        let copyEarlierVersion = app.buttons["request-version-copy-1"]
+        XCTAssertTrue(copyEarlierVersion.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["conversation-earlier-answer"].exists,
+                       "The version view has no answer control.")
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format:
+            "identifier BEGINSWITH %@", "conversation-carried-over-retry-")).firstMatch.exists,
+                       "The version view has no Retry control.")
+        XCTAssertFalse(app.buttons["sample-chat-send"].exists,
+                       "The version view has no chat Send control.")
+        copyEarlierVersion.tap()
+        app.buttons["request-version-history-done"].tap()
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(chatComposer.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(chatComposer.value as? String, draft,
+                       "Opening and closing read-only version history preserves the chat draft.")
+        capture("conversation-read-copy-version-preserves-draft", app)
         open("sample-information-2", search: "Thursday")
         XCTAssertTrue(app.staticTexts["Example · Exact bytes transferred"].exists)
         XCTAssertTrue(app.staticTexts["Example · Agent reported unusable: Fictional unsupported format"].exists)

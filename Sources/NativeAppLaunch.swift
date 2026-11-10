@@ -35,36 +35,141 @@ private struct ComposerDraftStorageKey: Codable, Sendable {
 
 struct AnswerComposerDraft: Codable, Equatable, Sendable {
     var content: RequestDraft
+    var contentRequestRevision: UInt64?
     var operationID: UUID?
+    var operationRequestRevision: UInt64?
     var failureOperationID: UUID?
     var currentAttemptUnsettled: Bool
     var earlierVersionMayHaveBeenSent: Bool
     var failure: ComposerSendFailure?
-    var carriedOverSend: CarriedOverAnswerSend?
+    var selectedChoices: [AnswerChoiceSnapshot]
+    var carriedOverSends: [CarriedOverAnswerSend]
+    var earlierEntries: [EarlierComposerEntry]
 
-    init(content: RequestDraft, operationID: UUID? = nil,
+    var carriedOverSend: CarriedOverAnswerSend? {
+        get { carriedOverSends.first }
+        set { carriedOverSends = newValue.map { [$0] } ?? [] }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case content, contentRequestRevision, operationID, failureOperationID, currentAttemptUnsettled
+        case operationRequestRevision
+        case earlierVersionMayHaveBeenSent, failure, selectedChoices
+        case carriedOverSend, carriedOverSends, earlierEntries
+    }
+
+    init(content: RequestDraft, contentRequestRevision: UInt64? = nil,
+         operationID: UUID? = nil,
+         operationRequestRevision: UInt64? = nil,
          failureOperationID: UUID? = nil,
          currentAttemptUnsettled: Bool = false,
          earlierVersionMayHaveBeenSent: Bool = false,
          failure: ComposerSendFailure? = nil,
-         carriedOverSend: CarriedOverAnswerSend? = nil) {
+         carriedOverSend: CarriedOverAnswerSend? = nil,
+         carriedOverSends: [CarriedOverAnswerSend]? = nil,
+         selectedChoices: [AnswerChoiceSnapshot] = [],
+         earlierEntries: [EarlierComposerEntry] = []) {
         self.content = content
+        self.contentRequestRevision = contentRequestRevision
         self.operationID = operationID
+        self.operationRequestRevision = operationRequestRevision
         self.failureOperationID = failureOperationID
         self.currentAttemptUnsettled = currentAttemptUnsettled
         self.earlierVersionMayHaveBeenSent = earlierVersionMayHaveBeenSent
         self.failure = failure
-        self.carriedOverSend = carriedOverSend
+        self.carriedOverSends = carriedOverSends ?? carriedOverSend.map { [$0] } ?? []
+        self.selectedChoices = selectedChoices
+        self.earlierEntries = earlierEntries
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        content = try values.decode(RequestDraft.self, forKey: .content)
+        contentRequestRevision = try values.decodeIfPresent(UInt64.self, forKey: .contentRequestRevision)
+        operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
+        operationRequestRevision = try values.decodeIfPresent(UInt64.self, forKey: .operationRequestRevision)
+        failureOperationID = try values.decodeIfPresent(UUID.self, forKey: .failureOperationID)
+        currentAttemptUnsettled = try values.decodeIfPresent(Bool.self, forKey: .currentAttemptUnsettled) ?? false
+        earlierVersionMayHaveBeenSent = try values.decodeIfPresent(Bool.self,
+            forKey: .earlierVersionMayHaveBeenSent) ?? false
+        failure = try values.decodeIfPresent(ComposerSendFailure.self, forKey: .failure)
+        selectedChoices = try values.decodeIfPresent([AnswerChoiceSnapshot].self, forKey: .selectedChoices) ?? []
+        carriedOverSends = try values.decodeIfPresent([CarriedOverAnswerSend].self, forKey: .carriedOverSends)
+            ?? values.decodeIfPresent(CarriedOverAnswerSend.self, forKey: .carriedOverSend).map { [$0] }
+            ?? []
+        earlierEntries = try values.decodeIfPresent([EarlierComposerEntry].self, forKey: .earlierEntries) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(content, forKey: .content)
+        try values.encodeIfPresent(contentRequestRevision, forKey: .contentRequestRevision)
+        try values.encodeIfPresent(operationID, forKey: .operationID)
+        try values.encodeIfPresent(operationRequestRevision, forKey: .operationRequestRevision)
+        try values.encodeIfPresent(failureOperationID, forKey: .failureOperationID)
+        try values.encode(currentAttemptUnsettled, forKey: .currentAttemptUnsettled)
+        try values.encode(earlierVersionMayHaveBeenSent, forKey: .earlierVersionMayHaveBeenSent)
+        try values.encodeIfPresent(failure, forKey: .failure)
+        try values.encode(selectedChoices, forKey: .selectedChoices)
+        try values.encode(carriedOverSends, forKey: .carriedOverSends)
+        if carriedOverSends.count == 1 {
+            try values.encode(carriedOverSends[0], forKey: .carriedOverSend)
+        }
+        try values.encode(earlierEntries, forKey: .earlierEntries)
     }
 }
 
 struct CarriedOverAnswerSend: Codable, Equatable, Sendable {
+    var id: String
+    var requestRevision: UInt64?
     var content: RequestDraft
+    var answerChoices: [AnswerChoiceSnapshot]
     var operationID: UUID?
     var failureOperationID: UUID?
     var currentAttemptUnsettled: Bool
     var earlierVersionMayHaveBeenSent: Bool
     var failure: ComposerSendFailure
+
+    private enum CodingKeys: String, CodingKey {
+        case id, requestRevision, content, answerChoices, operationID, failureOperationID
+        case currentAttemptUnsettled, earlierVersionMayHaveBeenSent, failure
+    }
+
+    init(id: String? = nil, requestRevision: UInt64? = nil, content: RequestDraft,
+         answerChoices: [AnswerChoiceSnapshot] = [],
+         operationID: UUID?, failureOperationID: UUID? = nil,
+         currentAttemptUnsettled: Bool, earlierVersionMayHaveBeenSent: Bool = false,
+         failure: ComposerSendFailure) {
+        self.id = id ?? Self.defaultID(operationID: operationID, revision: requestRevision)
+        self.requestRevision = requestRevision
+        self.content = content
+        self.answerChoices = answerChoices
+        self.operationID = operationID
+        self.failureOperationID = failureOperationID
+        self.currentAttemptUnsettled = currentAttemptUnsettled
+        self.earlierVersionMayHaveBeenSent = earlierVersionMayHaveBeenSent
+        self.failure = failure
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        requestRevision = try values.decodeIfPresent(UInt64.self, forKey: .requestRevision)
+        content = try values.decode(RequestDraft.self, forKey: .content)
+        answerChoices = try values.decodeIfPresent([AnswerChoiceSnapshot].self, forKey: .answerChoices) ?? []
+        operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
+        failureOperationID = try values.decodeIfPresent(UUID.self, forKey: .failureOperationID)
+        currentAttemptUnsettled = try values.decodeIfPresent(Bool.self, forKey: .currentAttemptUnsettled) ?? false
+        earlierVersionMayHaveBeenSent = try values.decodeIfPresent(Bool.self,
+            forKey: .earlierVersionMayHaveBeenSent) ?? false
+        failure = try values.decode(ComposerSendFailure.self, forKey: .failure)
+        id = try values.decodeIfPresent(String.self, forKey: .id)
+            ?? Self.defaultID(operationID: operationID, revision: requestRevision)
+    }
+
+    private static func defaultID(operationID: UUID?, revision: UInt64?) -> String {
+        "legacy:\(revision.map(String.init) ?? "unknown"):" +
+            (operationID?.uuidString.lowercased() ?? UUID().uuidString.lowercased())
+    }
 }
 
 struct PreparedAnswerAttempt: Equatable, Sendable {
@@ -89,6 +194,7 @@ actor ComposerDraftPersistence {
     static let shared = ComposerDraftPersistence()
 
     private let rootDirectory: URL?
+    private let legacyAttentionDirectoryURL: URL?
     private var latestGenerationByName: [String: UInt64] = [:]
     private var latestDataByName: [String: Data] = [:]
     private var addressesByName: [String: ComposerDraftAddress]?
@@ -96,18 +202,26 @@ actor ComposerDraftPersistence {
     private var legacyMigrationFailure: String?
     private let fileManager = FileManager.default
 
+    private enum MigrationError: LocalizedError {
+        case failed(String)
+        var errorDescription: String? {
+            if case let .failed(message) = self { return "Legacy composer migration failed: " + message }
+        }
+    }
+
     private struct AddressIndex: Codable {
         var version = 1
         var addresses: [String: ComposerDraftAddress]
     }
 
-    init(rootDirectory: URL? = nil) {
+    init(rootDirectory: URL? = nil, legacyAttentionDirectoryURL: URL? = nil) {
         self.rootDirectory = rootDirectory
+        self.legacyAttentionDirectoryURL = legacyAttentionDirectoryURL
     }
 
     func load<Value: Decodable & Sendable>(_ type: Value.Type,
                                            at address: ComposerDraftAddress) async throws -> Value? {
-        await legacyMigrationTask?.value
+        try await waitForLegacyAttentionMigration()
         return try loadRaw(type, at: address)
     }
 
@@ -147,7 +261,7 @@ actor ComposerDraftPersistence {
 
     func scheduleSave<Value: Encodable & Sendable>(_ value: Value,
                                                    at address: ComposerDraftAddress) async throws {
-        await legacyMigrationTask?.value
+        try await waitForLegacyAttentionMigration()
         let name = address.stableName
         let data = try JSONEncoder().encode(value)
         var addresses = try loadAddressIndex()
@@ -161,9 +275,12 @@ actor ComposerDraftPersistence {
 
     func flush<Value: Encodable & Sendable>(_ value: Value,
                                             at address: ComposerDraftAddress) async throws {
-        await legacyMigrationTask?.value
+        try await waitForLegacyAttentionMigration()
         let name = address.stableName
         let data = try JSONEncoder().encode(value)
+        var addresses = try loadAddressIndex()
+        addresses[name] = address
+        addressesByName = addresses
         let generation = latestGenerationByName[name, default: 0] &+ 1
         latestGenerationByName[name] = generation
         latestDataByName[name] = data
@@ -173,7 +290,7 @@ actor ComposerDraftPersistence {
     func remove(at address: ComposerDraftAddress) async throws {
         // This is actor-owned file work and may suspend until the one-time
         // legacy import has either completed or failed without deleting source.
-        if let legacyMigrationTask { await legacyMigrationTask.value }
+        try await waitForLegacyAttentionMigration()
         let name = address.stableName
         latestGenerationByName[name, default: 0] &+= 1
         let file = try fileURL(named: name, createDirectory: false)
@@ -184,12 +301,12 @@ actor ComposerDraftPersistence {
     }
 
     func addresses(for identity: ProfileIdentity) async throws -> [ComposerDraftAddress] {
-        await legacyMigrationTask?.value
+        try await waitForLegacyAttentionMigration()
         return try loadAddressIndex().values.filter { $0.identity == identity }
     }
 
     func pruneDrafts(for identity: ProfileIdentity, keeping requestKeys: Set<RequestKey>) async throws {
-        await legacyMigrationTask?.value
+        try await waitForLegacyAttentionMigration()
         let stale = try loadAddressIndex().filter { _, address in
             address.identity == identity && !requestKeys.contains(address.request)
         }
@@ -226,9 +343,16 @@ actor ComposerDraftPersistence {
         return legacyMigrationFailure
     }
 
+    private func waitForLegacyAttentionMigration() async throws {
+        await legacyMigrationTask?.value
+        if let legacyMigrationFailure { throw MigrationError.failed(legacyMigrationFailure) }
+    }
+
     private func performLegacyAttentionMigration(context: ProfileContext,
                                                  conversationFiles: ConversationFileStorage) async throws {
-        let legacyPersistence = try FileAttentionStatePersistence.applicationSupport()
+        let legacyPersistence = try legacyAttentionDirectoryURL.map {
+            FileAttentionStatePersistence(directoryURL: $0)
+        } ?? FileAttentionStatePersistence.applicationSupport()
         guard try legacyPersistence.load(identity: context.identity) != nil else {
             try removeUnreferencedLegacyInlineContent(for: context.identity, conversationFiles: conversationFiles)
             return
@@ -238,69 +362,259 @@ actor ComposerDraftPersistence {
         let legacy = try await legacyStore.snapshot(context: context)
         let conversation = try await legacyStore.currentConversationSnapshot(context: context)
 
-        var answerByKey: [RequestKey: AnswerComposerDraft] = [:]
-        for key in legacy.requests.keys {
-            let revision = conversation.threads[key]?.currentRevision ?? 1
-            let typed = legacy.drafts[key] ?? conversation.threads[key]?.answerDrafts?[revision]
-            if let typed, typed.hasEdits {
-                answerByKey[key] = AnswerComposerDraft(content: typed)
-            }
-        }
+        let requestKeys = Set(legacy.requests.keys)
+            .union(conversation.threads.keys)
+            .union(legacy.drafts.keys)
+            .union(legacy.intents.values.map(\.requestKey))
 
-        let unresolvedResponses = legacy.intents.values.filter(Self.isLegacyUnresolvedResponse)
-            .sorted { lhs, rhs in
-                (lhs.requestRevision ?? 0, lhs.operationID.uuidString) <
-                    (rhs.requestRevision ?? 0, rhs.operationID.uuidString)
-            }
-        for submission in unresolvedResponses {
-            guard legacy.requests[submission.requestKey] != nil else { continue }
-            let responseContent = Self.answerDraft(for: submission)
-            let isUnsettled = Self.legacyResponseIsUnsettled(submission)
-            let failure = ComposerSendFailure(
-                outcome: isUnsettled ? .unconfirmed : .notSent,
-                summary: isUnsettled
-                    ? "This response may not have gone through."
-                    : "The response was not sent.",
-                detail: isUnsettled
-                    ? "The earlier build kept this response without a server confirmation."
-                    : "The earlier build recorded that the server refused this response.")
-            let existing = answerByKey[submission.requestKey]
-            if let existing, existing.content != responseContent {
-                var composerDraft = existing
-                composerDraft.carriedOverSend = CarriedOverAnswerSend(
-                    content: responseContent, operationID: submission.operationID,
-                    failureOperationID: submission.operationID,
-                    currentAttemptUnsettled: isUnsettled,
-                    earlierVersionMayHaveBeenSent: false, failure: failure)
-                answerByKey[submission.requestKey] = composerDraft
-            } else {
-                answerByKey[submission.requestKey] = AnswerComposerDraft(
-                    content: existing?.content ?? responseContent,
-                    operationID: submission.operationID,
-                    currentAttemptUnsettled: isUnsettled,
-                    failure: failure)
-            }
-        }
+        for key in requestKeys {
+            let thread = conversation.threads[key]
+            let currentRevision = thread?.currentRevision ?? 1
+            let answerAddress = ComposerDraftAddress(identity: context.identity,
+                request: key, revision: currentRevision, kind: .answer)
+            let conversationAddress = ComposerDraftAddress(identity: context.identity,
+                request: key, revision: currentRevision, kind: .conversation)
 
-        for (key, thread) in conversation.threads {
-            guard let revision = thread.drafts.keys.max(),
-                  let oldDraft = thread.drafts[revision] else { continue }
-            let migrated = Self.migrateConversationDraft(oldDraft)
-            guard migrated.text.rawValue.isEmpty == false || !migrated.files.isEmpty ||
-                  migrated.carriedOverSend != nil || migrated.failure != nil else { continue }
-            let address = ComposerDraftAddress(identity: context.identity,
-                request: key, revision: revision, kind: .conversation)
-            if try loadRaw(ConversationDraft.self, at: address) == nil {
-                try flushRaw(migrated, at: address)
+            var answerCandidates: [(revision: UInt64, draft: RequestDraft, isCurrent: Bool)] = []
+            if let current = legacy.drafts[key] {
+                answerCandidates.append((currentRevision, current, true))
             }
-        }
+            for (revision, draft) in thread?.answerDrafts ?? [:] {
+                answerCandidates.append((revision, draft, false))
+            }
+            answerCandidates = Self.uniqueAnswerDrafts(answerCandidates)
 
-        for (key, draft) in answerByKey {
-            let revision = conversation.threads[key]?.currentRevision ?? 1
-            let address = ComposerDraftAddress(identity: context.identity,
-                request: key, revision: revision, kind: .answer)
-            if try loadRaw(AnswerComposerDraft.self, at: address) == nil {
-                try flushRaw(draft, at: address)
+            let existingAnswer = try loadRaw(AnswerComposerDraft.self, at: answerAddress)
+            let primaryAnswerCandidate = answerCandidates.filter { $0.draft.hasEdits }
+                .sorted { lhs, rhs in
+                    if lhs.revision != rhs.revision { return lhs.revision < rhs.revision }
+                    return !lhs.isCurrent && rhs.isCurrent
+                }.last
+            let unresolvedResponses = legacy.intents.values
+                .filter { $0.requestKey == key && Self.isLegacyUnresolvedResponse($0) &&
+                    Self.answerDraft(for: $0).hasEdits }
+                .sorted(by: Self.legacySubmissionOrder)
+            let activeOperation = legacy.outbox.first(where: { $0.requestKey == key })?.intentID
+            let activeResponse = activeOperation.flatMap { operation in
+                unresolvedResponses.first { $0.intentID == operation }
+            }
+            let refusedAtCurrent = unresolvedResponses
+                .filter { !Self.legacyResponseIsUnsettled($0) &&
+                    ($0.requestRevision ?? currentRevision) == currentRevision }
+                .sorted { $0.operationID.uuidString < $1.operationID.uuidString }
+                .first
+            let retryableResponse = activeResponse ?? refusedAtCurrent
+            let existingAnswerAttempt = existingAnswer.flatMap { saved -> AnswerComposerDraft? in
+                guard saved.operationID != nil,
+                      saved.currentAttemptUnsettled || saved.failure != nil || saved.failureOperationID != nil,
+                      saved.content.hasEdits else { return nil }
+                return saved
+            }
+
+            // A saved operation is a separate recoverable send. The composer
+            // continues to hold the newest typed draft, or an empty draft when
+            // there is no newer text to show.
+            var answer = existingAnswerAttempt == nil ? existingAnswer : nil
+            if answer == nil, let primaryAnswerCandidate {
+                answer = AnswerComposerDraft(content: primaryAnswerCandidate.draft,
+                    contentRequestRevision: primaryAnswerCandidate.revision)
+            }
+
+            if answer != nil || !answerCandidates.isEmpty || !unresolvedResponses.isEmpty ||
+                existingAnswerAttempt != nil {
+                if answer == nil {
+                    answer = AnswerComposerDraft(content: RequestDraft(inputs: [:]),
+                        contentRequestRevision: currentRevision)
+                }
+                var migrated = answer!
+                if migrated.contentRequestRevision == nil {
+                    migrated.contentRequestRevision = migrated.selectedChoices.first?.requestRevision ??
+                        migrated.operationRequestRevision ?? currentRevision
+                }
+                if migrated.selectedChoices.isEmpty,
+                   let selectedSource = answerCandidates.first(where: {
+                       $0.revision == migrated.contentRequestRevision && $0.draft == migrated.content
+                   }) {
+                    migrated.selectedChoices = Self.choiceSnapshots(for: migrated.content,
+                        revision: selectedSource.revision, payload: thread?.revisions[selectedSource.revision])
+                }
+
+                var earlier = migrated.earlierEntries
+                if let existingAnswerAttempt {
+                    let content = existingAnswerAttempt.content
+                    let revision = existingAnswerAttempt.operationRequestRevision ??
+                        existingAnswerAttempt.contentRequestRevision ?? currentRevision
+                    let choices = existingAnswerAttempt.selectedChoices.isEmpty
+                        ? Self.choiceSnapshots(for: content, revision: revision,
+                            payload: thread?.revisions[revision])
+                        : existingAnswerAttempt.selectedChoices
+                    let unsettled = existingAnswerAttempt.currentAttemptUnsettled
+                    let failure = existingAnswerAttempt.failure ?? ComposerSendFailure(
+                        outcome: unsettled ? .unconfirmed : .notSent,
+                        summary: unsettled ? "This response may not have gone through." : "The response was not sent.",
+                        detail: "The earlier composer kept this response without a current server confirmation.")
+                    let carried = CarriedOverAnswerSend(
+                        id: try Self.stableEntryID(kind: .answer, request: key,
+                            revision: revision, payload: existingAnswerAttempt),
+                        requestRevision: revision, content: content, answerChoices: choices,
+                        operationID: existingAnswerAttempt.operationID,
+                        failureOperationID: existingAnswerAttempt.failureOperationID ??
+                            existingAnswerAttempt.operationID,
+                        currentAttemptUnsettled: unsettled,
+                        earlierVersionMayHaveBeenSent: existingAnswerAttempt.earlierVersionMayHaveBeenSent,
+                        failure: failure)
+                    migrated.carriedOverSends = Self.uniqueCarriedAnswerSends(
+                        migrated.carriedOverSends + [carried])
+                }
+                for candidate in answerCandidates where candidate.draft.hasEdits {
+                    let choices = Self.choiceSnapshots(for: candidate.draft, revision: candidate.revision,
+                        payload: thread?.revisions[candidate.revision])
+                    let isSameAsComposer = existingAnswer == nil
+                        ? primaryAnswerCandidate?.revision == candidate.revision &&
+                            primaryAnswerCandidate?.draft == candidate.draft
+                        : migrated.content == candidate.draft &&
+                            migrated.contentRequestRevision == candidate.revision &&
+                            migrated.operationID == nil && !migrated.currentAttemptUnsettled &&
+                            !migrated.earlierVersionMayHaveBeenSent && migrated.failure == nil &&
+                            migrated.selectedChoices == choices
+                    if isSameAsComposer { continue }
+                    earlier.append(EarlierComposerEntry(
+                        id: try Self.stableEntryID(kind: .answer, request: key,
+                            revision: candidate.revision, payload: candidate.draft),
+                        kind: .answer, requestRevision: candidate.revision,
+                        text: Self.answerEntryText(candidate.draft, choices: choices),
+                        answerDraft: candidate.draft, answerChoices: choices))
+                }
+
+                if let retryableResponse {
+                    let content = Self.answerDraft(for: retryableResponse)
+                    let revision = retryableResponse.requestRevision ?? currentRevision
+                    let unsettled = Self.legacyResponseIsUnsettled(retryableResponse)
+                    let failure = Self.legacyResponseFailure(retryableResponse)
+                    let choices = Self.choiceSnapshots(for: content, revision: revision,
+                        payload: thread?.revisions[revision])
+                    let responseIsComposer = migrated.content == content &&
+                        migrated.contentRequestRevision == revision &&
+                        migrated.operationID == retryableResponse.operationID &&
+                        migrated.operationRequestRevision == revision &&
+                        migrated.failureOperationID == retryableResponse.operationID &&
+                        migrated.currentAttemptUnsettled == unsettled && migrated.failure == failure &&
+                        migrated.selectedChoices == choices
+                    if !responseIsComposer {
+                        let carried = CarriedOverAnswerSend(
+                            id: try Self.stableEntryID(kind: .answer, request: key,
+                                revision: revision, payload: retryableResponse),
+                            requestRevision: revision, content: content, answerChoices: choices,
+                            operationID: retryableResponse.operationID,
+                            failureOperationID: retryableResponse.operationID,
+                            currentAttemptUnsettled: unsettled, failure: failure)
+                        migrated.carriedOverSends = Self.uniqueCarriedAnswerSends(
+                            migrated.carriedOverSends + [carried])
+                    }
+                }
+
+                for submission in unresolvedResponses where submission.intentID != retryableResponse?.intentID {
+                    let revision = submission.requestRevision ?? currentRevision
+                    let content = Self.answerDraft(for: submission)
+                    let choices = Self.choiceSnapshots(for: content, revision: revision,
+                        payload: thread?.revisions[revision])
+                    let failure = Self.legacyResponseFailure(submission)
+                    earlier.append(EarlierComposerEntry(
+                        id: try Self.stableEntryID(kind: .answer, request: key,
+                            revision: revision, payload: submission),
+                        kind: .answer, requestRevision: revision,
+                        text: Self.answerEntryText(content, choices: choices),
+                        answerDraft: content, answerChoices: choices,
+                        operationID: submission.operationID,
+                        currentAttemptUnsettled: Self.legacyResponseIsUnsettled(submission),
+                        failure: failure))
+                }
+                migrated.earlierEntries = Self.uniqueEntries(earlier)
+                migrated.carriedOverSends = Self.uniqueCarriedAnswerSends(migrated.carriedOverSends)
+                try persistAndVerify(migrated, at: answerAddress)
+            }
+
+            guard let oldThread = thread else { continue }
+            let draftCandidates = oldThread.drafts.sorted { $0.key < $1.key }
+            let currentCandidate = draftCandidates.last(where: {
+                !$0.value.text.rawValue.isEmpty || !$0.value.files.isEmpty
+            })
+            let existingConversation = try loadRaw(ConversationDraft.self, at: conversationAddress)
+            var migrated = existingConversation ?? currentCandidate.map {
+                Self.migrateConversationDraft($0.value, for: ConversationBinding(request: key,
+                    revision: currentRevision))
+            } ?? ConversationDraft(binding: ConversationBinding(request: key, revision: currentRevision))
+
+            var earlier = migrated.earlierEntries
+            var carried = migrated.carriedOverSends
+            for (revision, oldDraft) in draftCandidates {
+                let normalized = Self.migrateConversationDraft(oldDraft,
+                    for: ConversationBinding(request: key, revision: revision))
+                let normalizedIsComposer = currentCandidate?.key == revision &&
+                    Self.sameConversationComposerFacts(migrated, normalized)
+                let isComposer = existingConversation == nil
+                    ? currentCandidate?.key == revision
+                    : normalizedIsComposer
+                let unresolved = Self.legacyConversationAttempt(oldDraft)
+                if let unresolved {
+                    let send = CarriedOverConversationSend(
+                        id: try Self.stableEntryID(kind: .conversation, request: key,
+                            revision: revision, payload: unresolved),
+                        requestRevision: revision, text: unresolved.text,
+                        files: unresolved.files, operationID: unresolved.operationID,
+                        currentAttemptUnsettled: unresolved.currentAttemptUnsettled,
+                        earlierVersionMayHaveBeenSent: unresolved.earlierVersionMayHaveBeenSent,
+                        failure: unresolved.failure ?? ComposerSendFailure(
+                            outcome: .unconfirmed,
+                            summary: "This message may not have gone through.",
+                            detail: "The earlier build kept this message without a server confirmation."))
+                    let sameAsComposer = isComposer && normalized.text == send.text &&
+                        normalized.files == send.files && normalized.operationID == send.operationID &&
+                        (normalized.operationRequestRevision ?? normalized.binding.revision) == send.requestRevision &&
+                        normalized.currentAttemptUnsettled == send.currentAttemptUnsettled &&
+                        normalized.earlierVersionMayHaveBeenSent == send.earlierVersionMayHaveBeenSent &&
+                        normalized.failure == send.failure
+                    if !sameAsComposer { carried.append(send) }
+                } else if !isComposer &&
+                    (!normalized.text.rawValue.isEmpty || !normalized.files.isEmpty) {
+                    earlier.append(EarlierComposerEntry(
+                        id: try Self.stableEntryID(kind: .conversation, request: key,
+                            revision: revision, payload: oldDraft),
+                        kind: .conversation, requestRevision: revision,
+                        text: normalized.text, files: normalized.files,
+                        operationID: normalized.operationID,
+                        currentAttemptUnsettled: normalized.currentAttemptUnsettled,
+                        earlierVersionMayHaveBeenSent: normalized.earlierVersionMayHaveBeenSent,
+                        failure: normalized.failure))
+                }
+                earlier.append(contentsOf: oldDraft.earlierEntries)
+                for oldSend in oldDraft.carriedOverSends {
+                    guard !oldSend.text.rawValue.isEmpty || !oldSend.files.isEmpty else { continue }
+                    let send = CarriedOverConversationSend(id: oldSend.id,
+                        requestRevision: oldSend.requestRevision ?? revision,
+                        text: oldSend.text, files: oldSend.files, operationID: oldSend.operationID,
+                        failureOperationID: oldSend.failureOperationID,
+                        inFlightOperationID: nil,
+                        currentAttemptUnsettled: oldSend.currentAttemptUnsettled,
+                        earlierVersionMayHaveBeenSent: oldSend.earlierVersionMayHaveBeenSent,
+                        failure: oldSend.failure)
+                    carried.append(send)
+                }
+            }
+            let rebound = ConversationDraft(binding: ConversationBinding(request: key, revision: currentRevision),
+                text: migrated.text, files: migrated.files, disposition: migrated.disposition,
+                operationID: migrated.operationID,
+                operationRequestRevision: migrated.operationRequestRevision,
+                inFlightOperationID: migrated.inFlightOperationID,
+                currentAttemptUnsettled: migrated.currentAttemptUnsettled,
+                earlierVersionMayHaveBeenSent: migrated.earlierVersionMayHaveBeenSent,
+                failure: migrated.failure,
+                carriedOverSends: Self.uniqueCarriedConversationSends(carried),
+                earlierEntries: Self.uniqueEntries(earlier))
+            if !rebound.text.rawValue.isEmpty || !rebound.files.isEmpty ||
+                !rebound.carriedOverSends.isEmpty || !rebound.earlierEntries.isEmpty ||
+                rebound.failure != nil {
+                try persistAndVerify(rebound, at: conversationAddress)
             }
         }
         try legacyPersistence.remove(identity: context.identity)
@@ -313,7 +627,9 @@ actor ComposerDraftPersistence {
         for address in try loadAddressIndex().values
             where address.identity == identity && address.kind == .conversation {
             guard let draft = try loadRaw(ConversationDraft.self, at: address) else { continue }
-            for file in draft.files {
+            let retainedFiles = draft.files + draft.carriedOverSends.flatMap(\.files) +
+                draft.earlierEntries.flatMap(\.files)
+            for file in retainedFiles {
                 guard case let .localFile(relativePath) = file.content,
                       relativePath.rawValue.hasPrefix("Inline/") else { continue }
                 referencedPaths.insert(relativePath.rawValue)
@@ -324,16 +640,15 @@ actor ComposerDraftPersistence {
 
     private nonisolated static func isLegacyUnresolvedResponse(_ submission: Submission) -> Bool {
         switch submission.disposition {
-        case .pending, .lost, .failed: true
-        default: false
+        case .accepted, .terminal: false
+        default: true
         }
     }
 
     private nonisolated static func legacyResponseIsUnsettled(_ submission: Submission) -> Bool {
         switch submission.disposition {
-        case .pending, .lost: true
-        case .failed: false
-        default: false
+        case .pending, .lost, .repairRequired: true
+        case .accepted, .terminal, .failed, .staleRevision, .refusedByRetraction, .unsupported: false
         }
     }
 
@@ -374,35 +689,295 @@ actor ComposerDraftPersistence {
         return draft
     }
 
-    private nonisolated static func migrateConversationDraft(_ old: ConversationDraft) -> ConversationDraft {
-        var migrated = old
+    private nonisolated static func migrateConversationDraft(_ old: ConversationDraft,
+        for binding: ConversationBinding) -> ConversationDraft {
+        var text = old.text
+        var files = old.files
+        var operationID = old.operationID
+        var inFlightOperationID: UUID?
+        var currentAttemptUnsettled = old.currentAttemptUnsettled
+        var earlierVersionMayHaveBeenSent = old.earlierVersionMayHaveBeenSent
+        var failure = old.failure
+        let carriedOverSends = old.carriedOverSends.map { send in
+            CarriedOverConversationSend(id: send.id,
+                requestRevision: send.requestRevision ?? old.binding.revision,
+                text: send.text, files: send.files, operationID: send.operationID,
+                failureOperationID: send.failureOperationID,
+                inFlightOperationID: nil,
+                currentAttemptUnsettled: send.currentAttemptUnsettled,
+                earlierVersionMayHaveBeenSent: send.earlierVersionMayHaveBeenSent,
+                failure: send.failure)
+        }
         switch old.disposition {
         case let .submitting(operation), let .outcomeUnknown(operation):
-            migrated.operationID = operation
-            migrated.inFlightOperationID = nil
-            migrated.currentAttemptUnsettled = true
-            migrated.failure = ComposerSendFailure(outcome: .unconfirmed,
+            operationID = operation
+            currentAttemptUnsettled = true
+            failure = ComposerSendFailure(outcome: .unconfirmed,
                 summary: "This message may not have gone through.",
                 detail: "The earlier build kept this message without a server confirmation.")
-            migrated.disposition = .saved
         case let .rejected(reason):
-            migrated.inFlightOperationID = nil
-            migrated.currentAttemptUnsettled = false
-            migrated.failure = ComposerSendFailure(outcome: .notSent,
+            inFlightOperationID = nil
+            currentAttemptUnsettled = false
+            failure = ComposerSendFailure(outcome: .notSent,
                 summary: "The message was not sent.", detail: reason.rawValue)
-            migrated.disposition = .saved
         case .acceptedPendingReplay:
-            migrated.text = ExactText("")
-            migrated.files = []
-            migrated.operationID = nil
-            migrated.inFlightOperationID = nil
-            migrated.currentAttemptUnsettled = false
-            migrated.failure = nil
-            migrated.disposition = .saved
-        case .saved:
-            migrated.disposition = .saved
+            text = ExactText("")
+            files = []
+            operationID = nil
+            inFlightOperationID = nil
+            currentAttemptUnsettled = false
+            earlierVersionMayHaveBeenSent = false
+            failure = nil
+        case .saved: break
         }
-        return migrated
+        return ConversationDraft(binding: binding, text: text, files: files,
+            disposition: .saved, draftRequestRevision: old.draftRequestRevision ?? old.binding.revision,
+            operationID: operationID,
+            operationRequestRevision: old.operationRequestRevision ??
+                (operationID == nil ? nil : old.binding.revision),
+            inFlightOperationID: inFlightOperationID,
+            currentAttemptUnsettled: currentAttemptUnsettled,
+            earlierVersionMayHaveBeenSent: earlierVersionMayHaveBeenSent,
+            failure: failure, carriedOverSends: carriedOverSends,
+            earlierEntries: old.earlierEntries)
+    }
+
+    private func persistAndVerify<Value: Codable & Equatable & Sendable>(
+        _ value: Value, at address: ComposerDraftAddress) throws {
+        let name = address.stableName
+        let data = try JSONEncoder().encode(value)
+        var addresses = try loadAddressIndex()
+        addresses[name] = address
+        addressesByName = addresses
+        let generation = latestGenerationByName[name, default: 0] &+ 1
+        latestGenerationByName[name] = generation
+        latestDataByName.removeValue(forKey: name)
+        try write(data, named: name, address: address, generation: generation)
+        let file = try fileURL(named: name, createDirectory: false)
+        let readBack = try Data(contentsOf: file, options: .mappedIfSafe)
+        guard readBack == data,
+              try JSONDecoder().decode(Value.self, from: readBack) == value else {
+            throw MigrationError.failed("readback did not match the migrated composer entry")
+        }
+        latestDataByName[name] = readBack
+    }
+
+    private nonisolated static func uniqueAnswerDrafts(
+        _ candidates: [(revision: UInt64, draft: RequestDraft, isCurrent: Bool)])
+        -> [(revision: UInt64, draft: RequestDraft, isCurrent: Bool)] {
+        var result: [(revision: UInt64, draft: RequestDraft, isCurrent: Bool)] = []
+        let ordered = candidates.sorted { lhs, rhs in
+            if lhs.revision != rhs.revision { return lhs.revision < rhs.revision }
+            if lhs.isCurrent != rhs.isCurrent { return lhs.isCurrent }
+            return lhs.draft.hasEdits && !rhs.draft.hasEdits
+        }
+        for candidate in ordered where !result.contains(where: {
+            $0.revision == candidate.revision && $0.draft == candidate.draft
+        }) {
+            result.append(candidate)
+        }
+        return result
+    }
+
+    private nonisolated static func uniqueEntries(_ entries: [EarlierComposerEntry]) -> [EarlierComposerEntry] {
+        var unique: [EarlierComposerEntry] = []
+        for entry in entries where !unique.contains(where: { sameEntryFacts($0, entry) }) {
+            unique.append(entry)
+        }
+        return unique.sorted { ($0.requestRevision, $0.id) < ($1.requestRevision, $1.id) }
+    }
+
+    private nonisolated static func uniqueCarriedConversationSends(
+        _ entries: [CarriedOverConversationSend]) -> [CarriedOverConversationSend] {
+        var unique: [CarriedOverConversationSend] = []
+        for entry in entries where !unique.contains(where: { sameSendFacts($0, entry) }) {
+            unique.append(entry)
+        }
+        return unique.sorted { ($0.requestRevision ?? 0, $0.id) < ($1.requestRevision ?? 0, $1.id) }
+    }
+
+    private nonisolated static func sameConversationComposerFacts(
+        _ lhs: ConversationDraft, _ rhs: ConversationDraft) -> Bool {
+        let lhsDraftRevision = lhs.draftRequestRevision ?? lhs.binding.revision
+        let rhsDraftRevision = rhs.draftRequestRevision ?? rhs.binding.revision
+        let lhsOperationRevision = lhs.operationRequestRevision ??
+            (lhs.operationID == nil ? nil : lhs.binding.revision)
+        let rhsOperationRevision = rhs.operationRequestRevision ??
+            (rhs.operationID == nil ? nil : rhs.binding.revision)
+        return lhsDraftRevision == rhsDraftRevision && lhs.text == rhs.text && lhs.files == rhs.files &&
+            lhs.operationID == rhs.operationID && lhsOperationRevision == rhsOperationRevision &&
+            lhs.currentAttemptUnsettled == rhs.currentAttemptUnsettled &&
+            lhs.earlierVersionMayHaveBeenSent == rhs.earlierVersionMayHaveBeenSent &&
+            lhs.failure == rhs.failure
+    }
+
+    private nonisolated static func sameEntryFacts(_ lhs: EarlierComposerEntry,
+                                                  _ rhs: EarlierComposerEntry) -> Bool {
+        lhs.kind == rhs.kind && lhs.requestRevision == rhs.requestRevision &&
+            lhs.text == rhs.text && lhs.files == rhs.files && lhs.answerDraft == rhs.answerDraft &&
+            lhs.answerChoices == rhs.answerChoices && lhs.operationID == rhs.operationID &&
+            lhs.currentAttemptUnsettled == rhs.currentAttemptUnsettled &&
+            lhs.earlierVersionMayHaveBeenSent == rhs.earlierVersionMayHaveBeenSent &&
+            lhs.failure == rhs.failure
+    }
+
+    private nonisolated static func sameSendFacts(_ lhs: CarriedOverConversationSend,
+                                                  _ rhs: CarriedOverConversationSend) -> Bool {
+        lhs.requestRevision == rhs.requestRevision && lhs.text == rhs.text &&
+            lhs.files == rhs.files && lhs.operationID == rhs.operationID &&
+            lhs.failureOperationID == rhs.failureOperationID &&
+            lhs.currentAttemptUnsettled == rhs.currentAttemptUnsettled &&
+            lhs.earlierVersionMayHaveBeenSent == rhs.earlierVersionMayHaveBeenSent &&
+            lhs.failure == rhs.failure
+    }
+
+    private nonisolated static func uniqueCarriedAnswerSends(
+        _ entries: [CarriedOverAnswerSend]) -> [CarriedOverAnswerSend] {
+        var unique: [CarriedOverAnswerSend] = []
+        for entry in entries where !unique.contains(where: {
+            $0.requestRevision == entry.requestRevision && $0.content == entry.content &&
+                $0.answerChoices == entry.answerChoices && $0.operationID == entry.operationID &&
+                $0.failureOperationID == entry.failureOperationID &&
+                $0.currentAttemptUnsettled == entry.currentAttemptUnsettled &&
+                $0.earlierVersionMayHaveBeenSent == entry.earlierVersionMayHaveBeenSent &&
+                $0.failure == entry.failure
+        }) {
+            unique.append(entry)
+        }
+        return unique.sorted { ($0.requestRevision ?? 0, $0.id) < ($1.requestRevision ?? 0, $1.id) }
+    }
+
+    private nonisolated static func legacySubmissionOrder(_ lhs: Submission, _ rhs: Submission) -> Bool {
+        (lhs.requestRevision ?? 0, lhs.operationID.uuidString) <
+            (rhs.requestRevision ?? 0, rhs.operationID.uuidString)
+    }
+
+    private nonisolated static func legacyResponseFailure(_ submission: Submission) -> ComposerSendFailure {
+        let unsettled = legacyResponseIsUnsettled(submission)
+        let detail: String
+        switch submission.disposition {
+        case .failed:
+            detail = "The earlier build recorded that the server refused this response."
+        case let .staleRevision(currentRevision):
+            detail = "The earlier build recorded that the server refused this response for an older revision. Current revision: \(currentRevision)."
+        case .refusedByRetraction:
+            detail = "The earlier build recorded that the server refused this response because the request was retracted."
+        case .unsupported:
+            detail = "The earlier build recorded that the server refused this response as unsupported."
+        default:
+            detail = "The earlier build kept this response without a server confirmation."
+        }
+        return ComposerSendFailure(outcome: unsettled ? .unconfirmed : .notSent,
+            summary: unsettled ? "This response may not have gone through." : "The response was not sent.",
+            detail: detail)
+    }
+
+    private nonisolated static func legacyConversationAttempt(
+        _ old: ConversationDraft) -> ConversationDraft? {
+        guard !old.text.rawValue.isEmpty || !old.files.isEmpty else { return nil }
+        switch old.disposition {
+        case .acceptedPendingReplay: return nil
+        case .submitting, .outcomeUnknown:
+            var attempt = old
+            attempt.disposition = .saved
+            attempt.inFlightOperationID = nil
+            attempt.currentAttemptUnsettled = true
+            attempt.failure = old.failure ?? ComposerSendFailure(outcome: .unconfirmed,
+                summary: "This message may not have gone through.",
+                detail: "The earlier build kept this message without a server confirmation.")
+            return attempt
+        case .rejected:
+            var attempt = old
+            attempt.disposition = .saved
+            attempt.inFlightOperationID = nil
+            attempt.currentAttemptUnsettled = false
+            attempt.failure = old.failure ?? ComposerSendFailure(outcome: .notSent,
+                summary: "The message was not sent.", detail: "The earlier build recorded a refusal.")
+            return attempt
+        case .saved:
+            if old.currentAttemptUnsettled || old.earlierVersionMayHaveBeenSent || old.failure != nil {
+                return old
+            }
+            return nil
+        }
+    }
+
+    nonisolated static func choiceSnapshots(for draft: RequestDraft, revision: UInt64,
+                                            payload: JSONValue?) -> [AnswerChoiceSnapshot] {
+        let answerUI = payload?.uniqueValue(named: "answer_ui")
+        switch RequestInterface.recognize(answerUI) {
+        case let .sender(document):
+            return document.inputs.compactMap { input in
+                guard case let .response(actions) = input.kind,
+                      let actionID = draft.inputs[input.id]?.selectedActionID,
+                      let action = actions.first(where: { $0.id == actionID }) else { return nil }
+                let kind: ExactText
+                let answer: JSONValue
+                switch action.kind {
+                case let .value(value): kind = ExactText("value"); answer = value
+                case .text:
+                    kind = ExactText("text")
+                    answer = .string(draft.inputs[input.id]?.textByActionID[actionID] ?? ExactText(""))
+                }
+                return AnswerChoiceSnapshot(inputID: input.id, choiceID: action.id,
+                    label: action.label, kind: kind, answerValue: answer, requestRevision: revision)
+            }
+        case let .compatibility(form):
+            guard let actionID = draft.compatibility.selectedActionID,
+                  let action = form.action(withID: actionID) else { return [] }
+            let kind = action.kind == .value ? ExactText("value") : ExactText("text")
+            let answer = action.value ?? .string(draft.compatibility.textByActionID[actionID] ?? ExactText(""))
+            return [AnswerChoiceSnapshot(choiceID: action.id, label: action.label,
+                kind: kind, answerValue: answer, requestRevision: revision)]
+        case .unsupported:
+            return []
+        }
+    }
+
+    private nonisolated static func answerEntryText(_ draft: RequestDraft,
+        choices: [AnswerChoiceSnapshot]) -> ExactText {
+        var parts: [String] = []
+        if draft.noCommentSelected { parts.append("No comment") }
+        for inputID in draft.inputs.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let field = draft.inputs[inputID] else { continue }
+            if let actionID = field.selectedActionID {
+                let choice = choices.first { $0.inputID == inputID && $0.choiceID == actionID }
+                parts.append(choice?.label.rawValue ?? actionID.rawValue)
+            }
+            if let text = field.text, !text.rawValue.isEmpty { parts.append(text.rawValue) }
+            for actionID in field.textByActionID.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+                guard let text = field.textByActionID[actionID], !text.rawValue.isEmpty else { continue }
+                let choice = choices.first { $0.inputID == inputID && $0.choiceID == actionID }
+                let label = choice?.label.rawValue ?? actionID.rawValue
+                parts.append("\(label): \(text.rawValue)")
+            }
+            if let x = field.horizontalText, !x.rawValue.isEmpty { parts.append("Horizontal: \(x.rawValue)") }
+            if let y = field.verticalText, !y.rawValue.isEmpty { parts.append("Vertical: \(y.rawValue)") }
+        }
+        if let actionID = draft.compatibility.selectedActionID {
+            let choice = choices.first { $0.inputID == nil && $0.choiceID == actionID }
+            parts.append(choice?.label.rawValue ?? actionID.rawValue)
+        }
+        for actionID in draft.compatibility.textByActionID.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let text = draft.compatibility.textByActionID[actionID], !text.rawValue.isEmpty else { continue }
+            let choice = choices.first { $0.inputID == nil && $0.choiceID == actionID }
+            let label = choice?.label.rawValue ?? actionID.rawValue
+            parts.append("\(label): \(text.rawValue)")
+        }
+        return ExactText(parts.isEmpty ? "Earlier answer draft" : parts.joined(separator: "\n"))
+    }
+
+    private nonisolated static func stableEntryID<Payload: Encodable>(kind: EarlierComposerEntry.Kind,
+        request: RequestKey, revision: UInt64, payload: Payload) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var data = Data("\(kind.rawValue):\(revision):".utf8)
+        data.append(0)
+        data.append(try encoder.encode(request))
+        data.append(0)
+        data.append(try encoder.encode(payload))
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return "legacy:" + digest
     }
 
     private func flushRaw<Value: Encodable & Sendable>(_ value: Value,
@@ -1804,6 +2379,7 @@ final class LivePresentationStore {
     @ObservationIgnored private let composerDraftPersistence: ComposerDraftPersistence
     @ObservationIgnored private var loadedConversationDrafts = Set<ConversationBinding>()
     @ObservationIgnored private var editedConversationDrafts = Set<ConversationBinding>()
+    private(set) var earlierComposerEntriesByRequest: [RequestKey: [EarlierComposerEntry]] = [:]
     // Reply edits remain local until submission, but must outlive a detail view
     // recreated by ordinary navigation in this app session.
     @ObservationIgnored private var replyEditorSessions: [RequestKey: ReplyEditorDraftSession] = [:]
@@ -2241,8 +2817,9 @@ final class LivePresentationStore {
         conversationThreads[key]?.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
     }
 
-    func noteConversationDraftEdit(_ binding: ConversationBinding) {
+    func noteConversationDraftEdit(_ binding: ConversationBinding, text: String) {
         editedConversationDrafts.insert(binding)
+        pendingConversationTextByBinding[binding] = text
     }
 
     func loadPersistedConversationDraft(for binding: ConversationBinding) async {
@@ -2250,15 +2827,45 @@ final class LivePresentationStore {
               loadedConversationDrafts.insert(binding).inserted else { return }
         let address = ComposerDraftAddress(identity: profileContext.identity,
             request: binding.request, revision: binding.revision, kind: .conversation)
-        guard let persisted = try? await composerDraftPersistence.load(ConversationDraft.self, at: address) else { return }
-        guard persisted.binding == binding,
+        let persisted: ConversationDraft?
+        do {
+            persisted = try await composerDraftPersistence.load(ConversationDraft.self, at: address)
+        } catch {
+            conversationError = "A saved discussion draft could not be recovered. Its earlier store is retained."
+            diagnose(.localStore, .draftLoad, .failed, error: error,
+                     request: binding.request, revision: binding.revision)
+            return
+        }
+        guard let persisted else { return }
+        guard persisted.binding.request == binding.request,
               !editedConversationDrafts.contains(binding),
               conversationThreads[binding.request] != nil else { return }
+        let recovered = persisted.binding == binding ? persisted : persisted.rebound(to: binding)
         let current = conversationDraft(for: binding.request, revision: binding.revision)
+        if !isSendingDiscussion,
+           (current.retryingCarriedOverSendID != nil ||
+            current.carriedOverSends.contains(where: { $0.inFlightOperationID != nil })) {
+            var settledForManualRetry = current
+            for index in settledForManualRetry.carriedOverSends.indices {
+                settledForManualRetry.carriedOverSends[index].inFlightOperationID = nil
+            }
+            settledForManualRetry.retryingCarriedOverSendID = nil
+            do {
+                try await port.saveConversationDraft(settledForManualRetry, context: port.context)
+                try await composerDraftPersistence.flush(settledForManualRetry, at: address)
+                try await refreshFromDurableStore()
+            } catch {
+                conversationError = "A saved discussion Retry could not be resumed. Its message is still retained."
+                diagnose(.localStore, .draftSave, .failed, error: error,
+                         request: binding.request, revision: binding.revision)
+            }
+            return
+        }
         guard current.text.rawValue.isEmpty, current.files.isEmpty,
-              current.operationID == nil, current.failure == nil else { return }
+              current.operationID == nil, current.failure == nil,
+              current.carriedOverSends.isEmpty, current.earlierEntries.isEmpty else { return }
         do {
-            try await port.saveConversationDraft(persisted, context: port.context)
+            try await port.saveConversationDraft(recovered, context: port.context)
             try await refreshFromDurableStore()
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error,
@@ -2274,6 +2881,8 @@ final class LivePresentationStore {
         let persistence = composerDraftPersistence
         Task { [weak self, persistence] in
             do {
+                guard let self else { return }
+                try await self.port.saveConversationDraft(draft, context: self.port.context)
                 if flushImmediately {
                     try await persistence.flush(draft, at: address)
                 } else {
@@ -2281,7 +2890,6 @@ final class LivePresentationStore {
                 }
             } catch {
                 await MainActor.run {
-                    guard let self else { return }
                     self.conversationError = "Your latest discussion edit could not be saved. It remains in this session; nothing was sent."
                     self.diagnose(.localStore, .draftSave, .failed, error: error,
                                   request: binding.request, revision: binding.revision)
@@ -2302,11 +2910,28 @@ final class LivePresentationStore {
         let binding = ConversationBinding(request: key, revision: revision)
         // The close transition flushes text staged before closure; ordinary edits stay blocked.
         guard var thread = conversationThreads[key],
+              thread.currentRevision == revision,
               thread.allowsDiscussion || flushImmediately else { return false }
         editedConversationDrafts.insert(binding)
         var draft = thread.drafts[revision] ?? ConversationDraft(binding: binding)
-        if let text { draft.text = ExactText(text) }
+        let updatedText = text.map(ExactText.init)
+        let contentChanged = (updatedText.map { $0 != draft.text } ?? false) ||
+            (files.map { $0 != draft.files } ?? false)
+        if contentChanged, let carried = Self.carriedOverAttempt(from: draft),
+           !draft.carriedOverSends.contains(where: { $0.id == carried.id }) {
+            draft.carriedOverSends.append(carried)
+        }
+        if let updatedText { draft.text = updatedText }
         if let files { draft.files = files }
+        if contentChanged {
+            draft.operationID = nil
+            draft.operationRequestRevision = nil
+            draft.inFlightOperationID = nil
+            draft.currentAttemptUnsettled = false
+            draft.earlierVersionMayHaveBeenSent = false
+            draft.failure = nil
+            draft.draftRequestRevision = revision
+        }
         draft.disposition = .saved
         thread.drafts[revision] = draft
         conversationThreads[key] = thread
@@ -2314,6 +2939,27 @@ final class LivePresentationStore {
         persistConversationDraft(draft, flushImmediately: flushImmediately)
         conversationError = nil
         return true
+    }
+
+    private static func carriedOverAttempt(from draft: ConversationDraft) -> CarriedOverConversationSend? {
+        guard !draft.text.rawValue.isEmpty || !draft.files.isEmpty else { return nil }
+        let operation = draft.operationID ?? draft.inFlightOperationID
+        guard draft.currentAttemptUnsettled || draft.earlierVersionMayHaveBeenSent ||
+                draft.inFlightOperationID != nil || draft.failure != nil || operation != nil else { return nil }
+        let unsettled = draft.currentAttemptUnsettled || draft.inFlightOperationID != nil ||
+            draft.failure?.outcome == .unconfirmed
+        let failure = draft.failure ?? ComposerSendFailure(outcome: unsettled ? .unconfirmed : .notSent,
+            summary: unsettled ? "This message may not have gone through." : "The message was not sent.",
+            detail: "This send was retained separately when the composer draft changed.")
+        return CarriedOverConversationSend(
+            id: operation.map { "attempt:\($0.uuidString.lowercased())" } ??
+                "attempt:\(draft.binding.revision):\(draft.text.rawValue.utf8.count)",
+            requestRevision: draft.operationRequestRevision ?? draft.binding.revision,
+            text: draft.text, files: draft.files, operationID: operation,
+            inFlightOperationID: draft.inFlightOperationID,
+            currentAttemptUnsettled: unsettled,
+            earlierVersionMayHaveBeenSent: draft.earlierVersionMayHaveBeenSent,
+            failure: failure)
     }
 
     /// The ordinary inbox calls this only for explicit selection/back navigation.
@@ -2353,6 +2999,9 @@ final class LivePresentationStore {
                 guard let self else { return }
                 defer { isSendingDiscussion = false }
                 do {
+                    let currentDraft = conversationDraft(for: key, revision: revision)
+                    try await port.saveConversationDraft(currentDraft, context: port.context)
+                    try await persistence.flush(currentDraft, at: address)
                     let result = try await NativeRelayLifecycle.shared.submitDiscussion(
                         binding, expected: profileContext,
                         retainedFile: { file in try files.fileURL(for: file) },
@@ -2369,7 +3018,11 @@ final class LivePresentationStore {
                     case let .rejected(reason):
                         conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
                         onResult?(false)
-                    case .unresolved, .operationConflict:
+                    case .unresolved:
+                        conversationError = nil
+                        onResult?(false)
+                    case .operationConflict:
+                        await refreshDiscussionHistory()
                         conversationError = nil
                         onResult?(false)
                     }
@@ -2408,6 +3061,97 @@ final class LivePresentationStore {
                          request: key, revision: revision, receiptState: .unknown)
                 onResult?(false)
             }
+        }
+    }
+
+    /// Starts one explicitly selected carried-over Retry after its operation
+    /// identity and in-flight marker are durable. An interrupted marker is
+    /// cleared on the next open without changing its uncertainty or id.
+    func retryCarriedOverDiscussion(for key: RequestKey, revision: UInt64,
+                                    entryID: String) async {
+        guard permitsDelivery, !isReadOnly, conversationUnavailableMessage == nil,
+              isOnline, !isSendingDiscussion,
+              let thread = conversationThreads[key], thread.currentRevision == revision,
+              thread.allowsDiscussion,
+              let selected = thread.drafts[revision]?.carriedOverSends.first(where: { $0.id == entryID }),
+              selected.inFlightOperationID == nil,
+              !selected.text.rawValue.isEmpty || !selected.files.isEmpty,
+              let files = conversationFiles else { return }
+
+        let binding = ConversationBinding(request: key, revision: revision)
+        let address = ComposerDraftAddress(identity: profileContext.identity,
+            request: key, revision: revision, kind: .conversation)
+        let wasUnsettled = selected.currentAttemptUnsettled
+        isSendingDiscussion = true
+        conversationError = nil
+        defer { isSendingDiscussion = false }
+        let persistence = composerDraftPersistence
+
+        var operation: UUID?
+        do {
+            operation = try await port.prepareCarriedOverDiscussion(binding, entryID: entryID,
+                context: port.context)
+            guard let prepared = try await port.currentConversationSnapshot(context: port.context)
+                .threads[key]?.drafts[revision],
+                  prepared.retryingCarriedOverSendID == entryID,
+                  prepared.carriedOverSends.first(where: { $0.id == entryID })?.inFlightOperationID == operation else {
+                throw ConversationError.invalidBinding
+            }
+            try await composerDraftPersistence.flush(prepared, at: address)
+            let persistDraft: @Sendable (ConversationDraft?) async throws -> Void = { draft in
+                if let draft { try await persistence.flush(draft, at: address) }
+                else { try await persistence.remove(at: address) }
+            }
+            let result = try await NativeRelayLifecycle.shared.submitDiscussion(
+                binding, expected: profileContext,
+                retainedFile: { file in try files.fileURL(for: file) },
+                persistDraft: persistDraft)
+            do { try await refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error,
+                             request: key, revision: revision) }
+            switch result {
+            case .accepted:
+                conversationError = nil
+            case let .rejected(reason):
+                conversationError = "Not delivered: " + reason.rawValue + ". The earlier message is retained."
+            case .unresolved:
+                conversationError = nil
+            case .operationConflict:
+                await refreshDiscussionHistory()
+                conversationError = nil
+            }
+        } catch {
+            if let operation {
+                do {
+                    let current = try await port.currentConversationSnapshot(context: port.context)
+                        .threads[key]?.drafts[revision]
+                    if current?.carriedOverSends.first(where: { $0.id == entryID })?.inFlightOperationID == operation {
+                        try await port.markCarriedOverDiscussionOutcome(binding, entryID: entryID,
+                            operation: operation,
+                            rejection: ExactText("The Retry could not be prepared. No new send was made."),
+                            preserveUnsettled: wasUnsettled, context: port.context)
+                    }
+                    if let settled = try await port.currentConversationSnapshot(context: port.context)
+                        .threads[key]?.drafts[revision] {
+                        try await composerDraftPersistence.flush(settled, at: address)
+                    }
+                } catch {
+                    diagnose(.localStore, .discussionPreparation, .failed, error: error,
+                             operationID: operation, request: key, revision: revision,
+                             receiptState: .unknown)
+                }
+            }
+            do { try await refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error,
+                             request: key, revision: revision) }
+            conversationError = conversationDraft(for: key, revision: revision).carriedOverSends
+                .first(where: { $0.id == entryID })?.failure == nil
+                ? "The earlier message could not be retried. Its text and operation id are retained."
+                : nil
+            diagnose(.conversation, .discussionSubmission,
+                     NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
+                     operationID: operation, request: key, revision: revision,
+                     receiptState: .unknown)
         }
     }
 
@@ -2772,13 +3516,27 @@ final class LivePresentationStore {
     }
 
     private func failedResponseWarning(for request: PresentedRequest) -> FailedResponseWarning? {
-        guard request.informationalSeenStatus == nil,
-              request.staleAnswerRevision == nil else { return nil }
+        guard request.informationalSeenStatus == nil else { return nil }
         if let session = replyEditorSessions[request.key],
            session.requestRevision == request.requestRevision,
            let carriedOver = session.deliveryDraft.carriedOverSend {
             return carriedOverWarning(carriedOver, for: request)
         }
+        if let session = replyEditorSessions[request.key],
+           session.requestRevision == request.requestRevision,
+           session.deliveryDraft.currentAttemptUnsettled,
+           let operationID = session.deliveryDraft.operationID,
+           let failure = session.deliveryDraft.failure {
+            return FailedResponseWarning(
+                requestRevision: request.requestRevision,
+                failedOperationID: session.deliveryDraft.failureOperationID ?? operationID,
+                answerKind: session.draft.noCommentSelected ? .noComment : .answer,
+                submittedInputs: [], answerDraft: session.draft,
+                detail: LocalizedStringResource(stringLiteral: failure.detail),
+                retryOperationID: operationID,
+                summaryOverride: failure.summary)
+        }
+        guard request.staleAnswerRevision == nil else { return nil }
         if var warning = failedResponseWarnings[request.key],
            warning.requestRevision == request.requestRevision {
             if let session = replyEditorSessions[request.key], !warning.isCarriedOver {
@@ -2797,16 +3555,19 @@ final class LivePresentationStore {
 
     private func carriedOverWarning(_ carriedOver: CarriedOverAnswerSend,
                                     for request: PresentedRequest) -> FailedResponseWarning {
+        let answerRequest = carriedOver.requestRevision.flatMap {
+            try? inspectedRequest(request.key, revision: $0)
+        } ?? request
         let text = carriedOver.content.noCommentSelected
             ? "No comment"
             : AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
-                submittedAnswer: carriedOver.content, projection: request.projection)
+                submittedAnswer: carriedOver.content, projection: answerRequest.projection)
                 ?? carriedOver.content.inputs.values
                     .compactMap { $0.text?.rawValue }
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n")
         return FailedResponseWarning(
-            requestRevision: request.requestRevision,
+            requestRevision: carriedOver.requestRevision ?? request.requestRevision,
             failedOperationID: carriedOver.failureOperationID ?? carriedOver.operationID,
             answerKind: carriedOver.content.noCommentSelected ? .noComment : .answer,
             submittedInputs: [], answerDraft: carriedOver.content,
@@ -2824,7 +3585,7 @@ final class LivePresentationStore {
               warning.canRetry,
               request.lifecycleStatus == .open,
               request.informationalSeenStatus == nil,
-              request.staleAnswerRevision == nil,
+              (warning.isCarriedOver || request.staleAnswerRevision == nil),
               !isRetracted(key) else { return false }
         if let receipt = request.intentReceipt {
             guard warning.failedOperationID == receipt.opID else { return false }
@@ -2888,12 +3649,25 @@ final class LivePresentationStore {
     }
 
     func replyEditorSession(for request: PresentedRequest) -> ReplyEditorDraftSession {
-        if let session = replyEditorSessions[request.key],
-           session.requestRevision == request.requestRevision {
+        let canSubmit = request.lifecycleStatus == .open && request.intentReceipt == nil &&
+            !isReadOnly && !isRetracted(request.key)
+        if let session = replyEditorSessions[request.key] {
+            if request.requestRevision > session.requestRevision ||
+               (request.requestRevision == session.requestRevision &&
+                session.canSubmitFromSnapshot != canSubmit) {
+                session.adoptUneditedRequest(request, canSubmit: canSubmit)
+                if let failure = session.deliveryDraft.failure {
+                    restoreAnswerComposerFailure(for: request, draft: session.deliveryDraft,
+                        failure: failure)
+                } else if let carriedOver = session.deliveryDraft.carriedOverSend {
+                    failedResponseWarnings[request.key] = carriedOverWarning(carriedOver, for: request)
+                    failedResponseWarningGeneration &+= 1
+                }
+            }
             return session
         }
         let session = ReplyEditorDraftSession(request: request,
-            canSubmitFromSnapshot: request.lifecycleStatus == .open && request.intentReceipt == nil,
+            canSubmitFromSnapshot: canSubmit,
             identity: permitsDelivery ? profileContext.identity : nil,
             persistence: permitsDelivery ? ComposerDraftPersistence.shared : nil,
             onDraftLoaded: { [weak self] saved in
@@ -2912,6 +3686,82 @@ final class LivePresentationStore {
         replyEditorSessions[request.key] = session
         Task { await session.loadPersistedDraft() }
         return session
+    }
+
+    func hasEarlierComposerEntries(for key: RequestKey) -> Bool {
+        !(earlierComposerEntriesByRequest[key] ?? []).isEmpty
+    }
+
+    func earlierComposerEntries(for key: RequestKey) -> [EarlierComposerEntry] {
+        earlierComposerEntriesByRequest[key] ?? []
+    }
+
+    func loadEarlierComposerEntries(for key: RequestKey) async {
+        guard permitsDelivery, !isReadOnly,
+              let request = request(for: key) else { return }
+        let answerAddress = ComposerDraftAddress(identity: profileContext.identity,
+            request: key, revision: request.requestRevision, kind: .answer)
+        let conversationAddress = ComposerDraftAddress(identity: profileContext.identity,
+            request: key, revision: request.requestRevision, kind: .conversation)
+        do {
+            var storedEntries: [EarlierComposerEntry] = []
+            let currentAnswer = try await composerDraftPersistence.load(AnswerComposerDraft.self,
+                at: answerAddress)
+            let currentConversation = try await composerDraftPersistence.load(ConversationDraft.self,
+                at: conversationAddress)
+            storedEntries.append(contentsOf: currentAnswer?.earlierEntries ?? [])
+            storedEntries.append(contentsOf: currentConversation?.earlierEntries ?? [])
+
+            let addresses = try await composerDraftPersistence.addresses(for: profileContext.identity)
+                .filter { $0.request == key }
+            for address in addresses {
+                switch address.kind {
+                case .answer:
+                    let draft = try await composerDraftPersistence.load(AnswerComposerDraft.self, at: address)
+                    storedEntries.append(contentsOf: draft?.earlierEntries ?? [])
+                case .conversation:
+                    let draft = try await composerDraftPersistence.load(ConversationDraft.self, at: address)
+                    storedEntries.append(contentsOf: draft?.earlierEntries ?? [])
+                }
+            }
+
+            // Include entries that have reached the domain store or an active
+            // editor before the sidecar flush completes. Later in-memory facts
+            // supersede a stale copy with the same stable entry id.
+            storedEntries.append(contentsOf: conversation(for: key)?.drafts.values
+                .flatMap(\.earlierEntries) ?? [])
+            storedEntries.append(contentsOf: replyEditorSessions[key]?.deliveryDraft.earlierEntries ?? [])
+
+            var unique: [EarlierComposerEntry] = []
+            for entry in storedEntries {
+                if let index = unique.firstIndex(where: { existing in
+                    existing.id == entry.id ||
+                        (existing.kind == entry.kind && existing.requestRevision == entry.requestRevision &&
+                         existing.text == entry.text && existing.files == entry.files &&
+                         existing.answerDraft == entry.answerDraft &&
+                         existing.answerChoices == entry.answerChoices &&
+                         existing.operationID == entry.operationID &&
+                         existing.currentAttemptUnsettled == entry.currentAttemptUnsettled &&
+                         existing.earlierVersionMayHaveBeenSent == entry.earlierVersionMayHaveBeenSent &&
+                         existing.failure == entry.failure)
+                }) {
+                    unique[index] = entry
+                } else {
+                    unique.append(entry)
+                }
+            }
+            let entries = unique.sorted {
+                if $0.requestRevision != $1.requestRevision {
+                    return $0.requestRevision > $1.requestRevision
+                }
+                if $0.kind != $1.kind { return $0.kind.rawValue < $1.kind.rawValue }
+                return $0.id < $1.id
+            }
+            earlierComposerEntriesByRequest[key] = entries.isEmpty ? nil : entries
+        } catch {
+            diagnose(.localStore, .draftLoad, .failed, error: error, request: key,
+                     revision: revision)
+        }
     }
 
     private func restoreAnswerComposerFailure(for request: PresentedRequest,
@@ -2942,6 +3792,10 @@ final class LivePresentationStore {
             guard snapshot.replayBarrier == nil, snapshot.repairIssues.isEmpty else { return }
             try await composerDraftPersistence.pruneDrafts(for: profileContext.identity,
                 keeping: Set(snapshot.requests.keys))
+            for key in Array(earlierComposerEntriesByRequest.keys)
+                where !snapshot.requests.contains(where: { $0.key == key }) {
+                earlierComposerEntriesByRequest.removeValue(forKey: key)
+            }
         } catch {
             diagnose(.localStore, .draftLoad, .failed, error: error)
         }
@@ -3254,7 +4108,7 @@ final class LivePresentationStore {
                 saved.carriedOverSend = carriedOver
                 try await composerDraftPersistence.flush(saved, at: answerAddress)
                 attempt = PreparedAnswerAttempt(operationID: operationID,
-                    requestRevision: requestRevision,
+                    requestRevision: carriedOver.requestRevision ?? requestRevision,
                     draft: carriedOver.content, wasUnsettled: wasUnsettled,
                     earlierVersionMayHaveBeenSent: earlierVersionMayHaveBeenSent)
             } else if let session {
@@ -3274,9 +4128,11 @@ final class LivePresentationStore {
                 saved.currentAttemptUnsettled = true
                 saved.failure = nil
                 saved.failureOperationID = nil
+                let attemptRevision = wasUnsettled
+                    ? (saved.operationRequestRevision ?? requestRevision) : requestRevision
                 try await composerDraftPersistence.flush(saved, at: answerAddress)
                 attempt = PreparedAnswerAttempt(operationID: operationID,
-                    requestRevision: requestRevision, draft: answerDraft,
+                    requestRevision: attemptRevision, draft: answerDraft,
                     wasUnsettled: wasUnsettled,
                     earlierVersionMayHaveBeenSent: saved.earlierVersionMayHaveBeenSent)
             }
@@ -3308,7 +4164,7 @@ final class LivePresentationStore {
         let stored = try? await attentionStore.snapshot(context: profileContext).intents.values.first {
             $0.operationID == attempt.operationID
         }
-        let currentRequest = try? inspectedRequest(key, revision: requestRevision)
+        let currentRequest = try? inspectedRequest(key, revision: attempt.requestRevision)
         let currentInputs = currentRequest.flatMap {
             try? typedInputs(for: $0, draft: answerDraft,
                              explicitCompatibilityAction: explicitCompatibilityAction)
@@ -3329,7 +4185,7 @@ final class LivePresentationStore {
         do {
             if stored == nil {
                 _ = try await submit(key, answerDraft: answerDraft,
-                    requestRevision: requestRevision, operationID: attempt.operationID)
+                    requestRevision: attempt.requestRevision, operationID: attempt.operationID)
             }
         } catch {
             let outcome = ComposerDeliveryOutcome.notSent(
@@ -3516,14 +4372,16 @@ final class LivePresentationStore {
                     at: address))?.operationID ?? (conflict ? nil : attempt.operationID)
             }
             setAnswerFailure(for: key, attemptID: attempt.operationID,
-                revision: attempt.requestRevision, draft: attempt.draft,
+                revision: request(for: key)?.requestRevision ?? attempt.requestRevision,
+                draft: attempt.draft,
                 summary: summary, detail: detail, retryOperationID: retryID)
         case let .unconfirmed(summary, detail):
             let retryID: UUID?
             if let session { retryID = session.deliveryDraft.operationID }
             else { retryID = attempt.operationID }
             setAnswerFailure(for: key, attemptID: attempt.operationID,
-                revision: attempt.requestRevision, draft: attempt.draft,
+                revision: request(for: key)?.requestRevision ?? attempt.requestRevision,
+                draft: attempt.draft,
                 summary: summary, detail: detail, retryOperationID: retryID)
         }
         failedResponseWarningGeneration &+= 1
@@ -3864,8 +4722,40 @@ final class LivePresentationStore {
         locallyReconciledConversationReadRevisions = Set(
             locallyReconciledConversationReadRevisions.filter { $0 > snapshot.revision })
         if !locallyReconciledRead {
-            conversationThreads = freshConversationThreads
+            var adoptedThreads = freshConversationThreads
+            var draftsToPersist: [ConversationDraft] = []
+            for (sourceBinding, stagedText) in Array(pendingConversationTextByBinding) {
+                guard conversationThreads[sourceBinding.request]?.currentRevision == sourceBinding.revision,
+                      var thread = adoptedThreads[sourceBinding.request],
+                      thread.currentRevision > sourceBinding.revision else { continue }
+                let targetBinding = ConversationBinding(request: sourceBinding.request,
+                    revision: thread.currentRevision)
+                var draft = thread.drafts[targetBinding.revision] ?? ConversationDraft(binding: targetBinding)
+                let staged = ExactText(stagedText)
+                if draft.text != staged {
+                    if let carried = Self.carriedOverAttempt(from: draft),
+                       !draft.carriedOverSends.contains(where: { $0.id == carried.id }) {
+                        draft.carriedOverSends.append(carried)
+                    }
+                    draft.text = staged
+                    draft.operationID = nil
+                    draft.operationRequestRevision = nil
+                    draft.inFlightOperationID = nil
+                    draft.currentAttemptUnsettled = false
+                    draft.earlierVersionMayHaveBeenSent = false
+                    draft.failure = nil
+                    draft.disposition = .saved
+                    draft.draftRequestRevision = sourceBinding.revision
+                    draftsToPersist.append(draft)
+                }
+                thread.drafts[targetBinding.revision] = draft
+                adoptedThreads[sourceBinding.request] = thread
+                editedConversationDrafts.insert(targetBinding)
+                pendingConversationTextByBinding.removeValue(forKey: sourceBinding)
+            }
+            conversationThreads = adoptedThreads
             conversationProjectionRevision = snapshot.revision
+            for draft in draftsToPersist { persistConversationDraft(draft, flushImmediately: true) }
         }
         presentation = snapshot
         reconcileNewMessageArea(snapshot.requests)

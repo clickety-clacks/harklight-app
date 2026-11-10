@@ -2,6 +2,7 @@ import AttentionDomain
 import Observation
 import SwiftUI
 import UIKit
+import QuickLook
 
 struct SeenActionPresentation: Equatable {
     let status: InformationalSeenStatus
@@ -265,8 +266,15 @@ final class ReplyEditorDraftSession {
     @ObservationIgnored private var persistenceTask: Task<Void, Never>?
     @ObservationIgnored private var didLoadPersistedDraft = false
     private(set) var isDraftLoaded: Bool
+    @ObservationIgnored private var requestPayload: JSONValue?
+    @ObservationIgnored private var requestProjection: AdmittedRequestProjection
     @ObservationIgnored private let onDraftLoaded: ((AnswerComposerDraft) -> Void)?
     @ObservationIgnored private let onPersistenceFailure: ((Error) -> Void)?
+
+    private enum ChoiceTarget: Equatable {
+        case compatibility
+        case input(ExactText)
+    }
 
     init(request: PresentedRequest, canSubmitFromSnapshot: Bool,
          identity: ProfileIdentity? = nil,
@@ -281,10 +289,15 @@ final class ReplyEditorDraftSession {
         draft = initialDraft
         noCommentSelected = initialDraft.noCommentSelected
         deliveryDraft = AnswerComposerDraft(content: initialDraft)
+        deliveryDraft.contentRequestRevision = request.requestRevision
         self.persistence = persistence
         self.onDraftLoaded = onDraftLoaded
         self.onPersistenceFailure = onPersistenceFailure
         isDraftLoaded = persistence == nil
+        requestPayload = Self.payload(for: request)
+        requestProjection = request.projection
+        deliveryDraft.selectedChoices = Self.choiceSnapshots(for: initialDraft,
+            revision: request.requestRevision, payload: requestPayload)
         persistenceAddress = identity.map {
             ComposerDraftAddress(identity: $0, request: request.key,
                                  revision: request.requestRevision, kind: .answer)
@@ -304,6 +317,8 @@ final class ReplyEditorDraftSession {
             loaded = try await persistence.load(AnswerComposerDraft.self, at: persistenceAddress)
         } catch {
             isDraftLoaded = false
+            didLoadPersistedDraft = false
+            onPersistenceFailure?(error)
             return
         }
         guard var saved = loaded else {
@@ -321,6 +336,16 @@ final class ReplyEditorDraftSession {
         if saved.failure != nil, saved.failureOperationID == nil {
             saved.failureOperationID = saved.operationID
         }
+        if saved.contentRequestRevision == nil {
+            saved.contentRequestRevision = saved.selectedChoices.first?.requestRevision ?? requestRevision
+        }
+        if saved.operationID != nil, saved.operationRequestRevision == nil {
+            saved.operationRequestRevision = saved.selectedChoices.first?.requestRevision ?? requestRevision
+        }
+        if saved.selectedChoices.isEmpty {
+            saved.selectedChoices = Self.choiceSnapshots(for: saved.content,
+                revision: saved.operationRequestRevision ?? requestRevision, payload: requestPayload)
+        }
         if hasLocalChanges {
             var merged = Self.merge(local: draft, over: saved.content,
                                     original: mergeSeedDraft)
@@ -337,7 +362,8 @@ final class ReplyEditorDraftSession {
         onDraftLoaded?(deliveryDraft)
     }
 
-    func updateText(_ text: String, target: ReplyEditorTarget) {
+    func updateText(_ text: String, target: ReplyEditorTarget, fromRevision: UInt64? = nil) {
+        guard fromRevision == nil || fromRevision == requestRevision else { return }
         var updated = draft
         updated.noCommentSelected = false
         if let inputID = target.inputID {
@@ -353,15 +379,19 @@ final class ReplyEditorDraftSession {
         store(updated)
     }
 
-    func selectAction(_ actionID: ExactText, inputID: ExactText?) {
+    func selectAction(_ actionID: ExactText, inputID: ExactText?, fromRevision: UInt64? = nil) {
+        guard fromRevision == nil || fromRevision == requestRevision else { return }
         var updated = draft
         updated.noCommentSelected = false
+        let target: ChoiceTarget
         if let inputID {
             updated.inputs[inputID]?.selectedActionID = actionID
+            target = .input(inputID)
         } else {
             updated.compatibility.selectedActionID = actionID
+            target = .compatibility
         }
-        store(updated)
+        store(updated, refreshingChoice: target)
     }
 
     func setPoint(_ point: PointValue, inputID: ExactText) {
@@ -373,31 +403,71 @@ final class ReplyEditorDraftSession {
         store(updated)
     }
 
-    func selectNoComment() {
+    func selectNoComment(fromRevision: UInt64? = nil) {
+        guard fromRevision == nil || fromRevision == requestRevision else { return }
         var updated = draft
         updated.noCommentSelected = true
         updated.compatibility.selectedActionID = nil
         for inputID in Array(updated.inputs.keys) {
             updated.inputs[inputID]?.selectedActionID = nil
         }
-        store(updated)
+        store(updated, clearingChoices: true)
     }
 
     func adoptUneditedRequest(_ request: PresentedRequest, canSubmit: Bool) {
-        guard request.key == requestKey, !hasLocalChanges else { return }
-        flushPendingPersistence()
+        guard request.key == requestKey, request.requestRevision >= requestRevision else { return }
+        let payload = Self.payload(for: request)
+        guard request.requestRevision != requestRevision ||
+              canSubmitFromSnapshot != canSubmit || requestPayload != payload else { return }
+        persistenceTask?.cancel()
+        persistenceTask = nil
         requestRevision = request.requestRevision
         canSubmitFromSnapshot = canSubmit
-        draft = Self.initialDraft(for: request)
-        mergeSeedDraft = draft
-        deliveryDraft = AnswerComposerDraft(content: draft)
+        requestPayload = payload
+        requestProjection = request.projection
+        mergeSeedDraft = Self.initialDraft(for: request)
+        deliveryDraft.content = draft
+        if !draft.hasEdits { deliveryDraft.contentRequestRevision = request.requestRevision }
         noCommentSelected = draft.noCommentSelected
-        didLoadPersistedDraft = false
-        isDraftLoaded = persistence == nil
+        if isDraftLoaded { schedulePersistence() }
+        else { didLoadPersistedDraft = false }
     }
 
-    private func store(_ updated: RequestDraft) {
-        guard updated != draft else { return }
+    func isUnavailableChoice(actionID: ExactText, inputID: ExactText?) -> Bool {
+        unavailableSelectedChoices.contains { $0.choiceID == actionID && $0.inputID == inputID }
+    }
+
+    struct UnavailableChoiceDescription: Identifiable {
+        let id: String
+        let text: String
+    }
+
+    var unavailableChoiceDescriptions: [UnavailableChoiceDescription] {
+        unavailableSelectedChoices.map { choice in
+            let responseText = choice.kind.rawValue == "text"
+                ? choice.answerValue.stringValue?.rawValue
+                : nil
+            let text = [choice.label.rawValue, responseText].compactMap { value in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            }.joined(separator: ": ")
+            return UnavailableChoiceDescription(id: choice.id, text: text)
+        }
+    }
+
+    struct PreservedTypedText: Identifiable {
+        let id: String
+        let label: String
+        let text: String
+    }
+
+    var unavailableTypedText: [PreservedTypedText] {
+        Self.unavailableTypedText(in: draft, projection: requestProjection)
+    }
+
+    private func store(_ updated: RequestDraft, refreshingChoice target: ChoiceTarget? = nil,
+                       clearingChoices: Bool = false) {
+        guard updated != draft || target != nil || clearingChoices else { return }
         let contentChanged = updated != draft
         if contentChanged {
             if deliveryDraft.currentAttemptUnsettled {
@@ -405,6 +475,34 @@ final class ReplyEditorDraftSession {
                 deliveryDraft.earlierVersionMayHaveBeenSent = true
             }
             deliveryDraft.operationID = nil
+            deliveryDraft.operationRequestRevision = nil
+            deliveryDraft.contentRequestRevision = requestRevision
+        }
+        if clearingChoices {
+            deliveryDraft.selectedChoices = []
+        } else {
+            let currentChoices = Self.choiceSnapshots(for: updated,
+                revision: requestRevision, payload: requestPayload)
+            var retained: [AnswerChoiceSnapshot] = []
+            for old in deliveryDraft.selectedChoices where Self.isSelected(old, in: updated) {
+                if target.map({ Self.matches($0, old) }) == true { continue }
+                if let current = currentChoices.first(where: { Self.sameChoiceIdentity(old, $0) }),
+                   Self.sameChoiceMeaning(old, current) {
+                    retained.append(AnswerChoiceSnapshot(inputID: old.inputID,
+                        choiceID: old.choiceID, label: old.label, kind: old.kind,
+                        answerValue: current.answerValue, requestRevision: old.requestRevision))
+                } else {
+                    retained.append(old)
+                }
+            }
+            for current in currentChoices where !retained.contains(where: {
+                Self.sameChoiceIdentity($0, current)
+            }) {
+                if target == nil || target.map({ Self.matches($0, current) }) == true {
+                    retained.append(current)
+                }
+            }
+            deliveryDraft.selectedChoices = retained
         }
         draft = updated
         deliveryDraft.content = updated
@@ -413,6 +511,66 @@ final class ReplyEditorDraftSession {
         }
         hasLocalChanges = true
         schedulePersistence()
+    }
+
+    var unavailableSelectedChoices: [AnswerChoiceSnapshot] {
+        let current = Self.choiceSnapshots(for: draft, revision: requestRevision,
+            payload: requestPayload)
+        return deliveryDraft.selectedChoices.filter { selected in
+            Self.isSelected(selected, in: draft) &&
+                !current.contains(where: {
+                    Self.sameChoiceIdentity(selected, $0) && Self.sameChoiceMeaning(selected, $0)
+                })
+        }
+    }
+
+    var hasUnavailableSelectedChoice: Bool { !unavailableSelectedChoices.isEmpty }
+
+    func clearUnavailableSelectedChoices() {
+        var updated = draft
+        for selected in unavailableSelectedChoices {
+            if let inputID = selected.inputID {
+                if updated.inputs[inputID]?.selectedActionID == selected.choiceID {
+                    updated.inputs[inputID]?.selectedActionID = nil
+                }
+            } else if updated.compatibility.selectedActionID == selected.choiceID {
+                updated.compatibility.selectedActionID = nil
+            }
+        }
+        store(updated)
+    }
+
+    private static func payload(for request: PresentedRequest) -> JSONValue? {
+        try? JSONDecoder().decode(JSONValue.self, from: Data(request.originalContentJSON.utf8))
+    }
+
+    private static func choiceSnapshots(for draft: RequestDraft, revision: UInt64,
+                                        payload: JSONValue?) -> [AnswerChoiceSnapshot] {
+        ComposerDraftPersistence.choiceSnapshots(for: draft, revision: revision, payload: payload)
+    }
+
+    private static func isSelected(_ choice: AnswerChoiceSnapshot, in draft: RequestDraft) -> Bool {
+        guard !draft.noCommentSelected else { return false }
+        if let inputID = choice.inputID { return draft.inputs[inputID]?.selectedActionID == choice.choiceID }
+        return draft.compatibility.selectedActionID == choice.choiceID
+    }
+
+    private static func sameChoiceIdentity(_ lhs: AnswerChoiceSnapshot,
+                                           _ rhs: AnswerChoiceSnapshot) -> Bool {
+        lhs.inputID == rhs.inputID && lhs.choiceID == rhs.choiceID
+    }
+
+    private static func sameChoiceMeaning(_ lhs: AnswerChoiceSnapshot,
+                                          _ rhs: AnswerChoiceSnapshot) -> Bool {
+        guard lhs.label == rhs.label, lhs.kind == rhs.kind else { return false }
+        return lhs.kind.rawValue != "value" || lhs.answerValue == rhs.answerValue
+    }
+
+    private static func matches(_ target: ChoiceTarget, _ choice: AnswerChoiceSnapshot) -> Bool {
+        switch target {
+        case .compatibility: choice.inputID == nil
+        case let .input(inputID): choice.inputID == inputID
+        }
     }
 
     private func schedulePersistence() {
@@ -446,13 +604,21 @@ final class ReplyEditorDraftSession {
 
     func prepareAttempt() async throws -> PreparedAnswerAttempt {
         guard let persistence, let persistenceAddress else { throw CocoaError(.fileWriteUnknown) }
-        guard !isSendInFlight, isDraftLoaded, canSubmitFromSnapshot else { throw LiveReplyError.notOpen }
+        let unchangedUnsettledRetry = deliveryDraft.currentAttemptUnsettled &&
+            deliveryDraft.operationID != nil && deliveryDraft.content == draft
+        guard !isSendInFlight, isDraftLoaded, canSubmitFromSnapshot,
+              (!hasUnavailableSelectedChoice || unchangedUnsettledRetry) else {
+            throw LiveReplyError.notOpen
+        }
         let attemptID = deliveryDraft.operationID ?? UUID()
         let wasUnsettled = deliveryDraft.currentAttemptUnsettled
+        let attemptRevision = wasUnsettled && deliveryDraft.operationID != nil
+            ? (deliveryDraft.operationRequestRevision ?? requestRevision) : requestRevision
         let earlierVersionMayHaveBeenSent = deliveryDraft.earlierVersionMayHaveBeenSent
         var prepared = deliveryDraft
         prepared.content = draft
         prepared.operationID = attemptID
+        prepared.operationRequestRevision = attemptRevision
         prepared.failureOperationID = nil
         prepared.currentAttemptUnsettled = true
         prepared.failure = nil
@@ -470,7 +636,7 @@ final class ReplyEditorDraftSession {
         }
         isSendInFlight = true
         return PreparedAnswerAttempt(operationID: attemptID,
-                                     requestRevision: requestRevision,
+                                     requestRevision: attemptRevision,
                                      draft: draft,
                                      wasUnsettled: wasUnsettled,
                                      earlierVersionMayHaveBeenSent: earlierVersionMayHaveBeenSent)
@@ -509,7 +675,7 @@ final class ReplyEditorDraftSession {
         }
         isSendInFlight = true
         return PreparedAnswerAttempt(operationID: attemptID,
-            requestRevision: requestRevision, draft: carriedOver.content,
+            requestRevision: carriedOver.requestRevision ?? requestRevision, draft: carriedOver.content,
             wasUnsettled: wasUnsettled,
             earlierVersionMayHaveBeenSent: earlierVersionMayHaveBeenSent)
     }
@@ -521,22 +687,29 @@ final class ReplyEditorDraftSession {
         case .confirmed:
             if deliveryDraft.operationID == attempt.operationID,
                deliveryDraft.content == attempt.draft {
+                draft = Self.unavailableTypedTextDraft(from: attempt.draft,
+                    projection: requestProjection, seed: mergeSeedDraft)
+                var retained = deliveryDraft
+                retained.content = draft
+                retained.operationID = nil
+                retained.operationRequestRevision = nil
+                retained.failureOperationID = nil
+                retained.currentAttemptUnsettled = false
+                retained.earlierVersionMayHaveBeenSent = false
+                retained.failure = nil
+                retained.selectedChoices = Self.choiceSnapshots(for: mergeSeedDraft,
+                    revision: requestRevision, payload: requestPayload)
+                retained.contentRequestRevision = requestRevision
+                deliveryDraft = retained
                 if let persistence, let persistenceAddress {
-                    if let carriedOver = deliveryDraft.carriedOverSend {
-                        draft = mergeSeedDraft
-                        deliveryDraft = AnswerComposerDraft(content: mergeSeedDraft,
-                            carriedOverSend: carriedOver)
-                        try? await persistence.flush(deliveryDraft, at: persistenceAddress)
-                    } else {
+                    if retained.carriedOverSends.isEmpty && retained.earlierEntries.isEmpty &&
+                        !draft.hasEdits {
                         try? await persistence.remove(at: persistenceAddress)
-                        draft = mergeSeedDraft
-                        deliveryDraft = AnswerComposerDraft(content: mergeSeedDraft)
+                    } else {
+                        try? await persistence.flush(retained, at: persistenceAddress)
                     }
-                } else {
-                    draft = mergeSeedDraft
-                    deliveryDraft = AnswerComposerDraft(content: mergeSeedDraft)
                 }
-                noCommentSelected = mergeSeedDraft.noCommentSelected
+                noCommentSelected = draft.noCommentSelected
                 hasLocalChanges = false
             } else {
                 deliveryDraft.currentAttemptUnsettled = false
@@ -672,6 +845,142 @@ final class ReplyEditorDraftSession {
             }
         }
         return RequestDraft(inputs: inputs)
+    }
+
+    private static func unavailableTypedText(in draft: RequestDraft,
+                                             projection: AdmittedRequestProjection)
+        -> [PreservedTypedText] {
+        var acceptedTextInputs = Set<ExactText>()
+        var acceptedTextActions = Set<String>()
+        var currentInputIDs = Set<ExactText>()
+        var currentPointInputs = Set<ExactText>()
+        var currentProjectionIsCompatibility = false
+        switch projection {
+        case let .sender(sender):
+            for input in sender.inputs {
+                currentInputIDs.insert(input.id)
+                switch input.kind {
+                case .text:
+                    acceptedTextInputs.insert(input.id)
+                case let .response(actions):
+                    for action in actions where action.kind == .text {
+                        acceptedTextActions.insert("\(input.id.rawValue)\u{1f}\(action.id.rawValue)")
+                    }
+                case .point:
+                    currentPointInputs.insert(input.id)
+                }
+            }
+        case let .compatibility(actions):
+            currentProjectionIsCompatibility = true
+            acceptedTextActions = Set(actions.filter { $0.kind == .text }.map {
+                "\u{1f}\($0.id.rawValue)"
+            })
+        case .unsupported:
+            break
+        }
+
+        var result: [PreservedTypedText] = []
+        func append(_ id: String, _ label: String, _ text: ExactText?) {
+            guard let text, !text.rawValue.isEmpty else { return }
+            result.append(PreservedTypedText(id: id, label: label, text: text.rawValue))
+        }
+
+        for (inputID, field) in draft.inputs.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
+            let inputIsCurrent = currentInputIDs.contains(inputID)
+            if !inputIsCurrent || !acceptedTextInputs.contains(inputID) {
+                append("input:\(inputID.rawValue)", "Saved text from an earlier answer control", field.text)
+            }
+            for (actionID, text) in field.textByActionID.sorted(by: {
+                $0.key.rawValue < $1.key.rawValue
+            }) {
+                let accepted = acceptedTextActions.contains("\(inputID.rawValue)\u{1f}\(actionID.rawValue)")
+                if !accepted {
+                    append("action:\(inputID.rawValue):\(actionID.rawValue)",
+                        "Saved text from an earlier answer control", text)
+                }
+            }
+            if !currentPointInputs.contains(inputID) {
+                append("point-x:\(inputID.rawValue)", "Saved text from an earlier answer control",
+                    field.horizontalText)
+                append("point-y:\(inputID.rawValue)", "Saved text from an earlier answer control",
+                    field.verticalText)
+            }
+        }
+
+        if !currentProjectionIsCompatibility {
+            for (actionID, text) in draft.compatibility.textByActionID.sorted(by: {
+                $0.key.rawValue < $1.key.rawValue
+            }) {
+                append("compatibility:\(actionID.rawValue)", "Saved text from an earlier answer control", text)
+            }
+        } else {
+            for (actionID, text) in draft.compatibility.textByActionID.sorted(by: {
+                $0.key.rawValue < $1.key.rawValue
+            }) where !acceptedTextActions.contains("\u{1f}\(actionID.rawValue)") {
+                append("compatibility:\(actionID.rawValue)", "Saved text from an earlier answer control", text)
+            }
+        }
+        return result
+    }
+
+    private static func unavailableTypedTextDraft(from draft: RequestDraft,
+        projection: AdmittedRequestProjection, seed: RequestDraft) -> RequestDraft {
+        let retainedItems = unavailableTypedText(in: draft, projection: projection)
+        guard !retainedItems.isEmpty else { return seed }
+        var retained = seed
+        switch projection {
+        case let .sender(sender):
+            let currentInputs = Dictionary(uniqueKeysWithValues: sender.inputs.map { ($0.id, $0) })
+            for (inputID, field) in draft.inputs {
+                guard let current = currentInputs[inputID] else {
+                    retained.inputs[inputID] = field
+                    continue
+                }
+                switch current.kind {
+                case .text:
+                    var preserved = InputDraft()
+                    for (actionID, text) in field.textByActionID {
+                        if !text.rawValue.isEmpty { preserved.textByActionID[actionID] = text }
+                    }
+                    if !preserved.textByActionID.isEmpty { retained.inputs[inputID] = preserved }
+                case let .response(actions):
+                    var preserved = InputDraft()
+                    if let text = field.text, !text.rawValue.isEmpty { preserved.text = text }
+                    let validTextActions = Set(actions.filter { $0.kind == .text }.map(\.id))
+                    preserved.textByActionID = field.textByActionID.filter {
+                        !validTextActions.contains($0.key) && !$0.value.rawValue.isEmpty
+                    }
+                    if preserved.text?.rawValue.isEmpty == false || !preserved.textByActionID.isEmpty {
+                        retained.inputs[inputID] = preserved
+                    }
+                case .point:
+                    var preserved = InputDraft()
+                    if let text = field.text, !text.rawValue.isEmpty { preserved.text = text }
+                    preserved.textByActionID = field.textByActionID.filter { !$0.value.rawValue.isEmpty }
+                    if preserved.text?.rawValue.isEmpty == false || !preserved.textByActionID.isEmpty {
+                        retained.inputs[inputID] = preserved
+                    }
+                }
+            }
+            if draft.compatibility.hasEdits { retained.compatibility = draft.compatibility }
+        case let .compatibility(actions):
+            let validTextActions = Set(actions.filter { $0.kind == .text }.map(\.id))
+            var compatibility = CompatibilityDraft()
+            compatibility.textByActionID = draft.compatibility.textByActionID
+                .filter { !validTextActions.contains($0.key) }
+            retained.compatibility = compatibility
+            retained.inputs = draft.inputs.filter { _, field in
+                field.text?.rawValue.isEmpty == false ||
+                    !field.textByActionID.isEmpty || field.horizontalText != nil || field.verticalText != nil
+            }
+        case .unsupported:
+            retained.inputs = draft.inputs.mapValues { field in
+                InputDraft(textByActionID: field.textByActionID, text: field.text,
+                    horizontalText: field.horizontalText, verticalText: field.verticalText)
+            }
+            retained.compatibility = CompatibilityDraft(textByActionID: draft.compatibility.textByActionID)
+        }
+        return retained
     }
 }
 
@@ -1429,6 +1738,7 @@ struct LiveRequestDetail: View {
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
+    @State private var versionHistoryPresented = false
     @State private var warningDialog: WarningDialogKind?
     @State private var activeReplyEditor: ReplyEditorTarget?
     @State private var replyDraftSession: ReplyEditorDraftSession?
@@ -1463,9 +1773,9 @@ struct LiveRequestDetail: View {
         self.testConversationSheetDidAppear = testConversationSheetDidAppear
         _storePresentationSnapshot = State(initialValue: Self.storePresentationSnapshot(
             request: request, store: store))
-        let canSubmit = localExample == nil &&
-            Self.canEditSnapshot(request: request, store: store, context: context)
-        if canSubmit {
+        let canLoadDraft = localExample == nil && fixtureStore == nil &&
+            request.informationalSeenStatus == nil
+        if canLoadDraft {
             _replyDraftSession = State(initialValue: store.replyEditorSession(for: request))
         } else {
             _replyDraftSession = State(initialValue: nil)
@@ -1563,6 +1873,10 @@ struct LiveRequestDetail: View {
         return session
     }
 
+    private var shouldLoadAnswerDraftSession: Bool {
+        localExample == nil && fixtureStore == nil && request.informationalSeenStatus == nil
+    }
+
     private var isEditingLocalReply: Bool {
         guard let session = localReplySession, session.canSubmitFromSnapshot else { return false }
         // The view's focus flag resets on navigation; the retained draft does not.
@@ -1587,8 +1901,14 @@ struct LiveRequestDetail: View {
 
     private func replyTextBinding(for target: ReplyEditorTarget) -> Binding<String> {
         if let session = localReplySession {
+            let shownRevision = request.requestRevision
             return Binding(
                 get: {
+                    if let inputID = target.inputID,
+                       session.isUnavailableChoice(actionID: ExactText(target.actionID),
+                                                   inputID: ExactText(inputID)) { return "" }
+                    if target.inputID == nil,
+                       session.isUnavailableChoice(actionID: ExactText(target.actionID), inputID: nil) { return "" }
                     if let inputID = target.inputID {
                         return session.draft.inputs[ExactText(inputID)]?
                             .textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
@@ -1598,7 +1918,7 @@ struct LiveRequestDetail: View {
                 set: { text in
                     guard !controlsReadOnly else { return }
                     markLocalReplyInteraction()
-                    session.updateText(text, target: target)
+                    session.updateText(text, target: target, fromRevision: shownRevision)
                 })
         }
         return Binding(
@@ -1900,6 +2220,7 @@ struct LiveRequestDetail: View {
         if let session = localReplySession {
             guard session.isDraftLoaded, !session.isSendInFlight else { return false }
             return session.canSubmitFromSnapshot &&
+                !session.hasUnavailableSelectedChoice &&
                 (!session.noCommentSelected || request.informationalSeenStatus == nil)
         }
         if noCommentSelected { return canOfferNoComment }
@@ -1927,7 +2248,7 @@ struct LiveRequestDetail: View {
     private func selectNoCommentAction() {
         closeReplyEditor()
         if let session = localReplySession {
-            session.selectNoComment()
+            session.selectNoComment(fromRevision: request.requestRevision)
             markLocalReplyInteraction()
         } else {
             store.selectNoComment(for: request.key, requestRevision: request.requestRevision)
@@ -2095,10 +2416,20 @@ struct LiveRequestDetail: View {
                                 : "request-local-answer-status")
                     }
                 }
-                if let revision = storePresentationSnapshot.conversationRevision, revision > 1 {
-                    Text(storePresentationSnapshot.hasAcceptedUpdate ? "Updated · version \(revision)" : "Question version \(revision)")
-                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
-                        .accessibilityIdentifier("request-update-fact")
+                let revision = storePresentationSnapshot.conversationRevision ?? request.requestRevision
+                if revision > 1 || store.hasEarlierComposerEntries(for: request.key) {
+                    Button {
+                        versionHistoryPresented = true
+                    } label: {
+                        Text(storePresentationSnapshot.hasAcceptedUpdate
+                             ? "Updated · version \(revision)"
+                             : "Question version \(revision)")
+                            .font(.caption)
+                            .foregroundStyle(detailColors.secondaryTextColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("request-update-fact")
+                    .accessibilityHint("Read earlier versions of this request")
                 }
                 if storePresentationSnapshot.isRetracted {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
@@ -2187,6 +2518,64 @@ struct LiveRequestDetail: View {
                             if canOfferNoComment { noCommentChoice }
                         }
                     }
+                }
+                if let session = localReplySession,
+                   !session.unavailableChoiceDescriptions.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Saved choice no longer available")
+                            .font(.subheadline.weight(.semibold))
+                        ForEach(session.unavailableChoiceDescriptions) { value in
+                            Text(value.text)
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("unavailable-answer-choice")
+                        }
+                        Text(session.deliveryDraft.currentAttemptUnsettled &&
+                            session.deliveryDraft.operationID != nil &&
+                            session.deliveryDraft.content == session.draft
+                            ? "A Retry reuses this unsettled answer exactly as it was sent. Choose a current option or clear the saved choice before sending new content."
+                            : "Choose a current option or clear the saved choice before sending.")
+                            .font(.caption)
+                            .foregroundStyle(detailColors.secondaryTextColor)
+                        if session.canSubmitFromSnapshot {
+                            Button("Clear saved choice") {
+                                session.clearUnavailableSelectedChoices()
+                            }
+                            .disabled(!session.isDraftLoaded || session.isSendInFlight)
+                            .accessibilityIdentifier("clear-unavailable-answer-choice")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+                    .accessibilityIdentifier("unavailable-answer-choice-notice")
+                }
+                if let session = localReplySession, !session.unavailableTypedText.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Saved text from earlier answer controls")
+                            .font(.subheadline.weight(.semibold))
+                        ForEach(session.unavailableTypedText) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.label)
+                                    .font(.caption)
+                                    .foregroundStyle(detailColors.secondaryTextColor)
+                                Text(item.text)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Button("Copy") {
+                                    UIPasteboard.general.string = item.text
+                                }
+                                .accessibilityIdentifier("unavailable-answer-text-copy-\(item.id)")
+                            }
+                            .accessibilityIdentifier("unavailable-answer-text-\(item.id)")
+                        }
+                        Text("This text cannot be included in a new answer. It stays saved until you remove it.")
+                            .font(.caption)
+                            .foregroundStyle(detailColors.secondaryTextColor)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+                    .accessibilityIdentifier("unavailable-answer-text-notice")
                 }
                 if controlsReadOnly, localReplySession?.noCommentSelected == true {
                     Text("No comment")
@@ -2352,6 +2741,12 @@ struct LiveRequestDetail: View {
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
         }
+        .sheet(isPresented: $versionHistoryPresented) {
+            RequestVersionHistorySheet(store: store, key: request.key,
+                                       currentRevision: storePresentationSnapshot.conversationRevision ?? request.requestRevision)
+                .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                                 testOpen: testOpenForegroundChatIndicator)
+        }
         .sheet(item: $warningDialog) { dialogKind in
             Group {
                 switch dialogKind {
@@ -2361,7 +2756,9 @@ struct LiveRequestDetail: View {
                             summary: warning.summary,
                             detail: .localized(warning.detail),
                             canRetry: store.canRetryFailedResponse(for: request.key),
-                            onRetry: { Task { _ = await store.retryFailedResponse(for: request.key) } },
+                            onRetry: request.lifecycleStatus == .open && !store.isRetracted(request.key)
+                                ? { Task { _ = await store.retryFailedResponse(for: request.key) } }
+                                : nil,
                             onCopy: { UIPasteboard.general.string = $0 })
                     }
                 case .skippedMessage:
@@ -2386,10 +2783,13 @@ struct LiveRequestDetail: View {
                                                  testOpen: testOpenForegroundChatIndicator)
         }
         .task(id: "\(request.key.accountScope.rawValue):\(request.key.senderID.rawValue):\(request.key.messageID.rawValue):\(request.requestRevision)") {
-            guard localExample == nil else { return }
+            guard shouldLoadAnswerDraftSession else { return }
             let session = store.replyEditorSession(for: request)
             replyDraftSession = session
             await session.loadPersistedDraft()
+        }
+        .task(id: request.key) {
+            await store.loadEarlierComposerEntries(for: request.key)
         }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
@@ -2422,9 +2822,7 @@ struct LiveRequestDetail: View {
         .onChange(of: request.key) { _, _ in
             closeReplyEditor()
             localReplyEditingActive = false
-            let canSubmit = localExample == nil &&
-                Self.canEditSnapshot(request: request, store: store, context: context)
-            if canSubmit {
+            if shouldLoadAnswerDraftSession {
                 replyDraftSession = store.replyEditorSession(for: request)
             } else {
                 replyDraftSession = nil
@@ -2434,19 +2832,15 @@ struct LiveRequestDetail: View {
     }
 
     private func refreshUneditedReplySession() {
-        guard !localReplyEditingActive else { return }
-        let canSubmit = localExample == nil &&
+        let canSubmit = localExample == nil && fixtureStore == nil &&
             Self.canEditSnapshot(request: request, store: store, context: context)
-        if canSubmit {
+        if shouldLoadAnswerDraftSession {
             if let session = localReplySession {
-                session.adoptUneditedRequest(request, canSubmit: true)
+                session.adoptUneditedRequest(request, canSubmit: canSubmit)
             } else {
                 replyDraftSession = store.replyEditorSession(for: request)
             }
         } else {
-            if request.lifecycleStatus != .open || request.intentReceipt != nil {
-                store.discardReplyEditorSession(for: request.key)
-            }
             replyDraftSession = nil
         }
     }
@@ -2496,9 +2890,12 @@ struct LiveRequestDetail: View {
                         endLocalReplyIfRequestChanged(session)
                         return
                     }
-                    store.discardReplyEditorSession(for: request.key)
+                    if let current = store.request(for: request.key) {
+                        session.adoptUneditedRequest(current,
+                            canSubmit: Self.canEditSnapshot(request: current, store: store, context: context))
+                    }
                     localReplyEditingActive = false
-                    replyDraftSession = nil
+                    replyDraftSession = session
                     closeReplyEditor()
                     returnToListIfSinglePane()
                 }
@@ -2532,12 +2929,8 @@ struct LiveRequestDetail: View {
         localReplyEditingActive = false
         let canEditCurrentRequest = localExample == nil &&
             Self.canEditSnapshot(request: current, store: store, context: context)
-        if !canEditCurrentRequest {
-            store.discardReplyEditorSession(for: current.key)
-        }
-        replyDraftSession = canEditCurrentRequest
-            ? store.replyEditorSession(for: current)
-            : nil
+        session.adoptUneditedRequest(current, canSubmit: canEditCurrentRequest)
+        replyDraftSession = shouldLoadAnswerDraftSession ? session : nil
         closeReplyEditor()
     }
 
@@ -2839,7 +3232,9 @@ private struct LiveProjectedInputView: View {
             switch input.kind {
             case let .response(actions):
                 ForEach(actions, id: \.id) { action in
-                    let selected = draft?.selectedActionID == action.id
+                    let selected = draft?.selectedActionID == action.id &&
+                        localReplyDraftSession?.isUnavailableChoice(actionID: action.id,
+                            inputID: input.id) != true
                     let responseText = draft?.textByActionID[action.id]?.rawValue ?? ""
                     if selected || !responseText.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
@@ -3124,9 +3519,11 @@ private struct LiveProjectedInputView: View {
 
     @ViewBuilder
     private func actionButton(_ action: ProjectedAction) -> some View {
+        let selectedFromDraft = draft?.selectedActionID == action.id
         let selected = request.isDefaultAnswered
             ? request.defaultAnswerAction == ProjectedActionReference(inputID: input.id, actionID: action.id)
-            : draft?.selectedActionID == action.id
+            : selectedFromDraft && localReplyDraftSession?.isUnavailableChoice(actionID: action.id,
+                inputID: input.id) != true
         let replyText = draft?.textByActionID[action.id]?.rawValue ?? ""
         if action.kind == .text && (selected || !replyText.isEmpty) {
             inlineReplyAction(action, selected: selected, text: replyText)
@@ -3207,7 +3604,11 @@ private struct LiveCompatibilityActions: View {
                 ? request.defaultAnswerAction?.actionID : nil
         }
         if let localReplyDraftSession {
-            return localReplyDraftSession.draft.compatibility.selectedActionID
+            guard let selected = localReplyDraftSession.draft.compatibility.selectedActionID,
+                  !localReplyDraftSession.isUnavailableChoice(actionID: selected, inputID: nil) else {
+                return nil
+            }
+            return selected
         }
         return readOnly ? (request.submittedAnswer ?? request.draft).compatibility.selectedActionID
             : store.draft(for: request.key, revision: request.requestRevision)?.compatibility.selectedActionID
@@ -3504,5 +3905,168 @@ struct LiveLifecycleTitle {
         case .expired: label = "Expired"
         case .superseded: label = "Superseded"
         }
+    }
+}
+
+@MainActor
+private struct RequestVersionHistorySheet: View {
+    let store: LivePresentationStore
+    let key: RequestKey
+    let currentRevision: UInt64
+
+    @Environment(\.dismiss) private var dismiss
+
+    private var thread: ConversationThread? { store.conversation(for: key) }
+    private var earlierEntries: [EarlierComposerEntry] {
+        store.earlierComposerEntries(for: key)
+    }
+    private var versionSections: [UInt64] {
+        let serverVersions = (thread?.revisionNumbers ?? []).filter { $0 != currentRevision }
+        return Set(serverVersions + earlierEntries.map(\.requestRevision)).sorted(by: >)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if versionSections.isEmpty {
+                        ContentUnavailableView("No earlier versions",
+                            systemImage: "clock.arrow.circlepath",
+                            description: Text("This request has no other message versions."))
+                    } else {
+                        ForEach(versionSections, id: \.self) { revision in
+                            versionCard(revision)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .accessibilityIdentifier("request-version-history")
+            .navigationTitle("Request versions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .accessibilityIdentifier("request-version-history-done")
+                }
+            }
+            .task {
+                await store.loadEarlierComposerEntries(for: key)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func versionCard(_ revision: UInt64) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(revision == currentRevision
+                 ? (revision == 1 ? "Original version" : "Current version · \(revision)")
+                 : (revision == 1 ? "Original version" : "Version \(revision)"))
+                .font(.headline)
+            if revision != currentRevision, let message = versionMessage(for: revision) {
+                if let title = message.title {
+                    Text(title)
+                        .font(.title3.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let body = message.body {
+                    Text(MessageMarkdown.attributed(body))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("request-version-content-\(revision)")
+                }
+                Button("Copy message") {
+                    UIPasteboard.general.string = message.copyText
+                }
+                .accessibilityIdentifier("request-version-copy-\(revision)")
+            } else {
+                if revision != currentRevision {
+                    Text("This version is not available now.")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("request-version-unavailable-\(revision)")
+                }
+            }
+            ForEach(earlierEntries.filter { $0.requestRevision == revision }) { entry in
+                earlierEntryCard(entry)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("request-version-card-\(revision)")
+    }
+
+    private func earlierEntryCard(_ entry: EarlierComposerEntry) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(entry.kind == .conversation ? "Chat message" : "Answer")
+                .font(.subheadline.weight(.semibold))
+            Text(entry.mayHaveBeenSent || (entry.operationID != nil && entry.failure?.outcome != .notSent)
+                 ? "This message may have been sent."
+                 : "This text was not sent.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("request-earlier-entry-status-\(entry.id)")
+            Text(entry.text.rawValue)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("request-earlier-entry-text-\(entry.id)")
+            answerChoiceLabels(for: entry)
+            if !entry.files.isEmpty {
+                Text("Attachments: \(entry.files.map { $0.name.rawValue }.formatted())")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Button("Copy") { UIPasteboard.general.string = copyText(for: entry) }
+                .accessibilityIdentifier("request-earlier-entry-copy-\(entry.id)")
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("request-earlier-entry-\(entry.id)")
+    }
+
+    private func copyText(for entry: EarlierComposerEntry) -> String {
+        guard !entry.files.isEmpty else { return entry.text.rawValue }
+        return "\(entry.text.rawValue)\nAttachments: \(entry.files.map { $0.name.rawValue }.formatted())"
+    }
+
+    @ViewBuilder
+    private func answerChoiceLabels(for entry: EarlierComposerEntry) -> some View {
+        if let draft = entry.answerDraft, !entry.answerChoices.isEmpty {
+            let currentChoices = ComposerDraftPersistence.choiceSnapshots(for: draft,
+                revision: currentRevision, payload: thread?.revisions[currentRevision])
+            ForEach(entry.answerChoices) { choice in
+                let unchanged = currentChoices.contains { current in
+                    current.inputID == choice.inputID && current.choiceID == choice.choiceID &&
+                        current.label == choice.label && current.kind == choice.kind &&
+                        current.answerValue == choice.answerValue
+                }
+                HStack(spacing: 6) {
+                    Text(choice.label.rawValue)
+                        .textSelection(.enabled)
+                    if !unchanged {
+                        Text("No longer available")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityIdentifier("request-earlier-entry-choice-\(entry.id)-\(choice.id)")
+            }
+        }
+    }
+
+    private func versionMessage(for revision: UInt64) -> (title: String?, body: String?, copyText: String)? {
+        guard let payload = thread?.revisions[revision] else { return nil }
+        let title = payload.uniqueValue(named: "title")?.stringValue?.rawValue
+        let body = payload.uniqueValue(named: "body")?.stringValue?.rawValue
+        let normalizedTitle = title?.isEmpty == false ? title : nil
+        let normalizedBody = body?.isEmpty == false ? body : nil
+        guard normalizedTitle != nil || normalizedBody != nil else { return nil }
+        let copyText = [normalizedTitle, normalizedBody].compactMap { $0 }.joined(separator: "\n\n")
+        return (normalizedTitle, normalizedBody, copyText)
     }
 }

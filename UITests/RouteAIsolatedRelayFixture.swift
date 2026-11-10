@@ -212,10 +212,6 @@ final class RouteAIsolatedRelayFixture {
                       "origin_https_port": 9443], on: connection)
                 send(["v": 1, "type": "conversation_resynced", "conversation_seq": 0],
                      on: connection)
-            case "conversation_ack":
-                let sequence = (frame["conversation_seq"] as? NSNumber)?.uint64Value ?? 0
-                send(["v": 1, "type": "ok", "ref": "native-conversation-ack",
-                      "conversation_seq": sequence], on: connection)
             case "message_open":
                 send(["v": 1, "type": "ok", "ref": "native-message-open",
                       "op_id": frame["op_id"] as? String ?? "",

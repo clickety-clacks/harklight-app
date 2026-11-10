@@ -274,18 +274,32 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     public var text: ExactText
     public var files: [ConversationFile]
     public var disposition: Disposition
+    /// Request revision whose message composer currently holds this content.
+    /// The draft key itself is revision independent; this is provenance only.
+    public var draftRequestRevision: UInt64?
     /// Identity for the current content. It is written with the composer draft
     /// before the direct send, then retained across uncertain outcomes.
     public var operationID: UUID?
+    public var operationRequestRevision: UInt64?
     public var inFlightOperationID: UUID?
     public var currentAttemptUnsettled: Bool
     public var earlierVersionMayHaveBeenSent: Bool
     public var failure: ComposerSendFailure?
-    public var carriedOverSend: CarriedOverConversationSend?
+    public var carriedOverSends: [CarriedOverConversationSend]
+    public var earlierEntries: [EarlierComposerEntry]
+    public var retryingCarriedOverSendID: String?
+
+    /// Compatibility view for older call sites. New recovery UI must use the
+    /// full collection so one entry cannot hide another entry's retry rights.
+    public var carriedOverSend: CarriedOverConversationSend? {
+        get { carriedOverSends.first }
+        set { carriedOverSends = newValue.map { [$0] } ?? [] }
+    }
 
     private enum CodingKeys: String, CodingKey {
-        case binding, text, files, disposition, operationID, inFlightOperationID
-        case currentAttemptUnsettled, earlierVersionMayHaveBeenSent, failure, carriedOverSend
+        case binding, text, files, disposition, draftRequestRevision, operationID, operationRequestRevision, inFlightOperationID
+        case currentAttemptUnsettled, earlierVersionMayHaveBeenSent, failure
+        case carriedOverSend, carriedOverSends, earlierEntries, retryingCarriedOverSendID
     }
 
     public enum Disposition: Equatable, Codable, Sendable {
@@ -298,21 +312,30 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
 
     public init(binding: ConversationBinding, text: ExactText = ExactText(""),
                 files: [ConversationFile] = [], disposition: Disposition = .saved,
-                operationID: UUID? = nil, inFlightOperationID: UUID? = nil,
+                draftRequestRevision: UInt64? = nil,
+                operationID: UUID? = nil, operationRequestRevision: UInt64? = nil,
+                inFlightOperationID: UUID? = nil,
                 currentAttemptUnsettled: Bool = false,
                 earlierVersionMayHaveBeenSent: Bool = false,
                 failure: ComposerSendFailure? = nil,
-                carriedOverSend: CarriedOverConversationSend? = nil) {
+                carriedOverSend: CarriedOverConversationSend? = nil,
+                carriedOverSends: [CarriedOverConversationSend]? = nil,
+                earlierEntries: [EarlierComposerEntry] = [],
+                retryingCarriedOverSendID: String? = nil) {
         self.binding = binding
         self.text = text
         self.files = files
         self.disposition = disposition
+        self.draftRequestRevision = draftRequestRevision
         self.operationID = operationID
+        self.operationRequestRevision = operationRequestRevision
         self.inFlightOperationID = inFlightOperationID
         self.currentAttemptUnsettled = currentAttemptUnsettled
         self.earlierVersionMayHaveBeenSent = earlierVersionMayHaveBeenSent
         self.failure = failure
-        self.carriedOverSend = carriedOverSend
+        self.carriedOverSends = carriedOverSends ?? carriedOverSend.map { [$0] } ?? []
+        self.earlierEntries = earlierEntries
+        self.retryingCarriedOverSendID = retryingCarriedOverSendID
     }
 
     public init(from decoder: Decoder) throws {
@@ -321,33 +344,166 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
         text = try values.decodeIfPresent(ExactText.self, forKey: .text) ?? ExactText("")
         files = try values.decodeIfPresent([ConversationFile].self, forKey: .files) ?? []
         disposition = try values.decodeIfPresent(Disposition.self, forKey: .disposition) ?? .saved
+        draftRequestRevision = try values.decodeIfPresent(UInt64.self, forKey: .draftRequestRevision)
         operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
+        operationRequestRevision = try values.decodeIfPresent(UInt64.self, forKey: .operationRequestRevision)
         inFlightOperationID = try values.decodeIfPresent(UUID.self, forKey: .inFlightOperationID)
         currentAttemptUnsettled = try values.decodeIfPresent(Bool.self, forKey: .currentAttemptUnsettled) ?? false
         earlierVersionMayHaveBeenSent = try values.decodeIfPresent(Bool.self, forKey: .earlierVersionMayHaveBeenSent) ?? false
         failure = try values.decodeIfPresent(ComposerSendFailure.self, forKey: .failure)
-        carriedOverSend = try values.decodeIfPresent(CarriedOverConversationSend.self, forKey: .carriedOverSend)
+        carriedOverSends = try values.decodeIfPresent([CarriedOverConversationSend].self, forKey: .carriedOverSends)
+            ?? values.decodeIfPresent(CarriedOverConversationSend.self, forKey: .carriedOverSend).map { [$0] }
+            ?? []
+        earlierEntries = try values.decodeIfPresent([EarlierComposerEntry].self, forKey: .earlierEntries) ?? []
+        retryingCarriedOverSendID = try values.decodeIfPresent(String.self, forKey: .retryingCarriedOverSendID)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(binding, forKey: .binding)
+        try values.encode(text, forKey: .text)
+        try values.encode(files, forKey: .files)
+        try values.encode(disposition, forKey: .disposition)
+        try values.encodeIfPresent(draftRequestRevision, forKey: .draftRequestRevision)
+        try values.encodeIfPresent(operationID, forKey: .operationID)
+        try values.encodeIfPresent(operationRequestRevision, forKey: .operationRequestRevision)
+        try values.encodeIfPresent(inFlightOperationID, forKey: .inFlightOperationID)
+        try values.encode(currentAttemptUnsettled, forKey: .currentAttemptUnsettled)
+        try values.encode(earlierVersionMayHaveBeenSent, forKey: .earlierVersionMayHaveBeenSent)
+        try values.encodeIfPresent(failure, forKey: .failure)
+        try values.encode(carriedOverSends, forKey: .carriedOverSends)
+        if carriedOverSends.count == 1 {
+            try values.encode(carriedOverSends[0], forKey: .carriedOverSend)
+        }
+        try values.encode(earlierEntries, forKey: .earlierEntries)
+        try values.encodeIfPresent(retryingCarriedOverSendID, forKey: .retryingCarriedOverSendID)
+    }
+
+    public func rebound(to binding: ConversationBinding) -> ConversationDraft {
+        ConversationDraft(binding: binding, text: text, files: files, disposition: disposition,
+            draftRequestRevision: draftRequestRevision,
+            operationID: operationID,
+            operationRequestRevision: operationRequestRevision ?? (operationID == nil ? nil : self.binding.revision),
+            inFlightOperationID: inFlightOperationID,
+            currentAttemptUnsettled: currentAttemptUnsettled,
+            earlierVersionMayHaveBeenSent: earlierVersionMayHaveBeenSent,
+            failure: failure, carriedOverSends: carriedOverSends,
+            earlierEntries: earlierEntries,
+            retryingCarriedOverSendID: retryingCarriedOverSendID)
     }
 }
 
-public struct CarriedOverConversationSend: Equatable, Codable, Sendable {
+public struct CarriedOverConversationSend: Equatable, Codable, Identifiable, Sendable {
+    public var id: String
+    public var requestRevision: UInt64?
     public var text: ExactText
     public var files: [ConversationFile]
     public var operationID: UUID?
+    public var failureOperationID: UUID?
+    public var inFlightOperationID: UUID?
     public var currentAttemptUnsettled: Bool
     public var earlierVersionMayHaveBeenSent: Bool
     public var failure: ComposerSendFailure
 
-    public init(text: ExactText, files: [ConversationFile] = [], operationID: UUID?,
+    private enum CodingKeys: String, CodingKey {
+        case id, requestRevision, text, files, operationID, failureOperationID, inFlightOperationID
+        case currentAttemptUnsettled, earlierVersionMayHaveBeenSent, failure
+    }
+
+    public init(id: String? = nil, requestRevision: UInt64? = nil,
+                text: ExactText, files: [ConversationFile] = [], operationID: UUID?,
+                failureOperationID: UUID? = nil, inFlightOperationID: UUID? = nil,
                 currentAttemptUnsettled: Bool, earlierVersionMayHaveBeenSent: Bool = false,
                 failure: ComposerSendFailure) {
+        self.id = id ?? Self.defaultID(operationID: operationID, revision: requestRevision, text: text)
+        self.requestRevision = requestRevision
         self.text = text
         self.files = files
+        self.operationID = operationID
+        self.failureOperationID = failureOperationID
+        self.inFlightOperationID = inFlightOperationID
+        self.currentAttemptUnsettled = currentAttemptUnsettled
+        self.earlierVersionMayHaveBeenSent = earlierVersionMayHaveBeenSent
+        self.failure = failure
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        requestRevision = try values.decodeIfPresent(UInt64.self, forKey: .requestRevision)
+        text = try values.decode(ExactText.self, forKey: .text)
+        files = try values.decodeIfPresent([ConversationFile].self, forKey: .files) ?? []
+        operationID = try values.decodeIfPresent(UUID.self, forKey: .operationID)
+        failureOperationID = try values.decodeIfPresent(UUID.self, forKey: .failureOperationID)
+        inFlightOperationID = try values.decodeIfPresent(UUID.self, forKey: .inFlightOperationID)
+        currentAttemptUnsettled = try values.decodeIfPresent(Bool.self, forKey: .currentAttemptUnsettled) ?? false
+        earlierVersionMayHaveBeenSent = try values.decodeIfPresent(Bool.self,
+            forKey: .earlierVersionMayHaveBeenSent) ?? false
+        failure = try values.decode(ComposerSendFailure.self, forKey: .failure)
+        id = try values.decodeIfPresent(String.self, forKey: .id)
+            ?? Self.defaultID(operationID: operationID, revision: requestRevision, text: text)
+    }
+
+    private static func defaultID(operationID: UUID?, revision: UInt64?, text: ExactText) -> String {
+        let operation = operationID?.uuidString.lowercased() ?? "no-operation"
+        return "legacy:\(revision.map(String.init) ?? "unknown"):\(operation):\(text.rawValue.utf8.count)"
+    }
+}
+
+public struct AnswerChoiceSnapshot: Equatable, Codable, Sendable, Identifiable {
+    public var id: String { [inputID?.rawValue ?? "", choiceID.rawValue, label.rawValue, kind.rawValue].joined(separator: "\u{1f}") }
+    public let inputID: ExactText?
+    public let choiceID: ExactText
+    public let label: ExactText
+    public let kind: ExactText
+    public let answerValue: JSONValue
+    public let requestRevision: UInt64
+
+    public init(inputID: ExactText? = nil, choiceID: ExactText, label: ExactText,
+                kind: ExactText, answerValue: JSONValue, requestRevision: UInt64) {
+        self.inputID = inputID
+        self.choiceID = choiceID
+        self.label = label
+        self.kind = kind
+        self.answerValue = answerValue
+        self.requestRevision = requestRevision
+    }
+}
+
+public struct EarlierComposerEntry: Equatable, Codable, Identifiable, Sendable {
+    public enum Kind: String, Codable, Sendable { case conversation, answer }
+
+    public let id: String
+    public let kind: Kind
+    public let requestRevision: UInt64
+    public let text: ExactText
+    public let files: [ConversationFile]
+    public let answerDraft: RequestDraft?
+    public let answerChoices: [AnswerChoiceSnapshot]
+    public let operationID: UUID?
+    public let currentAttemptUnsettled: Bool
+    public let earlierVersionMayHaveBeenSent: Bool
+    public let failure: ComposerSendFailure?
+
+    public init(id: String, kind: Kind, requestRevision: UInt64, text: ExactText = ExactText(""),
+                files: [ConversationFile] = [], answerDraft: RequestDraft? = nil,
+                answerChoices: [AnswerChoiceSnapshot] = [], operationID: UUID? = nil,
+                currentAttemptUnsettled: Bool = false,
+                earlierVersionMayHaveBeenSent: Bool = false,
+                failure: ComposerSendFailure? = nil) {
+        self.id = id
+        self.kind = kind
+        self.requestRevision = requestRevision
+        self.text = text
+        self.files = files
+        self.answerDraft = answerDraft
+        self.answerChoices = answerChoices
         self.operationID = operationID
         self.currentAttemptUnsettled = currentAttemptUnsettled
         self.earlierVersionMayHaveBeenSent = earlierVersionMayHaveBeenSent
         self.failure = failure
     }
+
+    public var mayHaveBeenSent: Bool { currentAttemptUnsettled || earlierVersionMayHaveBeenSent }
 }
 
 /// Upload identity is independent of turn and cursor identity. Keep attempts even
@@ -543,6 +699,92 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     }
 
     public var revisionNumbers: [UInt64] { Set(revisions.keys).union(redactedRevisions ?? []).sorted() }
+
+    mutating func advanceComposerDraft(to revision: UInt64) {
+        guard revision != currentRevision,
+              let oldDraft = drafts.removeValue(forKey: currentRevision) else { return }
+        let binding = ConversationBinding(request: request, revision: revision)
+        guard var current = drafts[revision] else {
+            drafts[revision] = oldDraft.rebound(to: binding)
+            return
+        }
+        if current.text.rawValue.isEmpty && current.files.isEmpty && current.operationID == nil {
+            var adopted = oldDraft.rebound(to: binding)
+            adopted.carriedOverSends = Self.mergeCarriedSends(
+                current.carriedOverSends, adopted.carriedOverSends)
+            adopted.earlierEntries = Self.mergeEarlierEntries(
+                current.earlierEntries, adopted.earlierEntries)
+            if adopted.failure == nil { adopted.failure = current.failure }
+            if adopted.retryingCarriedOverSendID == nil {
+                adopted.retryingCarriedOverSendID = current.retryingCarriedOverSendID
+            }
+            drafts[revision] = adopted
+            return
+        }
+        var earlier = Self.mergeEarlierEntries(current.earlierEntries, oldDraft.earlierEntries)
+        current.carriedOverSends = Self.mergeCarriedSends(current.carriedOverSends,
+            oldDraft.carriedOverSends)
+        if oldDraft.currentAttemptUnsettled || oldDraft.failure != nil || oldDraft.operationID != nil {
+            let failure = oldDraft.failure ?? ComposerSendFailure(outcome: .unconfirmed,
+                summary: "This message may not have gone through.",
+                detail: "The request changed while this send was still unresolved.")
+            let send = CarriedOverConversationSend(
+                id: "revision:\(oldDraft.binding.revision):\(oldDraft.operationID?.uuidString.lowercased() ?? "without-id")",
+                requestRevision: oldDraft.operationRequestRevision ?? oldDraft.binding.revision,
+                text: oldDraft.text, files: oldDraft.files, operationID: oldDraft.operationID,
+                currentAttemptUnsettled: oldDraft.currentAttemptUnsettled,
+                earlierVersionMayHaveBeenSent: oldDraft.earlierVersionMayHaveBeenSent,
+                failure: failure)
+            current.carriedOverSends.append(send)
+        } else if !oldDraft.text.rawValue.isEmpty || !oldDraft.files.isEmpty {
+            earlier.append(EarlierComposerEntry(
+                id: "revision:\(oldDraft.binding.revision)", kind: .conversation,
+                requestRevision: oldDraft.binding.revision, text: oldDraft.text, files: oldDraft.files,
+                operationID: oldDraft.operationID,
+                currentAttemptUnsettled: oldDraft.currentAttemptUnsettled,
+                earlierVersionMayHaveBeenSent: oldDraft.earlierVersionMayHaveBeenSent,
+                failure: oldDraft.failure))
+        }
+        current.carriedOverSends = Self.mergeCarriedSends([], current.carriedOverSends)
+        current.earlierEntries = Self.mergeEarlierEntries([], earlier)
+            .sorted { ($0.requestRevision, $0.id) < ($1.requestRevision, $1.id) }
+        drafts[revision] = current
+    }
+
+    private static func mergeCarriedSends(_ first: [CarriedOverConversationSend],
+                                          _ second: [CarriedOverConversationSend])
+        -> [CarriedOverConversationSend] {
+        var result = first
+        for send in second where !result.contains(where: { lhs in
+            lhs.requestRevision == send.requestRevision && lhs.text == send.text &&
+                lhs.files == send.files && lhs.operationID == send.operationID &&
+                lhs.failureOperationID == send.failureOperationID &&
+                lhs.currentAttemptUnsettled == send.currentAttemptUnsettled &&
+                lhs.earlierVersionMayHaveBeenSent == send.earlierVersionMayHaveBeenSent &&
+                lhs.failure == send.failure
+        }) {
+            result.append(send)
+        }
+        return result.sorted { ($0.requestRevision ?? 0, $0.id) < ($1.requestRevision ?? 0, $1.id) }
+    }
+
+    private static func mergeEarlierEntries(_ first: [EarlierComposerEntry],
+                                             _ second: [EarlierComposerEntry])
+        -> [EarlierComposerEntry] {
+        var result = first
+        for entry in second where !result.contains(where: { lhs in
+            lhs.kind == entry.kind && lhs.requestRevision == entry.requestRevision &&
+                lhs.text == entry.text && lhs.files == entry.files &&
+                lhs.answerDraft == entry.answerDraft && lhs.answerChoices == entry.answerChoices &&
+                lhs.operationID == entry.operationID &&
+                lhs.currentAttemptUnsettled == entry.currentAttemptUnsettled &&
+                lhs.earlierVersionMayHaveBeenSent == entry.earlierVersionMayHaveBeenSent &&
+                lhs.failure == entry.failure
+        }) {
+            result.append(entry)
+        }
+        return result.sorted { ($0.requestRevision, $0.id) < ($1.requestRevision, $1.id) }
+    }
     /// Accepted sender facts remain available under their original request,
     /// revision and turn identities. Draft edits and replay do not create one.
     public var acceptedUpdates: [ConversationTurn] {
@@ -1022,6 +1264,7 @@ struct ConversationState: Codable, Equatable {
                 guard binding.revision > thread.currentRevision else {
                     throw ConversationError.staleRevision(current: thread.currentRevision)
                 }
+                thread.advanceComposerDraft(to: binding.revision)
                 thread.revisions[binding.revision] = payload
                 thread.currentRevision = binding.revision
             }
@@ -1232,6 +1475,7 @@ struct ConversationState: Codable, Equatable {
                     throw ConversationError.staleRevision(current: thread.currentRevision)
                 }
                 thread.revisions[binding.revision] = payload
+                thread.advanceComposerDraft(to: binding.revision)
                 thread.currentRevision = binding.revision
             }
         case let .redactedRevision(turn):
@@ -1254,6 +1498,7 @@ struct ConversationState: Codable, Equatable {
                     throw ConversationError.staleRevision(current: thread.currentRevision)
                 }
                 thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
+                thread.advanceComposerDraft(to: binding.revision)
                 thread.currentRevision = binding.revision
             }
         default:

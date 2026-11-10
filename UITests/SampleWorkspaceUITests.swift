@@ -128,10 +128,27 @@ final class SampleWorkspaceUITests: XCTestCase {
         defer { relay.stop() }
         let app = XCUIApplication()
         relay.configure(app)
+        app.launchArguments.append("--harklight-routea-readiness")
         app.launch()
         let realRows = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'request-row-'"))
         XCTAssertTrue(realRows.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+        let readiness = app.descendants(matching: .any)["routea-readiness-observation"]
+        let refreshed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value CONTAINS %@", "ui=refreshed"),
+            object: readiness)
+        XCTAssertEqual(XCTWaiter.wait(for: [refreshed], timeout: 10), .completed,
+                       "Readiness is published only after both replay barriers and refreshed UI rows. \(app.debugDescription)")
+        let readinessValue = readiness.value as? String ?? ""
+        XCTAssertTrue(readinessValue.contains("inbox_resynced=applied high=2 count=2"), readinessValue)
+        XCTAssertTrue(readinessValue.contains("conversation_resynced=applied high=0 count=0"), readinessValue)
+        XCTAssertTrue(readinessValue.contains("ui=refreshed"), readinessValue)
+        XCTAssertFalse(readinessValue.contains("routea-ui-author"), readinessValue)
+        XCTAssertFalse(readinessValue.contains("Studio review"), readinessValue)
+        let readinessAttachment = XCTAttachment(string: readinessValue)
+        readinessAttachment.name = "content-free-routea-readiness"
+        readinessAttachment.lifetime = .keepAlways
+        add(readinessAttachment)
         let original = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(relay.answerOperationCount, 0,

@@ -285,27 +285,62 @@ public actor NativeRelayCore {
         try validate()
         guard !conversationsUnavailable else { throw InstallationTransportError.conversationsUnavailable }
         guard let transport = session as? any AuthenticatedConversationFileSession,
-              let draft = try await store.currentConversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+              let initialDraft = try await store.currentConversationSnapshot(context: context)
+                .threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
         }
-        if case let .acceptedPendingReplay(_, turn) = draft.disposition {
+        if case let .acceptedPendingReplay(_, turn) = initialDraft.disposition,
+           initialDraft.retryingCarriedOverSendID == nil {
             try await replayConversationRouteA(using: transport)
             return .accepted(turnID: turn)
         }
-        guard !draft.text.rawValue.isEmpty else { throw ConversationError.emptyDraft }
+        let carriedOverEntryID = initialDraft.retryingCarriedOverSendID
+        let initialCarriedOverSend = carriedOverEntryID.flatMap { id in
+            initialDraft.carriedOverSends.first { $0.id == id }
+        }
+        guard carriedOverEntryID == nil || initialCarriedOverSend != nil else {
+            throw ConversationError.invalidBinding
+        }
+        if carriedOverEntryID != nil {
+            guard let send = initialCarriedOverSend,
+                  !send.text.rawValue.isEmpty || !send.files.isEmpty else {
+                throw ConversationError.emptyDraft
+            }
+        } else if initialDraft.text.rawValue.isEmpty && initialDraft.files.isEmpty {
+            throw ConversationError.emptyDraft
+        }
         // Only a still-unsettled attempt with this operation id makes this
         // attempt uncertain. An earlier-version mark belongs to different
         // content and must survive a local preparation failure without
         // marking the new operation as transmitted.
-        let previousAttemptUnsettled = draft.currentAttemptUnsettled && draft.operationID != nil
-        let wasUncertain = previousAttemptUnsettled || draft.earlierVersionMayHaveBeenSent
+        let previousAttemptUnsettled = initialCarriedOverSend.map {
+            $0.currentAttemptUnsettled && $0.operationID != nil
+        } ?? (initialDraft.currentAttemptUnsettled && initialDraft.operationID != nil)
+        let wasUncertain = initialCarriedOverSend.map {
+            $0.currentAttemptUnsettled || $0.earlierVersionMayHaveBeenSent
+        } ?? (previousAttemptUnsettled || initialDraft.earlierVersionMayHaveBeenSent)
         let operation = try await store.prepareDiscussion(binding, context: context)
-        guard let frozen = try await store.currentConversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+        guard let preparedComposer = try await store.currentConversationSnapshot(context: context)
+            .threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
         }
-        try await persistDraft(frozen)
+        let frozen: ConversationDraft
+        if let entryID = carriedOverEntryID,
+           let carried = preparedComposer.carriedOverSends.first(where: { $0.id == entryID }) {
+            let retryBinding = ConversationBinding(request: binding.request,
+                revision: carried.requestRevision ?? binding.revision)
+            frozen = ConversationDraft(binding: retryBinding, text: carried.text, files: carried.files,
+                disposition: .submitting(operation), operationID: operation,
+                operationRequestRevision: retryBinding.revision, inFlightOperationID: operation,
+                currentAttemptUnsettled: carried.currentAttemptUnsettled,
+                earlierVersionMayHaveBeenSent: carried.earlierVersionMayHaveBeenSent,
+                failure: carried.failure)
+        } else {
+            frozen = preparedComposer
+        }
         let frame: Data
         do {
+            try await persistDraft(preparedComposer)
             var prepared: [ConversationFile] = []
             var limits: ConversationFileLimits?
             if !frozen.files.isEmpty {
@@ -322,11 +357,17 @@ public actor NativeRelayCore {
                         let source = try await retainedFile(file)
                         diagnose(.upload, .uploadTransfer, .began, operationID: operation,
                                  request: binding.request, revision: binding.revision)
-                        let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
+                        let uploaded = try await transport.uploadConversationFile(file, from: source, binding: frozen.binding,
                             operationID: operation, limits: published, originURL: endpoint)
                         try validate()
-                        let savedDraft = try await store.recordUploadedConversationFile(uploaded,
-                            binding: binding, operation: operation, context: context)
+                        let savedDraft: ConversationDraft
+                        if let entryID = carriedOverEntryID {
+                            savedDraft = try await store.recordUploadedCarriedOverConversationFile(uploaded,
+                                binding: binding, entryID: entryID, operation: operation, context: context)
+                        } else {
+                            savedDraft = try await store.recordUploadedConversationFile(uploaded,
+                                binding: binding, operation: operation, context: context)
+                        }
                         try await persistDraft(savedDraft)
                         diagnose(.upload, .uploadTransfer, .completed, operationID: operation,
                                  request: binding.request, revision: binding.revision)
@@ -345,8 +386,16 @@ public actor NativeRelayCore {
             }
             frame = try ConversationWire(profile: context, endpointHost: session.relayEndpointHost).discussion(frozen, operationID: operation,
                 preparedFiles: prepared, limits: limits)
-            let transmittingDraft = try await store.markDiscussionTransmissionStarting(
-                binding, operation: operation, context: context)
+            let transmittingDraft: ConversationDraft?
+            if let entryID = carriedOverEntryID {
+                try await store.markCarriedOverDiscussionTransmissionStarting(binding,
+                    entryID: entryID, operation: operation, context: context)
+                transmittingDraft = try await store.currentConversationSnapshot(context: context)
+                    .threads[binding.request]?.drafts[binding.revision]
+            } else {
+                transmittingDraft = try await store.markDiscussionTransmissionStarting(
+                    binding, operation: operation, context: context)
+            }
             try await persistDraft(transmittingDraft)
         } catch {
             // No discussion frame has been sent by this attempt. Preserve an
@@ -360,10 +409,17 @@ public actor NativeRelayCore {
                      operationID: operation, request: binding.request, revision: binding.revision,
                      receipt: wasUncertain ? .unknown : .pendingUnconfirmed)
             do {
-                try await store.markDiscussionOutcome(binding, operation: operation,
-                    rejection: ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
-                    preserveUnsettled: previousAttemptUnsettled,
-                    context: context)
+                let reason = ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) +
+                    " could not be prepared (\(error)). Draft retained.")
+                if let entryID = carriedOverEntryID {
+                    try await store.markCarriedOverDiscussionOutcome(binding, entryID: entryID,
+                        operation: operation, rejection: reason,
+                        preserveUnsettled: previousAttemptUnsettled, context: context)
+                } else {
+                    try await store.markDiscussionOutcome(binding, operation: operation,
+                        rejection: reason, preserveUnsettled: previousAttemptUnsettled,
+                        context: context)
+                }
                 let savedDraft = try await store.currentConversationSnapshot(context: context)
                     .threads[binding.request]?.drafts[binding.revision]
                 try await persistDraft(savedDraft)
@@ -380,7 +436,12 @@ public actor NativeRelayCore {
         try validate()
         switch result {
         case let .accepted(turn):
-            try await store.markDiscussionAccepted(binding, operation: operation, turn: turn, context: context)
+            if let entryID = carriedOverEntryID {
+                try await store.markCarriedOverDiscussionAccepted(binding, entryID: entryID,
+                    operation: operation, turn: turn, context: context)
+            } else {
+                try await store.markDiscussionAccepted(binding, operation: operation, turn: turn, context: context)
+            }
             diagnose(.conversation, .discussionSubmission, .accepted, operationID: operation,
                      request: binding.request, revision: binding.revision,
                      receipt: .acceptedAwaitingReplay)
@@ -394,17 +455,32 @@ public actor NativeRelayCore {
                          revision: binding.revision, receipt: .acceptedAwaitingReplay)
             }
         case let .rejected(reason):
-            try await store.markDiscussionOutcome(binding, operation: operation, rejection: reason, context: context)
+            if let entryID = carriedOverEntryID {
+                try await store.markCarriedOverDiscussionOutcome(binding, entryID: entryID,
+                    operation: operation, rejection: reason, context: context)
+            } else {
+                try await store.markDiscussionOutcome(binding, operation: operation, rejection: reason, context: context)
+            }
             diagnose(.conversation, .discussionSubmission, .rejected, operationID: operation,
                      request: binding.request, revision: binding.revision, receipt: .pendingUnconfirmed)
         case .operationConflict:
-            try await store.markDiscussionConflict(binding, operation: operation, context: context)
+            if let entryID = carriedOverEntryID {
+                try await store.markCarriedOverDiscussionConflict(binding, entryID: entryID,
+                    operation: operation, context: context)
+            } else {
+                try await store.markDiscussionConflict(binding, operation: operation, context: context)
+            }
             diagnose(.conversation, .discussionSubmission, .rejected,
                      causeCode: NativeDiagnosticCauseCode.serverReason("operation_conflict"),
                      operationID: operation, request: binding.request,
                      revision: binding.revision, receipt: .pendingUnconfirmed)
         case .unresolved:
-            try await store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+            if let entryID = carriedOverEntryID {
+                try await store.markCarriedOverDiscussionOutcome(binding, entryID: entryID,
+                    operation: operation, rejection: nil, context: context)
+            } else {
+                try await store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+            }
             diagnose(.conversation, .discussionSubmission, .unresolved, operationID: operation,
                      request: binding.request, revision: binding.revision, receipt: .unknown)
         }
@@ -412,7 +488,8 @@ public actor NativeRelayCore {
             .threads[binding.request]?.drafts[binding.revision]
         if let latestDraft,
            latestDraft.text.rawValue.isEmpty, latestDraft.files.isEmpty,
-           latestDraft.operationID == nil {
+           latestDraft.operationID == nil, latestDraft.carriedOverSends.isEmpty,
+           latestDraft.earlierEntries.isEmpty {
             try? await persistDraft(nil)
         } else {
             try? await persistDraft(latestDraft)
