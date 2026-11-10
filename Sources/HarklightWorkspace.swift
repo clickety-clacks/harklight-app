@@ -883,10 +883,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let landscape = geometry.size.width > geometry.size.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && landscape
+            let tabBarBackground = HarklightDesignSystem.palette(for: colorScheme)
+                .neutral.backgroundColor
             let tabs = TabView(selection: $workspaceTab) {
                 Tab(value: .inbox) {
                     inboxSplitView(for: .inbox, inlineChat: inlineChat,
                                    geometry: geometry)
+                        .toolbarBackground(tabBarBackground, for: .tabBar)
+                        .toolbarBackgroundVisibility(.visible, for: .tabBar)
                 } label: {
                     // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
                     Label {
@@ -899,10 +903,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 Tab("Replied", systemImage: "envelope.open", value: .replied) {
                     inboxSplitView(for: .replied, inlineChat: inlineChat,
                                    geometry: geometry)
+                        .toolbarBackground(tabBarBackground, for: .tabBar)
+                        .toolbarBackgroundVisibility(.visible, for: .tabBar)
                 }
 
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+            .tabBarMinimizeBehavior(.never)
             .onChange(of: workspaceTab) { oldTab, newTab in
                 if oldTab != newTab { isWarningPresented = false }
                 selectedTab = newTab.messageTab
@@ -1032,6 +1039,7 @@ struct InboxList: View {
     let triggerNotification: (() -> Void)?
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     private var reduceMotion: Bool {
         reduceMotionOverride ?? systemReduceMotion
     }
@@ -1876,6 +1884,13 @@ struct InboxList: View {
         .animation(reduceMotion ? nil : .default, value: normalEntries.map(\.id))
         .animation(reduceMotion ? nil : .default, value: shownAreaRows.map(\.id))
         .scrollContentBackground(.hidden)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            // The compact tab bar floats over the list. Leave scroll room for
+            // accessibility-sized rows so their lower text can clear it.
+            Color.clear
+                .frame(height: horizontalSizeClass == .compact ? 72 : 0)
+                .accessibilityHidden(true)
+        }
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)

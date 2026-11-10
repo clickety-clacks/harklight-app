@@ -139,8 +139,15 @@ final class DetailChatButtonUITests: XCTestCase {
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
+        let search = workspaceSearchField(in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap()
+        search.typeText("Archive\n")
         let revised = app.descendants(matching: .any)["sample-approval-2"]
         XCTAssertTrue(revised.waitForExistence(timeout: 10), app.debugDescription)
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<8 where !revised.isHittable { list.swipeUp() }
+        XCTAssertTrue(revised.isHittable, app.debugDescription)
         revised.tap()
 
         let versionIndicator = app.descendants(matching: .any)["request-update-fact"]
@@ -156,6 +163,8 @@ final class DetailChatButtonUITests: XCTestCase {
         let historicalBody = app.staticTexts["historical-version-body"]
         XCTAssertTrue(historicalTitle.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(historicalBody.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalTitle.isHittable, app.debugDescription)
+        XCTAssertTrue(historicalBody.isHittable, app.debugDescription)
         XCTAssertFalse(historicalContent.buttons["request-finish"].exists,
                        "A historical message version is available for reading and has no Send action.")
         attachScreenshot("detail-original-message-version-read-only")
@@ -263,6 +272,7 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         XCTAssertFalse(composer.exists, app.debugDescription)
+        attachScreenshot("chat-dismissed-once-\(appearance.lowercased())")
         chat.tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5),
                       "The toolbar Chat button must keep reopening its sheet. \(app.debugDescription)")

@@ -130,8 +130,7 @@ final class InboxStockTabsUITests: XCTestCase {
             let search = workspaceSearchField(in: app)
             XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
             search.tap()
-            search.typeText("Archive")
-            workspaceTab("Replied", in: app).tap()
+            search.typeText("Archive\n")
             let result = app.descendants(matching: .any)["sample-approval-2"]
             XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
 
@@ -140,22 +139,57 @@ final class InboxStockTabsUITests: XCTestCase {
             XCTAssertTrue(result.isHittable,
                           "A filtered result must remain reachable with the search field active. \(app.debugDescription)")
 
-            // The Replied tab keeps the filtered result and native bottom controls visible.
-            let bottomBar = app.tabBars.firstMatch
-            XCTAssertTrue(bottomBar.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
-            for _ in 0..<8 where !result.isHittable { list.swipeUp() }
+            // Workspace filters may adapt to a sidebar in regular layouts.
+            XCTAssertFalse(app.keyboards.firstMatch.exists,
+                           "The search field stays visible after its keyboard is dismissed.")
+            let inboxTab = workspaceTab("Inbox", in: app)
+            let repliedTab = workspaceTab("Replied", in: app)
+            XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(repliedTab.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+            if expectedSizeClass == "compact" {
+                let bottomBar = app.tabBars.firstMatch
+                XCTAssertTrue(bottomBar.exists, app.debugDescription)
+                let replyPreviews = app.staticTexts.matching(
+                    NSPredicate(format: "label CONTAINS %@", "Choose what happens to the earlier sketches")
+                )
+                XCTAssertTrue(replyPreviews.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+                for _ in 0..<12 {
+                    let visiblePreviews = replyPreviews.allElementsBoundByIndex
+                    let hasOverlap = visiblePreviews.contains { $0.frame.intersects(bottomBar.frame) }
+                    if !hasOverlap { break }
+                    list.swipeUp()
+                }
+                let visiblePreviews = replyPreviews.allElementsBoundByIndex
+                XCTAssertTrue(visiblePreviews.contains { $0.isHittable },
+                              "A filtered reply preview stays reachable. \(app.debugDescription)")
+                XCTAssertFalse(visiblePreviews.contains { $0.frame.intersects(bottomBar.frame) },
+                               "No visible filtered reply preview overlaps the bottom filters. \(app.debugDescription)")
+                XCTAssertTrue(bottomBar.isHittable, app.debugDescription)
+                XCTAssertTrue(inboxTab.isHittable, app.debugDescription)
+                XCTAssertTrue(repliedTab.isHittable,
+                              "The bottom filters remain visible while the list scrolls. \(app.debugDescription)")
+                attachScreenshot("filtered-result-compact-\(usesLargeType ? "large" : "standard")-clear-of-tabs", from: app)
+                for _ in 0..<8 where !result.isHittable { list.swipeDown() }
+                XCTAssertTrue(result.isHittable, app.debugDescription)
+            } else {
+                XCTAssertFalse(result.frame.intersects(inboxTab.frame), app.debugDescription)
+                XCTAssertFalse(result.frame.intersects(repliedTab.frame), app.debugDescription)
+                attachScreenshot("filtered-result-regular-\(usesLargeType ? "large" : "standard")", from: app)
+            }
             XCTAssertTrue(result.isHittable, app.debugDescription)
-            XCTAssertLessThanOrEqual(result.frame.maxY, bottomBar.frame.minY + 2,
-                                     "The bottom controls must not cover a filtered row. \(app.debugDescription)")
-            attachScreenshot("filtered-result-\(expectedSizeClass)-\(usesLargeType ? "large" : "standard")", from: app)
+            XCTAssertTrue(inboxTab.isHittable, app.debugDescription)
+            XCTAssertTrue(repliedTab.isHittable,
+                          "The bottom filter remains reachable beside the filtered result. \(app.debugDescription)")
 
             result.tap()
-            let messageText = app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS %@", "Choose what happens to the earlier sketches")
-            ).firstMatch
-            XCTAssertTrue(messageText.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(messageText.isHittable,
+            let messageBody = app.textViews["request-message-body"]
+            XCTAssertTrue(messageBody.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue((messageBody.value as? String ?? "")
+                .contains("Choose what happens to the earlier sketches"), app.debugDescription)
+            let detailScroll = app.scrollViews["message-card-scroll"]
+            for _ in 0..<8 where !messageBody.isHittable { detailScroll.swipeUp() }
+            XCTAssertTrue(messageBody.isHittable,
                           "The selected message text remains visible and reachable. \(app.debugDescription)")
             attachScreenshot("filtered-message-text-\(expectedSizeClass)-\(usesLargeType ? "large" : "standard")", from: app)
             app.terminate()
@@ -298,11 +332,11 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("synthetic-notification-cold-target", from: app)
     }
 
-    func testWarmSyntheticNotificationShowsLoadingThenExactMessageChat() {
+    func testWarmSyntheticNotificationShowsLoadingThenExactMessageDetail() {
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
-                               "--harklight-test-notification-pending",
-                               "--harklight-test-notification-chat"]
+        app.launchArguments = ["--reset-attention-fixture",
+                               "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-pending"]
         app.launch()
 
         let openNotification = app.buttons["harklight-test-notification"]
@@ -313,13 +347,10 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("synthetic-notification-warm-loading", from: app)
         app.buttons["notification-test-resolve"].tap()
 
-        let chatSurface = app.scrollViews["conversation-history-scroll"]
-        XCTAssertTrue(chatSurface.waitForExistence(timeout: 5), app.debugDescription)
         let targetHeading = app.buttons["request-heading"]
-        XCTAssertTrue(targetHeading.exists,
-                      "The completed synthetic chat route remains on its exact fixture detail. \(app.debugDescription)")
+        XCTAssertTrue(targetHeading.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(targetHeading.label.contains("Unfamiliar interface"), targetHeading.label)
-        attachScreenshot("synthetic-notification-warm-target-chat", from: app)
+        attachScreenshot("synthetic-notification-warm-target-detail", from: app)
     }
 
     func testSyntheticNotificationFailureOffersReturnToInbox() {

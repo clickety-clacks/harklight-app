@@ -1655,6 +1655,8 @@ struct LiveRequestDetail: View {
                     currentRevision: storePresentationSnapshot.conversationRevision,
                     hasAcceptedUpdate: storePresentationSnapshot.hasAcceptedUpdate,
                     secondaryTextColor: detailColors.secondaryTextColor,
+                    messageTextColor: detailColors.textColor,
+                    messageBackgroundColor: detailColors.backgroundColor,
                     testNotificationRouter: testNotificationRouter,
                     testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
                 if storePresentationSnapshot.isRetracted {
@@ -2245,6 +2247,8 @@ private struct HistoricalVersionAccess: View {
     let currentRevision: UInt64?
     let hasAcceptedUpdate: Bool
     let secondaryTextColor: Color
+    let messageTextColor: Color
+    let messageBackgroundColor: Color
     let testNotificationRouter: NativeNotificationRouter?
     let testOpenForegroundChatIndicator: (() -> Void)?
     @State private var selection: HistoricalVersionSelection?
@@ -2302,6 +2306,12 @@ private struct HistoricalVersionAccess: View {
                 .navigationTitle(selected.revision == 1 ? "Original version" : "Version \(selected.revision)")
                 .navigationBarTitleDisplayMode(.inline)
             }
+            .background(messageBackgroundColor.ignoresSafeArea())
+            .foregroundStyle(messageTextColor)
+            .tint(messageTextColor)
+            .toolbarBackground(messageBackgroundColor, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .presentationDetents([.large])
             .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                              testOpen: testOpenForegroundChatIndicator)

@@ -635,7 +635,15 @@ public final class AttentionDomainPort: @unchecked Sendable {
         let snapshot = try store.snapshot(context: profileContext)
         let revision = requestedRevision ?? snapshot.conversationThreads[key]?.currentRevision ?? 1
         if snapshot.conversationThreads[key]?.redactedRevisions?.contains(revision) == true {
-            return try presentation(from: snapshot, selectorFor: nil).filtering(to: key)
+            throw AttentionStoreError.requestMissing
+        }
+        let currentRevision = snapshot.conversationThreads[key]?.currentRevision ?? 1
+        if requestedRevision != nil, revision != currentRevision {
+            guard snapshot.conversationThreads[key]?.revisions[revision] != nil else {
+                throw AttentionStoreError.requestMissing
+            }
+            return try presentation(from: snapshot, selectorFor: nil,
+                                    revisionFor: [key: revision]).filtering(to: key)
         }
         let selector = try store.selector(for: key, requestRevision: revision, context: profileContext)
         return try presentation(from: store.snapshot(context: profileContext), selectorFor: [key: selector])
@@ -877,7 +885,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
     }
 
     private func presentation(from snapshot: AttentionStoreSnapshot,
-                              selectorFor selectors: [RequestKey: BoundDocumentSelector]?) throws -> PresentationSnapshot {
+                              selectorFor selectors: [RequestKey: BoundDocumentSelector]?,
+                              revisionFor revisions: [RequestKey: UInt64]? = nil) throws -> PresentationSnapshot {
         let orderedRequests = try snapshot.requests.values.map { request -> (order: UInt64, request: StoredRequest) in
             guard let order = request.acceptanceOrder else {
                 throw AttentionStoreError.missingAcceptanceOrder
@@ -906,7 +915,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 .flatMap(\.files) ?? []
             let deliveredFileNames = Set(deliveredFiles.map(\.name))
             let conversationRevision = thread?.currentRevision ?? 1
-            let presentedRevision = selectors?[item.request.key]?.requestRevision ?? conversationRevision
+            let presentedRevision = selectors?[item.request.key]?.requestRevision ??
+                revisions?[item.request.key] ?? conversationRevision
             let matchesCurrentRevision: (Submission) -> Bool = { candidate in
                 guard candidate.requestKey == item.request.key else { return false }
                 return (candidate.requestRevision ?? 1) == conversationRevision

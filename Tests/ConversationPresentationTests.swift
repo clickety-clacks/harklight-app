@@ -550,7 +550,13 @@ final class ConversationPresentationTests: XCTestCase {
 
         let historical = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
         let current = try XCTUnwrap(port.inspect(context: port.context, request: key, revision: 2).requests.first)
+        let historicalMessage = try XCTUnwrap(
+            port.inspect(context: port.context, request: key, revision: 1).requests.first)
         XCTAssertEqual(historical.draft.compatibility.selectedActionID, ExactText("old"))
+        XCTAssertEqual(historicalMessage.requestRevision, 1)
+        XCTAssertEqual(historicalMessage.title?.rawValue, "First wording")
+        XCTAssertNil(historicalMessage.selector,
+                     "Reading an older wording must not issue an answer selector for it.")
         XCTAssertNil(current.draft.compatibility.selectedActionID,
                      "Editing the version on screen must not apply its answer to the newer version.")
         XCTAssertNil(live.draft(for: key, revision: 2)?.compatibility.textByActionID[ExactText("old")],
