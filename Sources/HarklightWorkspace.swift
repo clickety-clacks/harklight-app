@@ -407,7 +407,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var testNotificationNavigationMessage: String?
     @State private var testNotificationLoading = false
     @State private var testNotificationUnavailable = false
+    @State private var testNotificationTargetKey: RequestKey?
     @State private var dismissedNotificationSerial: UInt64?
+    @State private var openedChatRouteSerial: UInt64?
     @State private var listTabOnMessageEntry: InboxMessageTab?
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
@@ -473,6 +475,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         if testNotificationNavigation != nil { return testNotificationNavigationMessage }
         return notificationNavigationMessage
     }
+    private var compactNotificationStatusPresented: Binding<Bool> {
+        Binding(
+            get: {
+                guard horizontalSizeClass == .compact,
+                      let route = activeNotificationNavigation,
+                      route.request == nil else { return false }
+                return route.messageResolution != .none
+            },
+            set: { _ in }
+        )
+    }
     private var newMessageAreaExpiryTaskKey: NewMessageAreaExpiryTaskKey {
         NewMessageAreaExpiryTaskKey(
             scenePhase: String(describing: scenePhase),
@@ -488,27 +501,58 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func triggerNotificationTestAction() {
         guard exposesNotificationTestAction, let key = requests.first?.key else { return }
+        let arguments = ProcessInfo.processInfo.arguments
+        let pushShape = arguments.contains("--harklight-test-notification-push-shape")
+        let locatorless = arguments.contains("--harklight-test-notification-no-locator")
+        let retrying = arguments.contains("--harklight-test-notification-retrying")
         let serial = max(notificationNavigation?.serial ?? 0,
                          testNotificationNavigation?.serial ?? 0) &+ 1
-        testNotificationNavigation = NativeInboxNavigation(serial: serial, request: key,
-            opensChat: ProcessInfo.processInfo.arguments.contains("--harklight-test-notification-chat"))
+        let resolution: NativeInboxMessageResolution = if arguments.contains(
+            "--harklight-test-notification-unavailable") {
+            .unavailable
+        } else if arguments.contains("--harklight-test-notification-pending") ||
+                    pushShape || retrying {
+            .resolving
+        } else {
+            .none
+        }
+        let routeRequest = pushShape || locatorless || retrying ? nil : key
+        testNotificationTargetKey = key
+        testNotificationNavigation = NativeInboxNavigation(serial: serial, request: routeRequest,
+            opensChat: arguments.contains("--harklight-test-notification-chat"),
+            messageResolution: locatorless ? .none : resolution)
         dismissedNotificationSerial = nil
-        testNotificationLoading = ProcessInfo.processInfo.arguments.contains(
-            "--harklight-test-notification-pending")
-        testNotificationUnavailable = ProcessInfo.processInfo.arguments.contains(
-            "--harklight-test-notification-unavailable")
-        testNotificationNavigationMessage = testNotificationLoading
-            ? "Checking this notification."
-            : (testNotificationUnavailable ? "This message could not be loaded." : nil)
+        testNotificationLoading = !locatorless && resolution == .resolving
+        testNotificationUnavailable = !locatorless && resolution == .unavailable
+        testNotificationNavigationMessage = if locatorless {
+            nil
+        } else if retrying {
+            "Could not verify notification. Checking again while open."
+        } else if resolution == .resolving {
+            "Checking this notification."
+        } else if resolution == .unavailable {
+            "This message could not be loaded."
+        } else {
+            nil
+        }
     }
 
     private func resolveSyntheticNotification() {
+        if let route = testNotificationNavigation, route.request == nil,
+           let targetKey = testNotificationTargetKey {
+            testNotificationNavigation = NativeInboxNavigation(serial: route.serial,
+                request: targetKey, opensChat: route.opensChat, messageResolution: .none)
+        }
         testNotificationLoading = false
         testNotificationUnavailable = false
         testNotificationNavigationMessage = nil
     }
 
     private func showSyntheticNotificationUnavailable() {
+        if let route = testNotificationNavigation {
+            testNotificationNavigation = NativeInboxNavigation(serial: route.serial,
+                request: route.request, opensChat: route.opensChat, messageResolution: .unavailable)
+        }
         testNotificationLoading = false
         testNotificationUnavailable = true
         testNotificationNavigationMessage = "This message could not be loaded."
@@ -687,15 +731,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Group {
                 switch item {
                 case let .request(key)?:
-                    if let route = activeNotificationNavigation,
-                       route.request == key,
-                       testNotificationLoading || testNotificationUnavailable ||
-                        conversationStore?.request(for: key) == nil {
+                    if let route = activeNotificationNavigation, route.request == key,
+                       route.messageResolution != .none {
                         notificationDestinationStatus(
                             message: activeNotificationNavigationMessage,
-                            isLoading: !testNotificationUnavailable &&
-                                Self.notificationRouteIsLoading(activeNotificationNavigationMessage),
-                            isSynthetic: testNotificationLoading || testNotificationUnavailable)
+                            isLoading: route.messageResolution == .resolving,
+                            isSynthetic: testNotificationNavigation != nil)
+                    } else if conversationStore?.request(for: key) == nil {
+                        notificationDestinationStatus(
+                            message: activeNotificationNavigationMessage,
+                            isLoading: false,
+                            isSynthetic: false)
                     } else {
                         requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
                             .id(key)
@@ -709,11 +755,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             .id(id)
                     }
                 case nil:
-                    if let route = activeNotificationNavigation, route.request == nil {
+                    if let route = activeNotificationNavigation, route.request == nil,
+                       route.messageResolution != .none {
                         notificationDestinationStatus(
                             message: activeNotificationNavigationMessage,
-                            isLoading: Self.notificationRouteIsLoading(activeNotificationNavigationMessage),
-                            isSynthetic: false)
+                            isLoading: route.messageResolution == .resolving,
+                            isSynthetic: testNotificationNavigation != nil)
                     } else {
                         HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
                             .background { HarklightDesignSystem.palette(for: colorScheme).neutral.backgroundColor.ignoresSafeArea() }
@@ -794,12 +841,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         .padding()
     }
 
-    private static func notificationRouteIsLoading(_ message: String?) -> Bool {
-        guard let message else { return false }
-        return message == "Checking this notification." ||
-            message == "Looking for this message."
-    }
-
     @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
@@ -846,14 +887,20 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         var chatRouteDidOpen: (() -> Void)? = nil
         if case let .request(key) = id,
            let route = activeNotificationNavigation,
-           route.opensChat, route.request == key {
+           route.opensChat, route.request == key,
+           openedChatRouteSerial != route.serial {
             chatRouteSerial = route.serial
-            chatRouteDidOpen = { [self] in self.notificationChatRouteDidOpen(route.serial) }
+            chatRouteDidOpen = { [self] in
+                self.openedChatRouteSerial = route.serial
+                self.notificationChatRouteDidOpen(route.serial)
+            }
         } else if case let .request(key) = id,
-                  let route = replyChatRoute, route.key == key {
+                  let route = replyChatRoute, route.key == key,
+                  openedChatRouteSerial != route.serial {
             chatRouteSerial = route.serial
             chatScrollTargetTurnID = replyRouteTargetTurnID(for: key)
             chatRouteDidOpen = { [self] in
+                self.openedChatRouteSerial = route.serial
                 if self.replyChatRoute?.serial == route.serial { self.replyChatRoute = nil }
             }
         } else {
@@ -883,14 +930,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             let landscape = geometry.size.width > geometry.size.height
             let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
             let inlineChat = wideChat && landscape
-            let tabBarBackground = HarklightDesignSystem.palette(for: colorScheme)
-                .neutral.backgroundColor
             let tabs = TabView(selection: $workspaceTab) {
                 Tab(value: .inbox) {
                     inboxSplitView(for: .inbox, inlineChat: inlineChat,
                                    geometry: geometry)
-                        .toolbarBackground(tabBarBackground, for: .tabBar)
-                        .toolbarBackgroundVisibility(.visible, for: .tabBar)
                 } label: {
                     // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
                     Label {
@@ -903,13 +946,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 Tab("Replied", systemImage: "envelope.open", value: .replied) {
                     inboxSplitView(for: .replied, inlineChat: inlineChat,
                                    geometry: geometry)
-                        .toolbarBackground(tabBarBackground, for: .tabBar)
-                        .toolbarBackgroundVisibility(.visible, for: .tabBar)
                 }
 
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
-            .tabBarMinimizeBehavior(.never)
             .onChange(of: workspaceTab) { oldTab, newTab in
                 if oldTab != newTab { isWarningPresented = false }
                 selectedTab = newTab.messageTab
@@ -990,6 +1030,15 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             settingsContent()
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
+        }
+        .fullScreenCover(isPresented: compactNotificationStatusPresented) {
+            if let route = activeNotificationNavigation {
+                notificationDestinationStatus(
+                    message: activeNotificationNavigationMessage,
+                    isLoading: route.messageResolution == .resolving,
+                    isSynthetic: testNotificationNavigation != nil)
+                    .interactiveDismissDisabled()
+            }
         }
         .alert("The message changed", isPresented: staleAnswerPresentation,
                presenting: conversationStore?.staleAnswerDialog) { dialog in

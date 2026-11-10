@@ -348,7 +348,12 @@ final class ConversationSampleUITests: XCTestCase {
         let normalReplyRow = app.descendants(matching: .any)[
             "normal-reply-item-sample-markdown-acceptance"
         ]
-        for _ in 0..<8 where !normalReplyRow.isHittable { list.swipeUp() }
+        for _ in 0..<12 where !normalReplyRow.isHittable {
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            let end = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+            start.press(forDuration: 0.05, thenDragTo: end,
+                        withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
         XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
         captureInboxColumnState("markdown-accessibility-normal-reply-row", app)
@@ -992,15 +997,20 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         XCTAssertTrue(row.label.contains("Updated"))
         row.tap()
-        XCTAssertTrue(app.staticTexts["request-update-fact"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.staticTexts["request-update-fact"].label, "Updated · version 2")
+        let versionIndicator = app.buttons["request-update-fact"]
+        XCTAssertTrue(versionIndicator.waitForExistence(timeout: 5))
+        XCTAssertEqual(versionIndicator.label, "Updated · version 2")
         capture("sender-updated-current-request", app)
-        app.buttons["Chat"].tap()
-        XCTAssertTrue(app.staticTexts["Updated"].waitForExistence(timeout: 5))
-        app.buttons["conversation-revision-picker"].tap()
-        app.buttons["Original · draft"].tap()
-        app.buttons["conversation-earlier-answer"].tap()
-        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
+        versionIndicator.tap()
+        app.buttons["request-historical-version-1"].tap()
+        let historical = app.scrollViews["historical-message-version"]
+        XCTAssertTrue(historical.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["historical-answer-draft"].waitForExistence(timeout: 5),
+                      "The retained undelivered answer remains reachable from the old wording.")
+        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(historical.buttons["request-finish"].exists,
+                       "The archived answer is available to read but cannot be sent against an earlier version.")
         let earlierTitle = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS %@", "Archive the old")
         ).firstMatch
@@ -1013,6 +1023,11 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(earlierBody.label.contains("new collection"), earlierBody.debugDescription)
         XCTAssertFalse(earlierBody.label.contains("*"), earlierBody.debugDescription)
         capture("sender-updated-earlier-question-and-draft", app)
+        app.buttons["Done"].tap()
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(app.staticTexts["Updated"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["conversation-revision-picker"].exists,
+                       "Earlier versions remain in detail and cannot be selected in Chat.")
     }
 
     func testMixedCleanupRetainsUnidentifiedFilesWithoutInventedCommittedHistory() {
@@ -1224,13 +1239,24 @@ final class ConversationSampleUITests: XCTestCase {
         open("sample-approval-2", search: "Archive")
         XCTAssertTrue(app.staticTexts["Please review the sketches before archiving. The earlier answer draft is retained."].exists)
         capture("conversation-current-revision", app)
-        let picker = app.buttons["conversation-revision-picker"]
-        XCTAssertTrue(picker.exists, app.debugDescription)
-        picker.tap()
-        app.buttons["Original · draft"].tap()
-        app.buttons["conversation-earlier-answer"].tap()
-        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
+        dismissChatSheet(app)
+        let versionIndicator = app.buttons["request-update-fact"]
+        XCTAssertTrue(versionIndicator.waitForExistence(timeout: 5), app.debugDescription)
+        versionIndicator.tap()
+        app.buttons["request-historical-version-1"].tap()
+        XCTAssertTrue(app.scrollViews["historical-message-version"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertTrue(app.staticTexts["historical-answer-draft"].waitForExistence(timeout: 5),
+                      "The older undelivered answer remains reachable in the historical detail.")
+        XCTAssertTrue(app.staticTexts[
+            "Not delivered · this selection belongs to the earlier question"
+        ].waitForExistence(timeout: 5))
         capture("conversation-archived-answer", app)
+        app.buttons["Done"].tap()
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["conversation-revision-picker"].exists,
+                       "Version selection stays on message details rather than Chat.")
         open("sample-information-2", search: "Thursday")
         XCTAssertTrue(app.staticTexts["Example · Exact bytes transferred"].exists)
         XCTAssertTrue(app.staticTexts["Example · Agent reported unusable: Fictional unsupported format"].exists)
@@ -1270,7 +1296,7 @@ final class ConversationSampleUITests: XCTestCase {
         let inputSurface = app.otherElements["sample-chat-input-surface"]
         // The saved accessibility hierarchy exposes the native presentation's
         // history and composer but has no Sheet node, so anchor the swipe to the history.
-        let history = app.scrollViews.firstMatch
+        let history = app.scrollViews["conversation-history-scroll"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inputSurface.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(history.exists, app.debugDescription)

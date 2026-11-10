@@ -634,10 +634,14 @@ public final class AttentionDomainPort: @unchecked Sendable {
         try validate(suppliedContext)
         let snapshot = try store.snapshot(context: profileContext)
         let revision = requestedRevision ?? snapshot.conversationThreads[key]?.currentRevision ?? 1
-        if snapshot.conversationThreads[key]?.redactedRevisions?.contains(revision) == true {
+        let currentRevision = snapshot.conversationThreads[key]?.currentRevision ?? 1
+        let isRedacted = snapshot.conversationThreads[key]?.redactedRevisions?.contains(revision) == true
+        if requestedRevision != nil, isRedacted {
             throw AttentionStoreError.requestMissing
         }
-        let currentRevision = snapshot.conversationThreads[key]?.currentRevision ?? 1
+        if requestedRevision == nil, isRedacted {
+            return try presentation(from: snapshot, selectorFor: nil).filtering(to: key)
+        }
         if requestedRevision != nil, revision != currentRevision {
             guard snapshot.conversationThreads[key]?.revisions[revision] != nil else {
                 throw AttentionStoreError.requestMissing

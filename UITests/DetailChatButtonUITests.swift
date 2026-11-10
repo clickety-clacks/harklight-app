@@ -37,6 +37,64 @@ final class DetailChatButtonUITests: XCTestCase {
         verifyToolbarChatButton(appearance: "Dark")
     }
 
+    func testNotificationChatDismissalStaysClosedWhenDetailIsRecreated() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The regular-width detail recreation requires an iPad layout.")
+        }
+        defer { XCUIDevice.shared.orientation = .portrait }
+        XCUIDevice.shared.orientation = .portrait
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-chat"]
+        app.launch()
+
+        let search = workspaceSearchField(in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap()
+        search.typeText("no-matching-request\n")
+
+        let openNotification = app.buttons["harklight-test-notification"]
+        XCTAssertTrue(openNotification.waitForExistence(timeout: 10), app.debugDescription)
+        if !openNotification.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        XCTAssertTrue(openNotification.isHittable, app.debugDescription)
+        openNotification.tap()
+
+        let noChat = app.staticTexts.matching(identifier: "conversation-no-chat-empty-state").firstMatch
+        XCTAssertTrue(noChat.waitForExistence(timeout: 10),
+                      "The synthetic notification opens the target's Chat surface. \(app.debugDescription)")
+        attachScreenshot("synthetic-notification-chat-open")
+
+        noChat.swipeDown()
+        XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["Chat"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(noChat.waitForNonExistence(timeout: 5),
+                      "One deliberate dismissal closes the notification Chat surface.")
+        attachScreenshot("synthetic-notification-chat-dismissed-once")
+
+        let otherRequest = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(otherRequest.waitForExistence(timeout: 5), app.debugDescription)
+        otherRequest.tap()
+        XCTAssertTrue(app.buttons["request-heading"].label.contains("Facilities desk"),
+                      app.debugDescription)
+        let targetRequest = app.descendants(matching: .any)["request-row-unknown-01"]
+        XCTAssertTrue(targetRequest.waitForExistence(timeout: 5), app.debugDescription)
+        targetRequest.tap()
+        let targetHeading = app.buttons["request-heading"]
+        XCTAssertTrue(targetHeading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(targetHeading.label.contains("Unfamiliar interface"), targetHeading.debugDescription)
+        let stayedClosed = noChat.waitForNonExistence(timeout: 2)
+        XCTAssertTrue(stayedClosed,
+                      "Recreating the detail does not reopen a dismissed notification chat. \(app.debugDescription)")
+        attachScreenshot("synthetic-notification-chat-stays-closed-after-detail-recreation")
+        guard stayedClosed else { return }
+
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(noChat.waitForExistence(timeout: 5),
+                      "The person can intentionally reopen the Chat surface. \(app.debugDescription)")
+        attachScreenshot("synthetic-notification-chat-intentionally-reopened")
+    }
+
     func testWideDetailChatButtonAlsoPresentsDismissibleSheet() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("The wide detail presentation requires an iPad layout.")

@@ -317,6 +317,7 @@ final class InboxStockTabsUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
                                "--harklight-test-notification-pending",
+                               "--harklight-test-notification-push-shape",
                                "--harklight-test-notification-auto"]
         app.launch()
 
@@ -336,7 +337,8 @@ final class InboxStockTabsUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture",
                                "--harklight-test-notification-navigation",
-                               "--harklight-test-notification-pending"]
+                               "--harklight-test-notification-pending",
+                               "--harklight-test-notification-push-shape"]
         app.launch()
 
         let openNotification = app.buttons["harklight-test-notification"]
@@ -356,7 +358,8 @@ final class InboxStockTabsUITests: XCTestCase {
     func testSyntheticNotificationFailureOffersReturnToInbox() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
-                               "--harklight-test-notification-pending"]
+                               "--harklight-test-notification-pending",
+                               "--harklight-test-notification-push-shape"]
         app.launch()
 
         let openNotification = app.buttons["harklight-test-notification"]
@@ -378,6 +381,50 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["notification-message-loading"].exists,
                        "Returning dismisses the unavailable route without reopening it.")
         attachScreenshot("synthetic-notification-returned-to-inbox", from: app)
+    }
+
+    func testWideNotificationWithoutLocatorKeepsTheNormalEmptyDetail() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-no-locator"]
+        app.launch()
+        guard app.windows.firstMatch.frame.width >= 700 else {
+            throw XCTSkip("A regular-width layout is required to show the empty detail beside the inbox.")
+        }
+
+        let openNotification = app.buttons["harklight-test-notification"]
+        XCTAssertTrue(openNotification.waitForExistence(timeout: 10), app.debugDescription)
+        if !openNotification.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        XCTAssertTrue(openNotification.isHittable, app.debugDescription)
+        openNotification.tap()
+        XCTAssertFalse(app.descendants(matching: .any)["notification-message-loading"].exists,
+                       app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["notification-message-unavailable"].exists,
+                       "A notification without a message locator leaves the normal empty detail visible.")
+        attachScreenshot("synthetic-notification-no-locator-empty-detail", from: app)
+    }
+
+    func testWideNotificationRetryStateRemainsLoading() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-retrying"]
+        app.launch()
+        guard app.windows.firstMatch.frame.width >= 700 else {
+            throw XCTSkip("A regular-width layout is required to check retry status in the detail column.")
+        }
+
+        let openNotification = app.buttons["harklight-test-notification"]
+        XCTAssertTrue(openNotification.waitForExistence(timeout: 10), app.debugDescription)
+        if !openNotification.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        XCTAssertTrue(openNotification.isHittable, app.debugDescription)
+        openNotification.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["notification-message-loading"]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Could not verify notification. Checking again while open."]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["notification-message-unavailable"].exists,
+                       "A retry remains a loading state until target resolution finishes.")
+        attachScreenshot("synthetic-notification-retrying-regular-detail", from: app)
     }
 
     private func selectMessageTab(_ title: String, in app: XCUIApplication,

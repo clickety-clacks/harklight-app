@@ -193,7 +193,6 @@ struct ConversationPanel: View {
                 guard abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 else { return }
                 dismissChat()
             })
-        .accessibilityAction(named: "Dismiss chat") { dismissChat() }
         .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
         .sheet(item: $inspectedFile) { file in
             NavigationStack {

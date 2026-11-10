@@ -1011,7 +1011,6 @@ struct LiveRequestDetail: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var chatPresented = false
     @State private var pendingChatScrollTarget: ExactText?
-    @State private var openedNotificationChatRouteSerial: UInt64?
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
@@ -1935,8 +1934,7 @@ struct LiveRequestDetail: View {
             if inline { chatPresented = false }
         }
         .onChange(of: context.notificationChatRouteSerial, initial: true) { _, serial in
-            guard let serial, openedNotificationChatRouteSerial != serial else { return }
-            openedNotificationChatRouteSerial = serial
+            guard let serial else { return }
             // Capture the scroll target before didOpen, which may clear the route.
             pendingChatScrollTarget = context.chatScrollTargetTurnID
             if !context.inlineChat { chatPresented = true }
@@ -2376,6 +2374,16 @@ private struct HistoricalMessageVersionView: View {
                 case .unsupported:
                     Text("This message version uses an unsupported answer format.")
                         .font(.callout).foregroundStyle(.secondary)
+                }
+                if let earlierAnswer = store.historicalAnswerDraft(
+                    for: request.key, revision: request.requestRevision) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Earlier answer draft")
+                            .font(.headline)
+                            .accessibilityIdentifier("historical-answer-draft")
+                        HistoricalAnswerDraftView(request: earlierAnswer, store: store,
+                            retracted: store.conversation(for: request.key)?.isRetracted ?? false)
+                    }
                 }
             }
             .frame(maxWidth: 680, alignment: .leading)
