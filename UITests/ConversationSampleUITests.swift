@@ -1251,7 +1251,7 @@ final class ConversationSampleUITests: XCTestCase {
     func testConversationRevisionFileFactsAndClosureUseTheOrdinaryApp() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        func open(_ id: String, search: String) {
+        func open(_ id: String, search: String, requiresEditableComposer: Bool = true) {
             app.terminate()
             app.launch()
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
@@ -1260,7 +1260,12 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             row.tap()
             app.buttons["Chat"].tap()
-            XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5))
+            if requiresEditableComposer {
+                XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5))
+            } else {
+                XCTAssertFalse(app.textViews["sample-chat-composer"].exists)
+                XCTAssertFalse(app.buttons["sample-chat-send"].exists)
+            }
         }
         open("sample-approval-2", search: "Archive")
         XCTAssertTrue(app.staticTexts["Please review the sketches before archiving. The earlier answer draft is retained."].exists)
@@ -1324,11 +1329,25 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Original bytes"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["Open file"].exists, "Local examples cannot fetch from a real service")
         capture("conversation-file-metadata", app)
-        open("sample-completed-2", search: "journal is ready")
+        open("sample-completed-2", search: "journal is ready", requiresEditableComposer: false)
         XCTAssertTrue(app.staticTexts["Request cleared"].exists)
-        XCTAssertFalse(app.textViews["sample-chat-composer"].isEnabled)
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        XCTAssertFalse(app.textViews["sample-chat-composer"].exists)
+        XCTAssertFalse(app.buttons["sample-chat-send"].exists)
         capture("conversation-explicit-closure", app)
+
+        open("sample-approval-1", search: "Archive", requiresEditableComposer: false)
+        XCTAssertTrue(app.staticTexts["Retracted"].exists, app.debugDescription)
+        let readOnlyDraft = app.descendants(matching: .any)["read-only-conversation-draft"]
+        XCTAssertTrue(readOnlyDraft.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Please keep this unsent note."].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["This request's chat is closed. Your message was not sent."].exists,
+                      app.debugDescription)
+        let copyDraft = app.buttons["read-only-conversation-copy"]
+        XCTAssertTrue(copyDraft.waitForExistence(timeout: 5), app.debugDescription)
+        copyDraft.tap()
+        XCTAssertFalse(app.textViews["sample-chat-composer"].exists)
+        XCTAssertFalse(app.buttons["sample-chat-send"].exists)
+        capture("closed-conversation-draft-remains-copyable", app)
     }
 
     private func capture(_ name: String, _ app: XCUIApplication) {
