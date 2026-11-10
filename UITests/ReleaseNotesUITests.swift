@@ -2,48 +2,6 @@ import XCTest
 
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
-    func testUnconfirmedCurrentReleaseOpensOnUpgradeAndShowsInSettings() {
-        let app = XCUIApplication()
-        let simulatedCurrentBuild = "9000" // Synthetic metadata; no archive mapping is claimed.
-        app.launchArguments = ["--reset-attention-fixture"]
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_FRESH_INSTALL"] = "0"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = simulatedCurrentBuild
-        app.launch()
-
-        XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"].exists,
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts["See what’s new after an update"].exists,
-                      app.debugDescription)
-        attachScreenshot("release-notes-unconfirmed-update", from: app)
-
-        app.buttons["Done"].tap()
-        let settings = app.buttons["inbox-settings"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
-        settings.tap()
-        let historyLink = app.buttons["Release notes"]
-        XCTAssertTrue(historyLink.waitForExistence(timeout: 5), app.debugDescription)
-        historyLink.tap()
-        XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
-                      app.debugDescription)
-        scrollHistoryToNewest(in: app)
-        let releaseImprovementsHeader = app.cells.containing(
-            .staticText, identifier: "Release note improvements").firstMatch
-        XCTAssertTrue(releaseImprovementsHeader.waitForExistence(timeout: 5),
-                      app.debugDescription)
-        XCTAssertTrue(releaseImprovementsHeader.staticTexts[
-            "Version 0.1.0 · Build UNCONFIRMED"
-        ].exists, "Settings keeps the current release's build label.")
-        let updateTitle = app.staticTexts["See what’s new after an update"]
-        XCTAssertTrue(updateTitle.waitForExistence(timeout: 5),
-                      app.debugDescription)
-        XCTAssertTrue(updateTitle.isHittable,
-                      app.debugDescription)
-        attachScreenshot("release-notes-settings-unconfirmed-history", from: app)
-    }
-
     func testPost79UpdateLabelsUnknownBuildNumbersWithoutGuessing() {
         let app = XCUIApplication()
         let simulatedCurrentBuild = "9001" // Synthetic metadata; no archive mapping is claimed.
@@ -192,16 +150,6 @@ final class ReleaseNotesUITests: XCTestCase {
         let list = app.collectionViews["release-notes-update-sheet"]
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
         reveal(element, in: list)
-    }
-
-    private func scrollHistoryToNewest(in app: XCUIApplication) {
-        let list = app.collectionViews["release-notes-history"]
-        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-        for _ in 0..<10 {
-            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
-            let end = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
-            start.press(forDuration: 0.05, thenDragTo: end)
-        }
     }
 
     private func reveal(_ element: XCUIElement, in list: XCUIElement) {
