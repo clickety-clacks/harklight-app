@@ -935,6 +935,9 @@ struct LiveInboxSettings: View {
                         }
                     }
                 }
+                if !store.isReadOnly && !store.isLocalExample {
+                    PriorityLevelsSettingsSection(store: store)
+                }
                 if let launch,
                    launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
                     InboxDiagnosticsSettingsSection(launch: launch, isReadOnly: store.isReadOnly,
@@ -950,6 +953,189 @@ struct LiveInboxSettings: View {
                 Button("Done", systemImage: "checkmark") { dismiss() }.labelStyle(.iconOnly)
             } }
         }
+    }
+}
+
+@MainActor
+private struct PriorityLevelsSettingsSection: View {
+    let store: LivePresentationStore
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var statusText: LocalizedStringResource {
+        if let reason = store.priorityLevelsState.failureReason {
+            switch reason {
+            case "unknown_type":
+                if store.priorityLevelsState.pendingSave != nil {
+                    return "This Server does not support priority levels yet. The submitted save remains unconfirmed on this phone and will retry after reconnecting to a supporting Server; later edits stay separate."
+                }
+                return "This Server does not support priority levels yet. Your draft stays on this phone and is not applied."
+            case "forbidden":
+                return "This phone was not allowed to access the priority levels. Your local draft remains here."
+            case "invalid_field":
+                return "The Server rejected this table. Correct the values and save again; the previous applied table remains in place."
+            case "operation_conflict":
+                return "The Server rejected this save because its operation conflicted. Your draft remains here; another save will use a new operation."
+            default:
+                if store.priorityLevelsState.pendingSave != nil {
+                    return "The Server did not confirm this save. The same operation will retry after reconnection; later edits stay separate."
+                }
+                return "The latest Server result was not confirmed. Your local draft remains separate from the last confirmed table."
+            }
+        }
+        if store.priorityLevelsState.pendingSave != nil {
+            return "Save is waiting for Server confirmation. The same operation will be retried after reconnection; later edits stay separate."
+        }
+        guard let confirmed = store.priorityLevelsState.confirmedLevels else {
+            return "The applied table has not been confirmed from the Server yet. Edits remain on this phone until saved while connected."
+        }
+        if confirmed.isEmpty {
+            return "The Server has no priority levels configured. Add a complete table to set one."
+        }
+        return "The editable rows are a local draft. Saving while connected applies them on the Server."
+    }
+
+    private var confirmedTableContent: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Last confirmed table:")
+            if let levels = store.priorityLevelsState.confirmedLevels {
+                if levels.isEmpty {
+                    Text("None configured.")
+                } else {
+                    // A band's lower bound is unique in a valid table and identifies its range.
+                    ForEach(levels, id: \.lowerBound) { level in
+                        if let days = level.bounceAfterDays {
+                            Text("\(level.name.rawValue) from \(level.lowerBound.formatted()), bounce after \(days.formatted()) days")
+                        } else {
+                            Text("\(level.name.rawValue) from \(level.lowerBound.formatted()), bounce disabled")
+                        }
+                    }
+                }
+            } else {
+                Text("Not confirmed yet.")
+            }
+        }
+        .font(.footnote)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("priority-levels-confirmed-table")
+    }
+
+    var body: some View {
+        Section("Priority levels") {
+            Text(statusText)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            confirmedTableContent
+            Text("Local draft")
+                .font(.subheadline.weight(.semibold))
+
+            ForEach(store.priorityLevelsDraftRows) { row in
+                PriorityLevelDraftEditorRow(
+                    row: row,
+                    name: binding(for: row.id, keyPath: \.name),
+                    lowerBound: binding(for: row.id, keyPath: \.lowerBound),
+                    bounceAfterDays: binding(for: row.id, keyPath: \.bounceAfterDays),
+                    onRemove: { remove(row.id) })
+            }
+
+            Button {
+                store.updatePriorityLevelsDraft(
+                    store.priorityLevelsDraftRows + [PriorityLevelDraftRow()])
+            } label: {
+                Label("Add level", systemImage: "plus.circle")
+            }
+            .accessibilityIdentifier("add-priority-level")
+
+            if let validation = store.priorityLevelsValidationMessage {
+                Text(validation)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("priority-levels-validation")
+            }
+            if let localError = store.priorityLevelsLocalError {
+                Text(localError)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            Button {
+                Task { await store.savePriorityLevels() }
+            } label: {
+                if store.priorityLevelsState.pendingSave != nil {
+                    Label("Waiting for confirmation…", systemImage: "clock")
+                } else {
+                    Label("Save levels", systemImage: "checkmark")
+                }
+            }
+            .disabled(!store.canSavePriorityLevels)
+            .accessibilityIdentifier("save-priority-levels")
+
+            if !store.priorityLevelsRelayConfirmed {
+                Text("Connect this phone before saving. Offline edits stay local and are not queued for upload.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task {
+            let updates = NativeRelayLifecycle.shared.priorityLevelsUpdates(for: store.notificationContext)
+            await store.openPriorityLevelsEditor()
+            for await _ in updates {
+                guard !Task.isCancelled else { break }
+                store.refreshPriorityLevelsProjection()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await store.openPriorityLevelsEditor() }
+        }
+    }
+
+    private func binding(for id: UUID,
+                         keyPath: WritableKeyPath<PriorityLevelDraftRow, String>) -> Binding<String> {
+        Binding(
+            get: {
+                store.priorityLevelsDraftRows.first(where: { $0.id == id })?[keyPath: keyPath] ?? ""
+            },
+            set: { value in
+                var rows = store.priorityLevelsDraftRows
+                guard let index = rows.firstIndex(where: { $0.id == id }) else { return }
+                rows[index][keyPath: keyPath] = value
+                store.updatePriorityLevelsDraft(rows)
+            })
+    }
+
+    private func remove(_ id: UUID) {
+        var rows = store.priorityLevelsDraftRows
+        rows.removeAll { $0.id == id }
+        store.updatePriorityLevelsDraft(rows)
+    }
+}
+
+@MainActor
+private struct PriorityLevelDraftEditorRow: View {
+    let row: PriorityLevelDraftRow
+    @Binding var name: String
+    @Binding var lowerBound: String
+    @Binding var bounceAfterDays: String
+    let onRemove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Level name", text: $name)
+                .accessibilityIdentifier("priority-level-name-\(row.id.uuidString.lowercased())")
+            HStack(spacing: 12) {
+                TextField("Lower bound (0–1)", text: $lowerBound)
+                    .keyboardType(.decimalPad)
+                    .accessibilityIdentifier("priority-level-lower-bound-\(row.id.uuidString.lowercased())")
+                TextField("Bounce after days (blank disables)", text: $bounceAfterDays)
+                    .keyboardType(.decimalPad)
+                    .accessibilityIdentifier("priority-level-bounce-days-\(row.id.uuidString.lowercased())")
+            }
+            Button(role: .destructive, action: onRemove) {
+                Label("Remove level", systemImage: "minus.circle")
+            }
+            .accessibilityIdentifier("remove-priority-level-\(row.id.uuidString.lowercased())")
+        }
+        .padding(.vertical, 4)
     }
 }
 

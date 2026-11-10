@@ -877,6 +877,11 @@ final class NativeConversationAvailability {
 final class NativeRelayLifecycle {
     static let shared = NativeRelayLifecycle()
 
+    private struct PriorityLevelsObserver {
+        let context: ProfileContext
+        let continuation: AsyncStream<Void>.Continuation
+    }
+
     let conversationAvailability = NativeConversationAvailability()
     private var core: NativeRelayCore? {
         didSet { conversationAvailability.reset() }
@@ -885,6 +890,7 @@ final class NativeRelayLifecycle {
     private var context: ProfileContext?
     private var confirmedRelayContext: ProfileContext?
     private var activeTransportAttemptID: UUID?
+    private var priorityLevelsLostTransportAttemptID: UUID?
     private let foregroundDeadline = ForegroundConnectDeadline()
     private var diagnosticJournal: NativeClientDiagnosticJournal?
     private var foregroundDiagnosticContext: ProfileContext?
@@ -893,6 +899,7 @@ final class NativeRelayLifecycle {
     private var foregroundDiagnosticSnapshotAvailable = false
     private var foregroundDiagnosticAttemptID = UUID()
     private var foregroundDiagnosticOperations = NativeForegroundOperationSnapshot.unavailable
+    private var priorityLevelsObservers: [UUID: PriorityLevelsObserver] = [:]
     private var configuration: (store: AttentionDomainStore,
                                 context: ProfileContext,
                                 relayURL: URL,
@@ -940,6 +947,9 @@ final class NativeRelayLifecycle {
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
+                                           onPriorityLevelsChanged: priorityLevelsChangeHandler(for: context),
+                                           onPriorityLevelsConnectionLost: priorityLevelsConnectionLostHandler(
+                                               for: context, transportAttemptID: transportAttemptID),
                                            onDiagnostic: diagnosticSink())
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
@@ -956,6 +966,7 @@ final class NativeRelayLifecycle {
         transport = nil
         self.context = nil
         confirmedRelayContext = nil
+        priorityLevelsLostTransportAttemptID = nil
         configuration = nil
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
@@ -986,13 +997,20 @@ final class NativeRelayLifecycle {
             throw NativeRelayCoreError.inactive
         }
         let expectedGeneration = refreshGeneration
+        let transportAttemptID = UUID()
         let nextTransport = try URLSessionInstallationSession(profile: current.context,
                                                               relayURL: relayURL,
                                                               clientIdentity: TrustedKeychainIdentity(current.identity),
-                                                              trustedRootDER: current.rootDER)
+                                                              trustedRootDER: current.rootDER,
+                                                              attemptID: transportAttemptID)
         var nextCore: NativeRelayCore?
         do {
-            nextCore = try NativeRelayCore(store: current.store, context: current.context, session: nextTransport)
+            nextCore = try NativeRelayCore(store: current.store, context: current.context, session: nextTransport,
+                                           attemptID: transportAttemptID,
+                                           onPriorityLevelsChanged: priorityLevelsChangeHandler(for: current.context),
+                                           onPriorityLevelsConnectionLost: priorityLevelsConnectionLostHandler(
+                                               for: current.context, transportAttemptID: transportAttemptID),
+                                           onDiagnostic: diagnosticSink())
             try await nextTransport.verifyEndpoint()
             guard refreshGeneration == expectedGeneration,
                   core === priorCore, transport === priorTransport,
@@ -1006,6 +1024,7 @@ final class NativeRelayLifecycle {
             confirmedRelayContext = nil
             core = nextCore
             transport = nextTransport
+            activeTransportAttemptID = transportAttemptID
             configuration = (current.store, current.context, relayURL, current.identity, current.rootDER)
             nextCore = nil
             await priorCore.deactivate()
@@ -1027,6 +1046,7 @@ final class NativeRelayLifecycle {
         context = nil
         confirmedRelayContext = nil
         activeTransportAttemptID = nil
+        priorityLevelsLostTransportAttemptID = nil
         configuration = nil
         foregroundDiagnosticContext = nil
         foregroundDiagnosticOperationsAtStart = [:]
@@ -1062,6 +1082,62 @@ final class NativeRelayLifecycle {
     /// ordinary reconnect drain.
     func sendPendingMessageOpens() async {
         _ = await core?.sendPendingMessageOpens()
+    }
+
+    func hasConfirmedPriorityLevelsRelay(for expected: ProfileContext) -> Bool {
+        guard let activeTransportAttemptID else { return false }
+        return confirmedRelayContext == expected && context == expected && core != nil &&
+            priorityLevelsLostTransportAttemptID != activeTransportAttemptID
+    }
+
+    func refreshPriorityLevels(expected: ProfileContext) async {
+        guard hasConfirmedPriorityLevelsRelay(for: expected), let core else { return }
+        await core.refreshPriorityLevels()
+    }
+
+    func sendPendingPriorityLevelsSave(expected: ProfileContext) async {
+        guard hasConfirmedPriorityLevelsRelay(for: expected), let core else { return }
+        await core.sendPendingPriorityLevelsSave()
+    }
+
+    func priorityLevelsUpdates(for expected: ProfileContext) -> AsyncStream<Void> {
+        let observerID = UUID()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            priorityLevelsObservers[observerID] = PriorityLevelsObserver(context: expected,
+                                                                         continuation: continuation)
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.priorityLevelsObservers.removeValue(forKey: observerID)
+                }
+            }
+        }
+    }
+
+    private func priorityLevelsChangeHandler(for expected: ProfileContext) -> @Sendable () -> Void {
+        { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.publishPriorityLevelsUpdate(for: expected)
+            }
+        }
+    }
+
+    private func priorityLevelsConnectionLostHandler(for expected: ProfileContext,
+                                                      transportAttemptID: UUID) -> @Sendable () -> Void {
+        { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.context == expected,
+                      self.activeTransportAttemptID == transportAttemptID else { return }
+                self.priorityLevelsLostTransportAttemptID = transportAttemptID
+                self.publishPriorityLevelsUpdate(for: expected)
+            }
+        }
+    }
+
+    private func publishPriorityLevelsUpdate(for changedContext: ProfileContext) {
+        for observer in priorityLevelsObservers.values where observer.context == changedContext {
+            observer.continuation.yield(())
+        }
     }
 
     /// The terminal event batch used by the foreground lifecycle and its
@@ -1599,6 +1675,9 @@ final class NativeRelayLifecycle {
                                            attemptID: transportAttemptID,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
+                                           onPriorityLevelsChanged: priorityLevelsChangeHandler(for: configuration.context),
+                                           onPriorityLevelsConnectionLost: priorityLevelsConnectionLostHandler(
+                                               for: configuration.context, transportAttemptID: transportAttemptID),
                                            onDiagnostic: diagnosticSink())
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
@@ -1694,6 +1773,7 @@ final class NativeRelayLifecycle {
         // may reconnect; this timeout ends only the current pass.
         refreshGeneration = UUID()
         activeTransportAttemptID = nil
+        priorityLevelsLostTransportAttemptID = nil
         refreshFlights.reset()
         confirmedRelayContext = nil
         let priorCore = core

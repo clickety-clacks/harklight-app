@@ -660,6 +660,178 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return true
     }
 
+    public func markPriorityLevelsEditorOpened(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var levels = state.priorityLevels ?? .empty
+        guard !levels.editorWasOpened else { return }
+        levels.editorWasOpened = true
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+    }
+
+    public func savePriorityLevelsDraft(_ rows: [PriorityLevelDraftRow],
+                                        context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard Set(rows.map(\.id)).count == rows.count, rows.allSatisfy({ isUUIDv4($0.id) }) else {
+            throw AttentionStoreError.invalidDraft
+        }
+        var levels = state.priorityLevels ?? .empty
+        levels.draftRows = rows
+        levels.draftRevision &+= 1
+        if levels.pendingSave == nil,
+           levels.failureReason != "unknown_type",
+           levels.failureReason != "forbidden" {
+            levels.failureReason = nil
+        }
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+    }
+
+    public func beginPriorityLevelsSave(_ table: [PriorityLevel],
+                                        context suppliedContext: ProfileContext) throws -> PendingPriorityLevelsSave {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        let rows = table.map(PriorityLevelDraftRow.init(level:))
+        guard !table.isEmpty, PriorityLevelsTableValidation.levels(from: rows) == table else {
+            throw AttentionStoreError.invalidDraft
+        }
+        var levels = state.priorityLevels ?? .empty
+        guard levels.pendingSave == nil else { throw AttentionStoreError.invalidSubmission }
+        let operation = PendingPriorityLevelsSave(levels: table, sourceDraftRevision: levels.draftRevision)
+        levels.pendingSave = operation
+        levels.failureReason = nil
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+        return operation
+    }
+
+    @discardableResult
+    public func confirmPriorityLevelsSave(_ operationID: UUID,
+                                          levels appliedLevels: [PriorityLevel],
+                                          context suppliedContext: ProfileContext) throws -> Bool {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var levels = state.priorityLevels ?? .empty
+        guard let operation = levels.pendingSave, operation.operationID == operationID,
+              operation.levels == appliedLevels else { return false }
+        levels.confirmedLevels = appliedLevels
+        levels.pendingSave = nil
+        if levels.draftRevision == operation.sourceDraftRevision {
+            levels.draftRows = appliedLevels.map(PriorityLevelDraftRow.init(level:))
+            levels.draftRevision &+= 1
+        }
+        levels.failureReason = nil
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+        return true
+    }
+
+    @discardableResult
+    public func rejectPriorityLevelsSave(_ operationID: UUID,
+                                         reason: String,
+                                         context suppliedContext: ProfileContext) throws -> Bool {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var levels = state.priorityLevels ?? .empty
+        guard levels.pendingSave?.operationID == operationID else { return false }
+        levels.pendingSave = nil
+        levels.failureReason = reason
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+        return true
+    }
+
+    public func recordPriorityLevelsRead(_ table: [PriorityLevel],
+                                        context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        let rows = table.map(PriorityLevelDraftRow.init(level:))
+        guard table.isEmpty || PriorityLevelsTableValidation.levels(from: rows) == table else {
+            throw AttentionStoreError.invalidProjection
+        }
+        var levels = state.priorityLevels ?? .empty
+        let draftMatchesLastConfirmed: Bool
+        if let draftRows = levels.draftRows {
+            if draftRows.isEmpty {
+                draftMatchesLastConfirmed = levels.confirmedLevels == []
+            } else if let confirmedLevels = levels.confirmedLevels {
+                draftMatchesLastConfirmed = PriorityLevelsTableValidation.levels(from: draftRows) == confirmedLevels
+            } else {
+                draftMatchesLastConfirmed = false
+            }
+        } else {
+            draftMatchesLastConfirmed = true
+        }
+        levels.confirmedLevels = table
+        let draftMatchesRead: Bool
+        if let draftRows = levels.draftRows {
+            if table.isEmpty {
+                draftMatchesRead = draftRows.isEmpty
+            } else {
+                draftMatchesRead = PriorityLevelsTableValidation.levels(from: draftRows) == table
+            }
+        } else {
+            draftMatchesRead = false
+        }
+        if levels.pendingSave == nil && draftMatchesLastConfirmed && !draftMatchesRead {
+            levels.draftRows = table.map(PriorityLevelDraftRow.init(level:))
+        }
+        if levels.pendingSave == nil,
+           (levels.failureReason == "unknown_type" || levels.failureReason == "unconfirmed" ||
+            levels.failureReason == "forbidden") {
+            levels.failureReason = nil
+        }
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+    }
+
+    public func recordPriorityLevelsFailure(_ reason: String,
+                                            context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var levels = state.priorityLevels ?? .empty
+        levels.failureReason = reason
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+    }
+
     public func recordAcceptedOperation(_ intentID: UUID,
                                         operationID: UUID,
                                         terminalSequence: UInt64,
@@ -2709,7 +2881,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                       inboxCurrentKeys: inboxCurrentKeys,
                                       pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
                                       inboxReferences: state.inboxReferences ?? [:],
-                                      pendingMessageOpens: state.pendingMessageOpens ?? [])
+                                      pendingMessageOpens: state.pendingMessageOpens ?? [],
+                                      priorityLevels: state.priorityLevels ?? .empty)
     }
 
     /// Returns only the contiguous relay cursor after validating the profile.
@@ -4149,6 +4322,8 @@ private struct PersistedAttentionState: Codable {
     var conversation: ConversationState?
     // Optional preserves schema-2 files created before deliberate-open reporting.
     var pendingMessageOpens: [PendingMessageOpen]?
+    // Optional preserves schema-2 files created before account-level editing.
+    var priorityLevels: PriorityLevelsStoreState?
 
     init(profileIdentity: ProfileIdentity) {
         self.schemaVersion = Self.currentSchemaVersion

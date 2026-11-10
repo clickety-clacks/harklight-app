@@ -953,6 +953,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let pendingRelayOverlays: [UInt64: RelayEvent]
     public let inboxReferences: [RequestKey: RemoteRequestState]
     public let pendingMessageOpens: [PendingMessageOpen]
+    public let priorityLevels: PriorityLevelsStoreState
 
     public init(requests: [RequestKey: StoredRequest],
                 drafts: [RequestKey: RequestDraft],
@@ -972,7 +973,8 @@ public struct AttentionStoreSnapshot: Sendable {
                 inboxCurrentKeys: Set<RequestKey>? = nil,
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
                 inboxReferences: [RequestKey: RemoteRequestState] = [:],
-                pendingMessageOpens: [PendingMessageOpen] = []) {
+                pendingMessageOpens: [PendingMessageOpen] = [],
+                priorityLevels: PriorityLevelsStoreState = .empty) {
         self.conversationThreads = conversationThreads
         self.requests = requests
         self.drafts = drafts
@@ -992,6 +994,7 @@ public struct AttentionStoreSnapshot: Sendable {
         self.pendingRelayOverlays = pendingRelayOverlays
         self.inboxReferences = inboxReferences
         self.pendingMessageOpens = pendingMessageOpens
+        self.priorityLevels = priorityLevels
     }
 }
 

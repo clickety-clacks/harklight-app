@@ -1260,6 +1260,9 @@ final class LivePresentationStore {
     }
 
     private(set) var conversationThreads: [RequestKey: ConversationThread]
+    private(set) var priorityLevelsState = PriorityLevelsStoreState.empty
+    private(set) var priorityLevelsLocalError: LocalizedStringResource?
+    private(set) var priorityLevelsRelayConfirmed = false
     @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
     @ObservationIgnored private let conversationAvailability: NativeConversationAvailability
@@ -1497,6 +1500,8 @@ final class LivePresentationStore {
         }
         self.port = port
         self.attentionStore = store
+        self.priorityLevelsState = try store.snapshot(context: context).priorityLevels
+        self.priorityLevelsRelayConfirmed = NativeRelayLifecycle.shared.hasConfirmedPriorityLevelsRelay(for: context)
         self.presentation = snapshot
         self.conversationThreads = conversationThreads
         self.conversationProjectionRevision = snapshot.revision
@@ -1524,6 +1529,80 @@ final class LivePresentationStore {
     /// Read-only real account archives are offline relay data, not fictional
     /// local examples. Delivery permission and data provenance are separate.
     var isLocalExample: Bool { profileContext.transportMode == .fixture }
+
+    var priorityLevelsDraftRows: [PriorityLevelDraftRow] {
+        priorityLevelsState.displayedRows
+    }
+
+    var priorityLevelsValidationMessage: LocalizedStringResource? {
+        PriorityLevelsTableValidation.message(for: priorityLevelsDraftRows)
+    }
+
+    var canSavePriorityLevels: Bool {
+        guard permitsDelivery, !isReadOnly, priorityLevelsRelayConfirmed,
+              NativeRelayLifecycle.shared.hasConfirmedPriorityLevelsRelay(for: profileContext),
+              priorityLevelsState.pendingSave == nil,
+              priorityLevelsState.failureReason != "unknown_type",
+              priorityLevelsState.failureReason != "forbidden" else { return false }
+        return PriorityLevelsTableValidation.levels(from: priorityLevelsDraftRows) != nil
+    }
+
+    func updatePriorityLevelsDraft(_ rows: [PriorityLevelDraftRow]) {
+        guard !isReadOnly, profileContext.transportMode == .relay else { return }
+        do {
+            try attentionStore.savePriorityLevelsDraft(rows, context: profileContext)
+            priorityLevelsLocalError = nil
+            refreshPriorityLevelsProjection()
+        } catch {
+            priorityLevelsLocalError = "This edit could not be saved on this phone. Your previous draft is unchanged."
+        }
+    }
+
+    func openPriorityLevelsEditor() async {
+        guard permitsDelivery, !isReadOnly, profileContext.transportMode == .relay else { return }
+        do {
+            try attentionStore.markPriorityLevelsEditorOpened(context: profileContext)
+            priorityLevelsLocalError = nil
+            refreshPriorityLevelsProjection()
+        } catch {
+            priorityLevelsLocalError = "Priority levels could not be prepared on this phone."
+            return
+        }
+        refreshPriorityLevelsRelayStatus()
+        await NativeRelayLifecycle.shared.refreshPriorityLevels(expected: profileContext)
+        refreshPriorityLevelsRelayStatus()
+        refreshPriorityLevelsProjection()
+    }
+
+    func savePriorityLevels() async {
+        refreshPriorityLevelsRelayStatus()
+        guard canSavePriorityLevels,
+              let table = PriorityLevelsTableValidation.levels(from: priorityLevelsDraftRows) else { return }
+        do {
+            _ = try attentionStore.beginPriorityLevelsSave(table, context: profileContext)
+            priorityLevelsLocalError = nil
+            refreshPriorityLevelsProjection()
+            await NativeRelayLifecycle.shared.sendPendingPriorityLevelsSave(expected: profileContext)
+            refreshPriorityLevelsProjection()
+        } catch {
+            priorityLevelsLocalError = "This save could not be started. Your local edits are unchanged."
+            refreshPriorityLevelsProjection()
+        }
+    }
+
+    func refreshPriorityLevelsRelayStatus() {
+        priorityLevelsRelayConfirmed = permitsDelivery && !isReadOnly &&
+            NativeRelayLifecycle.shared.hasConfirmedPriorityLevelsRelay(for: profileContext)
+    }
+
+    func refreshPriorityLevelsProjection() {
+        refreshPriorityLevelsRelayStatus()
+        do {
+            priorityLevelsState = try attentionStore.snapshot(context: profileContext).priorityLevels
+        } catch {
+            priorityLevelsLocalError = "Priority levels could not be read from this phone."
+        }
+    }
 
     func hasAcceptedUpdate(for key: RequestKey) -> Bool {
         conversationThreads[key]?.acceptedUpdates.isEmpty == false
@@ -2812,6 +2891,7 @@ final class LivePresentationStore {
     func applyRefreshResult(_ result: NativeRelayRefreshResult) {
         let confirmedForCurrentContext = result.confirms(
             notificationContext, transportAttemptID: result.confirmedTransportAttemptID)
+        refreshPriorityLevelsRelayStatus()
         connectionWarning = confirmedForCurrentContext ? nil :
             result.failureMessage ??
                 "The relay could not be refreshed. Saved requests, answers and confirmed receipts remain on this device."
@@ -3064,6 +3144,7 @@ final class LivePresentationStore {
     }
 
     private func adopt(_ snapshot: PresentationSnapshot) {
+        refreshPriorityLevelsProjection()
         let previousRoutingStates = noReplyRoutingStates(for: presentation.requests)
         let locallyReconciledRead = locallyReconciledConversationReadRevisions.remove(snapshot.revision) != nil
         locallyReconciledConversationReadRevisions = Set(
