@@ -1039,6 +1039,21 @@ struct LiveRequestDetail: View {
         store.conversation(for: request.key)?.revisionNumbers ?? []
     }
 
+    @ViewBuilder
+    private func historicalVersionMenuItem(_ version: UInt64) -> some View {
+        if version == 1 {
+            Button("Original version") {
+                historicalVersionSelection = HistoricalVersionSelection(revision: version)
+            }
+            .accessibilityIdentifier("request-historical-version-\(version)")
+        } else {
+            Button("Version \(version)") {
+                historicalVersionSelection = HistoricalVersionSelection(revision: version)
+            }
+            .accessibilityIdentifier("request-historical-version-\(version)")
+        }
+    }
+
     init(request: PresentedRequest,
          store: LivePresentationStore,
          context: InboxCardContext = .standalone,
@@ -1664,10 +1679,7 @@ struct LiveRequestDetail: View {
                 if let revision = storePresentationSnapshot.conversationRevision, revision > 1 {
                     Menu {
                         ForEach(historicalRevisionNumbers.filter { $0 != revision }, id: \.self) { version in
-                            Button(version == 1 ? "Original version" : "Version \(version)") {
-                                historicalVersionSelection = HistoricalVersionSelection(revision: version)
-                            }
-                            .accessibilityIdentifier("request-historical-version-\(version)")
+                            historicalVersionMenuItem(version)
                         }
                     } label: {
                         Label(storePresentationSnapshot.hasAcceptedUpdate
