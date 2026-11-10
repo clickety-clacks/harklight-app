@@ -1005,10 +1005,13 @@ final class ConversationSampleUITests: XCTestCase {
         app.buttons["request-historical-version-1"].tap()
         let historical = app.scrollViews["historical-message-version"]
         XCTAssertTrue(historical.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.staticTexts["historical-answer-draft"].waitForExistence(timeout: 5),
+        let historicalDraft = historical.staticTexts["historical-answer-draft"]
+        let historicalDraftStatus = historical.staticTexts[
+            "Not delivered · this selection belongs to the earlier question"
+        ]
+        XCTAssertTrue(historicalDraft.waitForExistence(timeout: 5),
                       "The retained undelivered answer remains reachable from the old wording.")
-        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"]
-            .waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalDraftStatus.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(historical.buttons["request-finish"].exists,
                        "The archived answer is available to read but cannot be sent against an earlier version.")
         let earlierTitle = app.staticTexts.matching(
@@ -1022,7 +1025,16 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(earlierBody.waitForExistence(timeout: 5), earlierBody.debugDescription)
         XCTAssertTrue(earlierBody.label.contains("new collection"), earlierBody.debugDescription)
         XCTAssertFalse(earlierBody.label.contains("*"), earlierBody.debugDescription)
-        capture("sender-updated-earlier-question-and-draft", app)
+        XCTAssertTrue(earlierTitle.isHittable, earlierTitle.debugDescription)
+        XCTAssertTrue(earlierBody.isHittable, earlierBody.debugDescription)
+        capture("sender-updated-earlier-question", app)
+        for _ in 0..<8 where !historicalDraft.isHittable { historical.swipeUp() }
+        XCTAssertTrue(historicalDraft.isHittable,
+                      "The retained earlier answer is reachable within the read-only version detail. \(app.debugDescription)")
+        for _ in 0..<8 where !historicalDraftStatus.isHittable { historical.swipeUp() }
+        XCTAssertTrue(historicalDraftStatus.isHittable,
+                      "The earlier answer remains visibly marked as undelivered. \(app.debugDescription)")
+        capture("sender-updated-earlier-draft-readable", app)
         app.buttons["Done"].tap()
         app.buttons["Chat"].tap()
         XCTAssertTrue(app.staticTexts["Updated"].waitForExistence(timeout: 5))
@@ -1244,13 +1256,22 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(versionIndicator.waitForExistence(timeout: 5), app.debugDescription)
         versionIndicator.tap()
         app.buttons["request-historical-version-1"].tap()
-        XCTAssertTrue(app.scrollViews["historical-message-version"].waitForExistence(timeout: 5),
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts["historical-answer-draft"].waitForExistence(timeout: 5),
-                      "The older undelivered answer remains reachable in the historical detail.")
-        XCTAssertTrue(app.staticTexts[
+        let historical = app.scrollViews["historical-message-version"]
+        XCTAssertTrue(historical.waitForExistence(timeout: 5), app.debugDescription)
+        let historicalDraft = historical.staticTexts["historical-answer-draft"]
+        let historicalDraftStatus = historical.staticTexts[
             "Not delivered · this selection belongs to the earlier question"
-        ].waitForExistence(timeout: 5))
+        ]
+        XCTAssertTrue(historicalDraft.waitForExistence(timeout: 5),
+                      "The older undelivered answer remains reachable in the historical detail.")
+        XCTAssertTrue(historicalDraftStatus.waitForExistence(timeout: 5), app.debugDescription)
+        capture("conversation-historical-revision", app)
+        for _ in 0..<8 where !historicalDraft.isHittable { historical.swipeUp() }
+        XCTAssertTrue(historicalDraft.isHittable,
+                      "The older answer draft is reachable while the historical version is open. \(app.debugDescription)")
+        for _ in 0..<8 where !historicalDraftStatus.isHittable { historical.swipeUp() }
+        XCTAssertTrue(historicalDraftStatus.isHittable,
+                      "The earlier answer remains visibly marked as undelivered. \(app.debugDescription)")
         capture("conversation-archived-answer", app)
         app.buttons["Done"].tap()
         app.buttons["Chat"].tap()

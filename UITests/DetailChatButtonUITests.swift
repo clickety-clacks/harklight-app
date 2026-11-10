@@ -223,9 +223,22 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(historicalBody.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(historicalTitle.isHittable, app.debugDescription)
         XCTAssertTrue(historicalBody.isHittable, app.debugDescription)
+        attachScreenshot("detail-original-message-version-read-only")
+        let historicalDraft = historicalContent.staticTexts["historical-answer-draft"]
+        let historicalDraftStatus = historicalContent.staticTexts[
+            "Not delivered · this selection belongs to the earlier question"
+        ]
+        XCTAssertTrue(historicalDraft.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalDraftStatus.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<8 where !historicalDraft.isHittable { historicalContent.swipeUp() }
+        XCTAssertTrue(historicalDraft.isHittable,
+                      "The retained answer draft is reachable inside historical message detail. \(app.debugDescription)")
+        for _ in 0..<8 where !historicalDraftStatus.isHittable { historicalContent.swipeUp() }
+        XCTAssertTrue(historicalDraftStatus.isHittable,
+                      "The saved answer remains visibly marked as undelivered. \(app.debugDescription)")
         XCTAssertFalse(historicalContent.buttons["request-finish"].exists,
                        "A historical message version is available for reading and has no Send action.")
-        attachScreenshot("detail-original-message-version-read-only")
+        attachScreenshot("detail-original-message-version-draft-readable")
 
         app.buttons["Done"].tap()
         XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5),
