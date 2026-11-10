@@ -14,8 +14,8 @@ private struct MessageCardContentHeightKey: PreferenceKey {
 }
 
 struct InboxCardContext {
-    let position: Int
-    let total: Int
+    let position: Int?
+    let total: Int?
     let hasPrevious: Bool
     let hasNext: Bool
     var inlineChat = false
@@ -121,11 +121,13 @@ struct MessageCardSurface<Content: View>: View {
             .toolbarBackground(.hidden, for: .navigationBar)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Text("\(context.position) of \(context.total)").font(.subheadline.monospacedDigit())
-                        .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme)
-                            .messageType(context.messageType).textColor)
-                        .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
+                if let position = context.position, let total = context.total {
+                    ToolbarItem(placement: .principal) {
+                        Text("\(position) of \(total)").font(.subheadline.monospacedDigit())
+                            .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme)
+                                .messageType(context.messageType).textColor)
+                            .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
+                    }
                 }
             }
             .accessibilityAction(named: "Previous message") { if context.hasPrevious { context.move(-1) } }
