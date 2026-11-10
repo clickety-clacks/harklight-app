@@ -2233,8 +2233,7 @@ struct HistoricalAnswerDraftView: View {
     }
 }
 
-@MainActor
-private struct HistoricalVersionSelection: Identifiable {
+private struct HistoricalVersionSelection: Identifiable, Sendable {
     let revision: UInt64
     var id: UInt64 { revision }
 }
