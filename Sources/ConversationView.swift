@@ -452,6 +452,25 @@ private struct ConversationComposer: View {
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var allowsDiscussion: Bool { thread?.allowsDiscussion == true }
     private var isOnline: Bool { store.isOnline }
+    private var currentFailureEntryID: String? {
+        guard draft.failure != nil else { return nil }
+        let operation = draft.operationID ?? draft.inFlightOperationID
+        return operation.map { "attempt:\($0.uuidString.lowercased())" } ??
+            "attempt:\(revision):\(draft.text.rawValue.utf8.count)"
+    }
+    private var warningEntries: [CarriedOverConversationSend] {
+        var entries = draft.carriedOverSends
+        guard let failure = draft.failure, let entryID = currentFailureEntryID,
+              !entries.contains(where: { $0.id == entryID }) else { return entries }
+        entries.append(CarriedOverConversationSend(id: entryID,
+            requestRevision: draft.operationRequestRevision ?? revision,
+            text: draft.text, files: draft.files, operationID: draft.operationID,
+            inFlightOperationID: draft.inFlightOperationID,
+            currentAttemptUnsettled: draft.currentAttemptUnsettled,
+            earlierVersionMayHaveBeenSent: draft.earlierVersionMayHaveBeenSent,
+            failure: failure))
+        return entries
+    }
 
     var body: some View {
         Group {
@@ -599,29 +618,41 @@ private struct ConversationComposer: View {
             }
         }
         .sheet(isPresented: $sendWarningPresented) {
-            if !draft.carriedOverSends.isEmpty {
-                CarriedOverDiscussionDialog(entries: draft.carriedOverSends,
+            if !warningEntries.isEmpty {
+                CarriedOverDiscussionDialog(entries: warningEntries,
+                    currentDraftFailureID: currentFailureEntryID,
                     canRetry: isOnline && allowsDiscussion && !store.isSendingDiscussion,
                     allowsRetry: allowsDiscussion,
                     onRetry: { entryID in
-                        Task { await store.retryCarriedOverDiscussion(for: key,
-                            revision: revision, entryID: entryID) }
+                        if entryID == currentFailureEntryID {
+                            retryCurrentFailure(entryID: entryID)
+                        } else {
+                            Task { await store.retryCarriedOverDiscussion(for: key,
+                                revision: revision, entryID: entryID) }
+                        }
                     },
-                    onCopy: { UIPasteboard.general.string = $0 })
-            } else if let failure = draft.failure {
-                FailedResponseDialog(title: "Message delivery",
-                    summary: LocalizedStringResource(stringLiteral: failure.summary),
-                    detail: .plain(failure.detail),
-                    accessibilityPrefix: "conversation-send-warning",
-                    canRetry: isOnline && allowsDiscussion && !store.isSendingDiscussion,
-                    onRetry: allowsDiscussion ? { sendStagedText() } : nil,
                     onCopy: { UIPasteboard.general.string = $0 })
             }
         }
     }
 
+    private func retryCurrentFailure(entryID: String) {
+        guard entryID == currentFailureEntryID, draft.failure != nil,
+              !store.isSendingDiscussion, allowsDiscussion, isOnline else { return }
+        let failedText = draft.text.rawValue
+        let newerTextIsStaged = textSession.stagedText != failedText
+        guard persistStagedText() else { return }
+        if newerTextIsStaged {
+            Task { await store.retryCarriedOverDiscussion(for: key,
+                revision: revision, entryID: entryID) }
+        } else {
+            sendStagedText()
+        }
+    }
+
 private struct CarriedOverDiscussionDialog: View {
     let entries: [CarriedOverConversationSend]
+    let currentDraftFailureID: String?
     let canRetry: Bool
     let allowsRetry: Bool
     let onRetry: (String) -> Void
@@ -642,9 +673,10 @@ private struct CarriedOverDiscussionDialog: View {
     private var copyText: String {
         entries.map { entry in
             let version = entry.requestRevision.map { "Version \($0)" } ?? "Version unavailable"
+            let heading = entry.id == currentDraftFailureID ? "Current draft · \(version)" : version
             let files = entry.files.map { $0.name.rawValue }.joined(separator: ", ")
             let attachmentLine = files.isEmpty ? "" : "\nAttachments: \(files)"
-            return "\(version) · \(status(for: entry))\n\(entry.failure.detail)\n" +
+            return "\(heading) · \(status(for: entry))\n\(entry.failure.detail)\n" +
                 "\(entry.text.rawValue)\(attachmentLine)"
         }.joined(separator: "\n\n")
     }
@@ -664,7 +696,8 @@ private struct CarriedOverDiscussionDialog: View {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     ForEach(entries) { entry in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(entry.requestRevision.map { "Version \($0)" } ?? "Version unavailable")
+                            let version = entry.requestRevision.map { "Version \($0)" } ?? "Version unavailable"
+                            Text(entry.id == currentDraftFailureID ? "Current draft · \(version)" : version)
                                 .font(.caption.weight(.semibold))
                             Text(status(for: entry))
                                 .font(.caption)

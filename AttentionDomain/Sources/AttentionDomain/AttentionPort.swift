@@ -619,6 +619,23 @@ public struct AttentionDomainPort: Sendable {
         try await store.saveConversationDraft(draft, context: profileContext)
     }
 
+    public func prepareCarriedOverDiscussion(_ binding: ConversationBinding, entryID: String,
+                                             context suppliedContext: PortContext) async throws -> UUID {
+        try validate(suppliedContext)
+        return try await store.prepareCarriedOverDiscussion(binding, entryID: entryID,
+                                                             context: profileContext)
+    }
+
+    public func markCarriedOverDiscussionOutcome(_ binding: ConversationBinding, entryID: String,
+                                                  operation: UUID, rejection: ExactText?,
+                                                  preserveUnsettled: Bool = false,
+                                                  context suppliedContext: PortContext) async throws {
+        try validate(suppliedContext)
+        try await store.markCarriedOverDiscussionOutcome(binding, entryID: entryID,
+            operation: operation, rejection: rejection, preserveUnsettled: preserveUnsettled,
+            context: profileContext)
+    }
+
     @discardableResult
     public func updateConversationDraftText(_ text: ExactText, for binding: ConversationBinding,
                                             context suppliedContext: PortContext) async throws -> ConversationDraft {

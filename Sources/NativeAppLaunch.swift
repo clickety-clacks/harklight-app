@@ -2889,11 +2889,10 @@ final class LivePresentationStore {
                     try await persistence.scheduleSave(draft, at: address)
                 }
             } catch {
-                await MainActor.run {
-                    self.conversationError = "Your latest discussion edit could not be saved. It remains in this session; nothing was sent."
-                    self.diagnose(.localStore, .draftSave, .failed, error: error,
-                                  request: binding.request, revision: binding.revision)
-                }
+                guard let self else { return }
+                self.conversationError = "Your latest discussion edit could not be saved. It remains in this session; nothing was sent."
+                self.diagnose(.localStore, .draftSave, .failed, error: error,
+                              request: binding.request, revision: binding.revision)
             }
         }
     }
@@ -3091,7 +3090,7 @@ final class LivePresentationStore {
         do {
             operation = try await port.prepareCarriedOverDiscussion(binding, entryID: entryID,
                 context: port.context)
-            guard let prepared = try await port.currentConversationSnapshot(context: port.context)
+            guard let prepared = try await port.conversations(context: port.context)
                 .threads[key]?.drafts[revision],
                   prepared.retryingCarriedOverSendID == entryID,
                   prepared.carriedOverSends.first(where: { $0.id == entryID })?.inFlightOperationID == operation else {
@@ -3123,7 +3122,7 @@ final class LivePresentationStore {
         } catch {
             if let operation {
                 do {
-                    let current = try await port.currentConversationSnapshot(context: port.context)
+                    let current = try await port.conversations(context: port.context)
                         .threads[key]?.drafts[revision]
                     if current?.carriedOverSends.first(where: { $0.id == entryID })?.inFlightOperationID == operation {
                         try await port.markCarriedOverDiscussionOutcome(binding, entryID: entryID,
@@ -3131,7 +3130,7 @@ final class LivePresentationStore {
                             rejection: ExactText("The Retry could not be prepared. No new send was made."),
                             preserveUnsettled: wasUnsettled, context: port.context)
                     }
-                    if let settled = try await port.currentConversationSnapshot(context: port.context)
+                    if let settled = try await port.conversations(context: port.context)
                         .threads[key]?.drafts[revision] {
                         try await composerDraftPersistence.flush(settled, at: address)
                     }
@@ -3760,7 +3759,7 @@ final class LivePresentationStore {
             earlierComposerEntriesByRequest[key] = entries.isEmpty ? nil : entries
         } catch {
             diagnose(.localStore, .draftLoad, .failed, error: error, request: key,
-                     revision: revision)
+                     revision: request.requestRevision)
         }
     }
 
