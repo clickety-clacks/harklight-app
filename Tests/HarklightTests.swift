@@ -305,7 +305,7 @@ final class HarklightTests: XCTestCase {
             expiresAt: 1, statusExpiresAt: 2, personID: "person",
             notificationProfileGeneration: generation)
         let profile = try XCTUnwrap(NativeNotificationProfile(record))
-        let payload = try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"00000000-0000-0000-0000-000000000001","person_id":"person","device_id":"device","sender_id":"sender","message_id":"target-message","acceptance_seq":4,"target":"chat"}}"#.utf8))
+        let payload = try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"00000000-0000-0000-0000-000000000001","person_id":"person","device_id":"device","sender_id":"sender","message_id":"target-message","acceptance_seq":4,"target":"chat"}}}"#.utf8))
         let locator = try XCTUnwrap(NativeNotificationLocator(payload))
         let route = NativeInboxNavigation(serial: 50, request: nil)
         let intent = NativeNotificationIntent(serial: 50, locator: locator, profile: profile)
@@ -333,7 +333,7 @@ final class HarklightTests: XCTestCase {
 
     @MainActor
     func testPendingNotificationShowsRetryAndUnavailableStates() throws {
-        let payload = try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"00000000-0000-0000-0000-000000000001","person_id":"person","device_id":"device","sender_id":"sender","message_id":"target-message","acceptance_seq":4,"target":"message"}}"#.utf8))
+        let payload = try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"00000000-0000-0000-0000-000000000001","person_id":"person","device_id":"device","sender_id":"sender","message_id":"target-message","acceptance_seq":4,"target":"message"}}}"#.utf8))
         let locator = try XCTUnwrap(NativeNotificationLocator(payload))
         let route = NativeInboxNavigation(serial: 70, request: nil)
         let intent = NativeNotificationIntent(serial: 70, locator: locator, profile: nil)
