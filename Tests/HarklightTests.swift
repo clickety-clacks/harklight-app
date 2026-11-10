@@ -294,6 +294,96 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(destination.search, "")
     }
 
+    @MainActor
+    func testPendingNotificationOpensExactMessageOrChatAfterValidation() throws {
+        let generation = UUID()
+        let record = NativeEnrollmentRecord(
+            host: "relay.example", enrollmentPort: 18444, relayPort: 18443,
+            trustedRootDER: Data([1, 2, 3]), identityLabel: "test device",
+            deviceID: "device", approvalCode: "ABCDEFGH",
+            statusSecret: String(repeating: "b", count: 64),
+            expiresAt: 1, statusExpiresAt: 2, personID: "person",
+            notificationProfileGeneration: generation)
+        let profile = try XCTUnwrap(NativeNotificationProfile(record))
+        let payload = try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"00000000-0000-0000-0000-000000000001","person_id":"person","device_id":"device","sender_id":"sender","message_id":"target-message","acceptance_seq":4,"target":"chat"}}}"#.utf8))
+        let locator = try XCTUnwrap(NativeNotificationLocator(payload))
+        let route = NativeInboxNavigation(serial: 50, request: nil)
+        let intent = NativeNotificationIntent(serial: 50, locator: locator, profile: profile)
+
+        let pending = InboxNotificationDestination(route: route, rows: [])
+        let presentation = InboxNotificationPendingPresentation(
+            route: route, intent: intent, statusMessage: "Checking this notification.")
+
+        XCTAssertEqual(pending.selection, .notificationPending(50))
+        XCTAssertEqual(pending.workspaceTab, .inbox)
+        XCTAssertEqual(presentation.locator, locator)
+        XCTAssertEqual(presentation.profile, profile)
+        XCTAssertEqual(presentation.target, .chat)
+        XCTAssertEqual(presentation.state, .opening)
+        XCTAssertEqual(presentation.listRowState, .opening(.chat))
+        XCTAssertTrue(presentation.listRowState.showsProgress)
+
+        let resolved = InboxNotificationDestination(
+            route: NativeInboxNavigation(serial: 50, request: locator.request, opensChat: true),
+            rows: [])
+        XCTAssertEqual(resolved.selection, .request(locator.request))
+        XCTAssertNotEqual(pending.selection, resolved.selection,
+                          "Unvalidated locator content must not appear as the loaded request.")
+    }
+
+    @MainActor
+    func testPendingNotificationShowsRetryAndUnavailableStates() throws {
+        let payload = try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"00000000-0000-0000-0000-000000000001","person_id":"person","device_id":"device","sender_id":"sender","message_id":"target-message","acceptance_seq":4,"target":"message"}}}"#.utf8))
+        let locator = try XCTUnwrap(NativeNotificationLocator(payload))
+        let route = NativeInboxNavigation(serial: 70, request: nil)
+        let intent = NativeNotificationIntent(serial: 70, locator: locator, profile: nil)
+
+        let states: [(String, InboxNotificationPendingPresentation.State,
+                      InboxNotificationPendingPresentation.ListRowState)] = [
+            ("Could not verify notification. Checking again while open.",
+             .checkingAgain, .checkingAgain),
+            ("This message link couldn't be opened.", .invalid, .invalid),
+            ("Could not check this notification's account.",
+             .accountUnavailable, .accountUnavailable),
+            ("This notification's message has not loaded yet.",
+             .messageUnavailable, .messageUnavailable),
+            ("The sender retracted this message.", .retracted, .retracted),
+        ]
+        for (message, expected, expectedRowState) in states {
+            let presentation = InboxNotificationPendingPresentation(
+                route: route, intent: intent, statusMessage: message)
+            XCTAssertEqual(presentation.state, expected, message)
+            XCTAssertEqual(presentation.listRowState, expectedRowState, message)
+            XCTAssertEqual(presentation.listRowState.showsProgress,
+                           expectedRowState == .checkingAgain, message)
+        }
+
+        let staleIntent = NativeNotificationIntent(serial: 69, locator: locator, profile: nil)
+        let invalid = InboxNotificationPendingPresentation(
+            route: route, intent: staleIntent, statusMessage: "Checking this notification.")
+        XCTAssertEqual(invalid.state, .invalid,
+                       "A different notification's locator must never be shown as this target.")
+        XCTAssertEqual(invalid.listRowState, .invalid)
+        XCTAssertFalse(invalid.listRowState.showsProgress)
+    }
+
+    func testDismissingPendingNotificationSuppressesItsLateResolution() {
+        let pending = InboxSelection.notificationPending(50)
+        let exactRoute = NativeInboxNavigation(
+            serial: 50,
+            request: RequestKey(accountScope: ExactText("person"),
+                                senderID: ExactText("sender"),
+                                messageID: ExactText("target-message")),
+            opensChat: true)
+
+        XCTAssertEqual(InboxNotificationNavigationPolicy.dismissalSerial(from: pending, to: nil), 50)
+        XCTAssertNil(InboxNotificationNavigationPolicy.dismissalSerial(from: pending, to: pending))
+        XCTAssertFalse(InboxNotificationNavigationPolicy.shouldApply(
+            exactRoute, afterDismissedSerial: 50))
+        XCTAssertTrue(InboxNotificationNavigationPolicy.shouldApply(
+            NativeInboxNavigation(serial: 51, request: nil), afterDismissedSerial: 50))
+    }
+
     func testMessageDeepLinkDecodesEachIdentityAsOnePathSegment() {
         let url = URL(string: "harklight://message/app%3Aone/message%2Fwith%25")!
         let deepLink = NativeMessageDeepLink(url: url)
