@@ -124,14 +124,24 @@ final class ReleaseNotesUITests: XCTestCase {
 
         let updateTitle = app.navigationBars["What’s New"]
         XCTAssertTrue(updateTitle.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
+        let inboxBuildHeader = app.staticTexts[
+            "Version 0.1.0 · Build \(simulatedCurrentBuild)"
+        ]
+        revealHistoryElement(inboxBuildHeader, in: app)
+        XCTAssertTrue(inboxBuildHeader.exists,
                       "The update sheet identifies the released build and version.")
-        XCTAssertTrue(app.staticTexts["Prepare Inbox history in the background"].exists,
+        let inboxPreparationTitle = app.staticTexts["Prepare Inbox history in the background"]
+        revealHistoryElement(inboxPreparationTitle, in: app)
+        XCTAssertTrue(inboxPreparationTitle.exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts[
+        let inboxPreparationDetail = app.staticTexts[
             "Inbox prepares messages and conversation history in the background as it catches up."
-        ].exists, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
+        ]
+        revealHistoryElement(inboxPreparationDetail, in: app)
+        XCTAssertTrue(inboxPreparationDetail.exists, app.debugDescription)
+        let inboxDeliveryTitle = app.staticTexts["Receive new messages during refresh"]
+        revealHistoryElement(inboxDeliveryTitle, in: app)
+        XCTAssertTrue(inboxDeliveryTitle.exists,
                       app.debugDescription)
         XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
                        "Earlier release highlights do not appear in the current update sheet.")
@@ -153,13 +163,24 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        let currentBuildHeader = app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"]
-        XCTAssertTrue(currentBuildHeader.waitForExistence(timeout: 5), app.debugDescription)
+        let currentBuildHeader = app.staticTexts[
+            "Version 0.1.0 · Build \(simulatedCurrentBuild)"
+        ]
+        revealHistoryElement(currentBuildHeader, in: app)
         XCTAssertTrue(currentBuildHeader.exists,
                       "Settings history identifies the build attached to this release note.")
-        XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
+        let build62Header = app.staticTexts["Version 0.1.0 · Build 62"]
+        revealHistoryElement(build62Header, in: app)
+        XCTAssertTrue(build62Header.exists, app.debugDescription)
+        let roundedReplyTitle = app.staticTexts["A single rounded Reply box"]
+        revealHistoryElement(roundedReplyTitle, in: app)
+        XCTAssertTrue(roundedReplyTitle.exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
+        let roundedReplyDetail = app.staticTexts[
+            "The Reply label and full-width editor now sit together in one rounded box."
+        ]
+        revealHistoryElement(roundedReplyDetail, in: app)
+        XCTAssertTrue(roundedReplyDetail.exists,
                       app.debugDescription)
 
         let build61Header = app.staticTexts["Version 0.1.0 · Build 61"]

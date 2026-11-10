@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 NOTES_PATH = "Resources/HarklightReleaseNotes.json"
@@ -101,7 +102,7 @@ def first_parent(repo: Path, head: str) -> str:
     return parent
 
 
-def check(repo: Path, commit: str) -> str | None:
+def check(repo: Path, commit: str) -> Optional[str]:
     head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").strip()
     resolved_commit = git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
     if not resolved_commit or resolved_commit != head:
