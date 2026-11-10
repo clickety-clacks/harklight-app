@@ -2449,7 +2449,9 @@ final class LivePresentationStore {
                 diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key)
                 current = nil
             }
-            if let current, current.intentReceipt != nil {
+            // Completed account answers intentionally hide device receipts.
+            // A duplicate callback must not turn that success into an error.
+            if let current, current.intentReceipt != nil || current.lifecycleStatus == .answered {
                 clearActionError()
                 return true
             } else {
