@@ -1054,6 +1054,22 @@ struct LiveRequestDetail: View {
         }
     }
 
+    private func historicalVersionMenu(for revision: UInt64) -> some View {
+        Menu {
+            ForEach(historicalRevisionNumbers.filter { $0 != revision }, id: \.self) { version in
+                historicalVersionMenuItem(version)
+            }
+        } label: {
+            Label(storePresentationSnapshot.hasAcceptedUpdate
+                  ? "Updated · version \(revision)" : "Question version \(revision)",
+                  systemImage: "clock.arrow.circlepath")
+                .font(.caption)
+                .foregroundStyle(detailColors.secondaryTextColor)
+        }
+        .accessibilityIdentifier("request-update-fact")
+        .accessibilityHint("View earlier versions of this message")
+    }
+
     init(request: PresentedRequest,
          store: LivePresentationStore,
          context: InboxCardContext = .standalone,
@@ -1677,19 +1693,7 @@ struct LiveRequestDetail: View {
                     }
                 }
                 if let revision = storePresentationSnapshot.conversationRevision, revision > 1 {
-                    Menu {
-                        ForEach(historicalRevisionNumbers.filter { $0 != revision }, id: \.self) { version in
-                            historicalVersionMenuItem(version)
-                        }
-                    } label: {
-                        Label(storePresentationSnapshot.hasAcceptedUpdate
-                              ? "Updated · version \(revision)" : "Question version \(revision)",
-                              systemImage: "clock.arrow.circlepath")
-                            .font(.caption)
-                            .foregroundStyle(detailColors.secondaryTextColor)
-                    }
-                    .accessibilityIdentifier("request-update-fact")
-                    .accessibilityHint("View earlier versions of this message")
+                    historicalVersionMenu(for: revision)
                 }
                 if storePresentationSnapshot.isRetracted {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
