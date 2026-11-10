@@ -3,6 +3,10 @@ options:
   bundleIdPrefix: com.example.attentionclient
   deploymentTarget:
     iOS: "27.0"
+configs:
+  Debug: debug
+  Release: release
+  PublicTestFlight: release
 packages:
   AttentionDomain:
     path: AttentionDomain
@@ -39,6 +43,9 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: YES
+      configs:
+        PublicTestFlight:
+          CURRENT_PROJECT_VERSION: "$(CI_BUILD_NUMBER)"
   HarklightConversationUITestHost:
     type: application
     platform: iOS
@@ -143,3 +150,16 @@ schemes:
         - HarklightUITests
         - HarklightConversationUITests
         - package: HarklightNativeRelay/HarklightNativeRelayTests
+  Harklight-PublicTestFlight:
+    build:
+      targets:
+        Harklight: [archive]
+    test:
+      config: Debug
+      targets:
+        - HarklightTests
+        - HarklightUITests
+        - HarklightConversationUITests
+        - package: HarklightNativeRelay/HarklightNativeRelayTests
+    archive:
+      config: PublicTestFlight

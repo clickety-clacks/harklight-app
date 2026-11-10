@@ -17,6 +17,9 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 
     let id: String
     let buildIdentifier: Int?
+    var buildNumberIsUnconfirmed: Bool {
+        buildIdentifier == nil && confirmedContainingBuildIdentifier == nil
+    }
     /// Earliest build confirmed to contain this update when its first shipped build is unknown.
     let confirmedContainingBuildIdentifier: Int?
     let marketingVersion: String
@@ -57,10 +60,26 @@ struct HarklightReleaseNote: Identifiable, Sendable {
 
 enum HarklightReleaseNotes {
     /// Keep these older updates' identifiers stable for existing installations.
-    /// Build 106 is the earliest confirmed containing build for the existing updates below;
-    /// it does not establish when they first shipped.
-    /// Add future releases to the numbered entries below using their expected shipping build.
+    /// Keep unknown build numbers explicit until an archived source mapping verifies them.
     static let updateEntries: [HarklightReleaseNote] = [
+        HarklightReleaseNote(
+            historyIdentifier: "whats-new-per-build",
+            marketingVersion: "0.1.0",
+            historyDateDescription: LocalizedStringResource(
+                "Release note improvements",
+                comment: "History label for release-note build attribution and presentation."),
+            visibleFromBuildIdentifier: 79,
+            highlights: [
+                .init(
+                    id: "whats-new-per-build",
+                    symbol: "sparkles",
+                    title: LocalizedStringResource(
+                        "See what’s new after an update",
+                        comment: "Release-note title for showing new notes after an app update."),
+                    detail: LocalizedStringResource(
+                        "Build numbers appear only when verified; unknown numbers are marked UNCONFIRMED.",
+                        comment: "Release-note detail for verified and unconfirmed build labels."))
+            ]),
         HarklightReleaseNote(
             historyIdentifier: "failed-response-retry",
             marketingVersion: "0.1.0",
@@ -76,7 +95,7 @@ enum HarklightReleaseNotes {
                         "See why a response was not accepted",
                         comment: "Release-note title for safe failure details and retrying a response."),
                     detail: LocalizedStringResource(
-                        "Known delivery failures show any safe recorded detail, let you retry the same response, and let you copy the visible summary and full detail.",
+                        "Known delivery failures show their recorded reason. You can retry the same response or copy the summary and full detail.",
                         comment: "Release-note detail for inspecting, retrying, and copying known delivery failures."))
             ]),
         HarklightReleaseNote(
@@ -86,7 +105,6 @@ enum HarklightReleaseNotes {
                 "Reply drafts stay while you browse",
                 comment: "Release-note heading for unfinished replies retained during navigation."),
             visibleFromBuildIdentifier: 79,
-            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "reply-drafts-after-navigation",
@@ -95,8 +113,8 @@ enum HarklightReleaseNotes {
                         "Keep an unfinished Reply",
                         comment: "Release-note title for same-session Reply draft retention."),
                     detail: LocalizedStringResource(
-                        "Leave a message and come back before closing the app; your unsent text and choices are still there.",
-                        comment: "Release-note detail for same-session Reply draft retention."))
+                        "Leave a message and come back before closing the app; your selected answer stays ready to finish.",
+                        comment: "Release-note detail for same-session Reply choice retention."))
             ]),
         HarklightReleaseNote(
             historyIdentifier: "chat-row-activity",
@@ -105,7 +123,6 @@ enum HarklightReleaseNotes {
                 "Chat activity in the Inbox",
                 comment: "Release-note heading for message-row Chat activity."),
             visibleFromBuildIdentifier: 79,
-            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "chat-row-activity",
@@ -124,7 +141,6 @@ enum HarklightReleaseNotes {
                 "Example messages removed",
                 comment: "Release-note heading for removal of local example messages."),
             visibleFromBuildIdentifier: 79,
-            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "example-messages-removed",
@@ -143,73 +159,48 @@ enum HarklightReleaseNotes {
                 "Changes since Build 79",
                 comment: "Release-note heading for changes after the last numbered update."),
             visibleFromBuildIdentifier: 79,
-            confirmedContainingBuildIdentifier: 106,
             highlights: [
                 .init(
                     id: "inbox-message-context",
                     symbol: "tray.full",
                     title: LocalizedStringResource(
-                        "More context in the Inbox",
+                        "More details for each message",
                         comment: "Release-note title for optional request details and related messages."),
                     detail: LocalizedStringResource(
-                        "Related messages can appear together. Priority, deadlines, and what’s at stake appear when provided.",
+                        "Open a message to see its priority, any deadline, why it matters, and links to messages it updates or replaces.",
                         comment: "Release-note detail for conditional request context in the Inbox.")),
                 .init(
                     id: "simpler-chat-display",
                     symbol: "bubble.left.and.bubble.right",
                     title: LocalizedStringResource(
-                        "A simpler Chat view",
+                        "Less clutter in Chat",
                         comment: "Release-note title for less repeated information in Chat."),
                     detail: LocalizedStringResource(
-                        "Original messages no longer show an extra version label, and repeated status rows are gone.",
+                        "Chat no longer repeats request information and extra status rows.",
                         comment: "Release-note detail for simplified Chat labels and status display.")),
-                .init(
-                    id: "chat-unsent-text",
-                    symbol: "square.and.pencil",
-                    title: LocalizedStringResource(
-                        "Chat keeps unsent text",
-                        comment: "Release-note title for confirmed Chat sending and draft retention."),
-                    detail: LocalizedStringResource(
-                        "Send with the keyboard or button. Only confirmed sent text clears; unsent text and later edits stay.",
-                        comment: "Release-note detail for Chat Send and draft retention.")),
                 .init(
                     id: "post-ack-connection-diagnostics",
                     symbol: "network",
                     title: LocalizedStringResource(
-                        "Clearer connection diagnostics",
+                        "Better details when syncing stops",
                         comment: "Release-note title for identifying failed post-sync steps."),
                     detail: LocalizedStringResource(
-                        "Connection reports can identify the conversation check that stopped syncing without including message content.",
+                        "Connection reports can show where syncing stopped without including message text.",
                         comment: "Release-note detail for safe post-sync failure diagnostics.")),
                 .init(
                     id: "no-reply-delivery-diagnostics",
                     symbol: "tray.and.arrow.down",
                     title: LocalizedStringResource(
-                        "More detail for no-reply answers",
+                        "More detail for quick answers",
                         comment: "Release-note title for additional support details about a no-reply answer."),
                     detail: LocalizedStringResource(
-                        "Support diagnostics can show whether a response arrived and whether the message is in Inbox or Replied.",
+                        "For answers without a comment, support details can show whether your answer arrived and where the request appears.",
                         comment: "Release-note detail for safe no-reply response and routing diagnostics.")),
             ])
     ]
 
-    /// Keep entries newest first. A future build stays hidden until that build is installed.
+    /// Keep entries newest first. Numbered notes stay hidden until that build is installed.
     static let entries: [HarklightReleaseNote] = [
-        HarklightReleaseNote(
-            buildIdentifier: 119,
-            marketingVersion: "0.1.0",
-            highlights: [
-                .init(
-                    id: "whats-new-per-build",
-                    symbol: "sparkles",
-                    title: LocalizedStringResource(
-                        "See what's new in each release",
-                        comment: "Release-note title for showing current-build notes automatically."),
-                    detail: LocalizedStringResource(
-                        "What’s New opens the first time you use a release with new notes. New release notes show their build number here and in Settings.",
-                        comment: "Release-note detail for automatic presentation and build labels."))
-            ]),
-        // Conservative estimate; adjust if the archive reports a different build.
         HarklightReleaseNote(
             buildIdentifier: 79,
             marketingVersion: "0.1.0",
@@ -698,7 +689,8 @@ enum ReleaseNotesLifecycle {
             entries: updateEntries).filter { !seenUpdateIdentifiers.contains($0.id) }
         guard let lastSeenBuildIdentifier else {
             if hasPriorAppState {
-                return unseenUpdates + Array(released.prefix(1))
+                let currentBuild = currentBuildIdentifier.flatMap(Int.init)
+                return unseenUpdates + released.filter { $0.buildIdentifier == currentBuild }
             }
             // A new installation should see notes written for its own current
             // release, while older history remains available from Settings.
@@ -891,6 +883,9 @@ private struct ReleaseNoteSection: View {
                 if let buildIdentifier = note.buildIdentifier {
                     Text("Version \(note.marketingVersion) · Build \(buildIdentifier)",
                          comment: "Marketing version and first shipped build for this release-note entry.")
+                } else if note.buildNumberIsUnconfirmed {
+                    Text("Version \(note.marketingVersion) · Build UNCONFIRMED",
+                         comment: "Marketing version and an explicitly unconfirmed build number.")
                 } else if let confirmedBuild = note.confirmedContainingBuildIdentifier {
                     Text("Version \(note.marketingVersion) · First confirmed in Build \(confirmedBuild)",
                          comment: "Earliest evidenced containing build; earlier shipment is unconfirmed.")

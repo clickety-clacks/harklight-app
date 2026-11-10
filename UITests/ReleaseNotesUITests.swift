@@ -2,19 +2,20 @@ import XCTest
 
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
-    func testCurrentReleaseOpensOnFirstInstallAndShowsItsBuildInSettings() {
+    func testUnconfirmedCurrentReleaseOpensOnUpgradeAndShowsInSettings() {
         let app = XCUIApplication()
+        let simulatedCurrentBuild = "9000" // Synthetic metadata; no archive mapping is claimed.
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_FRESH_INSTALL"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "119"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_FRESH_INSTALL"] = "0"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = simulatedCurrentBuild
         app.launch()
 
         XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 119"].exists,
+        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["See what's new in each release"].exists,
+        XCTAssertTrue(app.staticTexts["See what’s new after an update"].exists,
                       app.debugDescription)
 
         app.buttons["Done"].tap()
@@ -26,40 +27,39 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        let buildHeader = app.staticTexts["Version 0.1.0 · Build 119"]
+        let buildHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
         revealHistoryElement(buildHeader, in: app)
         XCTAssertTrue(buildHeader.exists,
                       "Settings keeps the current release's build label.")
-        let updateTitle = app.staticTexts["See what's new in each release"]
+        let updateTitle = app.staticTexts["See what’s new after an update"]
         revealHistoryElement(updateTitle, in: app)
         XCTAssertTrue(updateTitle.exists,
                       app.debugDescription)
     }
 
-    func testPost79UpdateShowsEarliestConfirmedContainingBuildWithoutRelabeling() {
+    func testPost79UpdateLabelsUnknownBuildNumbersWithoutGuessing() {
         let app = XCUIApplication()
+        let simulatedCurrentBuild = "9001" // Synthetic metadata; no archive mapping is claimed.
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "107"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = simulatedCurrentBuild
         app.launch()
 
         XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Keep an unfinished Reply"].exists,
                       app.debugDescription)
-        let unconfirmedUpdateHeader = app.staticTexts[
-            "Version 0.1.0 · Response delivery improvements"
-        ]
+        let unconfirmedUpdateHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
         XCTAssertTrue(unconfirmedUpdateHeader.exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["See why a response was not accepted"].exists,
                       app.debugDescription)
-        let updateHeader = app.staticTexts["Version 0.1.0 · First confirmed in Build 106"]
+        let updateHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
         XCTAssertTrue(updateHeader.exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["See when Chat needs attention"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
                       app.debugDescription)
-        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build 107"].exists,
+        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                        "A later installed build must not relabel this update.")
 
         app.buttons["Done"].tap()
@@ -75,9 +75,9 @@ final class ReleaseNotesUITests: XCTestCase {
             .staticText, identifier: "Changes since Build 79").firstMatch
         revealHistoryElement(historicalSection, in: app)
         XCTAssertTrue(historicalSection.staticTexts[
-            "Version 0.1.0 · First confirmed in Build 106"
-        ].exists, "Settings keeps the historical entry's confirmed build label.")
-        let earlierHighlight = app.staticTexts["More context in the Inbox"]
+            "Version 0.1.0 · Build UNCONFIRMED"
+        ].exists, "Settings keeps unknown historical build numbers explicit.")
+        let earlierHighlight = app.staticTexts["More details for each message"]
         revealHistoryElement(earlierHighlight, in: app)
         XCTAssertTrue(earlierHighlight.exists,
                       "The earlier historical entry remains available in Settings.")
