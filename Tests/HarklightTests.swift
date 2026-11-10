@@ -4,6 +4,41 @@ import AttentionDomain
 
 final class HarklightTests: XCTestCase {
     @MainActor
+    func testLargeInboxProjectionKeepsSelectedRequestAndSavedDraft() throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("fixture:launch"),
+            personID: ExactText("fixture-person"),
+            deviceID: ExactText("fixture-device")), transportMode: .fixture)
+        let domain = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let payload = try JSONValue.parse(Data(#"{"title":"Launch request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        let requests = (0..<1_000).map { index in
+            StoredRequest(key: RequestKey(accountScope: context.identity.personID,
+                senderID: ExactText("sender"), messageID: ExactText("message-\(index)")),
+                originalPayload: payload)
+        }
+        try domain.registerFixtureRequests(requests, context: context)
+        let key = requests[500].key
+        let selector = try domain.selector(for: key, context: context)
+        var draft = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
+        draft.compatibility.selectedActionID = ExactText("reply")
+        draft.compatibility.textByActionID[ExactText("reply")] = ExactText("Keep this unsent answer")
+        try domain.saveDraft(draft, selector: selector, context: context)
+        let model = try LivePresentationStore(localFixtureStore: domain, context: context)
+        model.selectRequest(key)
+        let before = try domain.snapshot(context: context)
+        let rows = model.inboxRows
+        XCTAssertEqual(rows.count, 1_000)
+        XCTAssertEqual(Set(rows.map(\.key)), Set(requests.map(\.key)))
+        XCTAssertTrue(model.expiredRetractionSearchRows.isEmpty)
+        XCTAssertNil(model.nextRetractionExpiry)
+        XCTAssertEqual(model.selectedRequestKey, key)
+        XCTAssertEqual(try domain.snapshot(context: context).drafts[key], before.drafts[key])
+        XCTAssertEqual(try domain.snapshot(context: context).revision, before.revision,
+                       "Reading inbox rows must not mutate durable state.")
+    }
+
+    @MainActor
     func testSearchProjectionUsesOnlyMatchingRowsInTheSelectedMessageTab() {
         let inboxMatch = InboxRequestRow(
             key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
