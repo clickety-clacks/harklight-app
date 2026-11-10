@@ -95,6 +95,7 @@ struct ConversationPanel: View {
                     local: store.isLocalExample,
                     hasNotAcceptedCardForRetainedAnswer: hasNotAcceptedCard,
                     initialScrollTurnID: initialScrollTurnID,
+                    dismissChat: dismissChat,
                     dynamicTypeSize: dynamicTypeSize,
                     inspect: { file, fileRevision in
                         fileError = nil
@@ -186,13 +187,6 @@ struct ConversationPanel: View {
                 NativeNotificationRouter.shared.conversationBecameHidden(key)
             }
         }
-        .simultaneousGesture(DragGesture(minimumDistance: 24)
-            .onEnded { value in
-                let horizontal = value.translation.width
-                let vertical = value.translation.height
-                guard abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 else { return }
-                dismissChat()
-            })
         .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
         .sheet(item: $inspectedFile) { file in
             NavigationStack {
@@ -244,6 +238,7 @@ private struct ConversationHistoryContent: View, Equatable {
     let local: Bool
     let hasNotAcceptedCardForRetainedAnswer: Bool
     let initialScrollTurnID: ExactText?
+    let dismissChat: () -> Void
     let dynamicTypeSize: DynamicTypeSize
     let inspect: (ConversationFile, UInt64) -> Void
 
@@ -309,6 +304,13 @@ private struct ConversationHistoryContent: View, Equatable {
             }
             .accessibilityIdentifier("conversation-history-scroll")
             .scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(DragGesture(minimumDistance: 24)
+                .onEnded { value in
+                    let horizontal = value.translation.width
+                    let vertical = value.translation.height
+                    guard abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 else { return }
+                    dismissChat()
+                })
             .onChange(of: thread.turns.count) { _, _ in
                 if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
             }
