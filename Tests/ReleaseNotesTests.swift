@@ -582,6 +582,15 @@ final class ReleaseNotesTests: XCTestCase {
             [3])
     }
 
+    func testLegacyUpgradeDoesNotPresentAnOlderNumberedNoteAsCurrent() {
+        XCTAssertTrue(ReleaseNotesLifecycle.notesToPresent(
+            currentBuildIdentifier: "9000",
+            entries: [releaseNote(79)],
+            updateEntries: [],
+            lastSeenBuildIdentifier: nil,
+            hasPriorAppState: true).isEmpty)
+    }
+
     func testUpdateShowsEveryUnseenReleasedNoteNewestFirst() {
         let notes = [releaseNote(2), releaseNote(4), releaseNote(1), releaseNote(3)]
 
