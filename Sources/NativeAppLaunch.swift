@@ -206,6 +206,7 @@ actor ComposerDraftPersistence {
         case failed(String)
         var errorDescription: String? {
             if case let .failed(message) = self { return "Legacy composer migration failed: " + message }
+            return nil
         }
     }
 
