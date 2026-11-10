@@ -730,6 +730,41 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertFalse(resumed.hasUnreadAgentReply(request))
     }
 
+    func testInboxChatMarkerAppearsForAnUnreadAgentReply() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let handle = ExactText("session")
+        let payload = try JSONValue.parse(Data(#"{"title":"A message"}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: handle,
+                eventID: ExactText("delivery-revision"),
+                availability: .listening)), context: context)
+
+        let person = ConversationTurn(id: ExactText("person-turn"), binding: binding,
+            author: .person, sessionHandle: handle, text: ExactText("Hello"), kind: .discussion)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .turn(person)), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, false)
+
+        let agent = ConversationTurn(id: ExactText("agent-turn"), binding: binding,
+            author: .agent, sessionHandle: handle, text: ExactText("Hi"),
+            inReplyTo: person.id, kind: .reply)
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(agent)), context: context)
+        try model.refreshFromDurableStore()
+
+        XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, true,
+                       "The Inbox row marks a reply as unread before Chat is opened.")
+    }
+
     func testInboxChatMarkerNeedsAChatTurnAndKeepsClosedUnreadRepliesVisible() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))

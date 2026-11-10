@@ -2,64 +2,36 @@ import XCTest
 
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
-    func testCurrentReleaseOpensOnFirstInstallAndShowsItsBuildInSettings() {
+    func testPost79UpdateLabelsUnknownBuildNumbersWithoutGuessing() {
         let app = XCUIApplication()
+        let simulatedCurrentBuild = "9001" // Synthetic metadata; no archive mapping is claimed.
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_FRESH_INSTALL"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "119"
-        app.launch()
-
-        XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build 119"].exists,
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts["See what's new in each release"].exists,
-                      app.debugDescription)
-
-        app.buttons["Done"].tap()
-        let settings = app.buttons["inbox-settings"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
-        settings.tap()
-        let historyLink = app.buttons["Release notes"]
-        XCTAssertTrue(historyLink.waitForExistence(timeout: 5), app.debugDescription)
-        historyLink.tap()
-        XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
-                      app.debugDescription)
-        let buildHeader = app.staticTexts["Version 0.1.0 · Build 119"]
-        revealHistoryElement(buildHeader, in: app)
-        XCTAssertTrue(buildHeader.exists,
-                      "Settings keeps the current release's build label.")
-        let updateTitle = app.staticTexts["See what's new in each release"]
-        revealHistoryElement(updateTitle, in: app)
-        XCTAssertTrue(updateTitle.exists,
-                      app.debugDescription)
-    }
-
-    func testPost79UpdateShowsEarliestConfirmedContainingBuildWithoutRelabeling() {
-        let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture"]
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
-        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = "107"
+        app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = simulatedCurrentBuild
         app.launch()
 
         XCTAssertTrue(app.navigationBars["What’s New"].waitForExistence(timeout: 10),
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Keep an unfinished Reply"].exists,
                       app.debugDescription)
-        let unconfirmedUpdateHeader = app.staticTexts[
-            "Version 0.1.0 · Response delivery improvements"
-        ]
+        let unconfirmedUpdateHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
         XCTAssertTrue(unconfirmedUpdateHeader.exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["See why a response was not accepted"].exists,
                       app.debugDescription)
-        let updateHeader = app.staticTexts["Version 0.1.0 · First confirmed in Build 106"]
-        XCTAssertTrue(updateHeader.exists, app.debugDescription)
+        let confirmedUpdateHeader = app.staticTexts[
+            "Version 0.1.0 · First confirmed in Build 106"
+        ]
+        XCTAssertTrue(confirmedUpdateHeader.exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Unknown build numbers are marked UNCONFIRMED."].exists,
+                      app.debugDescription)
+        attachScreenshot("release-notes-post79-update", from: app)
         XCTAssertTrue(app.staticTexts["See when Chat needs attention"].exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
+        let exampleMessagesNote = app.staticTexts["Example messages are gone from the app"]
+        revealUpdateSheetElement(exampleMessagesNote, in: app)
+        XCTAssertTrue(exampleMessagesNote.exists,
                       app.debugDescription)
-        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build 107"].exists,
+        XCTAssertFalse(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
                        "A later installed build must not relabel this update.")
 
         app.buttons["Done"].tap()
@@ -76,8 +48,9 @@ final class ReleaseNotesUITests: XCTestCase {
         revealHistoryElement(historicalSection, in: app)
         XCTAssertTrue(historicalSection.staticTexts[
             "Version 0.1.0 · First confirmed in Build 106"
-        ].exists, "Settings keeps the historical entry's confirmed build label.")
-        let earlierHighlight = app.staticTexts["More context in the Inbox"]
+        ].exists, "Settings keeps the confirmed containing build association.")
+        attachScreenshot("release-notes-settings-post79-history", from: app)
+        let earlierHighlight = app.staticTexts["More details for each message"]
         revealHistoryElement(earlierHighlight, in: app)
         XCTAssertTrue(earlierHighlight.exists,
                       "The earlier historical entry remains available in Settings.")
@@ -117,10 +90,10 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        let currentBuildHeader = app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"]
-        XCTAssertTrue(currentBuildHeader.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(currentBuildHeader.exists,
-                      "Settings history identifies the build attached to this release note.")
+        let currentUnconfirmedHeader = app.staticTexts["Version 0.1.0 · Build UNCONFIRMED"]
+        XCTAssertTrue(currentUnconfirmedHeader.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
+                      "Settings preserves the existing entry for this numbered build.")
         XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
@@ -150,10 +123,12 @@ final class ReleaseNotesUITests: XCTestCase {
         revealHistoryElement(settingsTitle, in: app)
         XCTAssertTrue(settingsTitle.isHittable,
                       "Settings history retains the confirmed Build 59 entry.")
-        let datedHistoryHeader = app.staticTexts["Version 0.1.0 · Earlier on October 25, 2026"]
-        revealHistoryElement(datedHistoryHeader, in: app)
-        XCTAssertTrue(datedHistoryHeader.isHittable,
-                      "Settings history identifies the dated entry without a build number.")
+        let datedHistorySection = app.cells.containing(
+            .staticText, identifier: "Earlier on October 25, 2026").firstMatch
+        revealHistoryElement(datedHistorySection, in: app)
+        XCTAssertTrue(datedHistorySection.staticTexts[
+            "Version 0.1.0 · Build UNCONFIRMED"
+        ].exists, "Settings shows the dated entry and marks its build number unconfirmed.")
         let replyTitle = app.staticTexts["Reply right from the message"]
         revealHistoryElement(replyTitle, in: app)
         XCTAssertTrue(replyTitle.isHittable,
@@ -170,9 +145,21 @@ final class ReleaseNotesUITests: XCTestCase {
     }
 
     private func revealHistoryElement(_ element: XCUIElement, in app: XCUIApplication) {
-        for _ in 0..<8 where !element.isHittable {
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.70))
-            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.56))
+        let list = app.collectionViews["release-notes-history"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        reveal(element, in: list)
+    }
+
+    private func revealUpdateSheetElement(_ element: XCUIElement, in app: XCUIApplication) {
+        let list = app.collectionViews["release-notes-update-sheet"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        reveal(element, in: list)
+    }
+
+    private func reveal(_ element: XCUIElement, in list: XCUIElement) {
+        for _ in 0..<24 where !element.isHittable {
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
+            let end = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.50))
             start.press(forDuration: 0.05, thenDragTo: end)
         }
         XCTAssertTrue(element.isHittable,
