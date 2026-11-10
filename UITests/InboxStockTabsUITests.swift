@@ -99,7 +99,67 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered request in Replied.")
+        XCTAssertTrue(approval.isHittable, app.debugDescription)
+        approval.tap()
+        let localReply = app.staticTexts["Answered locally · nothing sent"]
+        XCTAssertTrue(localReply.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(localReply.isHittable, app.debugDescription)
         attachScreenshot("Replied results for Archive", from: app)
+    }
+
+    func testFilteredRowsAndMessageTextStayReachableAtStandardAndLargeType() {
+        for usesLargeType in [false, true] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                                   "--harklight-ui-diagnostics"]
+            if usesLargeType {
+                app.launchArguments += ["-UIPreferredContentSizeCategoryName",
+                                       "UICTContentSizeCategoryAccessibilityXXXL"]
+            } else {
+                app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryM"]
+            }
+            app.launch()
+
+            let expectedSizeClass = UIDevice.current.userInterfaceIdiom == .pad
+                ? "regular" : "compact"
+            let diagnostics = app.descendants(matching: .any)["inbox-ui-diagnostics"]
+            XCTAssertTrue(diagnostics.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(diagnostics.label.contains("sizeClass=\(expectedSizeClass)"),
+                          "The test must exercise the expected layout. \(diagnostics.label)")
+
+            let search = workspaceSearchField(in: app)
+            XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+            search.tap()
+            search.typeText("Archive")
+            workspaceTab("Replied", in: app).tap()
+            let result = app.descendants(matching: .any)["sample-approval-2"]
+            XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
+
+            let list = app.collectionViews.firstMatch
+            for _ in 0..<8 where !result.isHittable { list.swipeUp() }
+            XCTAssertTrue(result.isHittable,
+                          "A filtered result must remain reachable with the search field active. \(app.debugDescription)")
+
+            // The Replied tab keeps the filtered result and native bottom controls visible.
+            let bottomBar = app.tabBars.firstMatch
+            XCTAssertTrue(bottomBar.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
+            for _ in 0..<8 where !result.isHittable { list.swipeUp() }
+            XCTAssertTrue(result.isHittable, app.debugDescription)
+            XCTAssertLessThanOrEqual(result.frame.maxY, bottomBar.frame.minY + 2,
+                                     "The bottom controls must not cover a filtered row. \(app.debugDescription)")
+            attachScreenshot("filtered-result-\(expectedSizeClass)-\(usesLargeType ? "large" : "standard")", from: app)
+
+            result.tap()
+            let messageText = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "Choose what happens to the earlier sketches")
+            ).firstMatch
+            XCTAssertTrue(messageText.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(messageText.isHittable,
+                          "The selected message text remains visible and reachable. \(app.debugDescription)")
+            attachScreenshot("filtered-message-text-\(expectedSizeClass)-\(usesLargeType ? "large" : "standard")", from: app)
+            app.terminate()
+        }
     }
 
     func testInboxAndRepliedPullToRefreshRunAndKeepFailureVisible() {
@@ -217,6 +277,76 @@ final class InboxStockTabsUITests: XCTestCase {
                       "Returning to Inbox shows its cleared list query.")
         XCTAssertFalse(app.scrollViews["message-card-scroll"].exists,
                        "The previous notification detail is not left selected.")
+    }
+
+    func testColdSyntheticNotificationShowsLoadingThenExactMessageDetail() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-pending",
+                               "--harklight-test-notification-auto"]
+        app.launch()
+
+        let loading = app.descendants(matching: .any)["notification-message-loading"]
+        XCTAssertTrue(loading.waitForExistence(timeout: 10), app.debugDescription)
+        attachScreenshot("synthetic-notification-cold-loading", from: app)
+        app.buttons["notification-test-resolve"].tap()
+
+        let heading = app.buttons["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(heading.label.contains("Unfamiliar interface"),
+                      "The completed synthetic route opens its exact fixture target. \(heading.label)")
+        attachScreenshot("synthetic-notification-cold-target", from: app)
+    }
+
+    func testWarmSyntheticNotificationShowsLoadingThenExactMessageChat() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-pending",
+                               "--harklight-test-notification-chat"]
+        app.launch()
+
+        let openNotification = app.buttons["harklight-test-notification"]
+        XCTAssertTrue(openNotification.waitForExistence(timeout: 10), app.debugDescription)
+        openNotification.tap()
+        let loading = app.descendants(matching: .any)["notification-message-loading"]
+        XCTAssertTrue(loading.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("synthetic-notification-warm-loading", from: app)
+        app.buttons["notification-test-resolve"].tap()
+
+        let chatSurface = app.scrollViews["conversation-history-scroll"]
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 5), app.debugDescription)
+        let targetHeading = app.buttons["request-heading"]
+        XCTAssertTrue(targetHeading.exists,
+                      "The completed synthetic chat route remains on its exact fixture detail. \(app.debugDescription)")
+        XCTAssertTrue(targetHeading.label.contains("Unfamiliar interface"), targetHeading.label)
+        attachScreenshot("synthetic-notification-warm-target-chat", from: app)
+    }
+
+    func testSyntheticNotificationFailureOffersReturnToInbox() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-pending"]
+        app.launch()
+
+        let openNotification = app.buttons["harklight-test-notification"]
+        XCTAssertTrue(openNotification.waitForExistence(timeout: 10), app.debugDescription)
+        openNotification.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["notification-message-loading"]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        app.buttons["notification-test-unavailable"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["notification-message-unavailable"]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        let returnButton = app.buttons["notification-return-to-inbox"]
+        XCTAssertTrue(returnButton.isHittable, app.debugDescription)
+        attachScreenshot("synthetic-notification-unavailable", from: app)
+        returnButton.tap()
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["request-row-facilities-01"]
+            .waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["notification-message-loading"].exists,
+                       "Returning dismisses the unavailable route without reopening it.")
+        attachScreenshot("synthetic-notification-returned-to-inbox", from: app)
     }
 
     private func selectMessageTab(_ title: String, in app: XCUIApplication,

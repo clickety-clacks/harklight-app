@@ -2038,6 +2038,11 @@ final class LivePresentationStore {
         presentation.requests.first { $0.key == key }
     }
 
+    func historicalRequest(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
+        guard conversationThreads[key]?.revisionNumbers.contains(revision) == true else { return nil }
+        return try? inspectedRequest(key, revision: revision)
+    }
+
     func failedResponseWarning(for key: RequestKey,
                                revision: UInt64? = nil) -> FailedResponseWarning? {
         guard let request = request(for: key),

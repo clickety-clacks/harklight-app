@@ -42,7 +42,7 @@ struct ConversationPanel: View {
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     var testConversationSheetDidAppear: (() -> Void)? = nil
-    @State private var selectedRevision: UInt64?
+    var dismissToList: (() -> Void)? = nil
     @State private var inspectedFile: ConversationFile?
     @State private var inspectedFileRevision: UInt64?
     @State private var previewURL: URL?
@@ -51,10 +51,19 @@ struct ConversationPanel: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
 
     private var thread: ConversationThread? { store.conversation(for: key) }
-    private var revision: UInt64 { selectedRevision ?? thread?.currentRevision ?? 1 }
+    private var revision: UInt64 { thread?.currentRevision ?? 1 }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
+
+    private func dismissChat() {
+        if let dismissToList {
+            dismissToList()
+        } else {
+            dismiss()
+        }
+    }
 
     private func hasNotAcceptedCardForRetainedAnswer(thread: ConversationThread,
                                                       request: PresentedRequest?) -> Bool {
@@ -81,15 +90,6 @@ struct ConversationPanel: View {
                 let request = store.request(for: key)
                 let hasNotAcceptedCard = hasNotAcceptedCardForRetainedAnswer(thread: thread,
                                                                               request: request)
-                if thread.revisionNumbers.count > 1 {
-                    Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
-                        ForEach(thread.revisionNumbers, id: \.self) { value in
-                            let hasDraft = thread.drafts[value] != nil || thread.answerDrafts?[value] != nil
-                            let revisionLabel = value == 1 ? "Original" : "Version \(value)"
-                            Text(revisionLabel + (hasDraft ? " · draft" : "")).tag(value)
-                    }
-                    }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
-                }
                 ConversationHistoryContent(store: store, key: key, revision: revision,
                     thread: thread, request: request, sender: sender,
                     local: store.isLocalExample,
@@ -171,7 +171,6 @@ struct ConversationPanel: View {
             }
         }
         .onAppear {
-            if selectedRevision == nil { selectedRevision = thread?.currentRevision }
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
             testConversationSheetDidAppear?()
         }
@@ -187,6 +186,14 @@ struct ConversationPanel: View {
                 NativeNotificationRouter.shared.conversationBecameHidden(key)
             }
         }
+        .simultaneousGesture(DragGesture(minimumDistance: 24)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+                guard abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 else { return }
+                dismissChat()
+            })
+        .accessibilityAction(named: "Dismiss chat") { dismissChat() }
         .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
         .sheet(item: $inspectedFile) { file in
             NavigationStack {

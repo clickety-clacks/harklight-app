@@ -134,6 +134,89 @@ final class DetailChatButtonUITests: XCTestCase {
         attachScreenshot("chat-toolbar-after-reading")
     }
 
+    func testDetailVersionIndicatorOpensReadOnlyHistoricalMessageAndChatHasNoVersionPicker() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let revised = app.descendants(matching: .any)["sample-approval-2"]
+        XCTAssertTrue(revised.waitForExistence(timeout: 10), app.debugDescription)
+        revised.tap()
+
+        let versionIndicator = app.descendants(matching: .any)["request-update-fact"]
+        XCTAssertTrue(versionIndicator.waitForExistence(timeout: 5), app.debugDescription)
+        versionIndicator.tap()
+        let original = app.buttons["Original version"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
+        original.tap()
+
+        let historicalContent = app.scrollViews["historical-message-version"]
+        XCTAssertTrue(historicalContent.waitForExistence(timeout: 5), app.debugDescription)
+        let historicalTitle = app.staticTexts["historical-version-title"]
+        let historicalBody = app.staticTexts["historical-version-body"]
+        XCTAssertTrue(historicalTitle.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalBody.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(historicalContent.buttons["request-finish"].exists,
+                       "A historical message version is available for reading and has no Send action.")
+        attachScreenshot("detail-original-message-version-read-only")
+
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5),
+                      "The current version's local response flow remains available.")
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+        XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["conversation-revision-picker"].exists,
+                       "Version selection belongs to message details, not Chat.")
+        attachScreenshot("chat-without-version-selector")
+    }
+
+    func testHorizontalSwipeInsideChatReturnsToListAndPreservesDraft() {
+        for direction in ["left", "right"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+            app.launch()
+
+            let row = app.descendants(matching: .any)["sample-information-2"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+            row.tap()
+            let chat = app.buttons["Chat"]
+            XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+            chat.tap()
+            let composer = app.textViews["sample-chat-composer"]
+            XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+            composer.tap()
+            composer.typeText("Swipe draft stays saved")
+
+            let history = app.scrollViews["conversation-history-scroll"]
+            XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+            let startX: CGFloat = direction == "left" ? 0.9 : 0.1
+            let endX: CGFloat = direction == "left" ? 0.1 : 0.9
+            let start = history.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
+            let end = history.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: end,
+                        withVelocity: .slow, thenHoldForDuration: 0.1)
+
+            XCTAssertTrue(row.waitForExistence(timeout: 5),
+                          "A horizontal \(direction) swipe in Chat returns to the message list. \(app.debugDescription)")
+            XCTAssertTrue(row.isHittable, app.debugDescription)
+            XCTAssertFalse(composer.exists, app.debugDescription)
+            attachScreenshot("chat-horizontal-swipe-\(direction)-returns-to-list")
+
+            row.tap()
+            let reopenedChat = app.buttons["Chat"]
+            XCTAssertTrue(reopenedChat.waitForExistence(timeout: 5), app.debugDescription)
+            reopenedChat.tap()
+            let reopenedComposer = app.textViews["sample-chat-composer"]
+            XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(reopenedComposer.value as? String, "Swipe draft stays saved",
+                           "Dismissing Chat keeps its unsent draft for an intentional reopen.")
+            app.terminate()
+        }
+    }
+
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
@@ -175,6 +258,8 @@ final class DetailChatButtonUITests: XCTestCase {
             composer.typeText("Draft survives dismissal")
         }
         dismissChatSheet(app, composer)
+        XCTAssertFalse(composer.waitForExistence(timeout: 1.5),
+                       "One deliberate dismissal leaves Chat closed until the toolbar button is tapped.")
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         XCTAssertFalse(composer.exists, app.debugDescription)

@@ -389,6 +389,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var refreshInbox: (@MainActor () async -> Void)? = nil
     var showsLocalExamples = false
     var notificationNavigation: NativeInboxNavigation? = nil
+    var notificationNavigationMessage: String? = nil
     var notificationChatRouteDidOpen: (UInt64) -> Void = { _ in }
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
@@ -403,6 +404,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
     @State private var testNotificationNavigation: NativeInboxNavigation?
+    @State private var testNotificationNavigationMessage: String?
+    @State private var testNotificationLoading = false
+    @State private var testNotificationUnavailable = false
+    @State private var dismissedNotificationSerial: UInt64?
     @State private var listTabOnMessageEntry: InboxMessageTab?
     @State private var lastViewedSelection: InboxSelection?
     @State private var navigatedBetweenMessages = false
@@ -460,7 +465,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             search: search).map(\.id)
     }
     private var activeNotificationNavigation: NativeInboxNavigation? {
-        notificationNavigation ?? testNotificationNavigation
+        let route = testNotificationNavigation ?? notificationNavigation
+        guard route?.serial != dismissedNotificationSerial else { return nil }
+        return route
+    }
+    private var activeNotificationNavigationMessage: String? {
+        if testNotificationNavigation != nil { return testNotificationNavigationMessage }
+        return notificationNavigationMessage
     }
     private var newMessageAreaExpiryTaskKey: NewMessageAreaExpiryTaskKey {
         NewMessageAreaExpiryTaskKey(
@@ -479,7 +490,37 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         guard exposesNotificationTestAction, let key = requests.first?.key else { return }
         let serial = max(notificationNavigation?.serial ?? 0,
                          testNotificationNavigation?.serial ?? 0) &+ 1
-        testNotificationNavigation = NativeInboxNavigation(serial: serial, request: key)
+        testNotificationNavigation = NativeInboxNavigation(serial: serial, request: key,
+            opensChat: ProcessInfo.processInfo.arguments.contains("--harklight-test-notification-chat"))
+        dismissedNotificationSerial = nil
+        testNotificationLoading = ProcessInfo.processInfo.arguments.contains(
+            "--harklight-test-notification-pending")
+        testNotificationUnavailable = ProcessInfo.processInfo.arguments.contains(
+            "--harklight-test-notification-unavailable")
+        testNotificationNavigationMessage = testNotificationLoading
+            ? "Checking this notification."
+            : (testNotificationUnavailable ? "This message could not be loaded." : nil)
+    }
+
+    private func resolveSyntheticNotification() {
+        testNotificationLoading = false
+        testNotificationUnavailable = false
+        testNotificationNavigationMessage = nil
+    }
+
+    private func showSyntheticNotificationUnavailable() {
+        testNotificationLoading = false
+        testNotificationUnavailable = true
+        testNotificationNavigationMessage = "This message could not be loaded."
+    }
+
+    private func dismissNotificationNavigation() {
+        guard let route = testNotificationNavigation ?? notificationNavigation else { return }
+        dismissedNotificationSerial = route.serial
+        testNotificationLoading = false
+        testNotificationUnavailable = false
+        testNotificationNavigationMessage = nil
+        navigate(to: nil)
     }
 
     private func currentItem(for selection: InboxSelection) -> InboxItem? {
@@ -496,6 +537,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func navigate(from previous: InboxSelection?, to next: InboxSelection?) {
         guard previous != next else { return }
+        if next == nil, let route = activeNotificationNavigation {
+            dismissedNotificationSerial = route.serial
+        }
         UIDiagnostics.shared.record("inbox.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next))")
         if case let .request(key) = previous { conversationStore?.flushPendingDraft(for: key) }
         if next != nil {
@@ -643,8 +687,19 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Group {
                 switch item {
                 case let .request(key)?:
-                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
-                        .id(key)
+                    if let route = activeNotificationNavigation,
+                       route.request == key,
+                       testNotificationLoading || testNotificationUnavailable ||
+                        conversationStore?.request(for: key) == nil {
+                        notificationDestinationStatus(
+                            message: activeNotificationNavigationMessage,
+                            isLoading: !testNotificationUnavailable &&
+                                Self.notificationRouteIsLoading(activeNotificationNavigationMessage),
+                            isSynthetic: testNotificationLoading || testNotificationUnavailable)
+                    } else {
+                        requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
+                            .id(key)
+                    }
                 case let .sample(id)?:
                     if showsLocalExamples,
                        samples.messages.contains(where: { $0.id == id }),
@@ -654,8 +709,15 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             .id(id)
                     }
                 case nil:
-                    HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background { HarklightDesignSystem.palette(for: colorScheme).neutral.backgroundColor.ignoresSafeArea() }
+                    if let route = activeNotificationNavigation, route.request == nil {
+                        notificationDestinationStatus(
+                            message: activeNotificationNavigationMessage,
+                            isLoading: Self.notificationRouteIsLoading(activeNotificationNavigationMessage),
+                            isSynthetic: false)
+                    } else {
+                        HarklightBrand(large: true).frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background { HarklightDesignSystem.palette(for: colorScheme).neutral.backgroundColor.ignoresSafeArea() }
+                    }
                 }
             }
             .frame(maxWidth: .infinity)
@@ -665,7 +727,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 Divider()
                 ConversationPanel(store: conversationStore, key: key,
                     sender: key.senderID.rawValue, title: request.title?.rawValue ?? "",
-                    initialScrollTurnID: replyRouteTargetTurnID(for: key))
+                    initialScrollTurnID: replyRouteTargetTurnID(for: key),
+                    dismissToList: { navigate(to: nil) })
                     .frame(width: min(360, geometry.size.width * 0.34))
             }
             if inlineChat, case let .sample(id)? = item,
@@ -697,6 +760,44 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         .toolbar(horizontalSizeClass == .compact && item != nil ? .hidden : .automatic,
                  for: .tabBar)
+    }
+
+    @ViewBuilder
+    private func notificationDestinationStatus(message: String?, isLoading: Bool,
+                                               isSynthetic: Bool) -> some View {
+        VStack(spacing: 16) {
+            if isLoading {
+                ProgressView("Opening message…")
+                    .accessibilityIdentifier("notification-message-loading")
+                if let message {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                }
+            } else {
+                ContentUnavailableView("Message unavailable",
+                    systemImage: "exclamationmark.bubble",
+                    description: Text(message ?? "This message could not be loaded."))
+                    .accessibilityIdentifier("notification-message-unavailable")
+            }
+#if DEBUG
+            if isSynthetic && testNotificationLoading {
+                Button("Resolve synthetic notification", action: resolveSyntheticNotification)
+                    .accessibilityIdentifier("notification-test-resolve")
+                Button("Show unavailable state", action: showSyntheticNotificationUnavailable)
+                    .accessibilityIdentifier("notification-test-unavailable")
+            }
+#endif
+            Button("Return to inbox", action: dismissNotificationNavigation)
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("notification-return-to-inbox")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
+    private static func notificationRouteIsLoading(_ message: String?) -> Bool {
+        guard let message else { return false }
+        return message == "Checking this notification." ||
+            message == "Looking for this message."
     }
 
     @ViewBuilder
@@ -868,6 +969,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .onAppear {
                 UIDiagnostics.shared.record("inbox.appear selection=\(UIDiagnostics.describe(selection)) samples.selected=\(samples.selectedID ?? "nil")")
+                if ProcessInfo.processInfo.arguments.contains("--harklight-test-notification-auto") {
+                    triggerNotificationTestAction()
+                }
                 guard showsLocalExamples, selection == nil,
                       let id = samples.selectedID, samples.responses[id] != nil else { return }
                 selection = .sample(id)
@@ -1758,7 +1862,7 @@ struct InboxList: View {
                         .accessibilityIdentifier("expired-retraction-history-header")
                 }
             }
-            if normalEntries.isEmpty, areaRows.isEmpty, historyRows.isEmpty, let triggerNotification {
+            if let triggerNotification {
                 Button("Open notification", action: triggerNotification)
                     .accessibilityIdentifier("harklight-test-notification")
             }
