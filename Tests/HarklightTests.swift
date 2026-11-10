@@ -38,6 +38,76 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testRepliedDetailNavigationUsesCurrentRepliedSetAndHidesCounterAfterDeparture() {
+        func row(_ id: String, replied: Bool) -> InboxItem {
+            .request(InboxRequestRow(
+                key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                messageID: ExactText(id)),
+                title: "Message \(id)", sender: "Assistant", status: "",
+                hasUserAction: replied, hasInboxViewEntry: true))
+        }
+
+        let inboxFirst = row("inbox-first", replied: false)
+        let repliedFirst = row("replied-first", replied: true)
+        let inboxSecond = row("inbox-second", replied: false)
+        let repliedSecond = row("replied-second", replied: true)
+        let rows = [inboxFirst, repliedFirst, inboxSecond, repliedSecond]
+
+        let repliedIDs = InboxCardNavigationProjection.ids(
+            rows: rows, originTab: .replied, selectedTab: .inbox, search: "",
+            freeOrderVersion: nil, serverItems: nil)
+        XCTAssertEqual(repliedIDs, [repliedFirst.id, repliedSecond.id])
+
+        let firstRepliedCard = InboxCardNavigationState(selection: repliedFirst.id, in: repliedIDs)
+        XCTAssertEqual(firstRepliedCard.position, 1)
+        XCTAssertEqual(firstRepliedCard.total, 2)
+        XCTAssertFalse(firstRepliedCard.hasPrevious)
+        XCTAssertTrue(firstRepliedCard.hasNext)
+        XCTAssertNil(InboxCardNavigationState.destination(from: repliedFirst.id,
+                                                            direction: -1, in: repliedIDs))
+        XCTAssertEqual(InboxCardNavigationState.destination(from: repliedFirst.id,
+                                                              direction: 1, in: repliedIDs),
+                       repliedSecond.id)
+        let secondRepliedCard = InboxCardNavigationState(selection: repliedSecond.id, in: repliedIDs)
+        XCTAssertEqual(secondRepliedCard.position, 2)
+        XCTAssertEqual(secondRepliedCard.total, 2)
+        XCTAssertTrue(secondRepliedCard.hasPrevious)
+        XCTAssertFalse(secondRepliedCard.hasNext)
+        XCTAssertEqual(InboxCardNavigationState.destination(from: repliedSecond.id,
+                                                              direction: -1, in: repliedIDs),
+                       repliedFirst.id)
+        XCTAssertNil(InboxCardNavigationState.destination(from: repliedSecond.id,
+                                                            direction: 1, in: repliedIDs))
+
+        let inboxIDs = InboxCardNavigationProjection.ids(
+            rows: rows, originTab: .inbox, selectedTab: .replied, search: "",
+            freeOrderVersion: nil, serverItems: nil)
+        let firstInboxCard = InboxCardNavigationState(selection: inboxFirst.id, in: inboxIDs)
+        XCTAssertEqual(firstInboxCard.position, 1)
+        XCTAssertEqual(firstInboxCard.total, 2)
+        XCTAssertTrue(firstInboxCard.hasNext)
+        XCTAssertEqual(InboxCardNavigationState.destination(from: inboxFirst.id,
+                                                              direction: 1, in: inboxIDs),
+                       inboxSecond.id)
+
+        let repliedFirstAfterLeaving = row("replied-first", replied: false)
+        let currentRepliedIDs = InboxCardNavigationProjection.ids(
+            rows: [inboxFirst, repliedFirstAfterLeaving, inboxSecond, repliedSecond],
+            originTab: .replied, selectedTab: .inbox, search: "",
+            freeOrderVersion: nil, serverItems: nil)
+        let departedRepliedCard = InboxCardNavigationState(selection: repliedFirst.id,
+                                                             in: currentRepliedIDs)
+        XCTAssertNil(departedRepliedCard.position)
+        XCTAssertNil(departedRepliedCard.total)
+        XCTAssertFalse(departedRepliedCard.hasPrevious)
+        XCTAssertFalse(departedRepliedCard.hasNext)
+        XCTAssertNil(InboxCardNavigationState.destination(from: repliedFirst.id,
+                                                            direction: -1, in: currentRepliedIDs))
+        XCTAssertNil(InboxCardNavigationState.destination(from: repliedFirst.id,
+                                                            direction: 1, in: currentRepliedIDs))
+    }
+
+    @MainActor
     func testThreadProjectionFoldsOnlyAdjacentExactSenderAndThreadEntries() {
         func item(_ id: String, senderID: String = "sender", thread: String? = "thread",
                   hasEntry: Bool = true, resolved: Bool = false) -> InboxItem {

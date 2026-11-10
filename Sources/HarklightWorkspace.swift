@@ -153,6 +153,60 @@ enum InboxListProjection {
     }
 }
 
+struct InboxCardNavigationState: Equatable {
+    let position: Int?
+    let total: Int?
+    let hasPrevious: Bool
+    let hasNext: Bool
+
+    init(selection: InboxSelection, in ids: [InboxSelection]) {
+        guard let index = ids.firstIndex(of: selection) else {
+            position = nil
+            total = nil
+            hasPrevious = false
+            hasNext = false
+            return
+        }
+
+        position = index + 1
+        total = ids.count
+        hasPrevious = index > 0
+        hasNext = index + 1 < ids.count
+    }
+
+    static func destination(from selection: InboxSelection, direction: Int,
+                            in ids: [InboxSelection]) -> InboxSelection? {
+        guard let current = ids.firstIndex(of: selection),
+              ids.indices.contains(current + direction) else { return nil }
+        return ids[current + direction]
+    }
+}
+
+@MainActor
+enum InboxCardNavigationProjection {
+    static func ids(rows: [InboxItem], originTab: InboxMessageTab?, selectedTab: InboxMessageTab,
+                    search: String, freeOrderVersion: Int?,
+                    serverItems: [InboxViewListItem]?) -> [InboxSelection] {
+        let tab: InboxWorkspaceTab = switch originTab ?? selectedTab {
+        case .inbox: .inbox
+        case .replied: .replied
+        }
+
+        if tab == .inbox,
+           InboxFreeOrder.isSupported(version: freeOrderVersion, items: serverItems) {
+            return InboxNormalListProjection.entries(
+                rows: rows, serverItems: serverItems,
+                freeOrderVersion: freeOrderVersion, in: .inbox, search: search)
+                .flatMap { entry -> [InboxSelection] in
+                    guard case let .message(message) = entry else { return [] }
+                    return message.members.map(\.id)
+                }
+        }
+
+        return InboxListProjection.filteredRows(rows, in: tab, search: search).map(\.id)
+    }
+}
+
 @MainActor
 struct InboxNotificationDestination: Equatable {
     let selection: InboxSelection?
@@ -437,26 +491,16 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         if warnings.isEmpty { isWarningPresented = false }
     }
 
-    private var orderedIDs: [InboxSelection] {
-        InboxListProjection.filteredRows(rows, in: .inbox, search: search).map(\.id)
-    }
     private var usesFreeOrder: Bool {
         InboxFreeOrder.isSupported(version: conversationStore?.presentation.inboxFreeOrderVersion,
                                    items: conversationStore?.presentation.inboxViewListItems)
     }
     private var cardNavigationIDs: [InboxSelection] {
-        // Keep detail navigation aligned with the current Inbox list, including
-        // its search results and server-ranked ordering when free order is active.
-        if usesFreeOrder {
-            return InboxNormalListProjection.entries(rows: rows,
-                serverItems: conversationStore?.presentation.inboxViewListItems,
-                freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
-                in: .inbox, search: search).flatMap { entry -> [InboxSelection] in
-                    guard case let .message(message) = entry else { return [] }
-                    return message.members.map(\.id)
-                }
-        }
-        return orderedIDs
+        // A shared detail can outlive a tab switch; keep its sequence with the tab that opened it.
+        InboxCardNavigationProjection.ids(rows: rows, originTab: listTabOnMessageEntry,
+            selectedTab: selectedTab, search: search,
+            freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
+            serverItems: conversationStore?.presentation.inboxViewListItems)
     }
     private var activeNotificationNavigation: NativeInboxNavigation? {
         notificationNavigation ?? testNotificationNavigation
@@ -491,6 +535,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func navigate(to next: InboxSelection?) {
         navigate(from: selection, to: next)
+    }
+
+    private func selectFromList(_ next: InboxSelection?) {
+        guard next != selection else { return }
+        if next != nil { listTabOnMessageEntry = workspaceTab.messageTab }
+        navigate(to: next)
     }
 
     private func navigate(from previous: InboxSelection?, to next: InboxSelection?) {
@@ -637,7 +687,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private var navigationSelection: Binding<InboxSelection?> {
         Binding(get: { selection }, set: { next in
-            navigate(to: next)
+            selectFromList(next)
         })
     }
 
@@ -751,9 +801,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
         let ids = cardNavigationIDs
-        let index = ids.firstIndex(of: id)
-        let hasPrevious = index.map { $0 > 0 } ?? false
-        let hasNext = index.map { $0 + 1 < ids.count } ?? false
+        let navigation = InboxCardNavigationState(selection: id, in: ids)
         let chatRouteSerial: UInt64?
         var chatScrollTargetTurnID: ExactText? = nil
         var chatRouteDidOpen: (() -> Void)? = nil
@@ -772,10 +820,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         } else {
             chatRouteSerial = nil
         }
-        return InboxCardContext(position: index.map { $0 + 1 },
-            total: index == nil ? nil : ids.count,
-            hasPrevious: hasPrevious,
-            hasNext: hasNext,
+        return InboxCardContext(position: navigation.position,
+            total: navigation.total,
+            hasPrevious: navigation.hasPrevious,
+            hasNext: navigation.hasNext,
             inlineChat: inlineChat,
             notificationChatRouteSerial: chatRouteSerial,
             notificationChatRouteDidOpen: chatRouteDidOpen,
@@ -784,9 +832,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             messageType: rows.first(where: { $0.id == id })?.resolvedMessageType ?? .request) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
                 let currentIDs = cardNavigationIDs
-                guard let current = currentIDs.firstIndex(of: id),
-                      currentIDs.indices.contains(current + direction) else { return }
-                let next = currentIDs[current + direction]
+                guard let next = InboxCardNavigationState.destination(
+                    from: id, direction: direction, in: currentIDs) else { return }
                 navigatedBetweenMessages = true
                 navigate(to: next)
             }
@@ -837,6 +884,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                                                usesFreeOrder: usesFreeOrder)
                 workspaceTab = destination.workspaceTab
                 selectedTab = destination.selectedTab
+                listTabOnMessageEntry = destination.selectedTab
                 search = destination.search
                 selection = destination.selection
                 if let key = route.request {
