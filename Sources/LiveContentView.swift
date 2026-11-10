@@ -1012,7 +1012,6 @@ struct LiveRequestDetail: View {
     @State private var chatPresented = false
     @State private var pendingChatScrollTarget: ExactText?
     @State private var openedNotificationChatRouteSerial: UInt64?
-    @State private var historicalVersionSelection: HistoricalVersionSelection?
     @State private var enlargedPicture: SampleOption?
     @State private var fixtureOutcomePresented = false
     @State private var requestDetailsPresented = false
@@ -1028,53 +1027,6 @@ struct LiveRequestDetail: View {
         case skippedMessage
 
         var id: String { rawValue }
-    }
-
-    private struct HistoricalVersionSelection: Identifiable {
-        let revision: UInt64
-        var id: UInt64 { revision }
-    }
-
-    private var historicalRevisionNumbers: [UInt64] {
-        store.conversation(for: request.key)?.revisionNumbers ?? []
-    }
-
-    @ViewBuilder
-    private func historicalVersionMenuItem(_ version: UInt64) -> some View {
-        if version == 1 {
-            Button("Original version") {
-                historicalVersionSelection = HistoricalVersionSelection(revision: version)
-            }
-            .accessibilityIdentifier("request-historical-version-\(version)")
-        } else {
-            Button("Version \(version)") {
-                historicalVersionSelection = HistoricalVersionSelection(revision: version)
-            }
-            .accessibilityIdentifier("request-historical-version-\(version)")
-        }
-    }
-
-    private func historicalVersionMenu(for revision: UInt64) -> some View {
-        Menu {
-            ForEach(historicalRevisionNumbers.filter { $0 != revision }, id: \.self) { version in
-                historicalVersionMenuItem(version)
-            }
-        } label: {
-            Label(storePresentationSnapshot.hasAcceptedUpdate
-                  ? "Updated · version \(revision)" : "Question version \(revision)",
-                  systemImage: "clock.arrow.circlepath")
-                .font(.caption)
-                .foregroundStyle(detailColors.secondaryTextColor)
-        }
-        .accessibilityIdentifier("request-update-fact")
-        .accessibilityHint("View earlier versions of this message")
-    }
-
-    @ViewBuilder
-    private var historicalVersionControl: some View {
-        if let revision = storePresentationSnapshot.conversationRevision, revision > 1 {
-            historicalVersionMenu(for: revision)
-        }
     }
 
     init(request: PresentedRequest,
@@ -1699,7 +1651,12 @@ struct LiveRequestDetail: View {
                                 : "request-local-answer-status")
                     }
                 }
-                historicalVersionControl
+                HistoricalVersionAccess(request: request, store: store,
+                    currentRevision: storePresentationSnapshot.conversationRevision,
+                    hasAcceptedUpdate: storePresentationSnapshot.hasAcceptedUpdate,
+                    secondaryTextColor: detailColors.secondaryTextColor,
+                    testNotificationRouter: testNotificationRouter,
+                    testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
                 if storePresentationSnapshot.isRetracted {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
                         .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
@@ -1964,28 +1921,6 @@ struct LiveRequestDetail: View {
                     }
                 }
             }
-            .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
-                                             testOpen: testOpenForegroundChatIndicator)
-        }
-        .sheet(item: $historicalVersionSelection) { selection in
-            NavigationStack {
-                if let version = store.historicalRequest(for: request.key, revision: selection.revision) {
-                    HistoricalMessageVersionView(request: version, store: store)
-                } else {
-                    ContentUnavailableView("This version is unavailable",
-                        systemImage: "questionmark.folder",
-                        description: Text("The saved message version could not be opened."))
-                        .accessibilityIdentifier("historical-version-unavailable")
-                }
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") { historicalVersionSelection = nil }
-                    }
-                }
-                .navigationTitle(selection.revision == 1 ? "Original version" : "Version \(selection.revision)")
-                .navigationBarTitleDisplayMode(.inline)
-            }
-            .presentationDetents([.large])
             .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                              testOpen: testOpenForegroundChatIndicator)
         }
@@ -2294,6 +2229,83 @@ struct HistoricalAnswerDraftView: View {
             case .unsupported:
                 Text("This saved answer format cannot be displayed.").font(.caption)
             }
+        }
+    }
+}
+
+@MainActor
+private struct HistoricalVersionSelection: Identifiable {
+    let revision: UInt64
+    var id: UInt64 { revision }
+}
+
+@MainActor
+private struct HistoricalVersionAccess: View {
+    let request: PresentedRequest
+    let store: LivePresentationStore
+    let currentRevision: UInt64?
+    let hasAcceptedUpdate: Bool
+    let secondaryTextColor: Color
+    let testNotificationRouter: NativeNotificationRouter?
+    let testOpenForegroundChatIndicator: (() -> Void)?
+    @State private var selection: HistoricalVersionSelection?
+
+    private var revisionNumbers: [UInt64] {
+        store.conversation(for: request.key)?.revisionNumbers ?? []
+    }
+
+    @ViewBuilder
+    private func versionMenuItem(_ version: UInt64) -> some View {
+        if version == 1 {
+            Button("Original version") { selection = HistoricalVersionSelection(revision: version) }
+                .accessibilityIdentifier("request-historical-version-\(version)")
+        } else {
+            Button("Version \(version)") { selection = HistoricalVersionSelection(revision: version) }
+                .accessibilityIdentifier("request-historical-version-\(version)")
+        }
+    }
+
+    var body: some View {
+        Group {
+            if let currentRevision, currentRevision > 1 {
+                Menu {
+                    ForEach(revisionNumbers.filter { $0 != currentRevision }, id: \.self) { version in
+                        versionMenuItem(version)
+                    }
+                } label: {
+                    Label(hasAcceptedUpdate
+                          ? "Updated · version \(currentRevision)" : "Question version \(currentRevision)",
+                          systemImage: "clock.arrow.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(secondaryTextColor)
+                }
+                .accessibilityIdentifier("request-update-fact")
+                .accessibilityHint("View earlier versions of this message")
+            }
+        }
+        .sheet(item: $selection) { selected in
+            NavigationStack {
+                Group {
+                    if let version = store.historicalRequest(for: request.key, revision: selected.revision) {
+                        HistoricalMessageVersionView(request: version, store: store)
+                    } else {
+                        ContentUnavailableView("This version is unavailable",
+                            systemImage: "questionmark.folder",
+                            description: Text("The saved message version could not be opened."))
+                            .accessibilityIdentifier("historical-version-unavailable")
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { selection = nil }
+                    }
+                }
+                .navigationTitle(selected.revision == 1 ? "Original version" : "Version \(selected.revision)")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+            .presentationDetents([.large])
+            .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                             testOpen: testOpenForegroundChatIndicator)
         }
     }
 }
