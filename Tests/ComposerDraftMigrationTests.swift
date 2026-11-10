@@ -79,19 +79,24 @@ final class ComposerDraftMigrationTests: XCTestCase {
         let oldRevisionThreeDraft = ConversationDraft(
             binding: ConversationBinding(request: key, revision: 3))
         let legacyState = try XCTUnwrap(legacyPersistence.load(identity: identity))
-        var legacyProfile = try XCTUnwrap(JSONSerialization.jsonObject(with: legacyState) as? [String: Any])
+        var legacyProfile = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: legacyState, options: [], format: nil) as? [String: Any])
         let encodedConversation = try XCTUnwrap(legacyProfile["conversation"])
-        let conversationData = try JSONSerialization.data(withJSONObject: encodedConversation)
-        var archivedConversation = try JSONDecoder().decode(ConversationState.self, from: conversationData)
+        let conversationData = try PropertyListSerialization.data(fromPropertyList: encodedConversation,
+            format: .binary, options: 0)
+        var archivedConversation = try PropertyListDecoder().decode(ConversationState.self,
+            from: conversationData)
         var archivedThread = try XCTUnwrap(archivedConversation.threads[key])
         archivedThread.drafts = [1: oldRevisionOneDraft, 2: oldRevisionTwoDraft,
                                  3: oldRevisionThreeDraft]
         archivedThread.answerDrafts = [1: oldAnswerDraft, 2: middleAnswerDraft]
         archivedConversation.threads[key] = archivedThread
-        let updatedConversation = try JSONEncoder().encode(archivedConversation)
-        legacyProfile["conversation"] = try JSONSerialization.jsonObject(with: updatedConversation)
-        try legacyPersistence.commit(try JSONSerialization.data(withJSONObject: legacyProfile),
-                                     identity: identity)
+        let updatedConversation = try PropertyListEncoder().encode(archivedConversation)
+        legacyProfile["conversation"] = try PropertyListSerialization.propertyList(
+            from: updatedConversation, options: [], format: nil)
+        let updatedLegacyState = try PropertyListSerialization.data(fromPropertyList: legacyProfile,
+            format: .binary, options: 0)
+        try legacyPersistence.commit(updatedLegacyState, identity: identity)
 
         let files = try ConversationFileStorage(identity: identity,
             root: root.appendingPathComponent("conversation-files", isDirectory: true))

@@ -4143,13 +4143,32 @@ public actor AttentionDomainStore {
 
     private static func externalizingConversationFiles(in draft: ConversationDraft,
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationDraft {
-        ConversationDraft(binding: draft.binding, text: draft.text,
-            files: try draft.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
-            disposition: draft.disposition, operationID: draft.operationID,
-            inFlightOperationID: draft.inFlightOperationID,
-            currentAttemptUnsettled: draft.currentAttemptUnsettled,
-            earlierVersionMayHaveBeenSent: draft.earlierVersionMayHaveBeenSent,
-            failure: draft.failure)
+        var externalized = draft
+        externalized.files = try draft.files.map {
+            try externalizingConversationFiles(in: $0, using: references,
+                allowInlinePersistence: allowInlinePersistence)
+        }
+        externalized.carriedOverSends = try draft.carriedOverSends.map { original in
+            var send = original
+            send.files = try original.files.map {
+                try externalizingConversationFiles(in: $0, using: references,
+                    allowInlinePersistence: allowInlinePersistence)
+            }
+            return send
+        }
+        externalized.earlierEntries = try draft.earlierEntries.map { entry in
+            EarlierComposerEntry(id: entry.id, kind: entry.kind,
+                requestRevision: entry.requestRevision, text: entry.text,
+                files: try entry.files.map {
+                    try externalizingConversationFiles(in: $0, using: references,
+                        allowInlinePersistence: allowInlinePersistence)
+                }, answerDraft: entry.answerDraft, answerChoices: entry.answerChoices,
+                operationID: entry.operationID,
+                currentAttemptUnsettled: entry.currentAttemptUnsettled,
+                earlierVersionMayHaveBeenSent: entry.earlierVersionMayHaveBeenSent,
+                failure: entry.failure)
+        }
+        return externalized
     }
 
     private static func externalizingConversationFiles(in event: ConversationEvent,
