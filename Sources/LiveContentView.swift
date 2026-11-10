@@ -285,19 +285,21 @@ final class ReplyEditorDraftSession {
         requestRevision = request.requestRevision
         self.canSubmitFromSnapshot = canSubmitFromSnapshot
         let initialDraft = Self.initialDraft(for: request)
+        let initialPayload = Self.payload(for: request)
+        var initialDeliveryDraft = AnswerComposerDraft(content: initialDraft)
+        initialDeliveryDraft.contentRequestRevision = request.requestRevision
+        initialDeliveryDraft.selectedChoices = Self.choiceSnapshots(for: initialDraft,
+            revision: request.requestRevision, payload: initialPayload)
         mergeSeedDraft = initialDraft
         draft = initialDraft
         noCommentSelected = initialDraft.noCommentSelected
-        deliveryDraft = AnswerComposerDraft(content: initialDraft)
-        deliveryDraft.contentRequestRevision = request.requestRevision
+        deliveryDraft = initialDeliveryDraft
         self.persistence = persistence
         self.onDraftLoaded = onDraftLoaded
         self.onPersistenceFailure = onPersistenceFailure
         isDraftLoaded = persistence == nil
-        requestPayload = Self.payload(for: request)
+        requestPayload = initialPayload
         requestProjection = request.projection
-        deliveryDraft.selectedChoices = Self.choiceSnapshots(for: initialDraft,
-            revision: request.requestRevision, payload: requestPayload)
         persistenceAddress = identity.map {
             ComposerDraftAddress(identity: $0, request: request.key,
                                  revision: request.requestRevision, kind: .answer)
