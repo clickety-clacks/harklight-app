@@ -499,14 +499,25 @@ final class NativeAppLaunch {
     private func navigateToMessage(_ key: RequestKey, in presentation: LivePresentationStore) {
         let serial = max(notificationNavigation?.serial ?? 0,
                          notificationRouter.intent?.serial ?? 0) &+ 1
-        notificationNavigation = NativeInboxNavigation(serial: serial, request: key)
-        if presentation.request(for: key) != nil {
+        let requestIsLoaded = presentation.request(for: key) != nil
+        notificationNavigation = NativeInboxNavigation(serial: serial, request: key,
+            messageResolution: requestIsLoaded ? .none : .resolving)
+        if requestIsLoaded {
             presentation.selectRequest(key)
         } else {
             // Clear the prior selection when this link is opened. Repeating
             // this during refresh would also clear the user's action warning.
             presentation.selectRequest(nil)
         }
+    }
+
+    private func setNotificationMessageResolution(_ resolution: NativeInboxMessageResolution,
+                                                  serial: UInt64, message: String?) {
+        guard let route = notificationNavigation, route.serial == serial else { return }
+        notificationNavigation = NativeInboxNavigation(serial: route.serial,
+            request: route.request, opensChat: route.opensChat,
+            messageResolution: resolution)
+        notificationNavigationMessage = message
     }
 
     var canReturnToDisconnectedAccount: Bool {
@@ -981,9 +992,14 @@ final class NativeAppLaunch {
                 guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
             }
             let confirmed = synchronized && notificationSynchronized
-            notificationNavigationMessage = confirmed && pageAvailability == .exhausted
+            let isUnavailable = confirmed && pageAvailability == .exhausted
+            let message = isUnavailable
                 ? "This message was never sent to this Harklight inbox."
                 : "This message hasn't arrived yet. Harklight will keep checking while it's open."
+            if let serial = notificationNavigation?.serial {
+                setNotificationMessageResolution(isUnavailable ? .unavailable : .resolving,
+                    serial: serial, message: message)
+            }
         }
     }
 
@@ -1002,7 +1018,8 @@ final class NativeAppLaunch {
     func notificationChatRouteWasOpened(serial: UInt64) {
         guard let route = notificationNavigation, route.serial == serial, route.opensChat,
               let request = route.request else { return }
-        notificationNavigation = NativeInboxNavigation(serial: route.serial, request: request)
+        notificationNavigation = NativeInboxNavigation(serial: route.serial, request: request,
+            messageResolution: route.messageResolution)
     }
 
     func handleNotification() async {
@@ -1015,7 +1032,8 @@ final class NativeAppLaunch {
         selectedArchivedAccount = nil
         selectedArchivedPresentation = nil
         isShowingDisconnectedArchive = false
-        notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: nil)
+        notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: nil,
+            messageResolution: intent.locator == nil ? .none : .resolving)
         notificationNavigationMessage = intent.locator == nil ? nil : "Checking this notification."
         if case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample {
             presentation.selectRequest(nil)
@@ -1030,7 +1048,8 @@ final class NativeAppLaunch {
             await refreshLive()
         } else {
             notificationRouter.fallback()
-            notificationNavigationMessage = nil
+            setNotificationMessageResolution(.unavailable, serial: intent.serial,
+                message: "This notification couldn't be opened in the current inbox.")
         }
     }
 
@@ -1048,7 +1067,8 @@ final class NativeAppLaunch {
         let record: NativeEnrollmentRecord?
         do { record = try enrollment.load() }
         catch {
-            notificationNavigationMessage = "Could not check this notification's account."
+            setNotificationMessageResolution(.unavailable, serial: intent.serial,
+                message: "Could not check this notification's account.")
             return
         }
         let records = record.map { [$0] } ?? []
@@ -1058,21 +1078,26 @@ final class NativeAppLaunch {
             presentation.selectRequest(key)
             let opensChat = notificationRouter.intent?.locator?.target == "chat"
             notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key,
-                                                            opensChat: opensChat)
+                opensChat: opensChat, messageResolution: .none)
             notificationNavigationMessage = nil
             notificationRouter.consumed()
             return
         }
         guard let locator = notificationRouter.intent?.locator else {
             presentation.selectRequest(nil)
-            notificationNavigationMessage = nil
+            let hadPendingLocator = notificationNavigation?.serial == intent.serial &&
+                notificationNavigation?.messageResolution == .resolving
+            setNotificationMessageResolution(hadPendingLocator ? .unavailable : .none,
+                serial: intent.serial,
+                message: hadPendingLocator ? "This notification couldn't be verified for this inbox." : nil)
             notificationRouter.consumed()
             return
         }
 
         presentation.selectRequest(nil)
         guard notificationSynchronized else {
-            notificationNavigationMessage = "Could not verify notification. Checking again while open."
+            setNotificationMessageResolution(.resolving, serial: intent.serial,
+                message: "Could not verify notification. Checking again while open.")
             return
         }
 
@@ -1106,14 +1131,18 @@ final class NativeAppLaunch {
                 presentation.selectRequest(key)
                 let opensChat = notificationRouter.intent?.locator?.target == "chat"
                 notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key,
-                                                                opensChat: opensChat)
+                    opensChat: opensChat, messageResolution: .none)
                 notificationNavigationMessage = nil
                 notificationRouter.consumed()
                 return
             }
             guard notificationRouter.intent?.locator != nil else {
                 presentation.selectRequest(nil)
-                notificationNavigationMessage = nil
+                let hadPendingLocator = notificationNavigation?.serial == intent.serial &&
+                    notificationNavigation?.messageResolution == .resolving
+                setNotificationMessageResolution(hadPendingLocator ? .unavailable : .none,
+                    serial: intent.serial,
+                    message: hadPendingLocator ? "This notification couldn't be verified for this inbox." : nil)
                 notificationRouter.consumed()
                 return
             }
@@ -1126,7 +1155,8 @@ final class NativeAppLaunch {
         }
         guard notificationRouter.intent?.serial == intent.serial,
               notificationRouter.intent?.locator != nil else { return }
-        notificationNavigationMessage = "This notification's message has not loaded yet."
+        setNotificationMessageResolution(.unavailable, serial: intent.serial,
+            message: "This notification's message has not loaded yet.")
     }
 
     func retryForegroundConnection() async {
@@ -2036,6 +2066,11 @@ final class LivePresentationStore {
 
     func request(for key: RequestKey) -> PresentedRequest? {
         presentation.requests.first { $0.key == key }
+    }
+
+    func historicalRequest(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
+        guard conversationThreads[key]?.revisionNumbers.contains(revision) == true else { return nil }
+        return try? inspectedRequest(key, revision: revision)
     }
 
     func failedResponseWarning(for key: RequestKey,

@@ -37,6 +37,64 @@ final class DetailChatButtonUITests: XCTestCase {
         verifyToolbarChatButton(appearance: "Dark")
     }
 
+    func testNotificationChatDismissalStaysClosedWhenDetailIsRecreated() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The regular-width detail recreation requires an iPad layout.")
+        }
+        defer { XCUIDevice.shared.orientation = .portrait }
+        XCUIDevice.shared.orientation = .portrait
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-chat"]
+        app.launch()
+
+        let search = workspaceSearchField(in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap()
+        search.typeText("no-matching-request\n")
+
+        let openNotification = app.buttons["harklight-test-notification"]
+        XCTAssertTrue(openNotification.waitForExistence(timeout: 10), app.debugDescription)
+        if !openNotification.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        XCTAssertTrue(openNotification.isHittable, app.debugDescription)
+        openNotification.tap()
+
+        let noChat = app.staticTexts.matching(identifier: "conversation-no-chat-empty-state").firstMatch
+        XCTAssertTrue(noChat.waitForExistence(timeout: 10),
+                      "The synthetic notification opens the target's Chat surface. \(app.debugDescription)")
+        attachScreenshot("synthetic-notification-chat-open")
+
+        noChat.swipeDown()
+        XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["Chat"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(noChat.waitForNonExistence(timeout: 5),
+                      "One deliberate dismissal closes the notification Chat surface.")
+        attachScreenshot("synthetic-notification-chat-dismissed-once")
+
+        let otherRequest = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(otherRequest.waitForExistence(timeout: 5), app.debugDescription)
+        otherRequest.tap()
+        XCTAssertTrue(app.buttons["request-heading"].label.contains("Facilities desk"),
+                      app.debugDescription)
+        let targetRequest = app.descendants(matching: .any)["request-row-unknown-01"]
+        XCTAssertTrue(targetRequest.waitForExistence(timeout: 5), app.debugDescription)
+        targetRequest.tap()
+        let targetHeading = app.buttons["request-heading"]
+        XCTAssertTrue(targetHeading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(targetHeading.label.contains("Unfamiliar interface"), targetHeading.debugDescription)
+        let stayedClosed = noChat.waitForNonExistence(timeout: 2)
+        XCTAssertTrue(stayedClosed,
+                      "Recreating the detail does not reopen a dismissed notification chat. \(app.debugDescription)")
+        attachScreenshot("synthetic-notification-chat-stays-closed-after-detail-recreation")
+        guard stayedClosed else { return }
+
+        app.buttons["Chat"].tap()
+        XCTAssertTrue(noChat.waitForExistence(timeout: 5),
+                      "The person can intentionally reopen the Chat surface. \(app.debugDescription)")
+        attachScreenshot("synthetic-notification-chat-intentionally-reopened")
+    }
+
     func testWideDetailChatButtonAlsoPresentsDismissibleSheet() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("The wide detail presentation requires an iPad layout.")
@@ -134,6 +192,111 @@ final class DetailChatButtonUITests: XCTestCase {
         attachScreenshot("chat-toolbar-after-reading")
     }
 
+    func testDetailVersionIndicatorOpensReadOnlyHistoricalMessageAndChatHasNoVersionPicker() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let search = workspaceSearchField(in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap()
+        search.typeText("Archive\n")
+        let revised = app.descendants(matching: .any)["sample-approval-2"]
+        XCTAssertTrue(revised.waitForExistence(timeout: 10), app.debugDescription)
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<8 where !revised.isHittable { list.swipeUp() }
+        XCTAssertTrue(revised.isHittable, app.debugDescription)
+        revised.tap()
+
+        let versionIndicator = app.descendants(matching: .any)["request-update-fact"]
+        XCTAssertTrue(versionIndicator.waitForExistence(timeout: 5), app.debugDescription)
+        versionIndicator.tap()
+        let original = app.buttons["Original version"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
+        original.tap()
+
+        let historicalContent = app.scrollViews["historical-message-version"]
+        XCTAssertTrue(historicalContent.waitForExistence(timeout: 5), app.debugDescription)
+        let historicalTitle = app.staticTexts["historical-version-title"]
+        let historicalBody = app.staticTexts["historical-version-body"]
+        XCTAssertTrue(historicalTitle.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalBody.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalTitle.isHittable, app.debugDescription)
+        XCTAssertTrue(historicalBody.isHittable, app.debugDescription)
+        attachScreenshot("detail-original-message-version-read-only")
+        let historicalDraft = historicalContent.staticTexts["historical-answer-draft"]
+        let historicalDraftStatus = historicalContent.staticTexts[
+            "Not delivered · this selection belongs to the earlier question"
+        ]
+        XCTAssertTrue(historicalDraft.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalDraftStatus.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<8 where !historicalDraft.isHittable { historicalContent.swipeUp() }
+        XCTAssertTrue(historicalDraft.isHittable,
+                      "The retained answer draft is reachable inside historical message detail. \(app.debugDescription)")
+        for _ in 0..<8 where !historicalDraftStatus.isHittable { historicalContent.swipeUp() }
+        XCTAssertTrue(historicalDraftStatus.isHittable,
+                      "The saved answer remains visibly marked as undelivered. \(app.debugDescription)")
+        XCTAssertFalse(historicalContent.buttons["request-finish"].exists,
+                       "A historical message version is available for reading and has no Send action.")
+        attachScreenshot("detail-original-message-version-draft-readable")
+
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5),
+                      "The current version's local response flow remains available.")
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+        XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["conversation-revision-picker"].exists,
+                       "Version selection belongs to message details, not Chat.")
+        attachScreenshot("chat-without-version-selector")
+    }
+
+    func testHorizontalSwipeInsideChatReturnsToListAndPreservesDraft() {
+        for direction in ["left", "right"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+            app.launch()
+
+            let row = app.descendants(matching: .any)["sample-information-2"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+            row.tap()
+            let chat = app.buttons["Chat"]
+            XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+            chat.tap()
+            let composer = app.textViews["sample-chat-composer"]
+            XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+            composer.tap()
+            composer.typeText("Swipe draft stays saved")
+
+            let history = app.scrollViews["conversation-history-scroll"]
+            XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+            let startX: CGFloat = direction == "left" ? 0.9 : 0.1
+            let endX: CGFloat = direction == "left" ? 0.1 : 0.9
+            let start = history.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
+            let end = history.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: end,
+                        withVelocity: .slow, thenHoldForDuration: 0.1)
+
+            XCTAssertTrue(row.waitForExistence(timeout: 5),
+                          "A horizontal \(direction) swipe in Chat returns to the message list. \(app.debugDescription)")
+            XCTAssertTrue(row.isHittable, app.debugDescription)
+            XCTAssertFalse(composer.exists, app.debugDescription)
+            attachScreenshot("chat-horizontal-swipe-\(direction)-returns-to-list")
+
+            row.tap()
+            let reopenedChat = app.buttons["Chat"]
+            XCTAssertTrue(reopenedChat.waitForExistence(timeout: 5), app.debugDescription)
+            reopenedChat.tap()
+            let reopenedComposer = app.textViews["sample-chat-composer"]
+            XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(reopenedComposer.value as? String, "Swipe draft stays saved",
+                           "Dismissing Chat keeps its unsent draft for an intentional reopen.")
+            app.terminate()
+        }
+    }
+
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
@@ -175,9 +338,12 @@ final class DetailChatButtonUITests: XCTestCase {
             composer.typeText("Draft survives dismissal")
         }
         dismissChatSheet(app, composer)
+        XCTAssertFalse(composer.waitForExistence(timeout: 1.5),
+                       "One deliberate dismissal leaves Chat closed until the toolbar button is tapped.")
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(chat.isHittable, app.debugDescription)
         XCTAssertFalse(composer.exists, app.debugDescription)
+        attachScreenshot("chat-dismissed-once-\(appearance.lowercased())")
         chat.tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5),
                       "The toolbar Chat button must keep reopening its sheet. \(app.debugDescription)")

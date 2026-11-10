@@ -30,6 +30,8 @@ final class ConversationJoinTests: XCTestCase {
         let current = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
         XCTAssertNil(current.selector)
         XCTAssertEqual(current.title, ExactText("Question content unavailable on this device"))
+        XCTAssertThrowsError(try port.inspect(context: port.context, request: key, revision: 2),
+                             "An explicitly requested redacted version remains unavailable.")
         let archived = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
         XCTAssertEqual(archived.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertNil(archived.selector)

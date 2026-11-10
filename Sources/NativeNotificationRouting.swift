@@ -81,15 +81,23 @@ struct NativeNotificationIntent: Codable, Equatable {
     var profile: NativeNotificationProfile?
 }
 
+enum NativeInboxMessageResolution: Equatable {
+    case none
+    case resolving
+    case unavailable
+}
+
 struct NativeInboxNavigation: Equatable {
     let serial: UInt64
     let request: RequestKey?
     var opensChat = false
+    var messageResolution: NativeInboxMessageResolution = .none
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         // Consuming the one-shot chat presentation must not replay workspace
         // selection or its existing Seen/unread-related presentation effects.
-        lhs.serial == rhs.serial && lhs.request == rhs.request
+        lhs.serial == rhs.serial && lhs.request == rhs.request &&
+            lhs.messageResolution == rhs.messageResolution
     }
 }
 
