@@ -44,8 +44,11 @@ private final class LiveAnswerConfirmationRelay: @unchecked Sendable {
                               [kSecImportExportPassphrase as String: "public-fixture-only"] as CFDictionary,
                               &items) == errSecSuccess,
               let rawIdentity = (items as? [[String: Any]])?.first?[kSecImportItemIdentity as String],
-              let identity = rawIdentity as? SecIdentity,
-              let localIdentity = sec_identity_create(identity) else {
+              CFGetTypeID(rawIdentity as CFTypeRef) == SecIdentityGetTypeID() else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        let identity = rawIdentity as! SecIdentity
+        guard let localIdentity = sec_identity_create(identity) else {
             throw NativeEnrollmentError.invalidIdentity
         }
         rootDER = root
@@ -514,11 +517,12 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let draftRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("Harklight-live-answer-\(UUID().uuidString)", isDirectory: true)
         let lifecycle = NativeRelayLifecycle.shared
+        let installationLabel = installation.label
         addTeardownBlock {
             await lifecycle.deactivate()
             relay.close()
             SecItemDelete([kSecClass as String: kSecClassCertificate,
-                           kSecAttrLabel as String: installation.label] as CFDictionary)
+                           kSecAttrLabel as String: installationLabel] as CFDictionary)
             SecItemDelete([kSecClass as String: kSecClassKey,
                            kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
             try? FileManager.default.removeItem(at: draftRoot)
