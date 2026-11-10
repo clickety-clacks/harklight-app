@@ -2132,9 +2132,8 @@ struct InboxList: View {
         .background { designPalette.neutral.backgroundColor.ignoresSafeArea() }
         .foregroundStyle(designPalette.neutral.textColor)
         .scrollDismissesKeyboard(.interactively)
-        // The native searchable field floats over the List's bottom edge.
-        // On compact layouts, keep enough trailing scroll content for the final
-        // reply text to clear it without adding blank space on regular layouts.
+        // Compact Search floats over the List's bottom edge. Reserve its area
+        // in the list viewport, scaling the clearance for Dynamic Type.
         .modifier(CompactSearchScrollClearance())
         .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
         .searchPresentationToolbarBehavior(.avoidHidingContent)
@@ -2234,11 +2233,12 @@ struct InboxList: View {
 
 private struct CompactSearchScrollClearance: ViewModifier {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @ScaledMetric(relativeTo: .body) private var bottomSearchClearance: CGFloat = 80
 
     @ViewBuilder
     func body(content: Content) -> some View {
         if horizontalSizeClass == .compact {
-            content.contentMargins(.bottom, 80, for: .scrollContent)
+            content.safeAreaPadding(.bottom, bottomSearchClearance)
         } else {
             content
         }
