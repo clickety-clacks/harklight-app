@@ -696,17 +696,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         if warnings.isEmpty { isWarningPresented = false }
     }
 
-    private var orderedIDs: [InboxSelection] { rows.map(\.id) }
+    private var orderedIDs: [InboxSelection] {
+        InboxListProjection.filteredRows(rows, in: .inbox, search: search).map(\.id)
+    }
     private var usesFreeOrder: Bool {
         InboxFreeOrder.isSupported(version: conversationStore?.presentation.inboxFreeOrderVersion,
                                    items: conversationStore?.presentation.inboxViewListItems)
     }
     private var cardNavigationIDs: [InboxSelection] {
-        // A Seen or answered card may leave this tab while it remains open.
-        guard !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return orderedIDs
-        }
-        if usesFreeOrder, workspaceTab == .inbox {
+        // Keep detail navigation aligned with the current Inbox list, including
+        // its search results and server-ranked ordering when free order is active.
+        if usesFreeOrder {
             return InboxNormalListProjection.entries(rows: rows,
                 serverItems: conversationStore?.presentation.inboxViewListItems,
                 freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
@@ -715,8 +715,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     return message.members.map(\.id)
                 }
         }
-        return InboxListProjection.filteredRows(rows, in: workspaceTab,
-            search: search).map(\.id)
+        return orderedIDs
     }
     private var activeNotificationNavigation: NativeInboxNavigation? {
         notificationNavigation ?? testNotificationNavigation
@@ -1086,7 +1085,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         } else {
             chatRouteSerial = nil
         }
-        return InboxCardContext(position: (index ?? 0) + 1, total: ids.count,
+        return InboxCardContext(position: index.map { $0 + 1 },
+            total: index == nil ? nil : ids.count,
             hasPrevious: hasPrevious,
             hasNext: hasNext,
             inlineChat: inlineChat,
