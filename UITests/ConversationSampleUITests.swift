@@ -1038,7 +1038,7 @@ final class ConversationSampleUITests: XCTestCase {
     func testAcceptedSenderUpdateIsVisibleInTheSameOrdinaryRequestAndHistory() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--harklight-test-markdown-history"]
+        app.launchArguments = ["--harklight-samples", "--harklight-test-markdown-history"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Archive", in: app)
@@ -1253,6 +1253,7 @@ final class ConversationSampleUITests: XCTestCase {
         let app = XCUIApplication()
         func open(_ id: String, search: String) {
             app.terminate()
+            app.launchArguments = ["--harklight-samples", "--harklight-test-markdown-history"]
             app.launch()
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
             enterSearch(search, in: app)
