@@ -2450,8 +2450,10 @@ final class LivePresentationStore {
                 current = nil
             }
             // Completed account answers intentionally hide device receipts.
-            // A duplicate callback must not turn that success into an error.
-            if let current, current.intentReceipt != nil || current.lifecycleStatus == .answered {
+            // Keep the retained submission as evidence that this is a duplicate
+            // callback, rather than a first attempt after another device answered.
+            if let current, current.intentReceipt != nil ||
+                (current.lifecycleStatus == .answered && current.submittedAnswer != nil) {
                 clearActionError()
                 return true
             } else {
