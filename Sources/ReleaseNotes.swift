@@ -131,8 +131,8 @@ enum HarklightReleaseNotes {
                         "See when Chat needs attention",
                         comment: "Release-note title for the Inbox Chat activity marker."),
                     detail: LocalizedStringResource(
-                        "A Chat icon appears after a conversation starts. It fills for an unseen agent reply, even on a closed request, and returns to an outline after you view Chat.",
-                        comment: "Release-note detail for started, unread, and read Chat markers."))
+                        "A filled Chat icon appears in the Inbox when an agent reply is unread.",
+                        comment: "Release-note detail for the filled Inbox marker on an unread agent reply."))
             ]),
         HarklightReleaseNote(
             historyIdentifier: "example-messages-removed",

@@ -38,6 +38,9 @@ final class ReleaseNotesTests: XCTestCase {
         let note = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "changes-after-build-79"
         })
+        let chatNote = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
+            $0.id == "chat-row-activity"
+        })
         let draftNote = try XCTUnwrap(HarklightReleaseNotes.updateEntries.first {
             $0.id == "reply-drafts-after-navigation"
         })
@@ -62,6 +65,8 @@ final class ReleaseNotesTests: XCTestCase {
                         "post-ack-connection-diagnostics", "no-reply-delivery-diagnostics"])
         XCTAssertEqual(String(localized: note.highlights[0].title), "More details for each message")
         XCTAssertEqual(String(localized: note.highlights[1].title), "Less clutter in Chat")
+        XCTAssertEqual(String(localized: chatNote.highlights[0].detail),
+                       "A filled Chat icon appears in the Inbox when an agent reply is unread.")
 
         let suite = "ReleaseNotesTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
