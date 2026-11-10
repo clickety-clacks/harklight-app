@@ -3,7 +3,7 @@ import XCTest
 @MainActor
 final class ReleaseNotesUITests: XCTestCase {
     func testCurrentReleaseOpensOnFirstInstallAndShowsItsBuildInSettings() {
-        let simulatedCurrentBuild = "9000" // Synthetic metadata; no archive mapping is claimed.
+        let simulatedCurrentBuild = "148" // The catalog's directly source-associated note build.
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
@@ -23,7 +23,7 @@ final class ReleaseNotesUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
                       app.debugDescription)
         XCTAssertFalse(app.staticTexts["Keep track of replies across conversations"].exists,
-                       "A fresh install shows only the current pending entry.")
+                       "A fresh install shows only the current release entry.")
         XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
                        "A fresh install does not show highlights from an earlier release.")
 
@@ -116,7 +116,7 @@ final class ReleaseNotesUITests: XCTestCase {
 
     func testUpdateSheetAndSettingsHistoryShowReleasedNotes() {
         let app = XCUIApplication()
-        let simulatedCurrentBuild = "62" // Synthetic metadata; no archive mapping is claimed.
+        let simulatedCurrentBuild = "148" // The catalog's directly source-associated note build.
         app.launchArguments = ["--reset-attention-fixture"]
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] = "1"
         app.launchEnvironment["HARKLIGHT_RELEASE_NOTES_UI_TEST_BUILD"] = simulatedCurrentBuild
@@ -124,17 +124,27 @@ final class ReleaseNotesUITests: XCTestCase {
 
         let updateTitle = app.navigationBars["What’s New"]
         XCTAssertTrue(updateTitle.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"].exists,
+        let inboxBuildHeader = app.staticTexts[
+            "Version 0.1.0 · Build \(simulatedCurrentBuild)"
+        ]
+        revealHistoryElement(inboxBuildHeader, in: app)
+        XCTAssertTrue(inboxBuildHeader.exists,
                       "The update sheet identifies the released build and version.")
-        XCTAssertTrue(app.staticTexts["Prepare Inbox history in the background"].exists,
+        let inboxPreparationTitle = app.staticTexts["Prepare Inbox history in the background"]
+        revealHistoryElement(inboxPreparationTitle, in: app)
+        XCTAssertTrue(inboxPreparationTitle.exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts[
+        let inboxPreparationDetail = app.staticTexts[
             "Inbox prepares messages and conversation history in the background as it catches up."
-        ].exists, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Receive new messages during refresh"].exists,
+        ]
+        revealHistoryElement(inboxPreparationDetail, in: app)
+        XCTAssertTrue(inboxPreparationDetail.exists, app.debugDescription)
+        let inboxDeliveryTitle = app.staticTexts["Receive new messages during refresh"]
+        revealHistoryElement(inboxDeliveryTitle, in: app)
+        XCTAssertTrue(inboxDeliveryTitle.exists,
                       app.debugDescription)
         XCTAssertFalse(app.staticTexts["Know which release is installed"].exists,
-                       "The stamped Build139 entry is future history at this synthetic build.")
+                       "Earlier release highlights do not appear in the current update sheet.")
         XCTAssertFalse(app.staticTexts["Scroll through your Inbox more smoothly"].exists,
                        "Earlier build notes do not appear in the current update sheet.")
         XCTAssertFalse(app.staticTexts["See clearer release notes"].exists,
@@ -153,13 +163,24 @@ final class ReleaseNotesUITests: XCTestCase {
         historyLink.tap()
         XCTAssertTrue(app.navigationBars["Release notes"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        let currentBuildHeader = app.staticTexts["Version 0.1.0 · Build \(simulatedCurrentBuild)"]
-        XCTAssertTrue(currentBuildHeader.waitForExistence(timeout: 5), app.debugDescription)
+        let currentBuildHeader = app.staticTexts[
+            "Version 0.1.0 · Build \(simulatedCurrentBuild)"
+        ]
+        revealHistoryElement(currentBuildHeader, in: app)
         XCTAssertTrue(currentBuildHeader.exists,
                       "Settings history identifies the build attached to this release note.")
-        XCTAssertTrue(app.staticTexts["A single rounded Reply box"].exists,
+        let build62Header = app.staticTexts["Version 0.1.0 · Build 62"]
+        revealHistoryElement(build62Header, in: app)
+        XCTAssertTrue(build62Header.exists, app.debugDescription)
+        let roundedReplyTitle = app.staticTexts["A single rounded Reply box"]
+        revealHistoryElement(roundedReplyTitle, in: app)
+        XCTAssertTrue(roundedReplyTitle.exists,
                       app.debugDescription)
-        XCTAssertTrue(app.staticTexts["The Reply label and full-width editor now sit together in one rounded box."].exists,
+        let roundedReplyDetail = app.staticTexts[
+            "The Reply label and full-width editor now sit together in one rounded box."
+        ]
+        revealHistoryElement(roundedReplyDetail, in: app)
+        XCTAssertTrue(roundedReplyDetail.exists,
                       app.debugDescription)
 
         let build61Header = app.staticTexts["Version 0.1.0 · Build 61"]

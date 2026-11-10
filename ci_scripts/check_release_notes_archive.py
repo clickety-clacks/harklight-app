@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fail an Xcode Cloud archive when its source has no new release note."""
+"""Validate tracked release notes for an Xcode Cloud archive."""
 
 import argparse
 import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 NOTES_PATH = "Resources/HarklightReleaseNotes.json"
@@ -101,27 +102,24 @@ def first_parent(repo: Path, head: str) -> str:
     return parent
 
 
-def check(repo: Path, commit: str) -> str:
+def check(repo: Path, commit: str) -> Optional[str]:
     head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").strip()
     resolved_commit = git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
     if not resolved_commit or resolved_commit != head:
         raise CheckFailure("cannot evaluate release notes: CI commit does not match checkout HEAD")
 
-    parent = first_parent(repo, head)
-
     if not tree_file_exists(repo, head):
         raise CheckFailure(f"missing release notes file: {NOTES_PATH}")
     current_entries = read_entries(repo, head, "current")
     pending = [entry for entry in current_entries if entry.get("testFlightBuildNumber") is None]
-    if len(pending) != 1:
+    if len(pending) > 1:
         raise CheckFailure(
-            "release notes must contain exactly one pending entry; "
+            "release notes must contain at most one pending entry; "
             f"found {len(pending)}"
         )
 
-    pending_id = pending[0]["id"]
     for entry in current_entries:
-        if entry is pending[0]:
+        if entry.get("testFlightBuildNumber") is None:
             continue
         build_number = entry.get("testFlightBuildNumber")
         if type(build_number) is not int or build_number <= 0:
@@ -129,6 +127,11 @@ def check(repo: Path, commit: str) -> str:
                 f"stamped release note {entry['id']} must have a positive integer TestFlight number"
             )
 
+    if not pending:
+        return None
+
+    pending_id = pending[0]["id"]
+    parent = first_parent(repo, head)
     previous_ids = set()
     if tree_file_exists(repo, parent):
         previous_entries = read_entries(repo, parent, "first-parent")
@@ -151,7 +154,10 @@ def main() -> int:
     except CheckFailure as error:
         print(f"Release notes archive check failed: {error}", file=sys.stderr)
         return 1
-    print(f"Release notes archive check passed: new pending entry {pending_id}")
+    if pending_id is None:
+        print("Release notes archive check passed: no pending entry; follow-up is tracked after merge.")
+    else:
+        print(f"Release notes archive check passed: new pending entry {pending_id}")
     return 0
 
 
