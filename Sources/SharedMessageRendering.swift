@@ -136,17 +136,7 @@ enum MessageMarkdown {
     }
 
     private static func makeValue(_ source: String) -> CachedValue {
-        var parsed = parse(source)
-        linkifyPlainWebURLs(in: &parsed)
-        let hasFormattingOrLinks = parsed.runs.contains { run in
-            if run.link != nil { return true }
-            if let inlineIntent = run.inlinePresentationIntent, !inlineIntent.isEmpty {
-                return true
-            }
-            return run.presentationIntent?.components.contains {
-                isNonParagraphBlockComponent($0.kind)
-            } == true
-        }
+        let parsed = parse(source)
 
         var rendered = AttributedString()
         var previousBlock: [BlockComponent] = []
@@ -234,6 +224,17 @@ enum MessageMarkdown {
             rendered += content
         }
 
+        linkifyPlainWebURLs(in: &rendered)
+        let hasFormattingOrLinks = rendered.runs.contains { run in
+            if run.link != nil { return true }
+            if let inlineIntent = run.inlinePresentationIntent, !inlineIntent.isEmpty {
+                return true
+            }
+            return run.presentationIntent?.components.contains {
+                isNonParagraphBlockComponent($0.kind)
+            } == true
+        }
+
         return CachedValue(attributed: rendered,
                            hasFormattingOrLinks: hasFormattingOrLinks)
     }
@@ -284,8 +285,6 @@ enum MessageMarkdown {
                                       range: NSRange(visibleText.startIndex..., in: visibleText))
         for match in matches {
             guard let stringRange = Range(match.range, in: visibleText) else { continue }
-            // Keep the destination tied to the matched characters instead of
-            // using a detector URL that can differ from the authored spelling.
             let authoredURL = String(visibleText[stringRange])
             guard let url = URL(string: authoredURL),
                   let scheme = url.scheme?.lowercased(),

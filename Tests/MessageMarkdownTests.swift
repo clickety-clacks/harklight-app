@@ -182,13 +182,15 @@ final class MessageMarkdownTests: XCTestCase {
         let rendered = MessageMarkdown.attributed(source)
         XCTAssertEqual(String(rendered.characters), expectedVisibleText, file: file, line: line)
 
-        let authoredLinkRun = rendered.runs.first { run in
-            run.link != nil && String(rendered[run.range].characters) == authoredURL
-        }
-        let linkRun = try XCTUnwrap(authoredLinkRun,
+        let linkRuns = rendered.runs.filter { $0.link != nil }
+        XCTAssertEqual(linkRuns.count, 1, file: file, line: line)
+        let linkRun = try XCTUnwrap(linkRuns.first,
                                     "The written URL should remain tappable.",
                                     file: file,
                                     line: line)
+        XCTAssertEqual(String(rendered[linkRun.range].characters), authoredURL,
+                       file: file,
+                       line: line)
         XCTAssertEqual(linkRun.link?.absoluteString, authoredURL, file: file, line: line)
     }
 
