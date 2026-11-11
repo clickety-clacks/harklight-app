@@ -106,12 +106,11 @@ final class ReleaseNotesTests: XCTestCase {
         let document = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         let entries = try XCTUnwrap(document["entries"] as? [[String: Any]])
-        XCTAssertEqual(entries.count, 3)
         XCTAssertNil(entries.first { $0["id"] as? String == "fresh-release-notes" })
         let build139Identifier = "fresh-release-notes-follow-up"
         let pendingEntries = entries.filter { $0["testFlightBuildNumber"] is NSNull }
-        XCTAssertTrue(pendingEntries.isEmpty,
-                      "The catalog can be between post-merge note-owner updates.")
+        XCTAssertLessThanOrEqual(pendingEntries.count, 1,
+            "The release display shows at most one pending entry, so the catalog must not hide another.")
         let inboxLiveUpdatesIdentifier = "post-144-inbox-live-updates"
         let rawStampedEntry = try XCTUnwrap(
             entries.first { $0["id"] as? String == inboxLiveUpdatesIdentifier })

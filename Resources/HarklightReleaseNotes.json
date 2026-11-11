@@ -125,8 +125,8 @@
         {
           "id": "horizontal-chat-dismissal",
           "symbol": "arrow.left",
-          "title": "Swipe from Chat to return to a message",
-          "detail": "Swipe left or right in Chat history to return to the message, including when the history is empty or a draft is open."
+          "title": "Swipe back to the message list",
+          "detail": "Swipe left or right in Chat history to return to the message list, including when the history is empty or a draft is open."
         },
         {
           "id": "historical-message-versions",
