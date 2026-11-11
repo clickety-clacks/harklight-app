@@ -173,10 +173,17 @@ see D-4.
 
 | Token | Current light | Target light | Current dark | Target dark |
 |---|---|---|---|---|
-| `selectedChoice` | rgba(255,255,255,0.16) | unchanged | rgba(255,255,255,0.07) | unchanged |
+| `selectedChoice` | rgba(255,255,255,0.16) | rgba(0,0,0,0.10) | rgba(255,255,255,0.07) | unchanged |
 | `replyField` | rgba(0,0,0,0.18) | unchanged | rgba(0,0,0,0.28) | unchanged |
+| `replyInput` (new) | rgba(255,255,255,0.10), literal | rgba(0,0,0,0.08) | rgba(0,0,0,0.10), literal | rgba(0,0,0,0.10) |
 
-These sit on type colors, which this document does not change.
+These sit on type colors, which this document does not change. Light type
+text is pale cream, so a white overlay lowers its contrast: the current light
+`selectedChoice` leaves type `text` at 3.82:1 and `secondaryText` at 3.15:1 on
+Information, and fails DS-6. A dark overlay raises it, so both light overlays
+turn dark. `replyInput` is the inline reply editor's surface, today a literal
+in `ReplyInputSurfaceStyle` (LiveContentView.swift); it moves into the token
+file (DS-1). The unused `ReplyInputSurfaceStyle.darkPlaceholder` goes with it.
 
 #### Message types
 
@@ -192,7 +199,7 @@ type has `text` #F6F1E7 and `secondaryText` #E3DCCF; `listIcon` and
 | Warning | #73592A | #2B2516 | #E6D9B8 | #AEA283 | #D8BE84 |
 | Error | #A63A2A | #3A1A14 | #F2C9BE | #C0948A | #EE8B75 |
 
-Dark `cameBackBar` equals dark `listIcon`.
+Dark `cameBackBar` equals dark `background`, as in light.
 
 **DS-4.** The app SHALL use type colors only to identify a message's type: the
 detail background, the list icon, the selected iPad row's fill (section 8.2)
@@ -231,6 +238,30 @@ Measured target pairings (lowest per row):
 | type `secondaryText` on type background | 4.57 (Information) | 5.86 (Error) |
 | type `listIcon` on the four neutrals | 4.76 (Information on rowTop) | 4.85 (Error on rowSelected) |
 
+Composed detail pairings. Each surface is the overlay drawn over the type
+background, in the order the views stack them. Lowest of the five types:
+
+| Text | Surface | Light, lowest | Dark, lowest |
+|---|---|---|---|
+| type `text` | `selectedChoice` | 6.43 (Information) | 8.50 (Error) |
+| type `secondaryText` | `selectedChoice` | 5.31 (Information) | 4.77 (Request) |
+| type `text` | `replyInput` over `selectedChoice` | 7.16 (Information) | 9.11 (Error) |
+| type `secondaryText` | `replyInput` over `selectedChoice` | 5.91 (Information) | 5.13 (Request) |
+| type `text` | `replyField` | 7.25 (Information) | 11.58 (Error) |
+| type `text` | `replyField` over `selectedChoice` | 8.19 (Information) | 10.30 (Error) |
+| type `secondaryText` | `replyField` over `selectedChoice` | 6.76 (Information) | 5.76 (Request) |
+
+**DS-26.** Every choice state (unselected, selected, own answer, editing,
+read-only) SHALL show its text at full opacity in type `text` or
+`secondaryText`, on a surface from the table above, so each pairing measures
+at least 4.5:1.
+Serves: [FIT] "Text contrast stays at or above 4.5:1."
+Accept: in light mode on an Information message, a selected choice measures
+at least 6.4:1 for its title and 5.3:1 for its detail; an unselected reply
+choice card measures the base pairing (5.53 and 4.57), not a faded one. The
+current light white overlay (3.82 and 3.15) and the unselected card's 0.55
+opacity (as low as 2.44 light) both fail this check.
+
 Current `seen` light (#587C60) measures 4.25:1 on the current `bg` and fails.
 The target value fixes it.
 
@@ -258,6 +289,18 @@ replace it with a scaled style.
 Serves: [FIT] Dynamic Type at every size.
 Accept: `MessageHeading` title (fixed 26 bold), its symbol (fixed 21) and the
 row symbol (fixed 15) grow with Dynamic Type.
+
+**DS-27.** Where a native UIKit text view draws text (the message body in
+6.18, the chat editor in 6.11), the app SHALL set DM Sans scaled through
+`UIFontMetrics` for the matching text style and keep
+`adjustsFontForContentSizeCategory` on. Monospaced text (inline code, the
+approval code, file hashes) SHALL keep the system monospaced face at the
+scaled size of its style, since DM Sans has no monospaced cut.
+Serves: [ASK] DM Sans; [FIT] "scaling with Dynamic Type at every size the app
+supports today".
+Accept: a message body containing bold, italic, inline code and a link shows
+DM Sans bold and italic and system monospaced code, at Large and at
+Accessibility XXXL; the chat editor's typed text is DM Sans at both sizes.
 
 Type scale. Size is the reference size at the default content size; the
 "Relative to" style sets the scaling curve
@@ -295,16 +338,18 @@ existing 680 pt maximum width does that job on iPad; no new limit is added.
 | `space.tiny` | 4 | Icon to label gaps |
 | `space.small` | 8 | Toolbar item gaps, header top |
 | `space.compact` | 12 | Detail VStack spacing, chat turn padding, choice gaps |
-| `space.base` | 16 | Row horizontal padding, detail horizontal padding |
-| `space.comfortable` | 20 | Choice label padding (current 14) |
+| `space.base` | 16 | Row horizontal padding, detail horizontal padding, choice label padding (current 14) |
+| `space.comfortable` | 20 | Detail vertical padding (current 18), top-tier row vertical padding (current 18) |
 | `space.generous` | 24 | Detail section gaps, iPad container margin |
 | `space.large` | 40 | Empty-state spacing |
 
 **DS-10.** The restyle SHALL draw paddings, gaps and margins from the spacing
-tokens, rounding current values to the nearest step.
+tokens, rounding current values to the nearest step, and a value halfway
+between two steps to the larger.
 Serves: [FIT] "spacing on a 4px base".
 Accept: row vertical padding becomes 20 (top tier, current 18) and 12 (other
-tiers, current 13); the detail padding 16 by 18 becomes 16 by 20.
+tiers, current 13); the detail padding 16 by 18 becomes 16 by 20; choice label
+padding 14 becomes 16.
 
 Values that are touch-target or layout sizes, not spacing, keep their meaning:
 44 pt targets, 80 pt paging and search clearance, 680 pt card width, 620 pt
@@ -316,12 +361,12 @@ All shapes are squircles (`.continuous`). [ASK] "28px squircles"; [CL] radii.
 
 | Token | Value | Clawline source | Used for |
 |---|---|---|---|
-| `radius.card` | 28 | demo bubble 28 | Detail content panels, enrollment cards, choice cards, reply card |
-| `radius.field` | 24 | input 24 | Composer field, reply field |
+| `radius.card` | 28 | demo bubble 28 | Enrollment cards, sheet sections |
+| `radius.field` | 24 | input 24 | Composer field |
 | `radius.button` | 22 | button 22 | Rectangular buttons |
 | `radius.panel` | 20 | card 20 | Foreground chat banner, popover content |
-| `radius.inset` | 16 | link card 16 | Choice labels, chat turns, inline editor |
-| `radius.small` | 12 | code 12 | Badges that are not capsules, small chips |
+| `radius.inset` | 16 | link card 16 | Choice labels, reply choice card and its editor, answer confirmation card, chat turns |
+| `radius.small` | 12 | code 12 | Saved reply text, projected text field (current 8), badges that are not capsules |
 | `radius.check` | 4 | bubble sharp corner 4 | Multi-select checkbox |
 
 Capsules and circles stay capsules and circles.
@@ -572,39 +617,88 @@ Target: unchanged structure. The type background stays (D-1). "N of M" uses
 
 ### 6.8 Detail content (`LiveRequestDetail`, `MessageHeading`, LiveContentView.swift)
 
-Anatomy: VStack spacing 12, padding 16 by 18. Heading: 28 pt initials, type
-symbol fixed 21 pt, title fixed 26 pt bold. Then body, choices, response
-controls, replaced-by section, historical version access.
+Anatomy: VStack spacing 12, padding 16 by 18. Heading: 28 pt initials circle
+(type `text` at 0.18), type symbol fixed 21 pt, title fixed 26 pt bold. Then
+body, choices, response controls, related-message links (section 7.8),
+historical version access.
 
 Current tokens: type `text` and `secondaryText`.
 
 Target: spacing `space.compact`, padding `space.base` by `space.comfortable`.
 Title `messageTitle`; symbol scales with it. Initials 28 pt circle on
-`selectedChoice` with type `text`. Body `body`. Section labels
-(`ReplacedByMessagesSection`) `sender` in type `secondaryText`.
+`selectedChoice` with type `text`. Body per 6.18. Section labels
+("Supersedes", "Replaced by") `sender` in type `secondaryText`.
 
 ### 6.9 Choices (`MessageChoiceLabel`, `NoCommentChoiceRow`, `ReplyChoiceCard`, `AnswerConfirmationCard`)
 
-Anatomy: checkbox (multi, 20 pt, radius 4) or radio, title, detail, optional
-"suggested" and "own answer" marks. Padding 14, radius 16, fill
-`selectedChoice` when selected. `ReplyChoiceCard` opens an inline editor
-(minimum height 120, white text) with `.smooth(0.25)`.
+Anatomy (`MessageChoiceLabel`): a mark, then title (`.headline`), optional
+"Suggested" (`.caption` semibold, secondary) and detail (`.subheadline`,
+secondary). The mark is a 20 pt checkbox (multi-select, radius 4, 1.5 stroke)
+or a radio circle (stroke 6 selected, 2 not). Padding 14, radius 16.
 
-Target: padding `space.comfortable`; radius `radius.inset`; checkbox
-`radius.check`; title `body` at 600, detail `bodySmall` in `secondaryText`. The
-editor text uses type `text`, not literal white (DS-1). The open animation is
-`motion.interaction`, gated by DS-16. Confirmation cards use `radius.card`.
+States and current treatment:
+
+| State | Mark | Fill | Stroke |
+|---|---|---|---|
+| Unselected | empty, `secondaryText` | none | type `text` at 0.30, 1 pt |
+| Selected | filled, type `text` | `selectedChoice` | type `text`, 1.5 pt |
+| Own answer | as selected or not | as selected or not | dashed 5 on 4 |
+
+`ReplyChoiceCard` wraps the label. Selected and not read-only, it opens an
+inline `TextEditor` (`.body`, literal white text and caret, minimum height
+120, padding 12 by 10) on the reply input surface, with only its bottom
+corners rounded. With saved text and the editor closed, the text shows in
+`.body` literal white on `replyField`, radius 12. The whole card draws at 0.55
+opacity when unselected and animates with `.smooth(0.25)`. A read-only card
+shows its state without a button. `AnswerConfirmationCard` uses the selected
+fill, a 1.5 pt type `text` stroke, radius 16 and padding 14.
+`NoCommentChoiceRow` follows the label recipe.
+
+Target:
+- Padding `space.base` (DS-10); radius `radius.inset` for labels, reply cards,
+  the editor's bottom corners and the confirmation card; checkbox
+  `radius.check`. Title `body` at 600, "Suggested" `sender`, detail
+  `bodySmall` in `secondaryText`.
+- Selected fill `selectedChoice` at its target value; editor surface
+  `replyInput`; saved text on `replyField` at `radius.small` (DS-26).
+- The unselected reply card draws at full opacity. Its unselected state shows
+  through the empty mark and the 0.30 stroke, as `MessageChoiceLabel` already
+  does. The 0.55 fade goes because it drops text below 4.5:1 (DS-26).
+- Editor text, caret and saved text use type `text`, not literal white (DS-1).
+- The open animation is `motion.interaction`, gated by DS-16.
 
 ### 6.10 Detail sheets and dialogs
 
 - Request details sheet, `FailedResponseDialog` (medium and large detents),
   `HistoricalMessageVersionSheet`: system sheets on `bg`. Target: `bg` with
   `raised` sections, `radius.card`, `elevation.flat`. Detents unchanged.
-- `LiveCompatibilityActions`, `LiveProjectedSceneView`,
-  `LiveProjectedInputView`, `SceneTextView`: projected message content using
-  `.title2` semibold, `.body`, `.caption`. Target: `rowTitleTop`, `body`,
-  `caption` in type colors.
+- `LiveCompatibilityActions`, `LiveProjectedSceneView`, `SceneTextView`:
+  projected message content using `.title2` semibold, `.body`, `.caption`.
+  Target: `rowTitleTop`, `body`, `caption` in type colors.
 - `SenderIllustrationCanvas`: a drawn illustration. Unchanged.
+
+#### Projected input (`LiveProjectedInputView`, LiveContentView.swift)
+
+Each form has a `.headline` label above its control. Forms:
+
+- **Response**: a column of action buttons (spacing 10). Text actions open the
+  reply choice card (6.9); others are choice rows.
+- **Text**: a vertical `TextField` (4 to 8 lines, plain style) whose text,
+  caret and prompt are literal white, padding 8, on `replyField` with radius 8.
+- **Point**: the sender's illustration with a tap-or-drag gesture that sets a
+  point. Accessibility hint "Tap or drag to select a point.", an action "Set
+  point at center", and a value "Horizontal x, vertical y".
+- **Read-only**: when answer controls are hidden, a response form lists its
+  action labels (with any illustration) as plain text, a text form shows
+  nothing, and a point form shows the illustration with the chosen point and
+  its "Horizontal x, vertical y" line. Where the point form is shown but
+  disabled, its hint reads "Read-only illustration."
+
+Target: labels `rowTitleMiddle` in type `text`; response buttons per 6.9; the
+text field's text and caret in type `text` and its prompt in `secondaryText`
+(DS-1), padding `space.small`, on `replyField` at `radius.small`; read-only
+text `body` in type `text`. The point form's gesture, hints, action and value
+are unchanged (DS-17); the illustration keeps its fixed frame.
 
 ### 6.11 Chat (`ConversationPanel` and children, ConversationView.swift)
 
@@ -626,6 +720,38 @@ Target:
   they are (section 8.1).
 - Avatars and flow layout from Clawline are not adopted (D-6).
 
+#### Chat editor (`ConversationReturnTextView`, `ConversationComposerTextInput`)
+
+Anatomy: a native `UITextView` inside the glass composer field, vertical
+padding 11. Font `.body` (scales with Dynamic Type), text color system
+`.label`, clear background, return key "Send". It grows from 1 to 5 lines,
+then scrolls. A SwiftUI placeholder "Write a message…" in `.secondary` shows
+while empty; VoiceOver reads the same words as the value.
+
+States: enabled; disabled (frozen or chat not allowed; not editable);
+unavailable, where a lock and the reason in `.callout` secondary replace the
+composer; read-only, where the saved draft under a "Saved discussion draft"
+heading with a lock replaces it and its files still open the inspector.
+
+Behavior that stays: Return sends only when the typed change is a single
+newline, not part of a paste and with no marked (in-progress IME) text;
+pasted newlines stay as text.
+
+Target: the editor font per DS-27 at the `body` style; text and caret `text`;
+placeholder `text2`; the 1 to 5 line sizing and the Return, paste and marked
+text behavior unchanged (DS-17). The read-only heading and unavailable reason
+use `bodySmall` in `text2`.
+
+#### Attachments in the composer
+
+The plus button opens the system file importer (any file type, several at
+once). In the local example, it opens a "Add a local example" dialog (Sample
+photo, Sample file, Sample camera image, Cancel). Each attachment shows as a
+72 by 48 thumbnail button that opens the file inspector (section 7.9), with a
+"Remove" button (`xmark.circle.fill`) on its corner. Target: thumbnails at
+`radius.small`; the remove symbol in `text2` on `raised`. The importer and
+dialog are system-drawn (section 9).
+
 ### 6.12 Foreground chat banner (`ForegroundChatNotificationIndicatorView`)
 
 Anatomy: top safe-area inset, HStack spacing 10, `.regularMaterial` in a
@@ -637,12 +763,44 @@ Target: system glass, `radius.panel`, `elevation.raised`, padding
 
 ### 6.13 Enrollment (`NativeEnrollmentView`, `UnconfirmedAccountRemovalNotice`)
 
-Anatomy: content at most 620 pt wide; cards stroked in `text2` at 0.25, radius
-12; `.borderedProminent` and `.bordered` buttons.
+Anatomy: content at most 620 pt wide; a navigation title per state; a heading
+(`.title2` semibold label with a symbol); prose in `.body`, captions and
+footnotes in `.secondary`; in the pending state, the last approval code in
+`.title` monospaced bold, selectable; cards padded 16, spacing 12, stroked in
+`.secondary` at 0.25, radius 12; one `.borderedProminent` capsule primary
+button per state, disabled while busy; `.bordered` secondary buttons.
+
+Fields:
+- **Full invitation**: a `SecureField` in the welcome card, with no
+  autocapitalization and no autocorrection, so the pasted invitation is
+  never shown.
+- **Device name**: a `TextField` under a "This device" caption in the
+  confirmation card.
+
+Progress: "Contacting the invited server" (`ProgressView` with a label) while
+busy, and a bare `ProgressView` while an approved device connects.
+
+States (each a screen of the same anatomy): welcome, verifying, confirmation,
+joining, pending, unreachable, approved and finishing, connected,
+notifications, invitation expired, approval expired, invitation used,
+declined, revoked, cancelled, refused, existing account, replacement
+confirmation. Secondary buttons by state: "Cancel this request" (pending,
+unreachable, approval expired; disabled while busy), "Not now"
+(notifications, replacement), "Use another invitation", "Back to saved
+messages", "Replace with this invitation…", "Keep current account".
+`UnconfirmedAccountRemovalNotice` has a "Retry removal" button that reads
+"Retrying removal…" and is disabled while busy.
 
 Target: cards on `raised`, `radius.card`, `elevation.raised`, no stroke.
 Prominent buttons `accent` with `onAccent`; bordered buttons `text` on `tabOn`;
-both `radius.button`, `label` style, at least 44 pt tall.
+both `radius.button`, `label` style, at least 44 pt tall. A disabled button
+keeps the system disabled treatment over these colors. Fields: text `body` in
+`text` on `bg` inside the card, prompt `text2`, system field chrome; the secure
+field stays secure. Headings `rowTitleTop`, prose `body`, captions and
+footnotes `caption` in `text2`. The approval code keeps the system monospaced
+face at a size relative to `.title` (DS-27). Progress views tinted `text2`,
+labels `bodySmall`. Card padding `space.base`, spacing `space.compact`.
+Wording, state order and which button each state shows are unchanged (DS-17).
 
 ### 6.14 Release notes (`ReleaseNotesSheet`, `ReleaseNotesHistoryView`, `ReleaseNoteRow`)
 
@@ -666,6 +824,24 @@ styles once the list batch lands.
 
 `SampleCardScreen`, `SampleMedia` views and `SampleChatView` are debug fixtures.
 They follow the same tokens when touched. No requirement is placed on them.
+
+### 6.18 Message body text (`SystemDetectedMessageBody`, SharedMessageRendering.swift)
+
+Anatomy: a native `UITextView`, not editable but selectable, with a clear
+background, no insets, no scrolling, and system data detection of every type
+(links, phone numbers, addresses, dates and the rest). It renders the message's Markdown: strong as bold,
+emphasis as italic, inline code in the system monospaced face at the body
+size (bold or italic where nested). Font `.body`, scaled with Dynamic Type.
+Text color, caret and link color are all the passed foreground (type `text`
+on the detail); links are underlined. Used for the detail body
+(LiveContentView.swift).
+
+States: plain; with detected links or data; with a text selection.
+
+Target: DM Sans at the `body` style per DS-27, with bold and italic from DM
+Sans and code in system monospaced. Text, link and selection tint stay type
+`text`; links stay underlined, so they never rely on a second color (DS-4).
+Data detection and selection unchanged (DS-17).
 
 ## 7. (c) Navigation
 
@@ -738,14 +914,61 @@ Target: system search field; no custom styling beyond tint `accent`.
 ### 7.7 Sheets
 
 Chat (from the bottom bar on iPhone), settings, release notes, request details,
-failed response, historical version. Target: sheets on `bg`, system grabber and
-detents unchanged.
+failed response, historical version, file inspector (7.9). Target: sheets on
+`bg`, system grabber and detents unchanged.
+
+### 7.8 Related-message links (LiveContentView.swift, HarklightWorkspace.swift)
+
+Anatomy: in the detail, a "Supersedes" section and a "Replaced by" section
+(`ReplacedByMessagesSection`), each a `.caption` semibold label in type
+`secondaryText` above one `NavigationLink` per message ID. The ID shows in
+`.subheadline`, selectable, in the link tint.
+
+Path: a link pushes onto the detail's navigation stack. The pushed screen is
+that message's detail. If the message is not on the device, it is a system
+`ContentUnavailableView`: "Message not available" (`questionmark.folder`) for
+a superseded message, or "Replacement not available yet" (`clock`) with "The
+original message is still available." for a replacement. Back is the system
+back button. On iPad the stack lives in the split view's detail column and
+empties when the sidebar selection changes. On compact width the tab bar stays
+hidden while a message, or a message pushed from it, is open. A notification
+whose message is gone shows "Notification no longer available" (`bell.slash`).
+
+Target: section labels `sender` in type `secondaryText`; IDs `bodySmall` in
+type `text`, underlined, so the link does not depend on a second color (DS-4).
+Pushed details follow 6.7 to 6.9 on their own type color. Unavailable screens
+on `bg`, system layout, symbol and description in `text2`, title in `text`.
+The back button keeps the system style with tint per 7.4. Stack, emptying and
+tab bar behavior unchanged (DS-17).
+
+### 7.9 File import and inspection (ConversationView.swift)
+
+Path: composer plus button, then the system file importer (or the local
+example dialog), then a thumbnail in the composer (6.11). Tapping a thumbnail,
+or a file in a read-only draft, opens the file inspector as a sheet. It holds a
+`NavigationStack` with a system `Form`:
+
+- "File" and "Original bytes" as `LabeledContent` rows.
+- "SHA-256" in `.headline`, then the hash in `.caption` monospaced, selectable.
+- "Open file", or "Open saved file" when read-only; it reads "Opening…" and is
+  disabled while opening, and is disabled when read-only and the file is not
+  saved on the device, with a `.caption` secondary note saying so.
+- An error line and a note on transfer facts, `.caption` secondary.
+- "Done" as the confirmation action.
+
+"Open file" hands the file to system Quick Look, which draws itself.
+
+Target: per 6.15's form recipe (`raised` rows on `bg`); labels `body`, values
+`bodySmall` in `text2`; "SHA-256" `label`; hash `caption` size in system
+monospaced (DS-27); notes `caption` in `text2`; buttons tinted `accent`. Quick
+Look, the importer and the dialog are system-drawn (section 9). Wording and
+enable rules unchanged (DS-17).
 
 ## 8. (d) Departures from Clawline
 
 | ID | Departure | Reason |
 |---|---|---|
-| D-1 | Five message-type colors stay, as detail background, list icon and came-back bar. | [FIT] keeps them; they identify type at a glance. |
+| D-1 | Five message-type colors stay, as detail background, list icon, selected iPad row fill and came-back bar (the bar is approved but not yet live, section 8.2). | [FIT] keeps them; they identify type at a glance. |
 | D-2 | Importance is shown by size (tier type styles and line limits), never color. | [FIT] "Importance is shown by size, not color." |
 | D-3 | The [README] list rules stay: came-back bar, `rowTop` top tier, `rowSelected` came-back row, chat flag. The first three are approved but not yet live (section 8.2). | [FIT] keeps them; shades re-derived from Clawline neutrals. |
 | D-4 | Accent is deepened sage, not terracotta. Terracotta is not used. | Terracotta (3.07:1 on cream) fails text contrast and sits near the Request and Error hues, which would let a neutral color read as a type. |
@@ -819,6 +1042,12 @@ Other constraints the restyle works within:
   [ASK] "light mode by default with a full dark palette"; [FIT] restyle only.
 - **Squircles.** `RoundedRectangle` with `.continuous` corners (the default).
 - **Split view.** See DS-21.
+- **System-drawn controls.** The file importer, confirmation dialogs, Quick
+  Look, `ContentUnavailableView` layout, `SecureField` and `TextField` chrome,
+  progress views, toggles, pickers and disabled-button dimming are drawn by the
+  system. The restyle sets only their tint and the colors of text it supplies;
+  it does not rebuild them. Native UIKit text views (the message body and the
+  chat editor) take the app font through DS-27.
 - **Shared files.** `LiveContentView.swift` is restyled only in a slot agreed
   with its current holder. [FIT] nothing in flight is held up.
 - **In-flight work.** Build 153, TestFlight review, privacy, the chat-closing
