@@ -1651,11 +1651,12 @@ struct LiveRequestDetail: View {
                                 : "request-local-answer-status")
                     }
                 }
-                if let revision = storePresentationSnapshot.conversationRevision, revision > 1 {
-                    Text(storePresentationSnapshot.hasAcceptedUpdate ? "Updated · version \(revision)" : "Question version \(revision)")
-                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
-                        .accessibilityIdentifier("request-update-fact")
-                }
+                HistoricalVersionAccess(key: request.key, store: store,
+                    currentRevision: storePresentationSnapshot.conversationRevision,
+                    hasAcceptedUpdate: storePresentationSnapshot.hasAcceptedUpdate,
+                    secondaryTextColor: detailColors.secondaryTextColor,
+                    messageTextColor: detailColors.textColor,
+                    messageBackgroundColor: detailColors.backgroundColor)
                 if storePresentationSnapshot.isRetracted {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
                         .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
@@ -2230,6 +2231,216 @@ struct HistoricalAnswerDraftView: View {
             case .unsupported:
                 Text("This saved answer format cannot be displayed.").font(.caption)
             }
+        }
+    }
+}
+
+private struct HistoricalVersionSelection: Identifiable, Sendable {
+    let revision: UInt64
+    var id: UInt64 { revision }
+}
+
+@MainActor
+private struct HistoricalVersionAccess: View {
+    let key: RequestKey
+    let store: LivePresentationStore
+    let currentRevision: UInt64?
+    let hasAcceptedUpdate: Bool
+    let secondaryTextColor: Color
+    let messageTextColor: Color
+    let messageBackgroundColor: Color
+    @State private var selection: HistoricalVersionSelection?
+
+    private var revisionNumbers: [UInt64] {
+        store.conversation(for: key)?.revisionNumbers ?? []
+    }
+
+    @ViewBuilder
+    private func versionMenuItem(_ version: UInt64) -> some View {
+        if version == 1 {
+            Button("Original version") { selection = HistoricalVersionSelection(revision: version) }
+                .accessibilityIdentifier("request-historical-version-\(version)")
+        } else {
+            Button("Version \(version)") { selection = HistoricalVersionSelection(revision: version) }
+                .accessibilityIdentifier("request-historical-version-\(version)")
+        }
+    }
+
+    var body: some View {
+        Group {
+            if let currentRevision, currentRevision > 1 {
+                Menu {
+                    ForEach(revisionNumbers.filter { $0 != currentRevision }, id: \.self) { version in
+                        versionMenuItem(version)
+                    }
+                } label: {
+                    Label(hasAcceptedUpdate
+                          ? "Updated · version \(currentRevision)" : "Question version \(currentRevision)",
+                          systemImage: "clock.arrow.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(secondaryTextColor)
+                }
+                .accessibilityIdentifier("request-update-fact")
+                .accessibilityHint("View earlier versions of this message")
+            }
+        }
+        .sheet(item: $selection) { selected in
+            HistoricalMessageVersionSheet(key: key, revision: selected.revision,
+                store: store, messageTextColor: messageTextColor,
+                messageBackgroundColor: messageBackgroundColor) {
+                    selection = nil
+                }
+        }
+    }
+}
+
+@MainActor
+private struct HistoricalMessageVersionSheet: View {
+    let key: RequestKey
+    let revision: UInt64
+    let store: LivePresentationStore
+    let messageTextColor: Color
+    let messageBackgroundColor: Color
+    let onDone: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HistoricalVersionSheetHeader(revision: revision,
+                messageTextColor: messageTextColor,
+                messageBackgroundColor: messageBackgroundColor,
+                onDone: onDone)
+            if let version = store.historicalRequest(for: key, revision: revision) {
+                HistoricalMessageVersionView(request: version, store: store)
+            } else {
+                ContentUnavailableView("This version is unavailable now",
+                    systemImage: "questionmark.folder",
+                    description: Text("No saved copy of this message version is available on this device."))
+                    .accessibilityIdentifier("historical-version-unavailable")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(messageBackgroundColor.ignoresSafeArea())
+        .foregroundStyle(messageTextColor)
+        .tint(messageTextColor)
+        .presentationDetents([.large])
+        .foregroundChatNotificationLayer()
+    }
+}
+
+private struct HistoricalVersionSheetHeader: View {
+    let revision: UInt64
+    let messageTextColor: Color
+    let messageBackgroundColor: Color
+    let onDone: () -> Void
+
+    var body: some View {
+        HStack {
+            Text(revision == 1 ? "Original version" : "Version \(revision)")
+                .font(.headline)
+                .foregroundStyle(messageTextColor)
+            Spacer()
+            Button("Done", action: onDone)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(messageTextColor)
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+        }
+        .padding(.horizontal)
+        .frame(maxWidth: .infinity)
+        .background(messageBackgroundColor)
+    }
+}
+
+@MainActor
+private struct HistoricalMessageVersionView: View {
+    let request: PresentedRequest
+    let store: LivePresentationStore
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HistoricalMessageOverview(version: request.requestRevision,
+                    title: request.title?.rawValue ?? "Message",
+                    messageBody: request.body?.rawValue, stake: request.stakeText?.rawValue)
+                HistoricalMessageReadOnlyResponse(request: request, store: store)
+            }
+            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+        }
+        .accessibilityIdentifier("historical-message-version")
+    }
+}
+
+private struct HistoricalMessageOverview: View {
+    let version: UInt64
+    let title: String
+    let messageBody: String?
+    let stake: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Version \(version)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("historical-version-number")
+            Text(title)
+                .font(.title2.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("historical-version-title")
+            if let messageBody {
+                Text(MessageMarkdown.attributed(messageBody))
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("historical-version-body")
+            }
+            if let stake {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("What’s at stake").font(.caption.weight(.semibold))
+                    Text(MessageMarkdown.attributed(stake))
+                        .font(.body).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private struct HistoricalMessageReadOnlyResponse: View {
+    let request: PresentedRequest
+    let store: LivePresentationStore
+    @FocusState private var focusedReplyActionID: String?
+
+    private func replyTextBinding(for target: ReplyEditorTarget) -> Binding<String> {
+        let text: String
+        if let inputID = target.inputID {
+            text = request.draft.inputs[ExactText(inputID)]?
+                .textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
+        } else {
+            text = request.draft.compatibility
+                .textByActionID[ExactText(target.actionID)]?.rawValue ?? ""
+        }
+        return .constant(text)
+    }
+
+    @ViewBuilder
+    var body: some View {
+        switch request.projection {
+        case let .sender(sender):
+            LiveProjectedSceneView(request: request, sender: sender,
+                node: sender.scene, store: store, readOnly: true,
+                focusedReplyActionID: $focusedReplyActionID,
+                replyTextBinding: replyTextBinding)
+        case let .compatibility(actions):
+            LiveCompatibilityActions(request: request, actions: actions,
+                store: store, readOnly: true, sendDisabled: true,
+                focusedReplyActionID: $focusedReplyActionID,
+                replyTextBinding: replyTextBinding)
+        case .unsupported:
+            Text("This message version uses an unsupported answer format.")
+                .font(.callout).foregroundStyle(.secondary)
         }
     }
 }

@@ -49,7 +49,6 @@ struct ConversationPanel: View {
     var testConversationSheetDidAppear: (() -> Void)? = nil
     var dismissToList: (() -> Void)? = nil
     var discussionUnavailableReason: LocalizedStringResource? = nil
-    @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
     @State private var inspectedFileRevision: UInt64?
     @State private var previewURL: URL?
@@ -61,7 +60,7 @@ struct ConversationPanel: View {
     @Environment(\.dismiss) private var dismiss
 
     private var thread: ConversationThread? { store.conversation(for: key) }
-    private var revision: UInt64 { selectedRevision ?? thread?.currentRevision ?? 1 }
+    private var revision: UInt64 { thread?.currentRevision ?? 1 }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
 
     private func dismissChat() {
@@ -107,15 +106,6 @@ struct ConversationPanel: View {
                 let request = store.request(for: key)
                 let hasNotAcceptedCard = hasNotAcceptedCardForRetainedAnswer(thread: thread,
                                                                               request: request)
-                if thread.revisionNumbers.count > 1 {
-                    Picker("Question version", selection: Binding(get: { revision }, set: { selectedRevision = $0 })) {
-                        ForEach(thread.revisionNumbers, id: \.self) { value in
-                            let hasDraft = thread.drafts[value] != nil || thread.answerDrafts?[value] != nil
-                            let revisionLabel = value == 1 ? "Original" : "Version \(value)"
-                            Text(revisionLabel + (hasDraft ? " · draft" : "")).tag(value)
-                    }
-                    }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("conversation-revision-picker")
-                }
                 ConversationHistoryContent(store: store, key: key, revision: revision,
                     thread: thread, request: request, sender: sender,
                     local: store.isLocalExample,
@@ -209,7 +199,6 @@ struct ConversationPanel: View {
             }
         }
         .onAppear {
-            if selectedRevision == nil { selectedRevision = thread?.currentRevision }
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
             testConversationSheetDidAppear?()
         }
