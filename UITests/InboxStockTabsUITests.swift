@@ -65,15 +65,62 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(repliedTab.exists, app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+        let list = app.collectionViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        let firstInboxRow = list.cells.firstMatch
+        XCTAssertTrue(firstInboxRow.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(firstInboxRow.isHittable,
+                      "The populated Inbox initially shows a visible row.")
         XCTAssertFalse(app.tabBars.buttons["Search"].exists,
                        "Search belongs to the message list, not a separate tab.")
         assertListHeader(in: app)
         attachScreenshot("Inbox with native list search", from: app)
 
+        // Exercise the bottom message filter instead of relying on the launch default.
+        repliedTab.tap()
+        XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
+        inboxTab.tap()
+        XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+
         let searchField = workspaceSearchField(in: app)
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
         searchField.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.typeText("assistant\n")
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        // Every standard sample sender contains “assistant”. Samples are displayed
+        // by descending acceptance order, so approval-0 is the final matching row.
+        let lastFilteredResult = app.descendants(matching: .any)["sample-approval-0"]
+        XCTAssertFalse(lastFilteredResult.exists && lastFilteredResult.isHittable,
+                       "The final matching sample is not initially visible above the bottom filter.")
+        let tabBar = app.tabBars.firstMatch
+        XCTAssertTrue(tabBar.exists, app.debugDescription)
+        for _ in 0..<12 {
+            if lastFilteredResult.exists {
+                let resultFrame = lastFilteredResult.frame
+                if lastFilteredResult.isHittable && resultFrame.maxY <= tabBar.frame.minY {
+                    break
+                }
+            }
+            list.swipeUp()
+        }
+        XCTAssertTrue(lastFilteredResult.exists, app.debugDescription)
+        XCTAssertTrue(lastFilteredResult.isHittable, app.debugDescription)
+        XCTAssertLessThanOrEqual(lastFilteredResult.frame.maxY, tabBar.frame.minY,
+                                 "The last filtered result clears the bottom message filter.")
+        XCTAssertTrue(inboxTab.isHittable, app.debugDescription)
+        XCTAssertTrue(repliedTab.isHittable, app.debugDescription)
+        attachScreenshot("Inbox filtered results above bottom message filter", from: app)
+
+        for _ in 0..<12 {
+            if searchField.isHittable { break }
+            list.swipeDown()
+        }
+        XCTAssertTrue(searchField.isHittable, app.debugDescription)
+        let clearSearch = searchField.buttons["Clear text"]
+        XCTAssertTrue(clearSearch.waitForExistence(timeout: 5), app.debugDescription)
+        clearSearch.tap()
+        searchField.tap()
         searchField.typeText("Archive\n")
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
