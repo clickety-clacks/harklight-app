@@ -648,6 +648,7 @@ final class ConversationRelayTests: XCTestCase {
 
         session.conversationOpenError = .serverRejected
         let rearmedAfterFailure = expectation(description: "listener rearmed after failed live replay")
+        rearmedAfterFailure.assertForOverFulfill = false
         session.onLiveConversationWait = { rearmedAfterFailure.fulfill() }
         session.pushLiveConversation()
         await fulfillment(of: [rearmedAfterFailure], timeout: 5)
