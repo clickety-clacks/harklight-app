@@ -174,7 +174,15 @@ final class MessageMarkdownTests: XCTestCase {
                              visibleText: "Open https://example.com/guide/, then continue.")
     }
 
+    func testSchemeLessBareWebURLRemainsLinked() throws {
+        try assertBareWebURL("www.example.com",
+                             targetURL: "http://www.example.com",
+                             in: "Read www.example.com for details.",
+                             visibleText: "Read www.example.com for details.")
+    }
+
     private func assertBareWebURL(_ authoredURL: String,
+                                  targetURL: String? = nil,
                                   in source: String,
                                   visibleText expectedVisibleText: String,
                                   file: StaticString = #filePath,
@@ -191,7 +199,7 @@ final class MessageMarkdownTests: XCTestCase {
         XCTAssertEqual(String(rendered[linkRun.range].characters), authoredURL,
                        file: file,
                        line: line)
-        XCTAssertEqual(linkRun.link?.absoluteString, authoredURL, file: file, line: line)
+        XCTAssertEqual(linkRun.link?.absoluteString, targetURL ?? authoredURL, file: file, line: line)
     }
 
     func testCompactPreviewTruncatesParsedTextAndRetainsLinkAndEmphasis() throws {

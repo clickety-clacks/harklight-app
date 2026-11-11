@@ -285,8 +285,7 @@ enum MessageMarkdown {
                                       range: NSRange(visibleText.startIndex..., in: visibleText))
         for match in matches {
             guard let stringRange = Range(match.range, in: visibleText) else { continue }
-            let authoredURL = String(visibleText[stringRange])
-            guard let url = URL(string: authoredURL),
+            guard let url = match.url,
                   let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https",
                   let lower = AttributedString.Index(stringRange.lowerBound, within: attributed),
