@@ -73,7 +73,7 @@ struct ConversationPanel: View {
     }
 
     private var horizontalDismissGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
+        DragGesture(minimumDistance: 80)
             .onEnded { value in
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
