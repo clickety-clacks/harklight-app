@@ -134,6 +134,51 @@ final class DetailChatButtonUITests: XCTestCase {
         attachScreenshot("chat-toolbar-after-reading")
     }
 
+    func testHorizontalSwipeInsideChatReturnsToListAndPreservesDraft() {
+        for direction in ["left", "right"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+            app.launch()
+
+            let row = app.descendants(matching: .any)["sample-information-2"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+            row.tap()
+            let chat = app.buttons["Chat"]
+            XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+            chat.tap()
+            let composer = app.textViews["sample-chat-composer"]
+            XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+            composer.tap()
+            composer.typeText("Swipe draft stays saved")
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                          "The horizontal swipe is exercised while the keyboard is up.")
+
+            let history = app.scrollViews["conversation-history-scroll"]
+            XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+            let startX: CGFloat = direction == "left" ? 0.9 : 0.1
+            let endX: CGFloat = direction == "left" ? 0.1 : 0.9
+            let start = history.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
+            let end = history.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: end,
+                        withVelocity: .slow, thenHoldForDuration: 0.1)
+
+            XCTAssertTrue(row.waitForExistence(timeout: 5),
+                          "A horizontal \(direction) swipe in Chat returns to the message. \(app.debugDescription)")
+            XCTAssertTrue(row.isHittable, app.debugDescription)
+            XCTAssertFalse(composer.exists, app.debugDescription)
+
+            row.tap()
+            let reopenedChat = app.buttons["Chat"]
+            XCTAssertTrue(reopenedChat.waitForExistence(timeout: 5), app.debugDescription)
+            reopenedChat.tap()
+            let reopenedComposer = app.textViews["sample-chat-composer"]
+            XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(reopenedComposer.value as? String, "Swipe draft stays saved",
+                           "Dismissing Chat keeps its unsent draft for an intentional reopen.")
+            app.terminate()
+        }
+    }
+
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",

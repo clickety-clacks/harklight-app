@@ -123,6 +123,19 @@
           "detail": "A late message confirmation no longer shows an error after its request is answered."
         }
       ]
+    },
+    {
+      "id": "post-148-chat-swipe",
+      "marketingVersion": "0.1.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "horizontal-chat-dismissal",
+          "symbol": "arrow.left",
+          "title": "Dismiss Chat with a horizontal swipe",
+          "detail": "A horizontal swipe returns you to the message from Chat, even while editing a draft or when history is empty."
+        }
+      ]
     }
   ]
 }

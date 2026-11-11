@@ -896,13 +896,16 @@ final class ConversationSampleUITests: XCTestCase {
                        "A missing chat thread must not show a chat composer.")
         capture("conversation-no-chat-empty-state", app)
 
-        let screen = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-        let frame = app.windows.firstMatch.frame
-        let start = screen.withOffset(CGVector(dx: frame.midX, dy: frame.minY + 20))
-        let end = start.withOffset(CGVector(dx: 0, dy: min(400, frame.height * 0.8)))
-        start.press(forDuration: 0.1, thenDragTo: end)
+        let start = noChatDescription.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
+        let end = noChatDescription.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end,
+                    withVelocity: .slow, thenHoldForDuration: 0.1)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable, app.debugDescription)
+        row.tap()
         XCTAssertTrue(noChatTitle.waitForNonExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(seenAction.exists, "The message's Seen response remains available outside the no-chat view.")
+        XCTAssertTrue(seenAction.waitForExistence(timeout: 5),
+                      "The message's Seen response remains available after returning from no-chat Chat.")
     }
 
     func testChatPanelRemovesRedundantRowsAndKeepsComposerControlsAlignedAsPromptGrows() {

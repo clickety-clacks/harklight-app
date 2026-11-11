@@ -226,6 +226,33 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("chat-panel-from-visible-toolbar-tap", from: app)
     }
 
+    func testHorizontalSwipeDismissesUnavailableChatStatus() throws {
+        let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
+        let requestRow = app.descendants(matching: .any)["request-row-facilities-01"]
+        selectFacilitiesRequest(in: app)
+
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+
+        let unavailable = app.staticTexts["conversation-status-unavailable"]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 5), app.debugDescription)
+        let unavailableDescription = app.staticTexts[
+            "The server connection could not confirm whether a chat was opened."
+        ]
+        XCTAssertTrue(unavailableDescription.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.textViews["sample-chat-composer"].exists,
+                       "Unavailable chat status does not invent a conversation composer.")
+
+        let start = unavailableDescription.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
+        let end = unavailableDescription.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end,
+                    withVelocity: .slow, thenHoldForDuration: 0.1)
+
+        XCTAssertTrue(requestRow.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(requestRow.isHittable, app.debugDescription)
+    }
+
     private func tapVisibleScreenCenter(of element: XCUIElement, in app: XCUIApplication,
                                         file: StaticString = #filePath, line: UInt = #line) {
         let window = app.windows.firstMatch
