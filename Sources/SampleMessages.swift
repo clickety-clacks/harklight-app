@@ -128,13 +128,13 @@ final class SampleResponse {
             localStatus = "Answer not delivered"
         } else if receiptStatus == .failed {
             if hasUnconfirmedOutcome {
-                localStatus = "Answer sent · result not confirmed"
+                localStatus = "Submission unconfirmed · saved draft retained"
             } else if request.noCommentUnavailable {
                 localStatus = "No comment was not accepted"
             } else {
                 switch request.intentReceipt?.localState {
                 case .some(.refusedByRetraction): localStatus = "Answer refused · request retracted"
-                case .some(.terminalUnconfirmed): localStatus = "Answer sent · result not confirmed"
+                case .some(.terminalUnconfirmed): localStatus = "Submission unconfirmed · saved draft retained"
                 case .some(.notDelivered): localStatus = "Answer not delivered"
                 case .some(.unsupported): localStatus = "No comment was not accepted"
                 case .some(.repairRequired): localStatus = "Answer needs recovery"

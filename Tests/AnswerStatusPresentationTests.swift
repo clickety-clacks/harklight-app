@@ -206,7 +206,7 @@ final class AnswerStatusPresentationTests: XCTestCase {
             LiveRequestDetail.answerStatusText(lifecycleStatus: .pending,
                                                ownOutcome: .unconfirmed,
                                                answeredFromThisDevice: true),
-            "Your answer is saved on this device. Delivery is not yet confirmed.")
+            "Submission unconfirmed · saved draft retained")
         XCTAssertNil(LiveRequestDetail.answerStatusText(lifecycleStatus: .answered,
                                                         ownOutcome: .accepted,
                                                         answeredFromThisDevice: true),
@@ -331,10 +331,10 @@ final class UnresolvedSendWarningTests: XCTestCase {
                      "No unresolved send leaves no warning, which closes the popup entry.")
         let single = LivePresentationStore.unresolvedSendWarning(unresolvedSendCount: 1)
         XCTAssertEqual(single,
-                       "A request closed without a confirmed result for your answer. Your answer stays saved on this device.")
+                       "Submission unconfirmed · saved draft retained")
         let several = LivePresentationStore.unresolvedSendWarning(unresolvedSendCount: 3)
         XCTAssertEqual(several,
-                       "3 requests closed without a confirmed result for your answers. Your answers stay saved on this device.")
+                       "3 submissions unconfirmed · saved drafts retained")
         for text in [single, several].compactMap({ $0 }) {
             for jargon in ["relay", "lifecycle", "evidence", "reconciliation", "terminal"] {
                 XCTAssertFalse(text.lowercased().contains(jargon),

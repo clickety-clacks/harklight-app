@@ -897,7 +897,8 @@ final class NativeRelayLifecycle {
                                 context: ProfileContext,
                                 relayURL: URL,
                                 identity: SecIdentity,
-                                rootDER: Data)?
+                                rootDER: Data,
+                                serverStateCache: (any ServerStateCaching)?)?
     private var refreshGeneration = UUID()
     private lazy var refreshFlights = RelayRefreshFlights(inactive: NativeRelayRefreshResult.unavailable) { [weak self] in
         guard let self else { return .unavailable }
@@ -912,7 +913,8 @@ final class NativeRelayLifecycle {
                   relayURL: URL,
                   clientIdentity: SecIdentity,
                   trustedRootDER: Data,
-                  diagnostics: NativeClientDiagnosticJournal? = nil) async throws {
+                  diagnostics: NativeClientDiagnosticJournal? = nil,
+                  serverStateCache: (any ServerStateCaching)? = nil) async throws {
         let generation = UUID()
         let transportAttemptID = UUID()
         self.diagnosticJournal = diagnostics
@@ -938,6 +940,7 @@ final class NativeRelayLifecycle {
         do {
             nextCore = try NativeRelayCore(store: store, context: context, session: nextTransport,
                                            attemptID: transportAttemptID,
+                                           serverStateCache: serverStateCache,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
                                            onDiagnostic: diagnosticSink())
@@ -968,7 +971,7 @@ final class NativeRelayLifecycle {
         core = nextCore
         self.context = context
         activeTransportAttemptID = transportAttemptID
-        configuration = (store, context, relayURL, clientIdentity, trustedRootDER)
+        configuration = (store, context, relayURL, clientIdentity, trustedRootDER, serverStateCache)
     }
 
     /// Validates a fixed, approved endpoint with the same client identity and
@@ -992,7 +995,9 @@ final class NativeRelayLifecycle {
                                                               trustedRootDER: current.rootDER)
         var nextCore: NativeRelayCore?
         do {
-            nextCore = try NativeRelayCore(store: current.store, context: current.context, session: nextTransport)
+            nextCore = try NativeRelayCore(store: current.store, context: current.context,
+                                           session: nextTransport,
+                                           serverStateCache: current.serverStateCache)
             try await nextTransport.verifyEndpoint()
             guard refreshGeneration == expectedGeneration,
                   core === priorCore, transport === priorTransport,
@@ -1006,7 +1011,8 @@ final class NativeRelayLifecycle {
             confirmedRelayContext = nil
             core = nextCore
             transport = nextTransport
-            configuration = (current.store, current.context, relayURL, current.identity, current.rootDER)
+            configuration = (current.store, current.context, relayURL, current.identity,
+                             current.rootDER, current.serverStateCache)
             nextCore = nil
             await priorCore.deactivate()
             await priorTransport.close()
@@ -1330,6 +1336,42 @@ final class NativeRelayLifecycle {
         await refreshFlights.afterCurrent()
     }
 
+    func hasConfirmedServerSnapshot(for expected: ProfileContext) -> Bool {
+        context == expected && confirmedRelayContext == expected
+    }
+
+    /// Revalidates the current server projection, sends only the operation
+    /// selected by the person's current tap, then refreshes the projection.
+    func sendOriginalOperationForUserTap(_ intentID: UUID,
+                                         expected: ProfileContext,
+                                         onSendCallStateChange: @escaping @MainActor @Sendable (Bool) -> Void = { _ in },
+                                         onSendCallCompleted: @MainActor () -> Void = {}) async throws -> NativeRelayRefreshResult {
+        guard context == expected, let configuration, self.core != nil else {
+            throw NativeRelayCoreError.inactive
+        }
+        let current = await refreshFlights.coalesced()
+        guard context == expected, current.relayConfirmed,
+              confirmedRelayContext == expected, let activeCore = self.core else {
+            try? configuration.store.discardUnsentOperation(intentID, context: expected)
+            throw NativeRelayCoreError.inactive
+        }
+        do {
+            try await activeCore.sendOriginalOperationForUserTap(
+                intentID,
+                onSendCallStateChange: { isSending in
+                    onSendCallStateChange(isSending)
+                })
+        } catch {
+            onSendCallCompleted()
+            if let relayError = error as? NativeRelayCoreError, relayError == .inactive {
+                try? configuration.store.discardUnsentOperation(intentID, context: expected)
+            }
+            throw error
+        }
+        onSendCallCompleted()
+        return await refreshFlights.coalesced()
+    }
+
     @discardableResult
     func fetchNextInboxPage() async -> Bool {
         guard let core, let context else { return false }
@@ -1597,6 +1639,7 @@ final class NativeRelayLifecycle {
                                            context: configuration.context,
                                            session: nextTransport,
                                            attemptID: transportAttemptID,
+                                           serverStateCache: configuration.serverStateCache,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
                                            onDiagnostic: diagnosticSink())

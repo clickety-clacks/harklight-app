@@ -995,6 +995,34 @@ public struct AttentionStoreSnapshot: Sendable {
     }
 }
 
+/// Server projection restored from the launch cache. User drafts are merged
+/// from their separate local persistence by AttentionDomainStore.
+public struct CachedAttentionServerState: Sendable {
+    public let requests: [RequestKey: StoredRequest]
+    public let remoteStates: [RequestKey: RemoteRequestState]
+    public let cursor: UInt64
+    public let conversationCursor: UInt64
+    public let conversations: [RequestKey: ConversationThread]
+    public let inboxView: InboxView?
+    public let currentRequestKeys: Set<RequestKey>?
+
+    public init(requests: [RequestKey: StoredRequest],
+                remoteStates: [RequestKey: RemoteRequestState],
+                cursor: UInt64,
+                conversationCursor: UInt64,
+                conversations: [RequestKey: ConversationThread],
+                inboxView: InboxView?,
+                currentRequestKeys: Set<RequestKey>?) {
+        self.requests = requests
+        self.remoteStates = remoteStates
+        self.cursor = cursor
+        self.conversationCursor = conversationCursor
+        self.conversations = conversations
+        self.inboxView = inboxView
+        self.currentRequestKeys = currentRequestKeys
+    }
+}
+
 public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
     case staleProfile
     case wrongAccount

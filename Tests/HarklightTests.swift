@@ -1376,7 +1376,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertTrue(store.simulateTerminal(for: facilities.key, scenario: .cleared))
         try presentation.refreshFromDurableStore()
         XCTAssertEqual(presentation.unresolvedSendWarning,
-                       "A request closed without a confirmed result for your answer. Your answer stays saved on this device.",
+                       "Submission unconfirmed · saved draft retained",
                        "A send whose request closed without a confirmed result raises the warning.")
     }
 

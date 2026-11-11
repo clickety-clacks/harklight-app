@@ -133,6 +133,12 @@
           "symbol": "clock.arrow.circlepath",
           "title": "Read earlier versions of a message",
           "detail": "Choose an earlier version from message details. Chat and replies continue to use the current version."
+        },
+        {
+          "id": "cache-first-paint-and-send-status",
+          "symbol": "tray.2",
+          "title": "Open Inbox and chats right away",
+          "detail": "Harklight shows your last saved Inbox and recent chats immediately, then refreshes from the server. “Answer pending on this device” and “Submitting · saved draft retained” become “Sending” only while a send is underway. “Answer sent · result not confirmed” and “A request closed without a confirmed result for your answer. Your answer stays saved on this device.” become “Submission unconfirmed · saved draft retained”; you can tap “Retry” instead of “Retry saved discussion.” “Sent · syncing chat history” becomes “Sent.” “Answer accepted” and “Answer not delivered” remain the send results."
         }
       ]
     }

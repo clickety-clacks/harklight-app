@@ -138,6 +138,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let context: ProfileContext
     private let persistence: any AttentionStatePersistence
+    private let persistsOnlyLocalState: Bool
+    private var needsServerCacheMigration = false
     private let conversationFileReferences: (any ConversationFileReferenceStore)?
     private let maximumWireFrameBytes: Int
     private var state: PersistedAttentionState
@@ -150,13 +152,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private var isInvalidated = false
 
     var profileContext: ProfileContext { context }
+    public var requiresConfirmedServerProjection: Bool { persistsOnlyLocalState }
 
     public init(context: ProfileContext,
                 persistence: any AttentionStatePersistence,
                 maximumWireFrameBytes: Int = 65_536,
-                conversationFileReferences: (any ConversationFileReferenceStore)? = nil) throws {
+                conversationFileReferences: (any ConversationFileReferenceStore)? = nil,
+                persistsOnlyLocalState: Bool = false) throws {
         self.context = context
         self.persistence = persistence
+        self.persistsOnlyLocalState = persistsOnlyLocalState
         self.conversationFileReferences = conversationFileReferences
         self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
         if let data = try persistence.load(identity: context.identity) {
@@ -165,19 +170,35 @@ public final class AttentionDomainStore: @unchecked Sendable {
             guard loaded.schemaVersion == PersistedAttentionState.currentSchemaVersion else {
                 throw AttentionStoreError.persistence("Unsupported local state schema \(loaded.schemaVersion).")
             }
+            let isLocalDraftState = persistsOnlyLocalState && loaded.localDraftsOnly == true
+            needsServerCacheMigration = persistsOnlyLocalState && !isLocalDraftState
             let requestKeys = Set(loaded.requests.keys)
-            let validRequestScope = requestKeys.allSatisfy { $0.accountScope == context.identity.personID }
-            let validDrafts = loaded.drafts.keys.allSatisfy { requestKeys.contains($0) }
-            let validSessions = loaded.fixtureSessions.keys.allSatisfy { requestKeys.contains($0) }
-            let validRemoteStates = loaded.remoteStates.keys.allSatisfy { requestKeys.contains($0) }
-            let validInboxReferences = (loaded.inboxReferences?.keys.allSatisfy {
-                $0.accountScope == context.identity.personID && !requestKeys.contains($0)
-            } ?? true)
-            let validInboxOverlays = (loaded.pendingRelayOverlays?.allSatisfy { entry in
-                entry.key == entry.value.sequence &&
-                    Self.requestKey(in: entry.value)?.accountScope == context.identity.personID
-            } ?? true)
-            let validInboxCheckpoints = [loaded.inboxCheckpoint, loaded.inboxCandidate].compactMap { $0 }.allSatisfy { checkpoint in
+            let validRequestScope = isLocalDraftState
+                ? loaded.requests.isEmpty
+                : requestKeys.allSatisfy { $0.accountScope == context.identity.personID }
+            let validDrafts = loaded.drafts.keys.allSatisfy {
+                $0.accountScope == context.identity.personID && (isLocalDraftState || requestKeys.contains($0))
+            }
+            let validSessions = isLocalDraftState
+                ? loaded.fixtureSessions.isEmpty
+                : loaded.fixtureSessions.keys.allSatisfy { requestKeys.contains($0) }
+            let validRemoteStates = isLocalDraftState
+                ? loaded.remoteStates.isEmpty
+                : loaded.remoteStates.keys.allSatisfy { requestKeys.contains($0) }
+            let validInboxReferences = isLocalDraftState
+                ? (loaded.inboxReferences?.isEmpty ?? true)
+                : (loaded.inboxReferences?.keys.allSatisfy {
+                    $0.accountScope == context.identity.personID && !requestKeys.contains($0)
+                } ?? true)
+            let validInboxOverlays = isLocalDraftState
+                ? (loaded.pendingRelayOverlays?.isEmpty ?? true)
+                : (loaded.pendingRelayOverlays?.allSatisfy { entry in
+                    entry.key == entry.value.sequence &&
+                        Self.requestKey(in: entry.value)?.accountScope == context.identity.personID
+                } ?? true)
+            let validInboxCheckpoints = (isLocalDraftState
+                ? loaded.inboxCheckpoint == nil && loaded.inboxCandidate == nil
+                : true) && [loaded.inboxCheckpoint, loaded.inboxCandidate].compactMap { $0 }.allSatisfy { checkpoint in
                 checkpoint.loadedKeys.allSatisfy { $0.accountScope == context.identity.personID } &&
                 (checkpoint.sourceOrder.map { order in
                     Set(order).count == order.count &&
@@ -192,16 +213,18 @@ public final class AttentionDomainStore: @unchecked Sendable {
             } &&
             (loaded.replayPublishedInboxCurrentKeys ?? []).allSatisfy { $0.accountScope == context.identity.personID }
             let loadedMessageOpens = loaded.pendingMessageOpens ?? []
-            let validPendingMessageOpens = Set(loadedMessageOpens.map(\.operationID)).count == loadedMessageOpens.count &&
-                loadedMessageOpens.allSatisfy {
-                    $0.requestKey.accountScope == context.identity.personID && $0.requestRevision > 0
-                }
+            let validPendingMessageOpens = isLocalDraftState
+                ? loadedMessageOpens.isEmpty
+                : Set(loadedMessageOpens.map(\.operationID)).count == loadedMessageOpens.count &&
+                    loadedMessageOpens.allSatisfy {
+                        $0.requestKey.accountScope == context.identity.personID && $0.requestRevision > 0
+                    }
             var validIntents = true
             var acceptedAwaitingReplay: [RequestKey: Submission] = [:]
             for entry in loaded.intents {
                 let submission = entry.value
                 guard entry.key == submission.intentID,
-                      requestKeys.contains(submission.requestKey),
+                      (isLocalDraftState || requestKeys.contains(submission.requestKey)),
                       submission.requestKey.accountScope == context.identity.personID else {
                     validIntents = false
                     break
@@ -216,8 +239,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
             let validFences = (loaded.fencedIntents ?? [:]).allSatisfy { entry in
                 entry.value.accountScope == context.identity.personID && loaded.intents[entry.key] == nil
             }
-            let validOutbox = Set(loaded.outboxOrder).count == loaded.outboxOrder.count &&
-                loaded.outboxOrder.allSatisfy { loaded.intents[$0] != nil }
+            let validOutbox = isLocalDraftState
+                ? loaded.outboxOrder.isEmpty
+                : Set(loaded.outboxOrder).count == loaded.outboxOrder.count &&
+                    loaded.outboxOrder.allSatisfy { loaded.intents[$0] != nil }
             guard validRequestScope, validDrafts, validSessions, validRemoteStates,
                   validInboxReferences, validInboxOverlays, validInboxCheckpoints,
                   validIntents, validIntentIndex, validFences, validOutbox else {
@@ -226,16 +251,23 @@ public final class AttentionDomainStore: @unchecked Sendable {
             let validConversationThreads = loaded.conversation?.threads.keys.allSatisfy {
                 $0.accountScope == context.identity.personID
             } ?? true
-            let validConversationEvents = loaded.conversation?.events.values.allSatisfy {
-                $0.binding.request.accountScope == context.identity.personID
-            } ?? true
-            let validConversationReadPositions = loaded.conversation?.chatReadPositions?.keys.allSatisfy {
-                $0.accountScope == context.identity.personID
-            } ?? true
-            let validPendingConversationReadPositions = loaded.conversation?.pendingChatReadPositions?.allSatisfy {
-                $0.key.accountScope == context.identity.personID && $0.key == $0.value.request &&
-                    $0.value.readThroughConversationSequence > 0
-            } ?? true
+            let validConversationEvents = isLocalDraftState
+                ? (loaded.conversation?.events.isEmpty ?? true)
+                : (loaded.conversation?.events.values.allSatisfy {
+                    $0.binding.request.accountScope == context.identity.personID
+                } ?? true)
+            let validConversationReadPositions = isLocalDraftState
+                ? (loaded.conversation?.chatReadPositions?.isEmpty ?? true) &&
+                    loaded.conversation?.chatReadPositionSupport == nil
+                : (loaded.conversation?.chatReadPositions?.keys.allSatisfy {
+                    $0.accountScope == context.identity.personID
+                } ?? true)
+            let validPendingConversationReadPositions = isLocalDraftState
+                ? (loaded.conversation?.pendingChatReadPositions?.isEmpty ?? true)
+                : (loaded.conversation?.pendingChatReadPositions?.allSatisfy {
+                    $0.key.accountScope == context.identity.personID && $0.key == $0.value.request &&
+                        $0.value.readThroughConversationSequence > 0
+                } ?? true)
             guard validConversationThreads, validConversationEvents,
                   validConversationReadPositions, validPendingConversationReadPositions,
                   validPendingMessageOpens else {
@@ -248,8 +280,105 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
             self.acceptedAwaitingTerminalReplay = acceptedAwaitingReplay
         } else {
+            needsServerCacheMigration = false
             self.state = PersistedAttentionState(profileIdentity: context.identity)
         }
+    }
+
+    /// True when this installation still has the pre-cache server projection
+    /// that should be copied into the launch cache once.
+    public func hasLegacyServerProjection(context suppliedContext: ProfileContext) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        return needsServerCacheMigration
+    }
+
+    /// Removes answer sends from the relay outbox while preserving any exact
+    /// operation that can be retried only after a new user tap.
+    public func prepareForServerCache(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard persistsOnlyLocalState else { throw AttentionStoreError.persistence("Cache-backed persistence is not enabled.") }
+        let next = localDraftProjection(from: state)
+        try commit(next)
+        needsServerCacheMigration = false
+    }
+
+    /// Replaces only the in-memory server projection with the saved cache.
+    /// Drafts from the local profile store are merged back by request and revision.
+    public func restoreCachedServerState(_ cached: CachedAttentionServerState,
+                                         context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard persistsOnlyLocalState, suppliedContext.transportMode == .relay else {
+            throw AttentionStoreError.fixtureOnlyOperation
+        }
+        let keys = Set(cached.requests.keys)
+            .union(cached.remoteStates.keys)
+            .union(cached.conversations.keys)
+        guard keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
+            throw AttentionStoreError.wrongAccount
+        }
+        var next = state
+        next.requests = cached.requests
+        next.remoteStates = cached.remoteStates
+        next.cursor = cached.cursor
+        next.replayBarrier = nil
+        next.replayPublishedRequests = nil
+        next.replayPublishedStates = nil
+        next.replayPublishedIntents = nil
+        next.replayPublishedInboxCurrentKeys = nil
+        next.appliedEvents = [:]
+        next.inboxCheckpoint = nil
+        next.inboxCandidate = nil
+        next.cachedInboxCurrentKeys = cached.currentRequestKeys
+        next.inboxView = cached.inboxView
+        next.pendingRelayOverlays = nil
+        next.inboxReferences = nil
+
+        var conversation = ConversationState()
+        conversation.cursor = cached.conversationCursor
+        conversation.threads = cached.conversations
+        for (key, localThread) in state.conversation?.threads ?? [:] {
+            if var serverThread = conversation.threads[key] {
+                serverThread.drafts = localThread.drafts
+                serverThread.answerDrafts = localThread.answerDrafts
+                serverThread.readThroughTurn = nil
+                serverThread.accountReadThroughConversationSequence = nil
+                conversation.threads[key] = serverThread
+            } else if !localThread.drafts.isEmpty || !(localThread.answerDrafts ?? [:]).isEmpty {
+                var shell = Self.localDraftThread(localThread)
+                shell.readThroughTurn = nil
+                shell.accountReadThroughConversationSequence = nil
+                conversation.threads[key] = shell
+            }
+        }
+        next.conversation = conversation
+        try commit(next)
+        acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
+    }
+
+    private static func localDraftThread(_ original: ConversationThread) -> ConversationThread {
+        var thread = ConversationThread(request: original.request,
+                                        sessionHandle: ExactText(""),
+                                        revision: 0,
+                                        payload: .object([]))
+        thread.drafts = original.drafts.mapValues { originalDraft in
+            var draft = originalDraft
+            if case let .submitting(operation) = draft.disposition {
+                draft.disposition = .outcomeUnknown(operation)
+            }
+            return draft
+        }
+        thread.answerDrafts = original.answerDrafts
+        return thread
     }
 
     public func invalidate() {
@@ -469,7 +598,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
-        next.outboxOrder.append(intentID)
+        if !(persistsOnlyLocalState && suppliedContext.transportMode == .relay) {
+            next.outboxOrder.append(intentID)
+        }
         if suppliedContext.transportMode == .fixture {
             let sessionDraft = persistAnswerDraft ? draft : RequestDraft(interface: interface)
             next.fixtureSessions[request.key] = RequestSession(draft: sessionDraft,
@@ -549,7 +680,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
-        next.outboxOrder.append(intentID)
+        if !(persistsOnlyLocalState && suppliedContext.transportMode == .relay) {
+            next.outboxOrder.append(intentID)
+        }
         if discardDraft {
             discardAnswerDraft(for: request.key, revision: requestRevision, in: &next)
         }
@@ -660,6 +793,90 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return true
     }
 
+    /// Queues one answer operation only for an explicit user retry. The exact
+    /// operation and id are reused; no background refresh calls this method.
+    @discardableResult
+    public func queueOriginalOperationForUserTap(_ intentID: UUID,
+                                                 context suppliedContext: ProfileContext) throws -> Submission {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var submission = state.intents[intentID],
+              state.intentByRequest[submission.requestKey] == intentID else {
+            throw AttentionStoreError.intentMissing
+        }
+        let currentKeys = state.inboxCheckpoint.flatMap { $0.checkpointAccepted ? $0.currentKeys : nil }
+            ?? state.cachedInboxCurrentKeys
+        guard state.requests[submission.requestKey] != nil,
+              currentKeys?.contains(submission.requestKey) == true,
+              state.remoteStates[submission.requestKey]?.isTerminal != true else {
+            throw AttentionStoreError.requestClosed
+        }
+        switch submission.disposition {
+        case .pending, .lost:
+            submission.disposition = .pending
+        default:
+            throw AttentionStoreError.intentConflict
+        }
+        var next = state
+        next.intents[intentID] = submission
+        if !next.outboxOrder.contains(intentID) { next.outboxOrder.append(intentID) }
+        try commit(next)
+        return submission
+    }
+
+    /// Retains the exact answer operation for a later explicit Retry tap.
+    public func recordUnresolvedOperation(_ intentID: UUID,
+                                          operationID: UUID,
+                                          context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var submission = state.intents[intentID],
+              submission.operationID == operationID,
+              state.intentByRequest[submission.requestKey] == intentID else {
+            throw AttentionStoreError.intentConflict
+        }
+        switch submission.disposition {
+        case .pending, .lost:
+            submission.disposition = .lost
+        default:
+            throw AttentionStoreError.intentConflict
+        }
+        var next = state
+        next.intents[intentID] = submission
+        next.outboxOrder.removeAll { $0 == intentID }
+        try commit(next)
+    }
+
+    /// Drops an operation that was prepared locally but rejected before any
+    /// send call opened, leaving its separately stored draft available.
+    public func discardUnsentOperation(_ intentID: UUID,
+                                       context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              let submission = state.intents[intentID],
+              submission.disposition == .pending,
+              !state.outboxOrder.contains(intentID) else {
+            throw AttentionStoreError.intentConflict
+        }
+        var next = state
+        next.intents.removeValue(forKey: intentID)
+        next.intentByRequest.removeValue(forKey: submission.requestKey)
+        next.outboxOrder.removeAll { $0 == intentID }
+        try commit(next)
+    }
+
     public func recordAcceptedOperation(_ intentID: UUID,
                                         operationID: UUID,
                                         terminalSequence: UInt64,
@@ -701,7 +918,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.intentConflict
         }
         switch intent.disposition {
-        case .pending:
+        case .pending, .lost:
             intent.disposition = .unsupported
         case .unsupported:
             return
@@ -736,7 +953,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.intentConflict
         }
         switch intent.disposition {
-        case .pending:
+        case .pending, .lost:
             intent.disposition = .failed
         case .failed:
             return
@@ -2101,14 +2318,16 @@ public final class AttentionDomainStore: @unchecked Sendable {
             guard let submission = state.intents[id], seen.insert(submission.operationID).inserted else { continue }
             inventory.append(submission)
         }
-        let accepted = acceptedAwaitingTerminalReplay.values.sorted { left, right in
-            let l = Self.acceptedSequence(left)
-            let r = Self.acceptedSequence(right)
-            if l != r { return l < r }
-            return left.operationID.uuidString < right.operationID.uuidString
-        }
-        for submission in accepted where seen.insert(submission.operationID).inserted {
-            inventory.append(submission)
+        if !persistsOnlyLocalState {
+            let accepted = acceptedAwaitingTerminalReplay.values.sorted { left, right in
+                let l = Self.acceptedSequence(left)
+                let r = Self.acceptedSequence(right)
+                if l != r { return l < r }
+                return left.operationID.uuidString < right.operationID.uuidString
+            }
+            for submission in accepted where seen.insert(submission.operationID).inserted {
+                inventory.append(submission)
+            }
         }
         return inventory
     }
@@ -2641,6 +2860,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         next.inboxCheckpoint = candidate
         next.inboxCandidate = nil
+        next.cachedInboxCurrentKeys = nil
         next.cursor = highWater
         next.replayBarrier = nil
         next.replayPublishedRequests = nil
@@ -2671,7 +2891,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             visibleSessions = state.fixtureSessions.filter { visibleKeys.contains($0.key) }
         }
         let sortedOutbox = state.outboxOrder.compactMap { state.intents[$0] }
-        let inboxCurrentKeys: Set<RequestKey>?
+        var inboxCurrentKeys: Set<RequestKey>?
         if state.replayBarrier != nil {
             inboxCurrentKeys = state.replayPublishedInboxCurrentKeys
         } else if state.inboxCandidate != nil,
@@ -2687,6 +2907,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
             inboxCurrentKeys = checkpoint.currentKeys
         } else {
             inboxCurrentKeys = nil
+        }
+        if state.inboxCheckpoint == nil && state.inboxCandidate == nil {
+            inboxCurrentKeys = state.cachedInboxCurrentKeys
         }
         let inboxSourceOrder = state.inboxCheckpoint.flatMap {
             $0.checkpointAccepted ? $0.sourceOrder : nil
@@ -3084,7 +3307,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
               thread.revisions[draft.binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion else { throw ConversationError.closed }
+        guard thread.allowsDiscussion || persistsOnlyLocalState else { throw ConversationError.closed }
         if let previous = thread.drafts[draft.binding.revision] {
             switch previous.disposition {
             case .submitting, .outcomeUnknown, .acceptedPendingReplay: throw ConversationError.pendingSubmission
@@ -3114,7 +3337,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard var conversation = next.conversation,
               var thread = conversation.threads[binding.request],
               thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion else { throw ConversationError.closed }
+        guard thread.allowsDiscussion || persistsOnlyLocalState else { throw ConversationError.closed }
         var draft = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
         guard draft.binding == binding else { throw ConversationError.invalidBinding }
         switch draft.disposition {
@@ -3674,6 +3897,51 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard requestKey.accountScope == identity.personID else { throw AttentionStoreError.wrongAccount }
     }
 
+    private func localDraftProjection(from original: PersistedAttentionState) -> PersistedAttentionState {
+        var local = original
+        local.localDraftsOnly = true
+        local.requests = [:]
+        local.fixtureSessions = [:]
+        local.outboxOrder = []
+        local.remoteStates = [:]
+        local.appliedEvents = [:]
+        local.cursor = 0
+        local.replayBarrier = nil
+        local.replayPublishedRequests = nil
+        local.replayPublishedStates = nil
+        local.replayPublishedIntents = nil
+        local.replayPublishedInboxCurrentKeys = nil
+        local.repairIssues = []
+        local.inboxCheckpoint = nil
+        local.inboxCandidate = nil
+        local.inboxView = nil
+        local.cachedInboxCurrentKeys = nil
+        local.pendingRelayOverlays = nil
+        local.inboxReferences = nil
+        local.fencedIntents = [:]
+        local.pendingMessageOpens = []
+
+        for id in Array(local.intents.keys) {
+            guard var submission = local.intents[id], submission.disposition == .pending else { continue }
+            submission.disposition = .lost
+            local.intents[id] = submission
+        }
+
+        if let originalConversation = original.conversation {
+            var conversation = ConversationState()
+            for (key, originalThread) in originalConversation.threads {
+                let thread = Self.localDraftThread(originalThread)
+                if !thread.drafts.isEmpty || !(thread.answerDrafts ?? [:]).isEmpty {
+                    conversation.threads[key] = thread
+                }
+            }
+            local.conversation = conversation
+        } else {
+            local.conversation = nil
+        }
+        return local
+    }
+
     private func commit(_ proposed: PersistedAttentionState,
                         allowingCommittedReads: Bool = true) throws {
         // File payloads are normalized when events and drafts enter the state,
@@ -3692,7 +3960,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
         do {
             let encoder = PropertyListEncoder()
             encoder.outputFormat = .binary
-            let bytes = try encoder.encode(next)
+            let persisted = persistsOnlyLocalState ? localDraftProjection(from: next) : next
+            let bytes = try encoder.encode(persisted)
             try persistence.commit(bytes, identity: context.identity)
             if stateLockReleased {
                 lock.lock()
@@ -3703,7 +3972,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 observer.yield(state.revision)
             }
         } catch {
-            if let bytes = try? persistence.load(identity: context.identity),
+            if !persistsOnlyLocalState,
+               let bytes = try? persistence.load(identity: context.identity),
                let recovered = try? PropertyListDecoder().decode(PersistedAttentionState.self, from: bytes),
                recovered.profileIdentity == context.identity,
                let normalized = try? Self.externalizingConversationFiles(in: recovered,
@@ -4143,6 +4413,8 @@ private struct PersistedAttentionState: Codable {
     var inboxCheckpoint: InboxPagingCheckpoint?
     var inboxCandidate: InboxPagingCheckpoint?
     var inboxView: InboxView?
+    var cachedInboxCurrentKeys: Set<RequestKey>?
+    var localDraftsOnly: Bool? = nil
     var pendingRelayOverlays: [UInt64: RelayEvent]?
     var inboxReferences: [RequestKey: RemoteRequestState]?
     // Optional keeps existing schema-2 account files readable without resetting their data.

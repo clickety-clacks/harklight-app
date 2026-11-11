@@ -1217,7 +1217,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                             ownOutcome: .accepted,
                                                             originalOperationUncertainty: false)
                 } else {
-                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: "Your answer is saved on this device. Relay acceptance is not yet confirmed.",
+                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: "Submission unconfirmed · saved draft retained",
                                                             ownOutcome: .unconfirmed,
                                                             originalOperationUncertainty: true)
                 }
