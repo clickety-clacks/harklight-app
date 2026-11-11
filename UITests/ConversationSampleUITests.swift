@@ -593,8 +593,7 @@ final class ConversationSampleUITests: XCTestCase {
         ]
         for gesture in gestures {
             let app = XCUIApplication()
-            app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
-                                   "--harklight-test-foreground-chat-indicator"]
+            app.launchArguments = ["--harklight-samples", "--harklight-test-foreground-chat-indicator"]
             app.launch()
 
             let indicator = app.buttons.matching(identifier: "foreground-chat-notification").firstMatch
