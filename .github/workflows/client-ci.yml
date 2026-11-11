@@ -25,3 +25,6 @@ jobs:
 
       - name: Build and test the iOS app
         run: Scripts/verify.sh test
+
+      - name: Build and test the native host
+        run: Scripts/verify.sh native-host-test
