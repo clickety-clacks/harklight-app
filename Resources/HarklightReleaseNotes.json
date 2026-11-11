@@ -115,6 +115,12 @@
           "symbol": "list.number",
           "title": "See your position in Inbox",
           "detail": "The message count and position reflect only items in Inbox. The counter disappears when an open item leaves Inbox."
+        },
+        {
+          "id": "answered-request-late-confirmation",
+          "symbol": "checkmark.circle",
+          "title": "Keep answered requests clear",
+          "detail": "A late message confirmation no longer shows an error after its request is answered."
         }
       ]
     }

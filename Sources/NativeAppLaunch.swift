@@ -2695,7 +2695,8 @@ final class LivePresentationStore {
                 diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key)
                 current = nil
             }
-            if let current, current.intentReceipt != nil {
+            if let current, current.intentReceipt != nil ||
+                (current.lifecycleStatus == .answered && current.submittedAnswer != nil) {
                 clearActionError()
                 return true
             } else {
