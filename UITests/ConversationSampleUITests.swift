@@ -1049,27 +1049,19 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         XCTAssertTrue(row.label.contains("Updated"))
         row.tap()
-        XCTAssertTrue(app.staticTexts["request-update-fact"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.staticTexts["request-update-fact"].label, "Updated · version 2")
+        let versionIndicator = app.descendants(matching: .any)["request-update-fact"]
+        XCTAssertTrue(versionIndicator.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(versionIndicator.label, "Updated · version 2")
         capture("sender-updated-current-request", app)
+        openOriginalVersionFromDetail(in: app)
+        assertHistoricalQuestionAndSavedAnswer(in: app)
+        capture("sender-updated-earlier-question-and-draft", app)
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["Chat"].waitForExistence(timeout: 5), app.debugDescription)
         app.buttons["Chat"].tap()
         XCTAssertTrue(app.staticTexts["Updated"].waitForExistence(timeout: 5))
-        app.buttons["conversation-revision-picker"].tap()
-        app.buttons["Original · draft"].tap()
-        app.buttons["conversation-earlier-answer"].tap()
-        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
-        let earlierTitle = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "Archive the old")
-        ).firstMatch
-        let earlierBody = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "earlier sketches")
-        ).firstMatch
-        XCTAssertTrue(earlierTitle.waitForExistence(timeout: 5), earlierTitle.debugDescription)
-        XCTAssertFalse(earlierTitle.label.contains("*"), earlierTitle.debugDescription)
-        XCTAssertTrue(earlierBody.waitForExistence(timeout: 5), earlierBody.debugDescription)
-        XCTAssertTrue(earlierBody.label.contains("new collection"), earlierBody.debugDescription)
-        XCTAssertFalse(earlierBody.label.contains("*"), earlierBody.debugDescription)
-        capture("sender-updated-earlier-question-and-draft", app)
+        XCTAssertFalse(app.buttons["conversation-revision-picker"].exists,
+                       "Chat stays on the current message version.")
     }
 
     func testMixedCleanupRetainsUnidentifiedFilesWithoutInventedCommittedHistory() {
@@ -1281,13 +1273,11 @@ final class ConversationSampleUITests: XCTestCase {
         open("sample-approval-2", search: "Archive")
         XCTAssertTrue(app.staticTexts["Please review the sketches before archiving. The earlier answer draft is retained."].exists)
         capture("conversation-current-revision", app)
-        let picker = app.buttons["conversation-revision-picker"]
-        XCTAssertTrue(picker.exists, app.debugDescription)
-        picker.tap()
-        app.buttons["Original · draft"].tap()
-        app.buttons["conversation-earlier-answer"].tap()
-        XCTAssertTrue(app.staticTexts["Not delivered · this selection belongs to the earlier question"].waitForExistence(timeout: 5))
+        dismissChatSheet(app)
+        openOriginalVersionFromDetail(in: app)
+        assertHistoricalQuestionAndSavedAnswer(in: app)
         capture("conversation-archived-answer", app)
+        app.buttons["Done"].tap()
         open("sample-information-2", search: "Thursday")
         XCTAssertTrue(app.staticTexts["Example · Exact bytes transferred"].exists)
         XCTAssertTrue(app.staticTexts["Example · Agent reported unusable: Fictional unsupported format"].exists)
@@ -1301,6 +1291,35 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertFalse(app.textViews["sample-chat-composer"].isEnabled)
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
         capture("conversation-explicit-closure", app)
+    }
+
+    private func openOriginalVersionFromDetail(in app: XCUIApplication) {
+        let versionIndicator = app.descendants(matching: .any)["request-update-fact"]
+        XCTAssertTrue(versionIndicator.waitForExistence(timeout: 5), app.debugDescription)
+        versionIndicator.tap()
+        let originalVersion = app.buttons["Original version"]
+        XCTAssertTrue(originalVersion.waitForExistence(timeout: 5), app.debugDescription)
+        originalVersion.tap()
+        XCTAssertTrue(app.scrollViews["historical-message-version"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+    }
+
+    private func assertHistoricalQuestionAndSavedAnswer(in app: XCUIApplication) {
+        let title = app.staticTexts["historical-version-title"]
+        let body = app.staticTexts["historical-version-body"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(title.label.contains("Archive the old"), title.debugDescription)
+        XCTAssertFalse(title.label.contains("*"), title.debugDescription)
+        XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(body.label.contains("earlier sketches"), body.debugDescription)
+        XCTAssertTrue(body.label.contains("new collection"), body.debugDescription)
+        XCTAssertFalse(body.label.contains("*"), body.debugDescription)
+
+        let savedChoice = app.buttons.matching(NSPredicate(format: "label == %@", "Archive")).firstMatch
+        XCTAssertTrue(savedChoice.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(savedChoice.value as? String, "Selected", savedChoice.debugDescription)
+        XCTAssertFalse(savedChoice.isEnabled,
+                       "An earlier answer remains visible as read-only in its historical version.")
     }
 
     private func capture(_ name: String, _ app: XCUIApplication) {
