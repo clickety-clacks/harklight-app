@@ -72,7 +72,7 @@ struct ConversationPanel: View {
     }
 
     private var chatDismissGesture: some Gesture {
-        DragGesture(minimumDistance: 80)
+        DragGesture(minimumDistance: 80, coordinateSpace: .global)
             .onEnded { value in
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
@@ -81,7 +81,7 @@ struct ConversationPanel: View {
                     return
                 }
                 guard vertical >= 80, vertical > abs(horizontal) * 1.35,
-                      value.startLocation.y <= 64 else { return }
+                      value.startLocation.y <= 96 else { return }
                 dismissChat()
             }
     }
