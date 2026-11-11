@@ -304,7 +304,8 @@ Accessibility XXXL; the chat editor's typed text is DM Sans at both sizes.
 
 Type scale. Size is the reference size at the default content size; the
 "Relative to" style sets the scaling curve
-(`Font.custom(_:size:relativeTo:)`).
+(`Font.custom(_:size:relativeTo:)` in SwiftUI; `UIFontMetrics(forTextStyle:)`
+for UIKit text views, DS-27).
 
 | Token | Size / weight / line height | Relative to | Clawline source | Used for |
 |---|---|---|---|---|
@@ -1027,7 +1028,8 @@ composer field show no blur.
 Other constraints the restyle works within:
 
 - **Fonts.** DM Sans ships in the app bundle, is listed under `UIAppFonts`, and
-  is used through `Font.custom(_:size:relativeTo:)`. The font license file
+  is used through `Font.custom(_:size:relativeTo:)` in SwiftUI and through
+  `UIFont` scaled by `UIFontMetrics` in UIKit text views (DS-27). The font license file
   ships with it. Variable or static files are the coder's choice.
 - **Dynamic Type.** Every text style is relative to a system style (DS-8).
   Illustrations and the brand mark keep fixed frames. Touch targets stay at
