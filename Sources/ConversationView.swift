@@ -47,7 +47,7 @@ struct ConversationPanel: View {
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     var testConversationSheetDidAppear: (() -> Void)? = nil
-    var dismissToList: (() -> Void)? = nil
+    var onDismissChat: (() -> Void)? = nil
     var discussionUnavailableReason: LocalizedStringResource? = nil
     @State private var inspectedFile: ConversationFile?
     @State private var inspectedFileRevision: UInt64?
@@ -64,19 +64,24 @@ struct ConversationPanel: View {
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
 
     private func dismissChat() {
-        if let dismissToList {
-            dismissToList()
+        if let onDismissChat {
+            onDismissChat()
         } else {
             dismiss()
         }
     }
 
-    private var horizontalDismissGesture: some Gesture {
+    private var chatDismissGesture: some Gesture {
         DragGesture(minimumDistance: 80)
             .onEnded { value in
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
-                guard abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 else { return }
+                if abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 {
+                    dismissChat()
+                    return
+                }
+                guard vertical >= 80, vertical > abs(horizontal) * 1.35,
+                      value.startLocation.y <= 64 else { return }
                 dismissChat()
             }
     }
@@ -118,7 +123,6 @@ struct ConversationPanel: View {
                         inspectedFileRevision = fileRevision
                     })
                     .equatable()
-                    .simultaneousGesture(horizontalDismissGesture)
                 if let terminal = thread.terminal {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
@@ -195,9 +199,9 @@ struct ConversationPanel: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
-                .simultaneousGesture(horizontalDismissGesture)
             }
         }
+        .simultaneousGesture(chatDismissGesture)
         .onAppear {
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
             testConversationSheetDidAppear?()

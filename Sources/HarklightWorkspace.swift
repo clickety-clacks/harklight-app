@@ -777,11 +777,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         navigate(from: selection, to: next)
     }
 
-    private func dismissChat(for item: InboxSelection, inlineChat: Bool) {
-        if inlineChat, case let .request(key) = item {
+    private func dismissInlineChat(for key: RequestKey) {
+        withAnimation(.easeInOut(duration: 0.22)) {
             dismissedInlineChatRequests.insert(key)
-        } else {
-            navigate(to: nil)
         }
     }
 
@@ -987,15 +985,18 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             if inlineChat, case let .request(key)? = item,
                !dismissedInlineChatRequests.contains(key), let conversationStore,
                let request = conversationStore.request(for: key) {
-                Divider()
-                ConversationPanel(store: conversationStore, key: key,
-                    sender: key.senderID.rawValue, title: request.title?.rawValue ?? "",
-                    initialScrollTurnID: replyRouteTargetTurnID(for: key),
-                    dismissToList: { dismissChat(for: .request(key), inlineChat: true) },
-                    discussionUnavailableReason: request.lifecycleStatus == .superseded
-                        ? ConversationPanelText.supersededReadOnlyReason
-                        : nil)
-                    .frame(width: min(360, geometry.size.width * 0.34))
+                Group {
+                    Divider()
+                    ConversationPanel(store: conversationStore, key: key,
+                        sender: key.senderID.rawValue, title: request.title?.rawValue ?? "",
+                        initialScrollTurnID: replyRouteTargetTurnID(for: key),
+                        onDismissChat: { dismissInlineChat(for: key) },
+                        discussionUnavailableReason: request.lifecycleStatus == .superseded
+                            ? ConversationPanelText.supersededReadOnlyReason
+                            : nil)
+                        .frame(width: min(360, geometry.size.width * 0.34))
+                }
+                .transition(.move(edge: .trailing))
             }
             if inlineChat, case let .sample(id)? = item,
                let message = samples.messages.first(where: { $0.id == id }),
@@ -1109,7 +1110,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             notificationChatRouteSerial: chatRouteSerial,
             notificationChatRouteDidOpen: chatRouteDidOpen,
             chatScrollTargetTurnID: chatScrollTargetTurnID,
-            dismissToList: { dismissChat(for: id, inlineChat: inlineChat) },
+            dismissToList: { navigate(to: nil) },
             messageType: rows.first(where: { $0.id == id })?.resolvedMessageType ?? .request) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
                 let currentIDs = cardNavigationIDs
