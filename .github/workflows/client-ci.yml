@@ -15,7 +15,7 @@ jobs:
   ios-build-and-test:
     name: iOS build and tests
     runs-on: xcode-27
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Check out source
         uses: actions/checkout@v4
