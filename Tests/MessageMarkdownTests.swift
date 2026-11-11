@@ -146,12 +146,60 @@ final class MessageMarkdownTests: XCTestCase {
         XCTAssertTrue(replyText.contains("Replying to: ▏ The earlier point"), replyText)
     }
 
-    func testBareWebLinkRemainsVisibleAndTappable() throws {
-        let rendered = MessageMarkdown.attributed("Read https://example.com/guide before continuing.")
-        let visible = String(rendered.characters)
-        XCTAssertTrue(visible.contains("https://example.com/guide"), visible)
-        XCTAssertEqual(try XCTUnwrap(rendered.runs.first { $0.link != nil }).link,
-                       URL(string: "https://example.com/guide"))
+    func testStandaloneBareWebURLTargetsExactAuthoredURL() throws {
+        try assertBareWebURL("https://example.com/guide/",
+                             in: """
+                             Follow the reference:
+
+                             https://example.com/guide/
+
+                             Then continue.
+                             """,
+                             visibleText: """
+                             Follow the reference:
+                             https://example.com/guide/
+                             Then continue.
+                             """)
+    }
+
+    func testInlineBareWebURLTargetsExactAuthoredURL() throws {
+        try assertBareWebURL("https://example.com/guide/",
+                             in: "Open https://example.com/guide/ before continuing.",
+                             visibleText: "Open https://example.com/guide/ before continuing.")
+    }
+
+    func testBareWebURLBeforePunctuationTargetsExactAuthoredURL() throws {
+        try assertBareWebURL("https://example.com/guide/",
+                             in: "Open https://example.com/guide/, then continue.",
+                             visibleText: "Open https://example.com/guide/, then continue.")
+    }
+
+    func testSchemeLessBareWebURLRemainsLinked() throws {
+        try assertBareWebURL("www.example.com",
+                             targetURL: "http://www.example.com",
+                             in: "Read www.example.com for details.",
+                             visibleText: "Read www.example.com for details.")
+    }
+
+    private func assertBareWebURL(_ authoredURL: String,
+                                  targetURL: String? = nil,
+                                  in source: String,
+                                  visibleText expectedVisibleText: String,
+                                  file: StaticString = #filePath,
+                                  line: UInt = #line) throws {
+        let rendered = MessageMarkdown.attributed(source)
+        XCTAssertEqual(String(rendered.characters), expectedVisibleText, file: file, line: line)
+
+        let linkRuns = rendered.runs.filter { $0.link != nil }
+        XCTAssertEqual(linkRuns.count, 1, file: file, line: line)
+        let linkRun = try XCTUnwrap(linkRuns.first,
+                                    "The written URL should remain tappable.",
+                                    file: file,
+                                    line: line)
+        XCTAssertEqual(String(rendered[linkRun.range].characters), authoredURL,
+                       file: file,
+                       line: line)
+        XCTAssertEqual(linkRun.link?.absoluteString, targetURL ?? authoredURL, file: file, line: line)
     }
 
     func testCompactPreviewTruncatesParsedTextAndRetainsLinkAndEmphasis() throws {

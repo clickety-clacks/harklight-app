@@ -136,17 +136,7 @@ enum MessageMarkdown {
     }
 
     private static func makeValue(_ source: String) -> CachedValue {
-        var parsed = parse(source)
-        linkifyPlainWebURLs(in: &parsed)
-        let hasFormattingOrLinks = parsed.runs.contains { run in
-            if run.link != nil { return true }
-            if let inlineIntent = run.inlinePresentationIntent, !inlineIntent.isEmpty {
-                return true
-            }
-            return run.presentationIntent?.components.contains {
-                isNonParagraphBlockComponent($0.kind)
-            } == true
-        }
+        let parsed = parse(source)
 
         var rendered = AttributedString()
         var previousBlock: [BlockComponent] = []
@@ -234,6 +224,17 @@ enum MessageMarkdown {
             rendered += content
         }
 
+        linkifyPlainWebURLs(in: &rendered)
+        let hasFormattingOrLinks = rendered.runs.contains { run in
+            if run.link != nil { return true }
+            if let inlineIntent = run.inlinePresentationIntent, !inlineIntent.isEmpty {
+                return true
+            }
+            return run.presentationIntent?.components.contains {
+                isNonParagraphBlockComponent($0.kind)
+            } == true
+        }
+
         return CachedValue(attributed: rendered,
                            hasFormattingOrLinks: hasFormattingOrLinks)
     }
@@ -283,10 +284,10 @@ enum MessageMarkdown {
         let matches = detector.matches(in: visibleText,
                                       range: NSRange(visibleText.startIndex..., in: visibleText))
         for match in matches {
+            guard let stringRange = Range(match.range, in: visibleText) else { continue }
             guard let url = match.url,
                   let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https",
-                  let stringRange = Range(match.range, in: visibleText),
                   let lower = AttributedString.Index(stringRange.lowerBound, within: attributed),
                   let upper = AttributedString.Index(stringRange.upperBound, within: attributed) else {
                 continue
