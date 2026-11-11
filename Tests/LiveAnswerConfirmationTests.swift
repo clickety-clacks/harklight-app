@@ -32,6 +32,38 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         return (context, store, try LivePresentationStore(store: store, context: context), key)
     }
 
+    func testCachedCurrentRowDoesNotAuthorizeAnswerUntilRelayConfirmsIt() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("cached-answer"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Cached question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
+        let stored = StoredRequest(key: key, originalPayload: payload)
+        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(stored, .message)),
+                            context: context)
+        let inbox = try store.snapshot(context: context)
+        try store.restoreCachedServerState(CachedAttentionServerState(
+            requests: inbox.requests, remoteStates: inbox.remoteStates, cursor: inbox.cursor,
+            conversationCursor: 0, conversations: [:], inboxView: nil,
+            currentRequestKeys: [key]), context: context)
+        let live = try LivePresentationStore(store: store, context: context)
+        let cachedRequest = try XCTUnwrap(live.request(for: key))
+        XCTAssertTrue(cachedRequest.inboxStateIsCurrent,
+                      "The saved copy can render the row immediately.")
+        XCTAssertFalse(live.canSendToCurrentServer,
+                       "A cached row does not prove that the relay has confirmed a current snapshot.")
+
+        let answerDraft = RequestDraft(inputs: [:],
+            compatibility: CompatibilityDraft(selectedActionID: ExactText("got-it")))
+        XCTAssertFalse(live.submitFromUser(key, answerDraft: answerDraft, requestRevision: 1))
+        XCTAssertFalse(live.submitNoCommentFromUser(key, requestRevision: 1, selectionIsLocal: true))
+        XCTAssertTrue(try store.snapshot(context: context).intents.isEmpty)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+    }
+
     private func setupTextReplyOnly() throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
@@ -369,7 +401,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let pending = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(pending.lifecycleStatus, .pending)
         XCTAssertEqual(pending.receiptFacts?.evidenceLabel,
-                       "Your answer is saved on this device. Relay acceptance is not yet confirmed.")
+                       "Submission unconfirmed · saved draft retained")
         XCTAssertFalse(pending.answerNotDelivered)
         XCTAssertFalse(LiveRequestDetail(request: pending, store: live).canAnswer,
                        "An unknown delivery remains locked until the original operation is reconciled.")

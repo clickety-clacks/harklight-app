@@ -364,8 +364,9 @@ final class HarklightUITests: XCTestCase {
                        "The attempted local answer is not presented as the unknown accepted answer.")
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
                        "The content area omits the redundant Answered status line.")
-        XCTAssertFalse(app.staticTexts["request-receipt-evidence"].exists,
-                       "Internal evidence wording stays out of the content area.")
+        XCTAssertEqual(app.staticTexts["request-receipt-evidence"].label,
+                       "Submission unconfirmed · saved draft retained",
+                       "An unconfirmed send is shown without claiming server acceptance.")
         XCTAssertFalse(app.descendants(matching: .any)["Established submitted location"].exists,
                        "An unconfirmed closure must keep the neutral sender scene.")
 
@@ -379,7 +380,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(inbox.isSelected, app.debugDescription)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A server-answered request no longer appears in Inbox.")
-        XCTAssertFalse(app.staticTexts["Answer sent · result not confirmed"].exists,
+        XCTAssertFalse(app.staticTexts["Submission unconfirmed · saved draft retained"].exists,
                        "A server-answered request is not shown as a failed response.")
         XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists,
                        "The list must not claim this device's answer was accepted.")
@@ -388,7 +389,7 @@ final class HarklightUITests: XCTestCase {
         workspaceTab("Replied", in: app).tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The server-answered request appears in Replied.")
-        XCTAssertFalse(app.staticTexts["Answer sent · result not confirmed"].exists)
+        XCTAssertFalse(app.staticTexts["Submission unconfirmed · saved draft retained"].exists)
         XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists)
         attachScreenshot("Server-answered response in Replied", from: app)
     }
@@ -409,7 +410,7 @@ final class HarklightUITests: XCTestCase {
         let inbox = workspaceTab("Inbox", in: app)
         if !inbox.isSelected { inbox.tap() }
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(row.label.contains("Answer sent · result not confirmed"),
+        XCTAssertTrue(row.label.contains("Submission unconfirmed · saved draft retained"),
                       "A failed or unresolved send is shown on its Inbox row.")
         let warningButton = app.buttons["inbox-warning-button"]
         XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
@@ -417,7 +418,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(message.waitForExistence(timeout: 5),
                       "A send left without a confirmed result remains available in the Inbox warning.")
         XCTAssertEqual(message.label,
-                       "A request closed without a confirmed result for your answer. Your answer stays saved on this device.",
+                       "Submission unconfirmed · saved draft retained",
                        "The warning explains the unresolved send in plain language.")
         attachScreenshot("Unresolved send warning opened from Inbox", from: app)
     }

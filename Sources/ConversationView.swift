@@ -268,6 +268,7 @@ private struct ConversationHistoryContent: View, Equatable {
     let initialScrollTurnID: ExactText?
     let dynamicTypeSize: DynamicTypeSize
     let inspect: (ConversationFile, UInt64) -> Void
+    @State private var visibleAgentReplyTurnIDs = Set<ExactText>()
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         // Read cursors change as replies cross the visibility threshold, but
@@ -323,14 +324,25 @@ private struct ConversationHistoryContent: View, Equatable {
                             inspect: inspect)
                             .id(turn.id)
                             .onScrollVisibilityChange(threshold: 0.5) { isVisible in
-                                guard isVisible, turn.kind == .reply, turn.author == .origin else { return }
-                                store.markConversationRead(key, through: turn.id)
+                                guard turn.kind == .reply, turn.author == .origin else { return }
+                                if isVisible {
+                                    visibleAgentReplyTurnIDs.insert(turn.id)
+                                    store.markConversationRead(key, through: turn.id)
+                                } else {
+                                    visibleAgentReplyTurnIDs.remove(turn.id)
+                                }
                             }
                     }
                 }.padding(.horizontal)
             }
             .accessibilityIdentifier("conversation-history-scroll")
             .scrollDismissesKeyboard(.interactively)
+            .onChange(of: store.canUseCurrentServerState(for: key)) { _, canUseCurrentServerState in
+                guard canUseCurrentServerState else { return }
+                for turnID in visibleAgentReplyTurnIDs {
+                    store.markConversationRead(key, through: turnID)
+                }
+            }
             .onChange(of: thread.turns.count) { _, _ in
                 if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
             }
@@ -459,7 +471,7 @@ private struct ConversationComposerSendButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
-        .accessibilityLabel(isLocalExample ? "Send locally" : frozen ? "Retry saved discussion" : "Send message")
+        .accessibilityLabel(isLocalExample ? "Send locally" : frozen ? "Retry" : "Send message")
         .accessibilityIdentifier("sample-chat-send")
         .disabled(isSendingDiscussion || !allowsDiscussion || hasPendingUploadCleanup ||
                   hasAbandonedDiscussion || hasUnreadyUploadReference ||
@@ -479,7 +491,8 @@ private struct ConversationComposer: View {
     @Environment(\.scenePhase) private var scenePhase
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
-    private var allowsDiscussion: Bool { thread?.allowsDiscussion == true }
+    private var allowsDraftEditing: Bool { store.canEditDiscussionDraft(for: key) }
+    private var allowsDiscussion: Bool { store.canSendDiscussion(for: key) }
     private var frozen: Bool {
         switch draft.disposition { case .submitting, .outcomeUnknown, .acceptedPendingReplay: return true; default: return false }
     }
@@ -498,7 +511,7 @@ private struct ConversationComposer: View {
                 .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
                 .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
                 .accessibilityIdentifier("sample-chat-add-attachment")
-                .disabled(frozen || !allowsDiscussion || store.hasPendingUploadCleanup(for: key, revision: revision))
+                .disabled(frozen || !allowsDraftEditing || store.hasPendingUploadCleanup(for: key, revision: revision))
                 .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
                     Button("Sample photo") { addExample("Photo") }
                     Button("Sample file") { addExample("Document") }
@@ -533,7 +546,7 @@ private struct ConversationComposer: View {
                     .padding(.top, 8)
                 }
                 ConversationComposerTextInput(session: textSession,
-                    isEnabled: !frozen && allowsDiscussion,
+                    isEnabled: !frozen && allowsDraftEditing,
                     onTextChange: scheduleTextSave, onReturn: sendStagedText)
             }
             .padding(.horizontal, 12)
@@ -703,11 +716,11 @@ private struct ConversationDraftStatus: View {
         if let status = ConversationDraftPresentationText.status(for: disposition) {
             switch status {
             case .submitting:
-                Text("Submitting · saved draft retained").font(.caption).foregroundStyle(.secondary)
+                Text("Sending").font(.caption).foregroundStyle(.secondary)
             case .outcomeUnknown:
                 Text("Submission unconfirmed · saved draft retained").font(.caption).foregroundStyle(.secondary)
             case .acceptedPendingReplay:
-                Text("Sent · syncing chat history").font(.caption).foregroundStyle(.secondary)
+                Text("Sent").font(.caption).foregroundStyle(.secondary)
             case let .rejected(reason):
                 Text(reason.rawValue).font(.caption).foregroundStyle(.secondary)
             }

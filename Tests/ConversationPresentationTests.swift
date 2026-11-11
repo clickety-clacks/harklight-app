@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 import XCTest
 @testable import Harklight
+import HarklightNativeRelay
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
@@ -275,6 +276,47 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(availability.message(for: context))
     }
 
+    func testCachedRelayConversationCannotAuthorizeSendReadOrOpenedActions() async throws {
+        await NativeRelayLifecycle.shared.deactivate()
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("cache-person"), deviceID: ExactText("cache-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
+        let serverStore = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        _ = try serverStore.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        try serverStore.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        let reply = ConversationTurn(id: ExactText("reply"), binding: binding, author: .origin,
+            sessionHandle: ExactText("session"), text: ExactText("Reply"), kind: .reply)
+        try serverStore.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(reply)), context: context)
+
+        let serverSnapshot = ServerStateCacheSnapshot.make(
+            from: try serverStore.snapshot(context: context),
+            conversations: try serverStore.conversationSnapshot(context: context))
+        let cacheBackedStore = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+        try cacheBackedStore.prepareForServerCache(context: context)
+        try cacheBackedStore.restoreCachedServerState(
+            try serverSnapshot.attentionDomainState(), context: context)
+        let model = try LivePresentationStore(store: cacheBackedStore, context: context)
+
+        XCTAssertTrue(model.conversation(for: key)?.allowsDiscussion == true)
+        XCTAssertFalse(model.canSendDiscussion(for: key))
+        model.markConversationRead(key, through: ExactText("reply"))
+        model.reportMessageContentOpened(try XCTUnwrap(model.request(for: key)))
+
+        XCTAssertNil(try cacheBackedStore.conversationSnapshot(context: context)
+            .threads[key]?.readThroughTurn)
+        XCTAssertTrue(try cacheBackedStore.snapshot(context: context).pendingMessageOpens.isEmpty)
+    }
+
     func testConversationPanelSeparatesNoChatFromLoadingAndUnavailableStates() {
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .available,
             isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .noChat)
@@ -298,6 +340,109 @@ final class ConversationPresentationTests: XCTestCase {
             isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: false), .offline)
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
             isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .availabilityUnconfirmed)
+    }
+
+    func testCachedClosedChatKeepsDraftEditableWithoutAuthorizingSend() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("closed-cache"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
+        let serverStore = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence())
+        _ = try serverStore.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        try serverStore.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        try serverStore.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .terminal(turn: ExactText("expired"), author: .server, state: .expired)),
+            context: context)
+
+        let snapshot = ServerStateCacheSnapshot.make(
+            from: try serverStore.snapshot(context: context),
+            conversations: try serverStore.conversationSnapshot(context: context))
+        let cacheBackedStore = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+        try cacheBackedStore.prepareForServerCache(context: context)
+        try cacheBackedStore.restoreCachedServerState(
+            try snapshot.attentionDomainState(), context: context)
+        let model = try LivePresentationStore(store: cacheBackedStore, context: context)
+
+        XCTAssertFalse(try XCTUnwrap(model.conversation(for: key)).allowsDiscussion)
+        XCTAssertTrue(model.canEditDiscussionDraft(for: key))
+        XCTAssertFalse(model.canSendDiscussion(for: key))
+        XCTAssertTrue(model.updateConversation(for: key, revision: 1, text: "Saved while syncing"))
+        XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text,
+                       ExactText("Saved while syncing"))
+        XCTAssertFalse(model.canSendDiscussion(for: key))
+    }
+
+    func testExistingAnswerAndChatDraftsCarryIntoCacheBackedLaunchState() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let installedStore = try AttentionDomainStore(context: context, persistence: persistence)
+        _ = try installedStore.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        try installedStore.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        let reply = ConversationTurn(id: ExactText("reply"), binding: binding, author: .origin,
+            sessionHandle: ExactText("session"), text: ExactText("Cached server reply"), kind: .reply)
+        try installedStore.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(reply)), context: context)
+
+        let answerDraft = RequestDraft(inputs: [:],
+            compatibility: CompatibilityDraft(selectedActionID: ExactText("yes")))
+        let selector = try installedStore.selector(for: key, context: context)
+        try installedStore.saveDraft(answerDraft, selector: selector, context: context)
+        let chatDraft = ConversationDraft(binding: binding, text: ExactText("Keep this chat draft"))
+        try installedStore.saveConversationDraft(chatDraft, context: context)
+        let discussionOperationID = try installedStore.prepareDiscussion(binding, context: context)
+
+        let serverSnapshot = ServerStateCacheSnapshot.make(
+            from: try installedStore.snapshot(context: context),
+            conversations: try installedStore.conversationSnapshot(context: context))
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("harklight-draft-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let cache = FileServerStateCache(fileURL: cacheDirectory.appendingPathComponent("cache.json"))
+        try await cache.save(serverSnapshot)
+        let loadedSnapshot = try await cache.load()
+        let persistedSnapshot = try XCTUnwrap(loadedSnapshot)
+
+        let upgradedStore = try AttentionDomainStore(context: context, persistence: persistence,
+                                                     persistsOnlyLocalState: true)
+        XCTAssertTrue(try upgradedStore.hasLegacyServerProjection(context: context))
+        try upgradedStore.prepareForServerCache(context: context)
+
+        let relaunchedStore = try AttentionDomainStore(context: context, persistence: persistence,
+                                                       persistsOnlyLocalState: true)
+        try relaunchedStore.restoreCachedServerState(
+            try persistedSnapshot.attentionDomainState(), context: context)
+
+        let inbox = try relaunchedStore.snapshot(context: context)
+        XCTAssertEqual(inbox.requests[key]?.key, key)
+        XCTAssertEqual(inbox.requests[key]?.originalPayload, payload)
+        XCTAssertEqual(inbox.drafts[key], answerDraft)
+        let thread = try XCTUnwrap(relaunchedStore.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.turns.map(\.id), [reply.id], "Cached server reply history survives a file-backed cold launch.")
+        XCTAssertEqual(thread.turns.first?.text, reply.text)
+        XCTAssertEqual(thread.drafts[1]?.text, chatDraft.text)
+        XCTAssertEqual(thread.drafts[1]?.disposition, .outcomeUnknown(discussionOperationID),
+                       "A send left open by app termination is no longer presented as in flight.")
+        XCTAssertNil(thread.readThroughTurn, "The cache does not restore read state.")
+        XCTAssertTrue(inbox.outbox.isEmpty, "Restoring the saved copy never creates work to send.")
     }
 
     func testInlineTurnAndDraftBytesStayBehindReferencesAcrossTextOnlyComposerWrites() throws {

@@ -1340,7 +1340,8 @@ struct LiveRequestDetail: View {
     }
 
     private var showsPendingAnswerConfirmation: Bool {
-        !isSupersedesReadOnly && !storePresentationSnapshot.isRetracted &&
+        request.inboxStateIsCurrent &&
+            !isSupersedesReadOnly && !storePresentationSnapshot.isRetracted &&
             request.lifecycleStatus == .pending && request.receiptFacts?.ownOutcome == .unconfirmed
     }
 
@@ -1376,11 +1377,7 @@ struct LiveRequestDetail: View {
             defaultAnswerAction: request.defaultAnswerAction)
     }
 
-    private var pendingAnswerText: String? {
-        AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
-            submittedAnswer: request.submittedAnswer,
-            projection: request.projection)
-    }
+    private var pendingAnswerText: String? { nil }
 
     private var attemptedAnswerText: String? {
         AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
@@ -1404,10 +1401,13 @@ struct LiveRequestDetail: View {
     }
 
     private var answerStatusText: String? {
-        guard let facts = request.receiptFacts else { return nil }
+        if let receipt = request.intentReceipt,
+           store.isSendingAnswer(receipt.intentID) { return "Sending" }
         return Self.answerStatusText(lifecycleStatus: request.lifecycleStatus,
-                                     ownOutcome: facts.ownOutcome,
-                                     answeredFromThisDevice: request.intentReceipt != nil)
+                                     ownOutcome: request.receiptFacts?.ownOutcome,
+                                     answeredFromThisDevice: request.intentReceipt != nil,
+                                     localState: request.intentReceipt?.localState,
+                                     answerNotDelivered: request.answerNotDelivered)
     }
 
     private var byWhenDate: Date? {
@@ -1418,26 +1418,23 @@ struct LiveRequestDetail: View {
     /// Plain-language send status for the content area. Internal evidence
     /// wording stays in the request details sheet.
     static func answerStatusText(lifecycleStatus: AppLifecycleStatus,
-                                 ownOutcome: OwnOutcome,
-                                 answeredFromThisDevice: Bool) -> String? {
-        switch lifecycleStatus {
-        case .open, .answered:
-            return nil
-        case .noComment:
-            return nil
-        case .pending:
-            return ownOutcome == .unconfirmed
-                ? "Your answer is saved on this device. Delivery is not yet confirmed."
-                : nil
-        case .cleared, .expired, .superseded:
-            if ownOutcome == .refused {
-                return "The sender retracted this request before your answer was accepted. The answer was not accepted."
-            }
-            if ownOutcome == .unconfirmed && answeredFromThisDevice {
-                return "This request closed without a confirmed result for your answer."
-            }
-            return nil
+                                 ownOutcome: OwnOutcome?,
+                                 answeredFromThisDevice: Bool,
+                                 localState: LocalIntentState? = nil,
+                                 answerNotDelivered: Bool = false) -> String? {
+        if answerNotDelivered || localState == .notDelivered { return "Answer not delivered" }
+        if localState == .terminalUnconfirmed ||
+            (ownOutcome == .unconfirmed && answeredFromThisDevice) {
+            return "Submission unconfirmed · saved draft retained"
         }
+        if (localState.map { if case .accepted = $0 { true } else { false } } == true ||
+            ownOutcome == .accepted) && lifecycleStatus != .answered && lifecycleStatus != .noComment {
+            return "Answer accepted"
+        }
+        if ownOutcome == .refused {
+            return "The sender retracted this request before your answer was accepted. The answer was not accepted."
+        }
+        return nil
     }
 
     private var failedResponseWarningButton: some View {
@@ -1474,13 +1471,19 @@ struct LiveRequestDetail: View {
     }
 
     private var canSubmitCurrentAnswer: Bool {
+        let locallyValid: Bool
         if let session = localReplySession {
-            return session.noCommentSelected
+            locallyValid = session.noCommentSelected
                 ? session.canSubmitFromSnapshot && request.informationalSeenStatus == nil
                 : session.canSubmitFromSnapshot
+        } else if noCommentSelected {
+            locallyValid = canOfferNoComment
+        } else {
+            locallyValid = canAnswer
         }
-        if noCommentSelected { return canOfferNoComment }
-        return canAnswer
+        guard locallyValid else { return false }
+        if localExample != nil || fixtureStore != nil { return true }
+        return store.canSendToCurrentServer && request.inboxStateIsCurrent
     }
 
     private var canOfferNoComment: Bool {
@@ -1488,7 +1491,8 @@ struct LiveRequestDetail: View {
         if let localReplySession { return localReplySession.canSubmitFromSnapshot }
         if let localExample { return localExample.canDeclineLocally }
         if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
-        guard !store.isReadOnly,
+        guard !store.isReadOnly, store.canSendToCurrentServer,
+              request.inboxStateIsCurrent,
               !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         return true
@@ -1786,7 +1790,7 @@ struct LiveRequestDetail: View {
                         .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                         .accessibilityIdentifier("inbox-status-unrefreshed")
                     if failedResponseWarning == nil,
-                       let localStatus = Self.cachedOperationStatus(request.intentReceipt?.localState) {
+                       let localStatus = store.answerOperationStatus(request.intentReceipt) {
                         Text(localStatus).font(.caption).foregroundStyle(detailColors.secondaryTextColor)
                     }
                 }
@@ -1807,10 +1811,17 @@ struct LiveRequestDetail: View {
                     }
                 }
                 if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
-                   request.lifecycleStatus == .pending, failedResponseWarning == nil {
-                    Button("Retry delivery") { store.retryPendingDelivery() }
+                   request.inboxStateIsCurrent,
+                   request.intentReceipt?.localState == .terminalUnconfirmed {
+                    Button("Retry") { _ = store.retryUnconfirmedAnswerFromUser(request.key) }
                         .buttonStyle(.bordered)
-                        .disabled(store.isReadOnly)
+                        .disabled(!store.canRetryUnconfirmedAnswer(for: request.key))
+                } else if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
+                          request.inboxStateIsCurrent,
+                          request.lifecycleStatus == .pending, failedResponseWarning == nil {
+                    Button("Refresh status") { store.retryPendingDelivery() }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isReadOnly || store.isRefreshing)
                 }
                 if !isSupersedesReadOnly, let fixtureStore, request.lifecycleStatus == .pending {
                     Button("Simulate fixture outcome", systemImage: "testtube.2") {
@@ -1835,7 +1846,7 @@ struct LiveRequestDetail: View {
                     Label(actionError, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
                 }
-                if request.inboxStateIsCurrent, let statusText = answerStatusText {
+                if let statusText = answerStatusText {
                     Text(statusText)
                         .font(.subheadline)
                         .foregroundStyle(detailColors.secondaryTextColor)
@@ -2174,18 +2185,6 @@ struct LiveRequestDetail: View {
         }
     }
 
-    private static func cachedOperationStatus(_ state: LocalIntentState?) -> String? {
-        guard let state else { return nil }
-        return switch state {
-        case .durable, .queuedForRelay: "Answer pending on this device"
-        case .accepted: "Answer accepted"
-        case .refusedByRetraction: "Answer refused · request retracted"
-        case .terminalUnconfirmed: "Answer sent · result not confirmed"
-        case .notDelivered: "Answer not delivered"
-        case .unsupported: "No comment was not accepted"
-        case .repairRequired: "Answer needs recovery"
-        }
-    }
 }
 
 @MainActor

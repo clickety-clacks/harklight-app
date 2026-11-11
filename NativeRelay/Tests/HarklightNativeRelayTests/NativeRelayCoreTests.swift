@@ -95,6 +95,12 @@ private final class DiagnosticEventCollector: @unchecked Sendable {
 }
 
 final class NativeRelayCoreTests: XCTestCase {
+    private actor SendCallStateRecorder {
+        private var states: [Bool] = []
+        func append(_ state: Bool) { states.append(state) }
+        func recordedStates() -> [Bool] { states }
+    }
+
     private final class Session: AuthenticatedInboxEventStreamSession, @unchecked Sendable {
         var authenticatedIdentity: ProfileIdentity
         var supportsPostCheckpointInboxEvents = false
@@ -114,6 +120,8 @@ final class NativeRelayCoreTests: XCTestCase {
         var inboxViewListItems: [JSONValue]?
         var inboxViewRevision = "view-test"
         var checkpointWasAccepted = false
+        var onCheckpointACK: (@Sendable () async -> Void)?
+        var snapshotAtCheckpointACK: ServerStateCacheSnapshot?
         var reconciliationOverrides: [UUID: JSONValue] = [:]
         var missingReconciliationOperationIDs = Set<UUID>()
         private var postCheckpointEvents: [Data] = []
@@ -214,6 +222,7 @@ final class NativeRelayCoreTests: XCTestCase {
                 }
                 return response(viewMembers)
             case "inbox_checkpoint_ack":
+                await onCheckpointACK?()
                 checkpointWasAccepted = true
                 let acceptedHigh = uint64(value.uniqueValue(named: "high_water")) ?? 0
                 return response([
@@ -1366,6 +1375,124 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try restarted.snapshot(context: restartedContext).cursor, 1,
                        "An operation receipt at sequence 9 cannot jump the durable relay cursor.")
         XCTAssertTrue(try restarted.snapshot(context: restartedContext).outbox.isEmpty)
+    }
+
+    func testCacheBackedResyncDoesNotSendUntilTappedAndRetryReusesOperationID() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-cache"),
+                                       deviceID: ExactText("installation-cache"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryAttentionStatePersistence()
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: persistence,
+                                             persistsOnlyLocalState: true)
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"),
+                             messageID: ExactText("cached-request"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        let seedRequest = StoredRequest(key: key, originalPayload: payload)
+        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(seedRequest, .message)),
+                            context: context)
+        let request = try XCTUnwrap(store.snapshot(context: context).requests[key])
+        let cachedState = CachedAttentionServerState(
+            requests: [key: request], remoteStates: [:], cursor: 1, conversationCursor: 0,
+            conversations: [:], inboxView: nil, currentRequestKeys: [key])
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        try store.prepareForServerCache(context: context)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 0,
+                       "The old relay cursor is discarded before the cache snapshot is restored.")
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "Migration retains the answer for a tap without leaving it in an auto-send queue.")
+        try store.restoreCachedServerState(cachedState, context: context)
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1,
+                       "The saved server cursor resumes the next snapshot.")
+
+        let session = Session(identity)
+        session.snapshotHighWater = 1
+        let acceptance = try JSONValue.parse(data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"cached-request","origin":"source","as":"message","message":{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}}"#))
+        session.initialItems = [.object([JSONMember("acceptance", acceptance)])]
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        let cache = try FileServerStateCache()
+        session.onCheckpointACK = {
+            session.snapshotAtCheckpointACK = try? await cache.load()
+        }
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       serverStateCache: cache)
+
+        _ = try await core.resyncAndDrainOutbox()
+
+        XCTAssertEqual(session.snapshotAtCheckpointACK?.cursor, 1,
+                       "The current snapshot is saved before checkpoint acknowledgement.")
+        XCTAssertEqual(session.snapshotAtCheckpointACK?.requests.map(\.request.key), [key])
+        let inboxStart = try XCTUnwrap(session.requests
+            .map { String(decoding: $0, as: UTF8.self) }
+            .first { $0.contains("\"type\":\"inbox_start\"") })
+        XCTAssertTrue(inboxStart.contains("\"since\":1"),
+                      "Cache-backed sync resumes from the cached cursor.")
+        let backgroundSendCount = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(backgroundSendCount, 0)
+        XCTAssertTrue(session.sent.isEmpty, "Refresh and legacy drain entry points do not resend cached answers.")
+
+        let callStates = SendCallStateRecorder()
+        session.result = .unresolved
+        try await core.sendOriginalOperationForUserTap(receipt.intentID,
+            onSendCallStateChange: { await callStates.append($0) })
+        let firstCallStates = await callStates.recordedStates()
+        XCTAssertEqual(firstCallStates, [true, false])
+        XCTAssertEqual(session.sent.map { $0.1 }, [receipt.opID])
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "An uncertain send is retained for Retry, not left for background drain.")
+
+        _ = try await core.resyncAndDrainOutbox()
+        let retryBackgroundCount = try await core.sendPendingOriginalOperations()
+        XCTAssertEqual(retryBackgroundCount, 0)
+        XCTAssertEqual(session.sent.count, 1)
+
+        session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+        try await core.sendOriginalOperationForUserTap(receipt.intentID,
+            onSendCallStateChange: { await callStates.append($0) })
+
+        let allCallStates = await callStates.recordedStates()
+        XCTAssertEqual(allCallStates, [true, false, true, false])
+        XCTAssertEqual(session.sent.map { $0.1 }, [receipt.opID, receipt.opID])
+        XCTAssertEqual(session.sent.first?.0, session.sent.last?.0,
+                       "Manual retry reuses the identical operation id and frame.")
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+    }
+
+    func testCacheBackedRefreshDoesNotQueueAcceptedAnswerForAutomaticReconciliation() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-accepted-cache"),
+                                       deviceID: ExactText("installation-accepted-cache"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence(),
+                                             persistsOnlyLocalState: true)
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"),
+                             messageID: ExactText("accepted-cache"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)),
+            context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                          terminalSequence: 2, context: context)
+
+        try store.prepareForServerCache(context: context)
+
+        let migrated = try store.snapshot(context: context)
+        XCTAssertNotNil(migrated.intents[receipt.intentID],
+                        "The send-call result remains available for its status.")
+        XCTAssertTrue(migrated.outbox.isEmpty)
+        XCTAssertTrue(try store.inboxOperationInventory(context: context).isEmpty,
+                      "A later refresh does not resubmit or reconcile a previously accepted answer.")
     }
 
     func testCheckpointReconcilesAcceptedOriginalAndAppliesItsActualTerminalSequenceOnce() async throws {
