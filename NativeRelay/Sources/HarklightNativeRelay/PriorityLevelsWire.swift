@@ -139,12 +139,12 @@ public struct PriorityLevelsWire: Sendable {
             levels.append(PriorityLevel(name: name, lowerBound: lowerBound, bounceAfterDays: bounceAfterDays))
         }
         if levels.isEmpty { return [] }
-        let rows = levels.map { level in
+        let draftRows = levels.map { level in
             PriorityLevelDraftRow(name: level.name.rawValue,
                                   lowerBound: String(level.lowerBound),
                                   bounceAfterDays: level.bounceAfterDays.map { String($0) } ?? "")
         }
-        guard PriorityLevelsTableValidation.levels(from: rows) == levels else { return nil }
+        guard PriorityLevelsTableValidation.levels(from: draftRows) == levels else { return nil }
         return levels
     }
 }

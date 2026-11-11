@@ -68,10 +68,11 @@ final class PriorityLevelsTests: XCTestCase {
         }
         func inboxRequest(_ request: Data, ref: String) async throws -> Data {
             requests.append((request, ref))
-            requestLock.lock()
-            let shouldHold = holdNextRequest
-            holdNextRequest = false
-            requestLock.unlock()
+            let shouldHold = requestLock.withLock {
+                let shouldHold = holdNextRequest
+                holdNextRequest = false
+                return shouldHold
+            }
             if shouldHold {
                 return try await withCheckedThrowingContinuation { continuation in
                     requestLock.lock()
@@ -435,7 +436,7 @@ final class PriorityLevelsTests: XCTestCase {
         await core.refreshPriorityLevels()
 
         var state = try fixture.store.snapshot(context: fixture.context).priorityLevels
-        XCTAssertEqual(state.confirmedLevels, [routine, PriorityLevel(name: "Later", lowerBound: 0.7,
+        XCTAssertEqual(state.confirmedLevels, [routine, PriorityLevel(name: ExactText("Later"), lowerBound: 0.7,
                                                                        bounceAfterDays: 3)])
         XCTAssertEqual(PriorityLevelsTableValidation.levels(from: state.displayedRows), state.confirmedLevels)
 
@@ -447,7 +448,7 @@ final class PriorityLevelsTests: XCTestCase {
         await core.refreshPriorityLevels()
 
         state = try fixture.store.snapshot(context: fixture.context).priorityLevels
-        XCTAssertEqual(state.confirmedLevels, [routine, PriorityLevel(name: "Latest", lowerBound: 0.8,
+        XCTAssertEqual(state.confirmedLevels, [routine, PriorityLevel(name: ExactText("Latest"), lowerBound: 0.8,
                                                                         bounceAfterDays: 2)])
         XCTAssertEqual(state.draftRows, localDraft)
     }
