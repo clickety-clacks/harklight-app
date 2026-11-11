@@ -47,6 +47,7 @@ struct ConversationPanel: View {
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     var testConversationSheetDidAppear: (() -> Void)? = nil
+    var dismissToList: (() -> Void)? = nil
     var discussionUnavailableReason: LocalizedStringResource? = nil
     @State private var selectedRevision: UInt64?
     @State private var inspectedFile: ConversationFile?
@@ -57,10 +58,29 @@ struct ConversationPanel: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
 
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var revision: UInt64 { selectedRevision ?? thread?.currentRevision ?? 1 }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
+
+    private func dismissChat() {
+        if let dismissToList {
+            dismissToList()
+        } else {
+            dismiss()
+        }
+    }
+
+    private var horizontalDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 80)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+                guard abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 else { return }
+                dismissChat()
+            }
+    }
 
     private func hasNotAcceptedCardForRetainedAnswer(thread: ConversationThread,
                                                       request: PresentedRequest?) -> Bool {
@@ -108,6 +128,7 @@ struct ConversationPanel: View {
                         inspectedFileRevision = fileRevision
                     })
                     .equatable()
+                    .simultaneousGesture(horizontalDismissGesture)
                 if let terminal = thread.terminal {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
@@ -149,37 +170,42 @@ struct ConversationPanel: View {
                         .padding(verticalSizeClass == .compact ? 4 : 12)
                 }
             } else {
-                switch ConversationPanelEmptyState.resolve(
-                    availability: store.conversationAvailabilityState,
-                    isRefreshing: store.isRefreshing,
-                    hasConnectionWarning: store.connectionWarning != nil,
-                    canCheckAvailability: store.canCheckConversationAvailability
-                ) {
-                case .noChat:
-                    ContentUnavailableView("No chat", systemImage: "bubble.left.and.bubble.right",
-                        description: Text("The agent that sent this didn’t open a chat for it. You can still respond to the message itself."))
-                        .accessibilityIdentifier("conversation-no-chat-empty-state")
-                case .checkingAvailability:
-                    ProgressView("Checking chat availability…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityIdentifier("conversation-availability-checking")
-                case .chatUnavailable:
-                    ContentUnavailableView("Chat unavailable", systemImage: "bubble.left.and.bubble.right",
-                        description: Text("Chat is not available on this server yet."))
-                        .accessibilityIdentifier("conversation-unavailable")
-                case .connectionUnavailable:
-                    ContentUnavailableView("Chat status unavailable", systemImage: "wifi.slash",
-                        description: Text("The server connection could not confirm whether a chat was opened."))
-                        .accessibilityIdentifier("conversation-status-unavailable")
-                case .offline:
-                    ContentUnavailableView("Chat status unavailable offline", systemImage: "wifi.slash",
-                        description: Text("This offline view cannot confirm whether a chat was opened."))
-                        .accessibilityIdentifier("conversation-status-offline")
-                case .availabilityUnconfirmed:
-                    ContentUnavailableView("Chat status not confirmed", systemImage: "questionmark.bubble",
-                        description: Text("The server has not confirmed whether a chat was opened yet."))
-                        .accessibilityIdentifier("conversation-status-unconfirmed")
+                Group {
+                    switch ConversationPanelEmptyState.resolve(
+                        availability: store.conversationAvailabilityState,
+                        isRefreshing: store.isRefreshing,
+                        hasConnectionWarning: store.connectionWarning != nil,
+                        canCheckAvailability: store.canCheckConversationAvailability
+                    ) {
+                    case .noChat:
+                        ContentUnavailableView("No chat", systemImage: "bubble.left.and.bubble.right",
+                            description: Text("The agent that sent this didn’t open a chat for it. You can still respond to the message itself."))
+                            .accessibilityIdentifier("conversation-no-chat-empty-state")
+                    case .checkingAvailability:
+                        ProgressView("Checking chat availability…")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .accessibilityIdentifier("conversation-availability-checking")
+                    case .chatUnavailable:
+                        ContentUnavailableView("Chat unavailable", systemImage: "bubble.left.and.bubble.right",
+                            description: Text("Chat is not available on this server yet."))
+                            .accessibilityIdentifier("conversation-unavailable")
+                    case .connectionUnavailable:
+                        ContentUnavailableView("Chat status unavailable", systemImage: "wifi.slash",
+                            description: Text("The server connection could not confirm whether a chat was opened."))
+                            .accessibilityIdentifier("conversation-status-unavailable")
+                    case .offline:
+                        ContentUnavailableView("Chat status unavailable offline", systemImage: "wifi.slash",
+                            description: Text("This offline view cannot confirm whether a chat was opened."))
+                            .accessibilityIdentifier("conversation-status-offline")
+                    case .availabilityUnconfirmed:
+                        ContentUnavailableView("Chat status not confirmed", systemImage: "questionmark.bubble",
+                            description: Text("The server has not confirmed whether a chat was opened yet."))
+                            .accessibilityIdentifier("conversation-status-unconfirmed")
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .simultaneousGesture(horizontalDismissGesture)
             }
         }
         .onAppear {
@@ -199,6 +225,7 @@ struct ConversationPanel: View {
                 NativeNotificationRouter.shared.conversationBecameHidden(key)
             }
         }
+        .accessibilityAction(named: "Dismiss chat") { dismissChat() }
         .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
         .sheet(item: $inspectedFile) { file in
             NavigationStack {

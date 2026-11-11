@@ -981,6 +981,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 ConversationPanel(store: conversationStore, key: key,
                     sender: key.senderID.rawValue, title: request.title?.rawValue ?? "",
                     initialScrollTurnID: replyRouteTargetTurnID(for: key),
+                    dismissToList: { navigate(to: nil) },
                     discussionUnavailableReason: request.lifecycleStatus == .superseded
                         ? ConversationPanelText.supersededReadOnlyReason
                         : nil)
