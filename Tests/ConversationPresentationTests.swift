@@ -561,6 +561,33 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
     }
 
+    func testHistoricalRequestReturnsUnavailableForRedactedRevision() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fictional-relay"),
+                                       personID: ExactText("historical-version-person"),
+                                       deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        let domain = try AttentionDomainStore(context: context,
+                                             persistence: MemoryAttentionStatePersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("historical-version"))
+        let original = try JSONValue.parse(Data(#"{"title":"Original question","body":"Original wording"}"#.utf8))
+        try domain.registerFixtureRequests([
+            StoredRequest(key: key, originalPayload: original)
+        ], context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("origin"), payload: original)), context: context)
+        let redacted = ConversationTurn(id: ExactText("2"),
+            binding: ConversationBinding(request: key, revision: 2),
+            author: .origin, sessionHandle: ExactText("origin"), text: ExactText(""),
+            contentRedacted: true, kind: .revision)
+        try domain.applyConversation(ConversationEvent(sequence: 2,
+            binding: redacted.binding, fact: .redactedRevision(redacted)), context: context)
+
+        let store = try LivePresentationStore(localFixtureStore: domain, context: context)
+        XCTAssertNil(store.historicalRequest(for: key, revision: 2))
+    }
+
     func testShakeConversationUsesTheDomainAndOrdinaryViewModelAndCannotPrepareDelivery() throws {
         let library = SampleLibrary()
         library.populate()

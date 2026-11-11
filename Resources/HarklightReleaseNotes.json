@@ -129,6 +129,19 @@
           "detail": "Swipe left or right in Chat history to return to the message, including when the history is empty or a draft is open."
         }
       ]
+    },
+    {
+      "id": "post-148-historical-version-access",
+      "marketingVersion": "0.1.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "historical-message-versions",
+          "symbol": "clock.arrow.circlepath",
+          "title": "Read earlier message versions",
+          "detail": "Open an earlier version from an updated message. Chat stays with the current version."
+        }
+      ]
     }
   ]
 }

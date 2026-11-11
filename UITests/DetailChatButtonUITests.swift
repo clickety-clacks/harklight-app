@@ -239,6 +239,54 @@ final class DetailChatButtonUITests: XCTestCase {
         attachScreenshot("chat-remains-open-after-composer-drags")
     }
 
+    func testDetailVersionIndicatorOpensReadOnlyHistoricalMessageAndChatHasNoVersionPicker() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let search = workspaceSearchField(in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap()
+        search.typeText("Archive\n")
+        let revised = app.descendants(matching: .any)["sample-approval-2"]
+        XCTAssertTrue(revised.waitForExistence(timeout: 10), app.debugDescription)
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<8 where !revised.isHittable { list.swipeUp() }
+        XCTAssertTrue(revised.isHittable, app.debugDescription)
+        revised.tap()
+
+        let versionIndicator = app.descendants(matching: .any)["request-update-fact"]
+        XCTAssertTrue(versionIndicator.waitForExistence(timeout: 5), app.debugDescription)
+        versionIndicator.tap()
+        let original = app.buttons["Original version"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5), app.debugDescription)
+        original.tap()
+
+        let historicalContent = app.scrollViews["historical-message-version"]
+        XCTAssertTrue(historicalContent.waitForExistence(timeout: 5), app.debugDescription)
+        let historicalTitle = app.staticTexts["historical-version-title"]
+        let historicalBody = app.staticTexts["historical-version-body"]
+        XCTAssertTrue(historicalTitle.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalBody.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(historicalTitle.isHittable, app.debugDescription)
+        XCTAssertTrue(historicalBody.isHittable, app.debugDescription)
+        attachScreenshot("detail-original-message-version-read-only")
+        XCTAssertFalse(historicalContent.buttons["request-finish"].exists,
+                       "A historical message version is available for reading and has no Send action.")
+
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5), app.debugDescription)
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["sample-finish"].waitForExistence(timeout: 5),
+                      "The current version's local response flow remains available.")
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+        XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5),
+                      app.debugDescription)
+        XCTAssertFalse(app.buttons["conversation-revision-picker"].exists,
+                       "Chat stays on the current question version without a version picker.")
+    }
+
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",

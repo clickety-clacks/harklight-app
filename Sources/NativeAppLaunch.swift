@@ -2273,6 +2273,11 @@ final class LivePresentationStore {
         presentation.requests.first { $0.key == key }
     }
 
+    func historicalRequest(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
+        guard conversationThreads[key]?.revisionNumbers.contains(revision) == true else { return nil }
+        return try? inspectedRequest(key, revision: revision)
+    }
+
     /// Records only an explicit detail-content navigation. The durable
     /// operation is stored before any best-effort relay send; a reconnect will
     /// retry it with the same message identity and revision.
