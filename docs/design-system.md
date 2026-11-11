@@ -11,9 +11,11 @@ itself is later work that lands in small batches against this document.
 
 ## 1. Spirit and sources
 
-The product owner's fit ruling (`art_95feab40`, sha256
-`b2f78aa2b1779f2d72289aaba893205b64180b5891bb9ddbeb7c69580651856a`) is the
-governing intent. Its core lines, quoted where this document cites them:
+The product owner's fit ruling, revision 2 (`art_f6c0202c`, sha256
+`e482640a831f16a672d28f2ea2b92d9ae3f1f450280f2598750be58ea28ee83e`), is the
+governing intent. It supersedes revision 1 (`art_95feab40`) by adding the
+importance-wash ruling of 2026-11-11 (section 8.1). Its core lines, quoted
+where this document cites them:
 
 - "Clawline supplies the foundation": type, spacing, squircle radii, warm
   top-lit elevation, grain, motion, neutrals and accent, in light and dark.
@@ -44,7 +46,7 @@ Citation keys used below:
 | Key | Source |
 |---|---|
 | [ASK] | Event 1810 and the work item brief |
-| [FIT] | `art_95feab40` |
+| [FIT] | `art_f6c0202c` (fit ruling, revision 2) |
 | [CL] | Clawline `design-system.html` at `e1fc034a` |
 | [CL-DEMO] | Clawline `demo.html` at `e1fc034a` |
 | [README] | The superseded `Design/README.md` at `340c710` |
@@ -91,8 +93,9 @@ glass, grain and motion value in `Design/tokens.json`, decoded through
 `HarklightDesignTokens.swift`.
 Serves: [FIT] "The app keeps one token source."
 Accept: after a batch, `grep` of its changed view files finds no hex color
-literal, `Color.orange`/`.green`/`.red`/`.blue`, or numeric font size that is
-not read from the token layer.
+literal, `Color.blue`, or numeric font size that is not read from the token
+layer. The system status colors listed in section 8.1 are current behavior
+kept as they are and are the only exception.
 
 **DS-2.** When a token is added for this system, the Swift layer SHALL decode
 it and expose it as a typed value.
@@ -194,8 +197,9 @@ Dark `cameBackBar` equals dark `listIcon`.
 **DS-4.** The app SHALL use type colors only to identify a message's type: the
 detail background, the list icon and the came-back bar.
 Serves: [FIT] "No other color carries meaning: not senders, not importance."
-Accept: no sender avatar, priority mark, badge or button takes a type color
-except as listed. (Current code breaks this; see Q-1.)
+Accept: no sender avatar, badge or button takes a type color except as
+listed. The importance washes in section 8.1 are current behavior that
+conflicts with this rule and are kept by ruling.
 
 **DS-5.** If a type color is retuned, the change SHALL keep that type
 recognizable, keep every text pairing at or above 4.5:1, and keep Error the
@@ -447,28 +451,37 @@ Target:
   `bodySmall`, sender `sender`, date `timestamp`, status `caption`.
 - Type symbol scales with `rowTitle*` (DS-9) in `listIcon`.
 - Initials circle. Current: `caption2` bold in `text2` on a `separator`
-  circle; priority tints both; on a selected row the initials take type
-  `text`. Target: `timestamp` at 700 in `text2` on `raised`. It is not tinted
-  by sender or priority (DS-4).
+  circle; the importance wash tints both on high and urgent rows; on a
+  selected row the initials take type `text`. Target: `timestamp` at 700 in
+  `text2` on `raised`, never tinted by sender. On high and urgent rows the
+  importance wash tint stays as it is today (section 8.1).
 - Selected row (iPad sidebar, while its message shows in the detail). Current:
   the row fills with the selected message's type background, text in type
   `text`. Target: pending Q-3.
 - Padding per DS-10. Separator `separator`, 0.5 pt.
 - Top-tier rows on `rowTop`; came-back row on `rowSelected` (section 6.3).
 - Seen check in `seen`. Chat flag per section 6.3.
-- Warning icons: see Q-2.
+- Warning icons: system red, kept as they are (section 8.1).
 
-### 6.2 Priority fill and selection bar (HarklightWorkspace.swift 2255 to 2295)
+### 6.2 Importance wash and selection bar (HarklightWorkspace.swift 2255 to 2295)
 
-Current: a row background gradient whose hue comes from the Warning or Error
-type color by priority level, and an 8 pt bar on the leading edge whose color
-is always the neutral level (#B3A389 light, #756B61 dark), since it is called
-with no level. Priority capsules in `NewMessageArea` and reply rows use Warning
-and Error hex literals.
+Current: high and urgent rows have a background gradient (the importance
+wash) whose hue comes from the Warning or Error type color. An 8 pt bar on the
+leading edge is always the neutral level (#B3A389 light, #756B61 dark), since
+it is called with no level. Importance capsules in `NewMessageArea` and reply
+rows use Warning and Error hex literals.
 
-Target: depends on Q-1. If importance stays size-only, these fills are removed
-in the list batch and importance is the tier type size. The selection bar
-becomes the came-back bar (section 6.3).
+**DS-24.** The restyle SHALL keep the importance washes and capsules on the
+same rows with the same meaning, derived from the Warning and Error type
+tokens so they retune with those hues, and SHALL keep their existing tests.
+Serves: [FIT] ruling of 2026-11-11: "the washes stay as they are: same rows,
+same meaning, retuned along with the Warning and Error hues. Their existing
+tests stay."
+Accept: an urgent row still shows the Error-hued wash after the list batch;
+changing the Error token changes the wash; the wash tests pass unchanged.
+
+The wash keeps its current alpha unless text on it falls below 4.5:1 (DS-6).
+The leading selection bar is pending Q-3.
 
 ### 6.3 List rules (kept from [README])
 
@@ -498,8 +511,9 @@ and `rowSelected` above). [FIT] "Their colors may be re-derived."
 - **Type badge**: `caption` text in `text2` on a capsule of `text2` at 0.10.
   Target: same anatomy; `label` style at `caption` size, `radius` capsule.
 - **Kind badge**: Blocker uses system `.orange`, Success uses `.green`, with a
-  sparkles bounce gated on Reduce Motion. Target: see Q-2. The bounce keeps
-  its Reduce Motion gate.
+  sparkles bounce gated on Reduce Motion. Target: colors kept as they are
+  (section 8.1); type style `label` at `caption` size. The bounce keeps its
+  Reduce Motion gate.
 - **Retracted pill**: capsule, `caption2` semibold. Target: `timestamp` style at
   600, `text2` on `tabOn`.
 - **Refreshing badge** (toolbar): `accent` text on a capsule of `accent` at
@@ -511,14 +525,14 @@ and `rowSelected` above). [FIT] "Their colors may be re-derived."
 
 Anatomy: section header "New · x of y" on `rowTop`; up to 5 rows; More… /
 Less. Replied rows show an AI summary, a 3 pt reply capsule in `accent` at
-0.55, and priority capsules.
+0.55, and importance capsules.
 
-Current: `quietTitle` and separator colors are hex literals; priority capsules
-use Warning and Error hex.
+Current: `quietTitle` and separator colors are hex literals; importance
+capsules use Warning and Error hex.
 
 Target: header `sender` style on `rowTop`; rows follow section 6.1; reply
 capsule `accent` at 0.55; literals replaced by `text2` and `separator` (DS-1);
-priority capsules per Q-1.
+importance capsules read the Warning and Error type tokens (DS-24).
 
 ### 6.6 Inbox structure inside the list
 
@@ -600,7 +614,8 @@ Target:
 - Composer field `radius.field` on system glass; plus and send stay circles.
   Send uses `accent` through `.glassProminent` tint. On iPad with a pointer,
   send uses `motion.hoverScale`; pressing uses `motion.press` (DS-16 applies).
-- Status lines `caption` in `text2`; orange and red: see Q-2.
+- Status lines `caption`. Their `text2`, orange and red colors are kept as
+  they are (section 8.1).
 - Avatars and flow layout from Clawline are not adopted (D-6).
 
 ### 6.12 Foreground chat banner (`ForegroundChatNotificationIndicatorView`)
@@ -733,6 +748,27 @@ detents unchanged.
 | D-9 | Sender names at full `text2`, not 70% opacity. | 70% fails 4.5:1 on `rowTop`. |
 | D-10 | Detail screens get no grain and no shadow. | Grain on saturated type fields lowers legibility ([FIT]); shadows read as dirt there. |
 
+### 8.1 Current behavior kept that conflicts with a rule
+
+The code at `340c710` uses color for meaning in ways the departures above do
+not allow. This work is a restyle, so these stay as they are. They are
+recorded here as current behavior, not as design choices.
+
+- **Importance washes.** High and urgent inbox rows, and the importance
+  capsules in the new area and replied rows, use Warning and Error washes
+  (commits `0dc30f3`, `1d52cf7`, pinned by tests). Every live row is middle
+  tier, so these washes are the only importance signal users see today. This
+  conflicts with D-2 ("Importance is shown by size, not color") and DS-4. They
+  stay on the same rows with the same meaning, retuned with the Warning and
+  Error hues (DS-24). Replacing them with size-based importance is a behavior
+  change and a separate item after the Client freeze lifts. [FIT] ruling of
+  2026-11-11.
+- **System status and kind colors.** Kind badges (Blocker system orange,
+  Success system green), row warning icons (system red) and chat send status
+  (system orange and red) use system colors outside the token file. They are
+  kept as they are. [FIT]: "Other status and kind colors found in the code are
+  documented as they are."
+
 ## 9. (e) Platform constraints
 
 **DS-23.** While Reduce Transparency is on, every glass or material surface the
@@ -793,22 +829,8 @@ Falsifiable statements this document relies on:
 
 ## 12. Open questions
 
-**Q-1. Priority color on inbox rows (BLOCKING for the inbox row batch,
-NON-BLOCKING for this document).** Current rows show priority with Warning and
-Error hues: row gradients and priority capsules (commits `0dc30f3`, `1d52cf7`,
-pinned by tests). Since live rows are always tier middle, this color is the
-only live importance signal. [FIT] rules importance is size only and no other
-color carries meaning. The product owner must say whether this is a declared
-departure to keep or is removed when tiers carry importance. Raised to delivery
-ownership on 2026-11-11.
-
-**Q-2. System status colors (NON-BLOCKING).** Kind badges (Blocker orange,
-Success green), row warning icons (red) and chat send status (orange, red) use
-system colors outside the token file. Options: map them to the Warning, Error
-and Completed type colors (which makes them type colors carrying meaning beyond
-type), or to neutral `text2` with an SF Symbol carrying the meaning. This
-document recommends the neutral route under DS-4. Batches that do not touch
-these components proceed.
+Q-1 (importance color) and Q-2 (system status colors) were settled by the
+[FIT] ruling of 2026-11-11 and are recorded in section 8.1.
 
 **Q-3. List rules not live in code (BLOCKING for the list-rule batch,
 NON-BLOCKING for this document).** [FIT] keeps the [README] list rules, but at
