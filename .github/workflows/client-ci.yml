@@ -27,4 +27,5 @@ jobs:
         run: Scripts/verify.sh test
 
       - name: Build and test the native host
+        if: ${{ !cancelled() }}
         run: Scripts/verify.sh native-host-test
