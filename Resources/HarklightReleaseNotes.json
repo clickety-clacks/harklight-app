@@ -115,19 +115,12 @@
           "symbol": "list.number",
           "title": "See your position in Inbox",
           "detail": "The message count and position reflect only items in Inbox. The counter disappears when an open item leaves Inbox."
-        }
-      ]
-    },
-    {
-      "id": "post-148-late-answer-callback",
-      "marketingVersion": "0.1.0",
-      "testFlightBuildNumber": null,
-      "highlights": [
+        },
         {
-          "id": "answered-request-duplicate-callback",
+          "id": "answered-request-late-confirmation",
           "symbol": "checkmark.circle",
           "title": "Keep answered requests clear",
-          "detail": "A late duplicate send callback no longer shows an error for a request that is already answered."
+          "detail": "A late message confirmation no longer shows an error after its request is answered."
         }
       ]
     }
