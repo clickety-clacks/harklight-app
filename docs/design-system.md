@@ -259,27 +259,32 @@ Serves: [FIT] 4.5:1.
 Accept: the figures below, recomputed from the token file after each batch,
 stay at or above 4.5.
 
-Measured target pairings (lowest per row). Live neutrals are `bg` and
-`raised`; `rowTop` and `rowSelected` are the dormant row shades (section 8.2).
+Measured target pairings (lowest per row). Live neutrals are `bg`, `raised`
+and `rowTop`. `rowTop` is live only behind the New area header and its
+More… / Less control (section 6.5); it is dormant as the top-tier row shade.
+`rowSelected` is dormant (section 8.2). Dark `rowTop` equals dark `raised`.
 
 | Foreground | Light, lowest | Dark, lowest |
 |---|---|---|
-| `text` on live neutrals | 11.02 (bg) | 11.99 (raised) |
-| `text` on dormant shades | 9.32 (rowTop) | 9.38 (rowSelected) |
-| `text2` on live neutrals | 7.58 (bg) | 8.90 (raised) |
-| `text2` on dormant shades | 6.41 (rowTop) | 6.96 (rowSelected) |
-| `accent` on live neutrals | 4.83 (bg; 4.99 on raised) | 5.14 (raised; 5.93 on bg) |
-| `accent` on dormant shades | 4.09 (rowTop), fails | 4.02 (rowSelected), fails |
+| `text` on live neutrals | 9.32 (rowTop; 11.02 on bg) | 11.99 (raised, rowTop) |
+| `text` on `rowSelected` (dormant) | 9.71 | 9.38 |
+| `text2` on live neutrals | 6.41 (rowTop; 7.58 on bg) | 8.90 (raised, rowTop) |
+| `text2` on `rowSelected` (dormant) | 6.68 | 6.96 |
+| `accent` on `bg` and `raised` | 4.83 (bg; 4.99 on raised) | 5.14 (raised; 5.93 on bg) |
+| `accent` on `rowTop` | 4.09, fails; not drawn there (DS-32) | 5.14 |
+| `accent` on `rowSelected` (dormant) | 4.26, fails | 4.02, fails |
 | `onAccent` on `accent` | 4.83 | 5.93 |
 | system white label on `seen` fill | 5.00 | 5.00 |
 | system white label on `swipeNeutral` fill | 8.39 | 8.39 |
 | type `text` on type background | 5.53 (Information) | 10.37 (Error) |
 | type `secondaryText` on type background | 4.57 (Information) | 5.86 (Error) |
-| type `listIcon` on live neutrals | 5.63 (Information on bg) | 6.86 (Request on raised) |
+| type `listIcon` on `bg` and `raised` | 5.63 (Information on bg) | 6.86 (Request on raised) |
 | type `listIcon` on all four neutrals | 4.76 (Information on rowTop) | 5.36 (Request on rowSelected) |
 
-The `accent` failures on the dormant shades do not show today, because no
-live row uses those shades (DS-25). They are Q-6.
+No `accent` foreground is drawn on light `rowTop`: the New header takes
+`text2` and More… / Less takes `text` (DS-32). The `accent` failure on
+`rowSelected` does not show, because no live row uses that shade (DS-25). The
+top-tier and came-back shades are Q-6.
 
 Composed detail pairings. Each surface is the overlay drawn over the type
 background, in the order the views stack them. Lowest of the five types:
@@ -466,6 +471,9 @@ source".
 Accept: while the agreement is not recorded, a batch's diff adds no shadow
 read from `elevation.*`; a batch that does is rejected. If the agreed source
 differs from the table above, only `elevation.*` values change (Q-5).
+Status: met. The Chat and Tuner product owners confirmed [CL]
+`--shadow-bubble`, the table's source, and the agreement is recorded against
+this work item (Q-5).
 
 **DS-12.** Once the shadow source is agreed (DS-29), raised surfaces on the
 neutral background (`raised` cards, the foreground chat banner, the
@@ -672,9 +680,24 @@ Less. Replied rows show an AI summary, a 3 pt reply capsule in `accent` at
 Current: `quietTitle` and separator colors are hex literals; importance
 capsules use Warning and Error hex.
 
-Target: header `sender` style on `rowTop`; rows follow section 6.1; reply
-capsule `accent` at 0.55; literals replaced by `text2` and `separator` (DS-1);
-importance capsules read the Warning and Error type tokens (DS-24).
+Target: header `sender` style in `text2` on `rowTop`; rows follow section
+6.1; reply capsule `accent` at 0.55; literals replaced by `text2` and
+`separator` (DS-1); importance capsules read the Warning and Error type tokens
+(DS-24).
+
+The header and the More… / Less row are the only live uses of `rowTop`; the
+New area's message rows sit on `bg`. Today More… / Less sets no foreground,
+so its label may take the list's tint: the accent with no selection, or the
+open message's type background while an iPad row is selected. With the target
+tokens, the accent on light `rowTop` measures 4.09:1 and a dark type
+background on dark `rowTop` about 1.03:1.
+
+**DS-32.** The More… / Less label SHALL draw in `text` on `rowTop`, whether or
+not a message is selected, and SHALL NOT take its color from the list tint.
+Serves: [FIT] "Text contrast stays at or above 4.5:1" (DS-6).
+Accept: with more than five New entries, More… reads in `text` on `rowTop` in
+light and dark, with no row selected and with an iPad row selected: 9.32:1
+light, 11.99:1 dark. Its pressed and focus treatment follows DS-31.
 
 ### 6.6 Inbox structure inside the list
 
@@ -1205,7 +1228,8 @@ recorded here as current behavior, not as design choices.
 At `340c710`, three [README] list rules were never switched on: the came-back
 bar is decoded but never drawn, the selected-row shade (`rowSelected`) is in
 the token file but never read, and no live row is ever top tier, so `rowTop`
-never shows on a live row. On iPad, the selected sidebar row is filled with
+never shades a message row. It shows only behind the New area header and its
+More… / Less control (section 6.5, DS-32). On iPad, the selected sidebar row is filled with
 the open message's type background, and an 8 pt neutral bar marks the leading
 edge.
 
@@ -1303,16 +1327,17 @@ reply field that grows to 30% and no "Not now" button. The code's reply surface
 differs. This document describes the code; the reply field's behavior is not
 restyle scope.
 
-**Q-5. Shadow source (NON-BLOCKING).** Clawline's three sources disagree on
+**Q-5. Shadow source (settled).** Clawline's three sources disagree on
 shadow values. This document uses [CL] `--shadow-bubble`, as [PO-C] prefers.
-One source shared with the Chat and Tuner products is being agreed through
-their delivery owners; until it is recorded against this work item, no batch
-uses `elevation.*` (DS-29). If the agreed source differs, only `elevation.*`
-changes.
+The Chat and Tuner product owners confirmed the same source as the one shared
+across clients, and that agreement is recorded against this work item, so
+DS-29's condition is met and batches may use `elevation.*`.
 
-**Q-6. Accent on the dormant shades (NON-BLOCKING).** The accent fails 4.5:1 on
-the dormant `rowTop` and `rowSelected` shades (light 4.09 and 4.26, dark 4.02
-on `rowSelected`; DS-6). No live row shows those shades (section 8.2), so no
-restyle batch is affected. Turning them on under `wi_40e646fc` has to re-derive
-the shades or the flag color first. Lightening light `rowTop` enough would put
+**Q-6. Accent on the dormant row shades (NON-BLOCKING).** The accent fails
+4.5:1 on light `rowTop` (4.09) and on `rowSelected` (light 4.26, dark 4.02;
+DS-6). The live uses of `rowTop`, the New header and More… / Less, draw no
+accent (DS-32). No live row is top tier or uses `rowSelected` (section 8.2), so
+no restyle batch draws the accent on those shades. Making rows top tier or
+drawing the came-back row under `wi_40e646fc` has to re-derive the shades or
+the flag color first. Lightening light `rowTop` enough would put
 it about dE00 1.7 from `bg`, too close to tell apart.
