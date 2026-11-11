@@ -72,6 +72,16 @@ struct ConversationPanel: View {
         }
     }
 
+    private var horizontalDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 24)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+                guard abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 else { return }
+                dismissChat()
+            }
+    }
+
     private func hasNotAcceptedCardForRetainedAnswer(thread: ConversationThread,
                                                       request: PresentedRequest?) -> Bool {
         guard thread.isRetracted,
@@ -118,6 +128,7 @@ struct ConversationPanel: View {
                         inspectedFileRevision = fileRevision
                     })
                     .equatable()
+                    .simultaneousGesture(horizontalDismissGesture)
                 if let terminal = thread.terminal {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
@@ -194,6 +205,7 @@ struct ConversationPanel: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
+                .simultaneousGesture(horizontalDismissGesture)
             }
         }
         .onAppear {
@@ -213,13 +225,6 @@ struct ConversationPanel: View {
                 NativeNotificationRouter.shared.conversationBecameHidden(key)
             }
         }
-        .simultaneousGesture(DragGesture(minimumDistance: 24)
-            .onEnded { value in
-                let horizontal = value.translation.width
-                let vertical = value.translation.height
-                guard abs(horizontal) >= 80, abs(horizontal) > abs(vertical) * 1.35 else { return }
-                dismissChat()
-            })
         .accessibilityAction(named: "Dismiss chat") { dismissChat() }
         .uiDiagnostics("conversation-ui-diagnostics", store.uiDiagnosticSummary(for: key, revision: revision))
         .sheet(item: $inspectedFile) { file in

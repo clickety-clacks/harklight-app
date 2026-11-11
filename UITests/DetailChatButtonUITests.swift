@@ -179,6 +179,66 @@ final class DetailChatButtonUITests: XCTestCase {
         }
     }
 
+    func testSidewaysComposerDragsKeepChatOpen() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        defer { app.terminate() }
+
+        let row = app.descendants(matching: .any)["sample-information-2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+        row.tap()
+        let chat = app.buttons["Chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        chat.tap()
+
+        let composer = app.textViews["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        let addAttachment = app.buttons["Add sample attachment"]
+        for _ in 0..<4 {
+            XCTAssertTrue(addAttachment.isHittable, app.debugDescription)
+            addAttachment.tap()
+            let photo = app.buttons["Sample photo"]
+            XCTAssertTrue(photo.waitForExistence(timeout: 5), app.debugDescription)
+            photo.tap()
+        }
+
+        let inputSurface = app.otherElements["sample-chat-input-surface"]
+        let attachmentStrip = inputSurface.scrollViews.firstMatch
+        XCTAssertTrue(attachmentStrip.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(attachmentStrip.isHittable, app.debugDescription)
+
+        composer.tap()
+        let draft = "Sideways draft edits keep this Chat open."
+        composer.typeText(draft)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(attachmentStrip.isHittable, app.debugDescription)
+
+        for (startX, endX) in [(CGFloat(0.9), CGFloat(0.1)), (CGFloat(0.1), CGFloat(0.9))] {
+            attachmentStrip.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
+                .press(forDuration: 0.05,
+                       thenDragTo: attachmentStrip.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5)),
+                       withVelocity: .slow,
+                       thenHoldForDuration: 0.1)
+            XCTAssertTrue(composer.exists,
+                          "A sideways attachment-strip drag must leave Chat open. \(app.debugDescription)")
+            XCTAssertTrue(app.keyboards.firstMatch.exists, app.debugDescription)
+        }
+
+        composer.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.05,
+                   thenDragTo: composer.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)),
+                   withVelocity: .slow,
+                   thenHoldForDuration: 0.1)
+        XCTAssertTrue(composer.exists,
+                      "A sideways draft-text drag must leave Chat open. \(app.debugDescription)")
+        XCTAssertEqual(composer.value as? String, draft,
+                       "Dragging in draft text must preserve the unsent draft.")
+
+        XCTAssertTrue(app.keyboards.firstMatch.exists, app.debugDescription)
+        attachScreenshot("chat-remains-open-after-composer-drags")
+    }
+
     private func verifyToolbarChatButton(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
