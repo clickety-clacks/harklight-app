@@ -1,0 +1,30 @@
+name: Client CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ios-build-and-test:
+    name: iOS build and tests
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build and test the iOS app
+        run: Scripts/verify.sh test
+
+      - name: Build and test the native host
+        run: Scripts/verify.sh native-host-test

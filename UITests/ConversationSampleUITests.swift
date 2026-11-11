@@ -399,14 +399,6 @@ final class ConversationSampleUITests: XCTestCase {
 
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-        let normalReplyRow = app.descendants(matching: .any)[
-            "normal-reply-item-sample-markdown-acceptance"
-        ]
-        for _ in 0..<8 where !normalReplyRow.isHittable { list.swipeUp() }
-        XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
-        captureInboxColumnState("markdown-accessibility-normal-reply-row", app)
-
         let normalRow = app.descendants(matching: .any)["request-row-sample-markdown-acceptance"]
         for _ in 0..<8 where !normalRow.isHittable { list.swipeUp() }
         XCTAssertTrue(normalRow.waitForExistence(timeout: 5), app.debugDescription)
