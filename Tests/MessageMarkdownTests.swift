@@ -146,12 +146,50 @@ final class MessageMarkdownTests: XCTestCase {
         XCTAssertTrue(replyText.contains("Replying to: ▏ The earlier point"), replyText)
     }
 
-    func testBareWebLinkRemainsVisibleAndTappable() throws {
-        let rendered = MessageMarkdown.attributed("Read https://example.com/guide before continuing.")
-        let visible = String(rendered.characters)
-        XCTAssertTrue(visible.contains("https://example.com/guide"), visible)
-        XCTAssertEqual(try XCTUnwrap(rendered.runs.first { $0.link != nil }).link,
-                       URL(string: "https://example.com/guide"))
+    func testStandaloneBareWebURLTargetsExactAuthoredURL() throws {
+        try assertBareWebURL("https://example.com/guide/",
+                             in: """
+                             Follow the reference:
+
+                             https://example.com/guide/
+
+                             Then continue.
+                             """,
+                             visibleText: """
+                             Follow the reference:
+                             https://example.com/guide/
+                             Then continue.
+                             """)
+    }
+
+    func testInlineBareWebURLTargetsExactAuthoredURL() throws {
+        try assertBareWebURL("https://example.com/guide/",
+                             in: "Open https://example.com/guide/ before continuing.",
+                             visibleText: "Open https://example.com/guide/ before continuing.")
+    }
+
+    func testBareWebURLBeforePunctuationTargetsExactAuthoredURL() throws {
+        try assertBareWebURL("https://example.com/guide/",
+                             in: "Open https://example.com/guide/, then continue.",
+                             visibleText: "Open https://example.com/guide/, then continue.")
+    }
+
+    private func assertBareWebURL(_ authoredURL: String,
+                                  in source: String,
+                                  visibleText expectedVisibleText: String,
+                                  file: StaticString = #filePath,
+                                  line: UInt = #line) throws {
+        let rendered = MessageMarkdown.attributed(source)
+        XCTAssertEqual(String(rendered.characters), expectedVisibleText, file: file, line: line)
+
+        let authoredLinkRun = rendered.runs.first { run in
+            run.link != nil && String(rendered[run.range].characters) == authoredURL
+        }
+        let linkRun = try XCTUnwrap(authoredLinkRun,
+                                    "The written URL should remain tappable.",
+                                    file: file,
+                                    line: line)
+        XCTAssertEqual(linkRun.link?.absoluteString, authoredURL, file: file, line: line)
     }
 
     func testCompactPreviewTruncatesParsedTextAndRetainsLinkAndEmphasis() throws {

@@ -283,10 +283,13 @@ enum MessageMarkdown {
         let matches = detector.matches(in: visibleText,
                                       range: NSRange(visibleText.startIndex..., in: visibleText))
         for match in matches {
-            guard let url = match.url,
+            guard let stringRange = Range(match.range, in: visibleText) else { continue }
+            // Keep the destination tied to the matched characters instead of
+            // using a detector URL that can differ from the authored spelling.
+            let authoredURL = String(visibleText[stringRange])
+            guard let url = URL(string: authoredURL),
                   let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https",
-                  let stringRange = Range(match.range, in: visibleText),
                   let lower = AttributedString.Index(stringRange.lowerBound, within: attributed),
                   let upper = AttributedString.Index(stringRange.upperBound, within: attributed) else {
                 continue
