@@ -33,6 +33,12 @@ where this document cites them:
 - One document covers iPhone and iPad, with iPad split view and pointer hover
   called out.
 
+The product owner's correction of 2026-11-11 ([PO-C]) asks for six fixes, each
+applied here: the missing states (6.19), the named dialogs (6.20), pressed and
+keyboard focus (6.21, DS-31), terracotta as the accent measured against the
+type colors (DS-28), the button radius citation (5.4) and the shadow source
+(DS-29, Q-5).
+
 The original request is Client PO transcript event 1810. Its highlights: light
 mode by default with a full dark palette, DM Sans, a 4 pt spacing base, 28 pt
 squircles, warm top-lit shadows, subtle grain, terracotta and sage.
@@ -48,6 +54,7 @@ Citation keys used below:
 |---|---|
 | [ASK] | Event 1810 and the work item brief |
 | [FIT] | `art_632564ba` (fit ruling, revision 3) |
+| [PO-C] | The product owner's correction of 2026-11-11, in the work item body |
 | [CL] | Clawline `design-system.html` at `e1fc034a` |
 | [CL-DEMO] | Clawline `demo.html` at `e1fc034a` |
 | [README] | The superseded `Design/README.md` at `340c710` |
@@ -120,7 +127,7 @@ coder's choice.
 
 | Group | Tokens |
 |---|---|
-| `neutral` | existing, plus `raised`; `rowSelected` value re-derived, decoded when its rule goes live (section 8.2) |
+| `neutral` | existing, plus `raised` and `swipeNeutral`; `rowSelected` value re-derived, decoded when its rule goes live (section 8.2) |
 | `accent` | existing |
 | `detail` | existing |
 | `types` | existing, unchanged keys |
@@ -151,6 +158,7 @@ Non-color groups have one value for both appearances unless a table gives two.
 | `replySurface` | #F1EFEB | #FDF6EE | #201F1D | #292524 | bubble-other |
 | `glass` | rgba(250,246,238,0.74) | rgba(255,255,255,0.30) | rgba(46,42,37,0.74) | rgba(60,60,60,0.25) | input glass |
 | `glassEdge` | rgba(60,45,30,0.10) | rgba(255,255,255,0.60) | rgba(240,230,215,0.10) | rgba(255,255,255,0.12) | input glass border |
+| `swipeNeutral` (new) | `text2`, #5C5854 | #5C4A3D | `text2`, #9E9992 | #5C4A3D | text-secondary (light), as a fill under a white system label |
 | `tabOn` | rgba(60,45,30,0.07) | rgba(61,52,41,0.07) | rgba(240,230,215,0.10) | rgba(232,228,224,0.10) | ink at low alpha |
 
 `glass` is a tint for system Liquid Glass and for the Reduce Transparency
@@ -160,14 +168,38 @@ fallback, not a hand-built blur (section 9).
 
 | Token | Current light | Target light | Current dark | Target dark |
 |---|---|---|---|---|
-| `accent` | #526657 | #466B4A | #A5BAA9 | #85AD80 |
+| `accent` | #526657 | #A3553E | #A5BAA9 | #E07A5F |
 | `onAccent` | #F3F0EA | #F7F3EB | #19211B | #1C1917 |
-| `seen` | #587C60 | #466B4A | #9CBAA2 | #9CBAA2 |
+| `seen` | #587C60 | #3E7C50 | #9CBAA2 | #3E7C50 |
 
-The accent is Clawline sage, deepened in light and lifted one step in dark so
-it passes as text on every neutral, including `rowSelected`. Clawline's own
-sage (#8FA68A light, #7BA376 dark) fails there. Terracotta is not the accent;
-see D-4.
+The accent is terracotta. [PO-C] "deepened terracotta #A3553E as interface
+accent"; [ASK] terracotta and sage. In light it is Clawline terracotta
+(#C4785C, 3.07:1 on cream) deepened to pass as text on `bg` and `raised`; in
+dark it is Clawline's dark terracotta #E07A5F unchanged. `seen` is sage,
+deepened so the white label the system draws on a `seen` fill (swipe action,
+detail Seen button) passes; it is one value in both appearances. `seen` is a
+fill, never a text color.
+
+**DS-28.** The `accent` and `seen` tokens SHALL each measure a CIEDE2000
+difference (dE00) of at least 10 from every type `background` and type
+`listIcon`, in light and in dark. If a pairing falls short, the type color
+or the token is retuned (DS-5) until it passes.
+Serves: [PO-C] "measured separation from Request/Error hues, retuning those
+hues if too close, and sage measured against Completed"; [FIT] "No other
+color carries meaning", so a neutral color must not read as a type.
+Accept: recomputed from the token file, the closest pairings are:
+
+| Pairing | Light dE00 | Dark dE00 |
+|---|---|---|
+| `accent` to Error | 10.0 (background and listIcon) | 10.0 (listIcon) |
+| `accent` to Request | 10.7 | 16.6 (listIcon) |
+| `seen` to Completed | 10.1 | 25.0 (listIcon) |
+| `accent` to `seen` | 44.7 | 50.3 |
+
+Light Error moved from #A63A2A to #A42A20 and dark Error `listIcon` from
+#EE8B75 to #FE9C8A to reach this. At the old values the light accent was 7.0
+from Error. dE00 10 is this document's line for "clearly a different color";
+it is not a WCAG figure.
 
 #### Detail
 
@@ -187,9 +219,11 @@ file (DS-1). The unused `ReplyInputSurfaceStyle.darkPlaceholder` goes with it.
 
 #### Message types
 
-Values are unchanged from [README] and the current token file. Light: every
-type has `text` #F6F1E7 and `secondaryText` #E3DCCF; `listIcon` and
-`cameBackBar` equal `background`.
+Values are those of [README] and the current token file, except Error, which
+is retuned under DS-5 to keep its distance from the accent (DS-28): light
+`background` #A63A2A becomes #A42A20, and dark `listIcon` #EE8B75 becomes
+#FE9C8A. Light: every type has `text` #F6F1E7 and `secondaryText` #E3DCCF;
+`listIcon` and `cameBackBar` equal `background`.
 
 | Type | Light background | Dark background | Dark text | Dark secondary | Dark listIcon |
 |---|---|---|---|---|---|
@@ -197,7 +231,7 @@ type has `text` #F6F1E7 and `secondaryText` #E3DCCF; `listIcon` and
 | Information | #4D6470 | #1D252A | #CFD9DE | #93A3AB | #9FB4BF |
 | Completed | #4E6547 | #1E261C | #D3DDCC | #99A891 | #A5BC9C |
 | Warning | #73592A | #2B2516 | #E6D9B8 | #AEA283 | #D8BE84 |
-| Error | #A63A2A | #3A1A14 | #F2C9BE | #C0948A | #EE8B75 |
+| Error | #A42A20 (current #A63A2A) | #3A1A14 | #F2C9BE | #C0948A | #FE9C8A (current #EE8B75) |
 
 Dark `cameBackBar` equals dark `background`, as in light.
 
@@ -225,18 +259,27 @@ Serves: [FIT] 4.5:1.
 Accept: the figures below, recomputed from the token file after each batch,
 stay at or above 4.5.
 
-Measured target pairings (lowest per row):
+Measured target pairings (lowest per row). Live neutrals are `bg` and
+`raised`; `rowTop` and `rowSelected` are the dormant row shades (section 8.2).
 
 | Foreground | Light, lowest | Dark, lowest |
 |---|---|---|
-| `text` on `bg`, `raised`, `rowTop`, `rowSelected` | 9.32 (rowTop) | 9.38 (rowSelected) |
-| `text2` on the same | 6.41 (rowTop) | 6.96 (rowSelected) |
-| `accent` on the same | 4.63 (rowTop) | 4.68 (rowSelected) |
-| `seen` on the same | 4.63 (rowTop) | 5.62 (rowSelected) |
-| `onAccent` on `accent` | 5.48 | 6.90 |
+| `text` on live neutrals | 11.02 (bg) | 11.99 (raised) |
+| `text` on dormant shades | 9.32 (rowTop) | 9.38 (rowSelected) |
+| `text2` on live neutrals | 7.58 (bg) | 8.90 (raised) |
+| `text2` on dormant shades | 6.41 (rowTop) | 6.96 (rowSelected) |
+| `accent` on live neutrals | 4.83 (bg; 4.99 on raised) | 5.14 (raised; 5.93 on bg) |
+| `accent` on dormant shades | 4.09 (rowTop), fails | 4.02 (rowSelected), fails |
+| `onAccent` on `accent` | 4.83 | 5.93 |
+| system white label on `seen` fill | 5.00 | 5.00 |
+| system white label on `swipeNeutral` fill | 8.39 | 8.39 |
 | type `text` on type background | 5.53 (Information) | 10.37 (Error) |
 | type `secondaryText` on type background | 4.57 (Information) | 5.86 (Error) |
-| type `listIcon` on the four neutrals | 4.76 (Information on rowTop) | 4.85 (Error on rowSelected) |
+| type `listIcon` on live neutrals | 5.63 (Information on bg) | 6.86 (Request on raised) |
+| type `listIcon` on all four neutrals | 4.76 (Information on rowTop) | 5.36 (Request on rowSelected) |
+
+The `accent` failures on the dormant shades do not show today, because no
+live row uses those shades (DS-25). They are Q-6.
 
 Composed detail pairings. Each surface is the overlay drawn over the type
 background, in the order the views stack them. Lowest of the five types:
@@ -262,11 +305,20 @@ choice card measures the base pairing (5.53 and 4.57), not a faded one. The
 current light white overlay (3.82 and 3.15) and the unselected card's 0.55
 opacity (as low as 2.44 light) both fail this check.
 
-Current `seen` light (#587C60) measures 4.25:1 on the current `bg` and fails.
-The target value fixes it.
+**DS-30.** Where a control is filled with `accent` (a `.borderedProminent` or
+`.glassProminent` button under the app's `accent` tint, such as Send, Retry
+and the enrollment primary buttons), its label and symbol SHALL be drawn in
+`onAccent`, not the system's default white.
+Serves: [FIT] "Text contrast stays at or above 4.5:1"; [PO-C] terracotta
+accent.
+Accept: in dark mode the chat Send arrow and an enrollment primary button
+label measure 5.93:1 on the accent fill. White on the dark accent measures
+2.95:1 and fails; white on the light accent measures 5.35:1, and `onAccent`
+4.83:1.
 
 Clawline's `text-muted` (stone, #A69B8D light) measures 2.47:1 on cream and
-terracotta 3.07:1. Neither is used for text (D-5, D-4).
+is not used for text (D-5). Clawline's light terracotta (#C4785C) measures
+3.07:1 on cream, which is why the accent is the deepened #A3553E (D-4).
 
 ### 5.2 Typography
 
@@ -363,14 +415,21 @@ All shapes are squircles (`.continuous`). [ASK] "28px squircles"; [CL] radii.
 | Token | Value | Clawline source | Used for |
 |---|---|---|---|
 | `radius.card` | 28 | demo bubble 28 | Enrollment cards, sheet sections |
-| `radius.field` | 24 | input 24 | Composer field |
-| `radius.button` | 22 | button 22 | Rectangular buttons |
+| `radius.field` | 24 | [CL] "Border radius (field) 24px" | Composer field |
+| `radius.button` | 24 | [CL] field 24 (Clawline has no rectangular button) | Rectangular buttons |
 | `radius.panel` | 20 | card 20 | Foreground chat banner, popover content |
 | `radius.inset` | 16 | link card 16 | Choice labels, reply choice card and its editor, answer confirmation card, chat turns |
 | `radius.small` | 12 | code 12 | Saved reply text, projected text field (current 8), badges that are not capsules |
 | `radius.check` | 4 | bubble sharp corner 4 | Multi-select checkbox |
 
 Capsules and circles stay capsules and circles.
+
+Clawline's only button radius is "Border radius (button) 50% (circle)" ([CL],
+the send button), so Harklight's send and plus buttons stay circles. Its
+rectangular buttons (enrollment) have no Clawline counterpart and take the
+field radius, 24. [PO-C] "Clawline field is 24, demo iPhone input is 22, send
+button is circular". The 22 in [CL-DEMO] is the demo's iPhone input and is not
+used.
 
 **DS-11.** Every rounded rectangle the restyle touches SHALL use a radius token
 and continuous corners.
@@ -388,17 +447,31 @@ tinted warm brown in light mode. [ASK] "warm top-lit shadows".
 
 | Token | Light | Dark |
 |---|---|---|
-| `elevation.raised` | y 2 blur 4 rgba(92,74,61,0.06); y 8 blur 24 rgba(92,74,61,0.10); y 16 blur 40 rgba(92,74,61,0.08) | y 2 blur 4 rgba(0,0,0,0.15); y 8 blur 24 rgba(0,0,0,0.25); y 16 blur 40 rgba(0,0,0,0.20) |
-| `elevation.hover` | y 4 blur 8 rgba(92,74,61,0.08); y 12 blur 32 rgba(92,74,61,0.12); y 24 blur 56 rgba(92,74,61,0.10) | y 4 blur 8 rgba(0,0,0,0.20); y 12 blur 32 rgba(0,0,0,0.30); y 24 blur 56 rgba(0,0,0,0.25) |
+| `elevation.raised` | y 4 blur 20 rgba(60,45,30,0.08); y 1 blur 3 rgba(60,45,30,0.05) | y 4 blur 20 rgba(0,0,0,0.3); y 1 blur 3 rgba(0,0,0,0.2) |
+| `elevation.hover` | y 8 blur 30 rgba(60,45,30,0.12); y 2 blur 6 rgba(60,45,30,0.08) | y 8 blur 30 rgba(0,0,0,0.4); y 2 blur 6 rgba(0,0,0,0.3) |
 | `elevation.flat` | none | none |
 
-Source: [CL-DEMO] `--shadow-bubble` and `--shadow-bubble-hover`. Clawline's
-three sources disagree on shadow values; the demo is used because it is the
-rendered reference. CSS blur is roughly twice a SwiftUI shadow radius, so the
-SwiftUI layer uses radius = blur / 2.
+Source: [CL] `--shadow-bubble` and `--shadow-bubble-hover` (light and dark
+theme blocks). [PO-C] "prefer design-system.html shadow-bubble over
+demo.html". Clawline's sources disagree on shadow values; `demo.html` is not
+used. CSS blur is roughly twice a SwiftUI shadow radius, so the SwiftUI layer
+uses radius = blur / 2.
 
-**DS-12.** Raised surfaces on the neutral background (`raised` cards, the
-foreground chat banner, the enrollment card) SHALL use `elevation.raised`.
+**DS-29.** A restyle batch SHALL NOT use any `elevation.*` value until one
+shared shadow source has been agreed with the Chat and Tuner product owners,
+through their delivery owners, and recorded against this work item.
+Serves: [PO-C] "agree one shared source with Chat and Tuner POs through their
+delivery owners before restyle use"; "no restyle may use an unresolved shadow
+source".
+Accept: while the agreement is not recorded, a batch's diff adds no shadow
+read from `elevation.*`; a batch that does is rejected. If the agreed source
+differs from the table above, only `elevation.*` values change (Q-5).
+
+**DS-12.** Once the shadow source is agreed (DS-29), raised surfaces on the
+neutral background (`raised` cards, the foreground chat banner, the
+enrollment card) SHALL use `elevation.raised`. Until then they keep their
+current shadow, which is none for the cards; the same holds for
+`elevation.hover` in section 9.
 Serves: [FIT] warm top-lit elevation.
 Accept: in light mode a raised card shows a soft brown shadow below it and
 none above it.
@@ -508,7 +581,9 @@ Target:
   (section 8.2).
 - Padding per DS-10. Separator `separator`, 0.5 pt.
 - Top-tier and came-back row shades: approved, not yet live (section 6.3).
-- Seen check in `seen`. Chat flag per section 6.3.
+- Seen check: current and target `text2` (the row's secondary text color;
+  on a selected or washed row, that row's secondary text). Chat flag per
+  DS-20.
 - Warning icons: system red, kept as they are (section 8.1).
 
 ### 6.2 Importance wash and selection bar (HarklightWorkspace.swift 2255 to 2295)
@@ -528,8 +603,13 @@ tests stay."
 Accept: an urgent row still shows the Error-hued wash after the list batch;
 changing the Error token changes the wash; the wash tests pass unchanged.
 
-The wash keeps its current alpha unless text on it falls below 4.5:1 (DS-6).
-The leading 8 pt bar stays where it shows today; its neutral color is
+The wash is an opaque top-to-bottom gradient with its own text colors
+(`InboxPriorityRowTreatment`). With the Error retune (DS-28), the light urgent
+wash moves from #A63A2A to #8A2C1E to #A42A20 to #881E16, with text #F6F1E7
+and secondary #E3DCCF unchanged: 6.37:1 and 5.26:1 at the top, 8.31:1 and
+6.86:1 at the bottom. The light urgent capsule in `NewMessageArea` becomes
+#A42A20. The dark urgent wash (#5A2219 to #3A1A14), the dark capsule and both
+high (Warning) washes are unchanged. The leading 8 pt bar stays where it shows today; its neutral color is
 re-derived from the Clawline neutrals (section 8.2).
 
 ### 6.3 List rules (kept from [README])
@@ -553,8 +633,12 @@ no right-edge bar and no sage background. Live rows stay middle tier.
 
 **DS-20.** While a message has an unread chat, its row SHALL show the chat flag
 filled in `accent`; otherwise a message with chat shows it outlined in `text2`.
-Serves: [FIT] "the chat flag"; [README] chat flag rule.
-Accept: an unread chat row shows a filled sage flag; after reading, an outline.
+On a selected row the filled flag takes type `text`, and on a washed row the
+wash's text color, as today.
+Serves: [FIT] "the chat flag"; [README] chat flag rule; [PO-C] terracotta
+accent.
+Accept: an unread chat row on `bg` shows a filled terracotta flag; after
+reading, an outline in `text2`.
 
 Row shade token values are re-derived from Clawline neutrals (the target
 `rowTop` and `rowSelected` above) so they are ready when the rules go live.
@@ -570,8 +654,12 @@ Row shade token values are re-derived from Clawline neutrals (the target
   Reduce Motion gate.
 - **Retracted pill**: capsule, `caption2` semibold. Target: `timestamp` style at
   600, `text2` on `tabOn`.
-- **Refreshing badge** (toolbar): `accent` text on a capsule of `accent` at
-  0.14. Target: unchanged recipe with target `accent`.
+- **Refreshing badge** (toolbar): a small spinner and "Refreshing" in
+  `caption2` semibold, both in `accent`, on a capsule of `accent` at 0.14.
+  Target: label in `text` at `timestamp` size and 600, spinner tinted
+  `accent`, capsule `accent` at 0.14. With the target light accent, accent
+  text on its own 0.14 capsule measures 4.03:1 and fails; `text` measures
+  9.19:1 light and 11.26:1 dark.
 - **App icon badge** (InboxBadge.swift): a count, not drawn by the app.
   Unchanged.
 
@@ -601,9 +689,12 @@ importance capsules read the Warning and Error type tokens (DS-24).
 - **Notification pending rows and detail**
   (`InboxNotificationPending*`): `text2` captions. Target: `caption`, `text2`;
   status wording per `art_5a797432`, unchanged.
-- **Swipe actions**: Clear (`text2` tint), Seen (`seen` tint), No comment.
-  Target: same tints with target values. System swipe buttons draw their own
-  shape.
+- **Swipe actions**: Clear and No comment tinted `text2`, Seen tinted `seen`.
+  The system draws a white label on each tint (A5). Current white on dark
+  `text2` measures 2.83:1 and fails; on the target dark `text2` it would be
+  1.70:1. Target: Clear and No comment tinted `swipeNeutral` (white label
+  8.39:1), Seen tinted `seen` (5.00:1). System swipe buttons draw their own
+  shape. [FIT] 4.5:1.
 
 ### 6.7 Detail card (`MessageCardSurface`, InboxMessageSurface.swift)
 
@@ -715,7 +806,8 @@ Target:
 - Person turns on `raised`, radius `radius.inset`, padding `space.compact`; the
   other party's turns on `bg` with no fill. System blue goes (DS-1, DS-4).
 - Composer field `radius.field` on system glass; plus and send stay circles.
-  Send uses `accent` through `.glassProminent` tint. On iPad with a pointer,
+  Send uses `accent` through `.glassProminent` tint, with its arrow in
+  `onAccent` (DS-30). On iPad with a pointer,
   send uses `motion.hoverScale`; pressing uses `motion.press` (DS-16 applies).
 - Status lines `caption`. Their `text2`, orange and red colors are kept as
   they are (section 8.1).
@@ -758,7 +850,7 @@ dialog are system-drawn (section 9).
 Anatomy: top safe-area inset, HStack spacing 10, `.regularMaterial` in a
 16 pt shape, padding 12, outer padding 12/6/4. No Reduce Transparency branch.
 
-Target: system glass, `radius.panel`, `elevation.raised`, padding
+Target: system glass, `radius.panel`, `elevation.raised` (DS-29), padding
 `space.compact`, spacing `space.compact`. Under Reduce Transparency, an opaque
 `raised` fill (DS-23).
 
@@ -792,7 +884,7 @@ messages", "Replace with this invitation…", "Keep current account".
 `UnconfirmedAccountRemovalNotice` has a "Retry removal" button that reads
 "Retrying removal…" and is disabled while busy.
 
-Target: cards on `raised`, `radius.card`, `elevation.raised`, no stroke.
+Target: cards on `raised`, `radius.card`, `elevation.raised` (DS-29), no stroke.
 Prominent buttons `accent` with `onAccent`; bordered buttons `text` on `tabOn`;
 both `radius.button`, `label` style, at least 44 pt tall. A disabled button
 keeps the system disabled treatment over these colors. Fields: text `body` in
@@ -844,6 +936,108 @@ Sans and code in system monospaced. Text, link and selection tint stay type
 `text`; links stay underlined, so they never rely on a second color (DS-4).
 Data detection and selection unchanged (DS-17).
 
+### 6.19 Loading, empty and unavailable states
+
+Serves: [PO-C] (1). Each state below is drawn by the system
+(`ContentUnavailableView` or `ProgressView`, section 9); the restyle sets only
+its colors and the type of text it supplies. Wording, symbols, order and when
+each state shows are unchanged (DS-17). No state gains a new screen or message
+(section 10).
+
+| Surface | State (wording as in the code) | Current |
+|---|---|---|
+| Chat panel (ConversationView.swift, `ConversationPanelEmptyState`) | "No chat" (`bubble.left.and.bubble.right`): "The agent that sent this didn't open a chat for it. You can still respond to the message itself." | system unavailable view |
+| | "Checking chat availability…" | labeled `ProgressView` |
+| | "Chat unavailable" (`bubble.left.and.bubble.right`): "Chat is not available on this server yet." | system unavailable view |
+| | "Chat status unavailable" (`wifi.slash`): "The server connection could not confirm whether a chat was opened." | system unavailable view |
+| | "Chat status unavailable offline" (`wifi.slash`): "This offline view cannot confirm whether a chat was opened." | system unavailable view |
+| | "Chat status not confirmed" (`questionmark.bubble`): "The server has not confirmed whether a chat was opened yet." | system unavailable view |
+| Detail column (LiveContentView.swift) | "Request unavailable" (`questionmark.folder`), when the open message is no longer on the device | system unavailable view |
+| Historical version sheet (`HistoricalMessageVersionSheet`) | "This version is unavailable now" (`questionmark.folder`): "No saved copy of this message version is available on this device." | on the type background; foreground and tint type `text` |
+| Workspace (local example only) | Load error: the store's error text, or "The local example could not be opened." (`exclamationmark.triangle`), in place of the inbox | system unavailable view |
+| Saved-messages archive (HarklightApp.swift) | "Saved messages are unavailable" (`exclamationmark.triangle`) with two prominent buttons | system unavailable view; buttons per DS-30 |
+| Inbox | Loading or refreshing: the toolbar Refreshing badge (6.4) | badge |
+| | Pull to refresh, offered only when the inbox can refresh | system refresh control |
+| | Loading an older page: a spinner below the last row | `ProgressView` |
+| | Empty: an empty plain list on `bg`, with no message | list |
+| | Notification being opened or checked again: a large spinner, the target title and a `.secondary` line; pending list rows with a small spinner or a `.secondary` symbol | `ProgressView` |
+| Replied rows | "Loading reply": a small spinner in place of the reply text | `ProgressView` |
+
+Target:
+- An unavailable view on a neutral screen sits on `bg`: title `text`, symbol
+  and description `text2` (as section 7.8).
+- An unavailable view on a type background (the historical version sheet)
+  keeps type `text` for its title and symbol and uses type `secondaryText` for
+  its description, since a faded `text` is not a measured pairing (DS-6).
+- Spinners are tinted `text2` on neutral screens and the row's or screen's
+  secondary text color on a type or washed surface. A spinner's label uses
+  `bodySmall` in that same color.
+- The pull-to-refresh control takes `text2` where the system accepts a tint.
+- The empty inbox stays an empty list on `bg` with grain.
+- The notification pending title uses `text` and its lines `text2`.
+
+Accept: in light and dark, the chat panel's six states, "Request
+unavailable", "This version is unavailable now" and the inbox spinners show
+the colors above, and every text in them passes DS-6.
+
+### 6.20 Alerts and confirmation dialogs
+
+Serves: [PO-C] (2). The system draws these (section 9). The restyle sets only
+their tint; titles, messages, button wording, order and roles are unchanged
+(DS-17).
+
+| Dialog | Kind and place | Buttons | Current tint |
+|---|---|---|---|
+| "The message changed" | `.alert` on the workspace (HarklightWorkspace.swift), when an answer was sent against an older version | "Review message", "Dismiss" (cancel) | its host sets `.tint(text)` |
+| "Connection needs attention" | `.alert` over the live content (LiveContentView.swift), after a foreground connect failure | "Copy details", "Dismiss" (cancel) | none set; the system default |
+| "Switch this connection?" | `.confirmationDialog` with visible title, from Settings "Switch connection to new server…" (reads "Checking new server…" and is disabled while busy) | "Switch connection to new server", "Cancel" | the settings tint |
+| "Disconnect this phone?" | `.confirmationDialog` with visible title, from the destructive Settings button "Disconnect this phone…" | "Disconnect this phone" (destructive), "Cancel" | destructive in system red |
+
+Target:
+- Non-destructive and cancel buttons in every alert and dialog are tinted
+  `text`, as "The message changed" is today. The tint is set where the system
+  reads it for that presentation.
+- Destructive buttons, and the destructive Settings trigger, keep the system
+  destructive red (section 8.1). The disconnect result footnote keeps `.red`;
+  the switch result footnote is `caption` in `text2`.
+- The local example's "Add a local example" dialog (6.11) follows the same
+  target.
+
+Accept: in light and dark, each of the four dialogs shows its non-destructive
+buttons in `text`, and "Disconnect this phone" in system red.
+
+### 6.21 Pressed and keyboard focus
+
+Serves: [PO-C] (3). At `340c710` the app has no custom button style, hover
+effect or focus code beyond reply-action focus. It relies on the system
+pressed and focus treatment of each style:
+
+| Component | Style | Pressed today | Keyboard focus today |
+|---|---|---|---|
+| Inbox and replied rows | `.plain`, tint `.clear` (HarklightWorkspace.swift) | list row highlight | system focus in the row's tint |
+| New area rows, foreground chat banner, choice rows | `.plain` | label dims | system focus |
+| Enrollment, retry and choice primary buttons | `.borderedProminent` | system darken | system focus |
+| Enrollment and detail secondary buttons | `.bordered` | system darken | system focus |
+| Send | `.glassProminent` circle | system glass press | system focus |
+| Plus, detail toolbar and loading-reply buttons | `.glass` | system glass press | system focus |
+| Swipe actions, toggles, tab bar, search, dialogs | system | system | system |
+
+**DS-31.** When an interactive component is pressed or receives keyboard focus,
+it SHALL show its system pressed or focus treatment, and that treatment SHALL
+be visible in both appearances. The restyle SHALL NOT remove, hide or replace
+it, except that Send adds `motion.press` (5.8).
+Serves: [PO-C] (3) "pressed and keyboard-focus states for interactive
+components"; [FIT] restyle only.
+Accept: on iPad with a hardware keyboard and Full Keyboard Access on, in light
+and dark, moving focus through an inbox row, a toolbar button, a choice, the
+composer, Send and an enrollment button shows a visible focus indicator on
+each; pressing each shows its pressed treatment.
+
+Target per component: rows keep the list highlight; if a row's focus indicator
+does not show because its tint is `.clear` (A6), its focus color is `text`; prominent buttons darken `accent` with `onAccent` labels
+(DS-30); bordered buttons per 6.13; glass buttons keep the system glass press
+in their tint (7.4 for the detail toolbar). Hover is section 9's.
+
 ## 7. (c) Navigation
 
 ### 7.1 Root routing (HarklightApp.swift)
@@ -889,7 +1083,10 @@ and do not change.
 - Detail: confirmationAction Seen / Finish / Submit with a checkmark; bottomBar
   chat button with an unread badge; topBarTrailing warning. Target: system
   glass buttons tinted from type `text` as today; Done and Send stay inverted
-  ([README]). Chat badge `accent`.
+  ([README]). The Seen button, while it can still be marked, is tinted `seen`
+  under the system's white symbol (5.00:1), as today with the target value.
+  The chat button's unread badge is the system badge (`.badge`), not tinted;
+  it keeps the system badge colors (section 8.1).
 - The navigation bar background stays hidden on detail screens.
 - The inbox toolbar keeps its minimize-on-scroll behavior.
 
@@ -972,7 +1169,7 @@ enable rules unchanged (DS-17).
 | D-1 | Five message-type colors stay, as detail background, list icon, selected iPad row fill and came-back bar (the bar is approved but not yet live, section 8.2). | [FIT] keeps them; they identify type at a glance. |
 | D-2 | Importance is shown by size (tier type styles and line limits), never color. | [FIT] "Importance is shown by size, not color." |
 | D-3 | The [README] list rules stay: came-back bar, `rowTop` top tier, `rowSelected` came-back row, chat flag. The first three are approved but not yet live (section 8.2). | [FIT] keeps them; shades re-derived from Clawline neutrals. |
-| D-4 | Accent is deepened sage, not terracotta. Terracotta is not used. | Terracotta (3.07:1 on cream) fails text contrast and sits near the Request and Error hues, which would let a neutral color read as a type. |
+| D-4 | Accent is terracotta deepened to #A3553E in light; dark keeps Clawline #E07A5F. Error is retuned to stay apart from it (DS-28). | Clawline #C4785C measures 3.07:1 on cream, below [FIT] 4.5:1. [PO-C] keeps terracotta as the interface accent; DS-28 keeps it from reading as a type. |
 | D-5 | Clawline's muted text (stone) is not adopted; `text2` is the lowest text tone. | Stone measures 2.47:1 on cream. [FIT] 4.5:1. |
 | D-6 | Chat avatars, bubble shapes with a sharp corner, and flow layout are not adopted. | Harklight chat is a reply thread under a message, not a messenger; [FIT] restyle only, no layout change. |
 | D-7 | System Liquid Glass replaces Clawline's CSS glass recipe. | iOS 26 owns glass rendering; a hand-built blur would fight it and lose Reduce Transparency handling. |
@@ -997,8 +1194,10 @@ recorded here as current behavior, not as design choices.
   2026-11-11.
 - **System status and kind colors.** Kind badges (Blocker system orange,
   Success system green), row warning icons (system red) and chat send status
-  (system orange and red) use system colors outside the token file. They are
-  kept as they are. [FIT]: "Other status and kind colors found in the code are
+  (system orange and red), the detail warning buttons (system red), the
+  detail chat button's unread badge (system badge), destructive dialog and settings buttons (system destructive red)
+  and the disconnect footnote (`.red`) use system colors outside the token
+  file. They are kept as they are. [FIT]: "Other status and kind colors found in the code are
   documented as they are."
 
 ### 8.2 Approved list rules not yet live
@@ -1037,8 +1236,9 @@ Other constraints the restyle works within:
 - **Liquid Glass.** System-owned on iOS 26 and later; the app targets iOS 27. Tint and shape are the
   app's; blur and refraction are not.
 - **Pointer hover.** iPad with a pointer only. Hover uses `motion.hoverLift` or
-  `motion.hoverScale` and `elevation.hover`, through `.hoverEffect` or
-  `onHover`. iPhone has no hover state; nothing may depend on one.
+  `motion.hoverScale`, and `elevation.hover` once DS-29 allows it, through
+  `.hoverEffect` or `onHover`. iPhone has no hover state; nothing may depend
+  on one. Pressed and keyboard focus are DS-31.
 - **Appearance.** Light is the default appearance in design and screenshots;
   the app follows the system setting at runtime and does not add a picker.
   [ASK] "light mode by default with a full dark palette"; [FIT] restyle only.
@@ -1084,6 +1284,13 @@ Falsifiable statements this document relies on:
   `NativeAppLaunch.swift` assigns a tier other than `.middle` to live rows.
 - A4. System sheets, tab bars, search fields and swipe buttons accept tint but
   not custom shapes. False if a batch finds a supported API for more.
+- A5. Swipe actions and tinted `.borderedProminent`, `.glassProminent` and
+  `.glass` buttons draw a white label on their tint unless the app sets the
+  label color. False if a screenshot at `340c710` shows a non-white label on
+  any of them.
+- A6. The system keyboard focus effect draws in the component's tint, so a
+  row tinted `.clear` may show none. False if, at `340c710`, a focused inbox
+  row shows a visible indicator; then rows need no focus color.
 
 ## 12. Open questions
 
@@ -1097,5 +1304,15 @@ differs. This document describes the code; the reply field's behavior is not
 restyle scope.
 
 **Q-5. Shadow source (NON-BLOCKING).** Clawline's three sources disagree on
-shadow values. This document uses `demo.html`. A later Clawline correction
-would be adopted by updating `elevation.*` only.
+shadow values. This document uses [CL] `--shadow-bubble`, as [PO-C] prefers.
+One source shared with the Chat and Tuner products is being agreed through
+their delivery owners; until it is recorded against this work item, no batch
+uses `elevation.*` (DS-29). If the agreed source differs, only `elevation.*`
+changes.
+
+**Q-6. Accent on the dormant shades (NON-BLOCKING).** The accent fails 4.5:1 on
+the dormant `rowTop` and `rowSelected` shades (light 4.09 and 4.26, dark 4.02
+on `rowSelected`; DS-6). No live row shows those shades (section 8.2), so no
+restyle batch is affected. Turning them on under `wi_40e646fc` has to re-derive
+the shades or the flag color first. Lightening light `rowTop` enough would put
+it about dE00 1.7 from `bg`, too close to tell apart.
