@@ -79,6 +79,11 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                           terminalSequence: 2, context: context)
         _ = try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil)), context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertNil(live.request(for: key)?.intentReceipt,
+                     "The account-level answered state does not expose this device's receipt.")
+        XCTAssertNotNil(live.request(for: key)?.submittedAnswer,
+                        "The retained answer identifies a late callback for this device's submission.")
         live.submitFromUser(key)
         XCTAssertNil(live.actionError)
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
