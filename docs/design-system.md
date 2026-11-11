@@ -11,10 +11,11 @@ itself is later work that lands in small batches against this document.
 
 ## 1. Spirit and sources
 
-The product owner's fit ruling, revision 2 (`art_f6c0202c`, sha256
-`e482640a831f16a672d28f2ea2b92d9ae3f1f450280f2598750be58ea28ee83e`), is the
-governing intent. It supersedes revision 1 (`art_95feab40`) by adding the
-importance-wash ruling of 2026-11-11 (section 8.1). Its core lines, quoted
+The product owner's fit ruling, revision 3 (`art_632564ba`, sha256
+`a31d96f64e04053d5a4bc28d5653686b890a7527ba433276ce758a1569ba7344`), is the
+governing intent. It supersedes revisions 1 (`art_95feab40`) and 2
+(`art_f6c0202c`) by adding two rulings of 2026-11-11: importance washes
+(section 8.1) and dormant list rules (section 8.2). Its core lines, quoted
 where this document cites them:
 
 - "Clawline supplies the foundation": type, spacing, squircle radii, warm
@@ -46,7 +47,7 @@ Citation keys used below:
 | Key | Source |
 |---|---|
 | [ASK] | Event 1810 and the work item brief |
-| [FIT] | `art_f6c0202c` (fit ruling, revision 2) |
+| [FIT] | `art_632564ba` (fit ruling, revision 3) |
 | [CL] | Clawline `design-system.html` at `e1fc034a` |
 | [CL-DEMO] | Clawline `demo.html` at `e1fc034a` |
 | [README] | The superseded `Design/README.md` at `340c710` |
@@ -101,9 +102,8 @@ kept as they are and are the only exception.
 it and expose it as a typed value.
 Serves: [FIT] "Clawline values go into the existing token file and the Swift
 token layer."
-Accept: `rowSelected` exists in `tokens.json` today but is not decoded
-(`Neutral` has no field for it). After the list batch, `Neutral.rowSelected`
-exists and the came-back row reads it.
+Accept: after the foundation batch adds `raised` to `tokens.json`,
+`Neutral.raised` exists and the views that use it read it.
 
 **DS-3.** Color tokens SHALL keep the formats `Color(harklightToken:)` accepts
 today: `#RRGGBB` or `rgba(r,g,b,a)`.
@@ -120,7 +120,7 @@ coder's choice.
 
 | Group | Tokens |
 |---|---|
-| `neutral` | existing, plus `rowSelected` (decoded), `raised` |
+| `neutral` | existing, plus `raised`; `rowSelected` value re-derived, decoded when its rule goes live (section 8.2) |
 | `accent` | existing |
 | `detail` | existing |
 | `types` | existing, unchanged keys |
@@ -195,7 +195,8 @@ type has `text` #F6F1E7 and `secondaryText` #E3DCCF; `listIcon` and
 Dark `cameBackBar` equals dark `listIcon`.
 
 **DS-4.** The app SHALL use type colors only to identify a message's type: the
-detail background, the list icon and the came-back bar.
+detail background, the list icon, the selected iPad row's fill (section 8.2)
+and, once activated, the came-back bar.
 Serves: [FIT] "No other color carries meaning: not senders, not importance."
 Accept: no sender avatar, badge or button takes a type color except as
 listed. The importance washes in section 8.1 are current behavior that
@@ -457,9 +458,10 @@ Target:
   importance wash tint stays as it is today (section 8.1).
 - Selected row (iPad sidebar, while its message shows in the detail). Current:
   the row fills with the selected message's type background, text in type
-  `text`. Target: pending Q-3.
+  `text`. Target: the same fill and text, read from the retuned type tokens
+  (section 8.2).
 - Padding per DS-10. Separator `separator`, 0.5 pt.
-- Top-tier rows on `rowTop`; came-back row on `rowSelected` (section 6.3).
+- Top-tier and came-back row shades: approved, not yet live (section 6.3).
 - Seen check in `seen`. Chat flag per section 6.3.
 - Warning icons: system red, kept as they are (section 8.1).
 
@@ -481,30 +483,36 @@ Accept: an urgent row still shows the Error-hued wash after the list batch;
 changing the Error token changes the wash; the wash tests pass unchanged.
 
 The wash keeps its current alpha unless text on it falls below 4.5:1 (DS-6).
-The leading selection bar is pending Q-3.
+The leading 8 pt bar stays where it shows today; its neutral color is
+re-derived from the Clawline neutrals (section 8.2).
 
 ### 6.3 List rules (kept from [README])
 
-**DS-18.** When a row is the one the user came back from, the row SHALL show a
-bar on its right edge in that message's `cameBackBar` color, with its left
-corners rounded, on a `rowSelected` background.
-Serves: [FIT] "The list rules in Design/README stay: the came-back bar, the
-top-tier and selected row shades."
-Accept: open a Warning message, go back; its row has a right-edge bar in the
-Warning color and a sage-tinted background. (Current code does not do this;
-see Q-3.)
+The came-back bar, the selected-row shade and the top-tier shade are approved
+but not yet live (section 8.2). They are recorded here so the follow-up item
+(`wi_40e646fc`) builds them as approved; this restyle does not.
 
-**DS-19.** While a row is top tier, it SHALL use the `rowTop` background.
-Serves: [FIT] top-tier shade.
-Accept: a top-tier fixture row is on `rowTop`; middle and low are on `bg`.
+- **Came-back bar (approved, not yet live; was DS-18).** The row the user came
+  back from shows a bar on its right edge in that message's `cameBackBar`
+  color, with its left corners rounded, on a `rowSelected` background.
+- **Top-tier shade (approved, not yet live; was DS-19).** A top-tier row uses
+  the `rowTop` background.
+
+**DS-25.** The restyle SHALL NOT draw the came-back bar or the selected-row
+shade, and SHALL NOT make any live row top tier.
+Serves: [FIT] ruling of 2026-11-11 (dormant list rules): "The restyle keeps
+what the app does today ... and does not add the missing rules."
+Accept: after the list batch, open a Warning message and go back; its row has
+no right-edge bar and no sage background. Live rows stay middle tier.
 
 **DS-20.** While a message has an unread chat, its row SHALL show the chat flag
 filled in `accent`; otherwise a message with chat shows it outlined in `text2`.
 Serves: [FIT] "the chat flag"; [README] chat flag rule.
 Accept: an unread chat row shows a filled sage flag; after reading, an outline.
 
-Row shade colors are re-derived from Clawline neutrals (the target `rowTop`
-and `rowSelected` above). [FIT] "Their colors may be re-derived."
+Row shade token values are re-derived from Clawline neutrals (the target
+`rowTop` and `rowSelected` above) so they are ready when the rules go live.
+[FIT] "Their colors may be re-derived."
 
 ### 6.4 Badges (MessageMetadataPresentation.swift, InboxBadge.swift)
 
@@ -739,7 +747,7 @@ detents unchanged.
 |---|---|---|
 | D-1 | Five message-type colors stay, as detail background, list icon and came-back bar. | [FIT] keeps them; they identify type at a glance. |
 | D-2 | Importance is shown by size (tier type styles and line limits), never color. | [FIT] "Importance is shown by size, not color." |
-| D-3 | The [README] list rules stay: came-back bar, `rowTop` top tier, `rowSelected` came-back row, chat flag. | [FIT] keeps them; shades re-derived from Clawline neutrals. |
+| D-3 | The [README] list rules stay: came-back bar, `rowTop` top tier, `rowSelected` came-back row, chat flag. The first three are approved but not yet live (section 8.2). | [FIT] keeps them; shades re-derived from Clawline neutrals. |
 | D-4 | Accent is deepened sage, not terracotta. Terracotta is not used. | Terracotta (3.07:1 on cream) fails text contrast and sits near the Request and Error hues, which would let a neutral color read as a type. |
 | D-5 | Clawline's muted text (stone) is not adopted; `text2` is the lowest text tone. | Stone measures 2.47:1 on cream. [FIT] 4.5:1. |
 | D-6 | Chat avatars, bubble shapes with a sharp corner, and flow layout are not adopted. | Harklight chat is a reply thread under a message, not a messenger; [FIT] restyle only, no layout change. |
@@ -768,6 +776,21 @@ recorded here as current behavior, not as design choices.
   (system orange and red) use system colors outside the token file. They are
   kept as they are. [FIT]: "Other status and kind colors found in the code are
   documented as they are."
+
+### 8.2 Approved list rules not yet live
+
+At `340c710`, three [README] list rules were never switched on: the came-back
+bar is decoded but never drawn, the selected-row shade (`rowSelected`) is in
+the token file but never read, and no live row is ever top tier, so `rowTop`
+never shows on a live row. On iPad, the selected sidebar row is filled with
+the open message's type background, and an 8 pt neutral bar marks the leading
+edge.
+
+The restyle keeps what the app does today (DS-25). It restyles the selected
+iPad row's current fill and does not add the missing rules. The three rules
+are approved but not yet live (section 6.3). Turning them on is a separate
+item, `wi_40e646fc`, after the Client freeze lifts. [FIT] ruling of
+2026-11-11 (dormant list rules).
 
 ## 9. (e) Platform constraints
 
@@ -809,6 +832,10 @@ Other constraints the restyle works within:
 - No new screens, settings, appearance pickers or animations beyond those
   listed.
 - No change to message-type identity, tier rules or what drives a tier.
+- No replacement of the importance washes with size-based importance (section
+  8.1).
+- No activation of the came-back bar, the selected-row shade or top-tier rows
+  (section 8.2, `wi_40e646fc`).
 - No work on the website, the Mac app, notifications' system appearance, or
   Clawline itself.
 - No release, TestFlight or installation action.
@@ -830,19 +857,8 @@ Falsifiable statements this document relies on:
 ## 12. Open questions
 
 Q-1 (importance color) and Q-2 (system status colors) were settled by the
-[FIT] ruling of 2026-11-11 and are recorded in section 8.1.
-
-**Q-3. List rules not live in code (BLOCKING for the list-rule batch,
-NON-BLOCKING for this document).** [FIT] keeps the [README] list rules, but at
-`340c710`: `cameBackBar` is decoded and never drawn; `rowSelected` is in the
-token file but not decoded; no live row is top tier, so `rowTop` never shows on
-a live row; the selection mark is an 8 pt neutral bar on the leading edge.
-Making DS-18 and DS-19 visible needs code that draws the came-back bar and
-assigns tiers. Also, the iPad sidebar's selected row is filled with the
-open message's type background, which [FIT] does not list as a type-color use.
-The product owner must say whether drawing these rules is restyle (in scope
-for the batches) or new behavior (separate work), and whether the selected row
-keeps its type fill or moves to `rowSelected`.
+[FIT] rulings of 2026-11-11 and are recorded in section 8.1. Q-3 (list rules not
+live in code) was settled the same day and is recorded in section 8.2.
 
 **Q-4. Floating reply field (NON-BLOCKING).** [README] describes a floating
 reply field that grows to 30% and no "Not now" button. The code's reply surface
