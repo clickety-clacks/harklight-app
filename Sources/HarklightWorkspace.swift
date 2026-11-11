@@ -662,6 +662,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var restoreLastViewedOnReturn = false
     @State private var replyChatRoute: ReplyChatRoute?
     @State private var dismissedNotificationSerial: UInt64?
+    @State private var dismissedInlineChatRequests: Set<RequestKey> = []
 
     private var rows: [InboxItem] {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
@@ -774,6 +775,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func navigate(to next: InboxSelection?) {
         navigate(from: selection, to: next)
+    }
+
+    private func dismissChat(for item: InboxSelection, inlineChat: Bool) {
+        if inlineChat, case let .request(key) = item {
+            dismissedInlineChatRequests.insert(key)
+        } else {
+            navigate(to: nil)
+        }
     }
 
     private func dismissPendingNotification() {
@@ -975,13 +984,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            if inlineChat, case let .request(key)? = item, let conversationStore,
+            if inlineChat, case let .request(key)? = item,
+               !dismissedInlineChatRequests.contains(key), let conversationStore,
                let request = conversationStore.request(for: key) {
                 Divider()
                 ConversationPanel(store: conversationStore, key: key,
                     sender: key.senderID.rawValue, title: request.title?.rawValue ?? "",
                     initialScrollTurnID: replyRouteTargetTurnID(for: key),
-                    dismissToList: { navigate(to: nil) },
+                    dismissToList: { dismissChat(for: .request(key), inlineChat: true) },
                     discussionUnavailableReason: request.lifecycleStatus == .superseded
                         ? ConversationPanelText.supersededReadOnlyReason
                         : nil)
@@ -1075,13 +1085,18 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
            let route = visibleNotificationNavigation,
            route.opensChat, route.request == key {
             chatRouteSerial = route.serial
-            chatRouteDidOpen = { [self] in self.notificationChatRouteDidOpen(route.serial) }
+            chatRouteDidOpen = { [self] in
+                self.dismissedInlineChatRequests.remove(key)
+                self.notificationChatRouteDidOpen(route.serial)
+            }
         } else if case let .request(key) = id,
                   let route = replyChatRoute, route.key == key {
             chatRouteSerial = route.serial
             chatScrollTargetTurnID = replyRouteTargetTurnID(for: key)
             chatRouteDidOpen = { [self] in
-                if self.replyChatRoute?.serial == route.serial { self.replyChatRoute = nil }
+                guard self.replyChatRoute?.serial == route.serial else { return }
+                self.dismissedInlineChatRequests.remove(key)
+                self.replyChatRoute = nil
             }
         } else {
             chatRouteSerial = nil
@@ -1094,7 +1109,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             notificationChatRouteSerial: chatRouteSerial,
             notificationChatRouteDidOpen: chatRouteDidOpen,
             chatScrollTargetTurnID: chatScrollTargetTurnID,
-            dismissToList: { navigate(to: nil) },
+            dismissToList: { dismissChat(for: id, inlineChat: inlineChat) },
             messageType: rows.first(where: { $0.id == id })?.resolvedMessageType ?? .request) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
                 let currentIDs = cardNavigationIDs
