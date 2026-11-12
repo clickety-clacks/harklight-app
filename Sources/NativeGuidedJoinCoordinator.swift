@@ -216,8 +216,7 @@ final class NativeGuidedJoinCoordinator {
         do {
             if let departure = try store.departure() {
                 if departure.removed {
-                    if departure.replacement == nil { try store.finishConfirmedDeparture(departure) }
-                    else { try store.dismissConfirmedDeparture() }
+                    try store.finishConfirmedDeparture(departure)
                 } else {
                     unconfirmedDeparture = departure
                 }
