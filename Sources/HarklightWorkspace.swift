@@ -784,6 +784,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
     }
 
+    private func reopenInlineChat(for key: RequestKey) {
+        withAnimation(.easeInOut(duration: 0.22)) {
+            dismissedInlineChatRequests.remove(key)
+        }
+    }
+
     private func dismissPendingNotification() {
         guard let selection, case .notificationPending = selection else { return }
         navigate(to: nil)
@@ -1152,11 +1158,21 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         } else {
             chatRouteSerial = nil
         }
+        let reopenInlineChat: (() -> Void)?
+        if inlineChat, case let .request(key) = id,
+           conversationStore?.request(for: key) != nil {
+            reopenInlineChat = { [self] in
+                self.reopenInlineChat(for: key)
+            }
+        } else {
+            reopenInlineChat = nil
+        }
         return InboxCardContext(position: index.map { $0 + 1 },
             total: index == nil ? nil : ids.count,
             hasPrevious: hasPrevious,
             hasNext: hasNext,
             inlineChat: inlineChat,
+            reopenInlineChat: reopenInlineChat,
             chatTargetFallsBackToMessage: chatTargetFallsBack,
             notificationChatRouteSerial: chatRouteSerial,
             notificationChatRouteDidOpen: chatRouteDidOpen,

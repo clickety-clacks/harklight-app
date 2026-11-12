@@ -19,6 +19,7 @@ struct InboxCardContext {
     let hasPrevious: Bool
     let hasNext: Bool
     var inlineChat = false
+    var reopenInlineChat: (() -> Void)? = nil
     var isSupersedesTarget = false
     var chatTargetFallsBackToMessage = false
     var notificationChatRouteSerial: UInt64? = nil
