@@ -648,6 +648,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(MessageTextSize.preferenceKey)
+    private var selectedMessageTextSize = MessageTextSize.standard.rawValue
     @State private var selection: InboxSelection?
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var isWarningPresented = false
@@ -1258,6 +1260,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Text(dialog.localizedMessage)
         }
         .tint(HarklightDesignSystem.palette(for: colorScheme).neutral.textColor)
+        .environment(\.messageTextSize,
+                     MessageTextSize.resolve(storedValue: selectedMessageTextSize))
     }
 }
 
@@ -2439,7 +2443,7 @@ private struct NewMessageAreaRowContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(displayedSummary)
-                .font(.body)
+                .messageTextSize()
                 .foregroundStyle(palette.neutral.textColor)
                 .tint(palette.neutral.textColor)
                 .lineLimit(2)
@@ -2553,7 +2557,7 @@ private struct ReplyItemRowContent: View {
                     .accessibilityHidden(true)
                 Text(MessageMarkdown.preview(entry.newestUnseenReply?.text ?? "",
                                              characterLimit: 320))
-                    .font(.body)
+                    .messageTextSize()
                     .foregroundStyle(palette.neutral.textColor)
                     .tint(palette.neutral.textColor)
                     .lineLimit(1)
@@ -2621,6 +2625,10 @@ struct InboxRowContent: View {
     var selected = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.backgroundProminence) private var backgroundProminence
+    @Environment(\.messageTextSize) private var messageTextSize
+    @ScaledMetric(relativeTo: .title2) private var topTitlePointSize: CGFloat = 22
+    @ScaledMetric(relativeTo: .headline) private var middleTitlePointSize: CGFloat = 17
+    @ScaledMetric(relativeTo: .subheadline) private var lowTitlePointSize: CGFloat = 15
 
     private var palette: HarklightDesignSource.Appearance {
         HarklightDesignSystem.palette(for: colorScheme)
@@ -2802,7 +2810,7 @@ struct InboxRowContent: View {
                     }
                     if let bodyText = row.bodyText, !bodyText.isEmpty {
                         Text(MessageMarkdown.attributed(bodyText))
-                            .font(.body)
+                            .messageTextSize()
                             .foregroundStyle(secondaryRowTextColor)
                             .tint(secondaryRowTextColor)
                             .lineLimit(row.tier.bodyLineLimit)
@@ -2848,9 +2856,12 @@ struct InboxRowContent: View {
 
     private var titleFont: Font {
         switch row.tier {
-        case .top: .title2.bold()
-        case .middle: .headline
-        case .low: .subheadline.weight(.semibold)
+        case .top:
+            messageTextSize.font(basePointSize: topTitlePointSize, weight: .bold)
+        case .middle:
+            messageTextSize.font(basePointSize: middleTitlePointSize, weight: .semibold)
+        case .low:
+            messageTextSize.font(basePointSize: lowTitlePointSize, weight: .semibold)
         }
     }
 
@@ -3061,7 +3072,7 @@ private struct ReplyItemNormalRowContent: View {
                 if let projection {
                     Text(MessageMarkdown.preview(projection.quotedReply.text.rawValue,
                                                  characterLimit: 480))
-                        .font(.body)
+                        .messageTextSize()
                         .foregroundStyle(primaryTextColor)
                         .tint(primaryTextColor)
                         .lineLimit(3)

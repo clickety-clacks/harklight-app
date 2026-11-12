@@ -306,6 +306,7 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     let foregroundColor: Color
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.messageTextSize) private var messageTextSize
 
     static func attributedMessage(_ text: String,
                                   foregroundColor: UIColor,
@@ -377,7 +378,7 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         @unknown default: category = textView.traitCollection.preferredContentSizeCategory
         }
         let traits = UITraitCollection(preferredContentSizeCategory: category)
-        return UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)
+        return messageTextSize.uiFont(compatibleWith: traits)
     }
 
     func makeUIView(context: Context) -> UITextView {

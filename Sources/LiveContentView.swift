@@ -705,6 +705,7 @@ struct MessageHeading: View {
     var chatUnread: Bool? = nil
     var secondaryTextColor: Color? = nil
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.messageTextSize) private var messageTextSize
 
     private var neutralTokens: HarklightDesignSource.Neutral {
         HarklightDesignSystem.palette(for: colorScheme).neutral
@@ -747,7 +748,9 @@ struct MessageHeading: View {
                         .accessibilityHidden(true)
                 }
                 Text(MessageMarkdown.attributed(title))
-                    .font(.system(size: 26, weight: .bold))
+                    .messageTextSize(basePointSize: 26,
+                                     weight: .bold,
+                                     relativeTo: .title2)
                     .foregroundStyle(titleColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -797,6 +800,7 @@ struct LiveInboxSettings: View {
     var body: some View {
         NavigationStack {
             Form {
+                MessageTextSizeSettingsSection()
                 if let connectionStatus {
                     Section("Connection status") {
                         Text(connectionStatus).foregroundStyle(.secondary)
@@ -1609,7 +1613,7 @@ struct LiveRequestDetail: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(detailColors.secondaryTextColor)
                         Text(MessageMarkdown.attributed(stake.rawValue))
-                            .font(.body)
+                            .messageTextSize()
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                             .accessibilityIdentifier("request-stake")
@@ -2208,9 +2212,11 @@ struct HistoricalAnswerDraftView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(MessageMarkdown.attributed(request.title?.rawValue ?? "Earlier question"))
-                .font(.headline)
+                .messageTextSize(basePointSize: 17,
+                                 weight: .semibold,
+                                 relativeTo: .headline)
             if let body = request.body {
-                Text(MessageMarkdown.attributed(body.rawValue)).font(.body)
+                Text(MessageMarkdown.attributed(body.rawValue)).messageTextSize()
             }
             Text(retracted ? "Saved answer · request retracted. Its original wording and choices are retained." : "Not delivered · this selection belongs to the earlier question")
                 .font(.caption).foregroundStyle(.secondary)

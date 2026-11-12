@@ -178,6 +178,9 @@
 		FDB33E7EADEDFFCDE651C930 /* InboxViewLiveProgressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F41EE0AA99B238B7CF17B8A7 /* InboxViewLiveProgressTests.swift */; };
 		FE9A2435E3DEEA8115BA04B5 /* NativeClientDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */; };
 		FEE0EA389A07D71F0372DFA3 /* MessageMetadataPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDAAC52B9B8BD99B169F9A37 /* MessageMetadataPresentationTests.swift */; };
+		FF3442BCA26B6AFA46B6243E /* MessageTextSize.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFD4EF41F2E5E9E4E7C7635C /* MessageTextSize.swift */; };
+		FF43FD586BF6801C47E51902 /* MessageTextSizeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF3D4F07543226173F4AB0A2 /* MessageTextSizeTests.swift */; };
+		FFEEDCB4C204B8B51392B03D /* MessageTextSize.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFD4EF41F2E5E9E4E7C7635C /* MessageTextSize.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -323,6 +326,8 @@
 		F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeClientDiagnostics.swift; sourceTree = "<group>"; };
 		F68B30BAF95249EB48C166A9 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
 		FDAAC52B9B8BD99B169F9A37 /* MessageMetadataPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMetadataPresentationTests.swift; sourceTree = "<group>"; };
+		FF3D4F07543226173F4AB0A2 /* MessageTextSizeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageTextSizeTests.swift; sourceTree = "<group>"; };
+		FFD4EF41F2E5E9E4E7C7635C /* MessageTextSize.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageTextSize.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -468,6 +473,7 @@
 				2F28B1EA798F4B9BD079D83D /* LiveAnswerConfirmationTests.swift */,
 				7E1E85DB1B3213306E670445 /* MessageMarkdownTests.swift */,
 				FDAAC52B9B8BD99B169F9A37 /* MessageMetadataPresentationTests.swift */,
+				FF3D4F07543226173F4AB0A2 /* MessageTextSizeTests.swift */,
 				2B2B25DD9CA13B8F3993D9BB /* NativeGuidedIdentityTests.swift */,
 				5F320A27E5B0E129F5A38828 /* NativeGuidedJoinTests.swift */,
 				130EE825A778D0A7E64C7673 /* NativeGuidedTLSTests.swift */,
@@ -531,6 +537,7 @@
 				7B98DB32B39F5FB6D0FADF4F /* InboxMessageSurface.swift */,
 				7753DC115D8E0AF282B32EB7 /* LiveContentView.swift */,
 				B2289126C589FCD4A3067908 /* MessageMetadataPresentation.swift */,
+				FFD4EF41F2E5E9E4E7C7635C /* MessageTextSize.swift */,
 				53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */,
 				F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */,
 				2BC5F8F8783FB9F06698C460 /* NativeEnrollment.swift */,
@@ -827,6 +834,7 @@
 				448F5E46A16D5CE40C37F8D7 /* LiveAnswerConfirmationTests.swift in Sources */,
 				ED4B87547E11FFDE7818EFBE /* MessageMarkdownTests.swift in Sources */,
 				FEE0EA389A07D71F0372DFA3 /* MessageMetadataPresentationTests.swift in Sources */,
+				FF43FD586BF6801C47E51902 /* MessageTextSizeTests.swift in Sources */,
 				36286A1268E94779236BBBAB /* NativeGuidedIdentityTests.swift in Sources */,
 				549FA351946B6562D74E529B /* NativeGuidedJoinTests.swift in Sources */,
 				D41A9266F23BD611E896E68C /* NativeGuidedTLSTests.swift in Sources */,
@@ -868,6 +876,7 @@
 				FAAEC6DD7ADD88708C8B5C30 /* InboxMessageSurface.swift in Sources */,
 				8DB41E7415DD218BC6E405FB /* LiveContentView.swift in Sources */,
 				843E3AFB1BD02FEC405438C0 /* MessageMetadataPresentation.swift in Sources */,
+				FFEEDCB4C204B8B51392B03D /* MessageTextSize.swift in Sources */,
 				78CBE0A1F4BC73DE17C9F271 /* NativeAppLaunch.swift in Sources */,
 				AE4F3DDAE591865D84D685E0 /* NativeClientDiagnostics.swift in Sources */,
 				5557A9F9F180F64E0EC99108 /* NativeEnrollment.swift in Sources */,
@@ -921,6 +930,7 @@
 				A4B67EB0B1355A91F57E9C54 /* InboxMessageSurface.swift in Sources */,
 				782CD559247C24AFCC18A24F /* LiveContentView.swift in Sources */,
 				91F4C2477F61CC4779FB93BB /* MessageMetadataPresentation.swift in Sources */,
+				FF3442BCA26B6AFA46B6243E /* MessageTextSize.swift in Sources */,
 				9D262F1A9341068BB8EFA25E /* NativeAppLaunch.swift in Sources */,
 				FE9A2435E3DEEA8115BA04B5 /* NativeClientDiagnostics.swift in Sources */,
 				54976060574B865FBF118C4A /* NativeEnrollment.swift in Sources */,
