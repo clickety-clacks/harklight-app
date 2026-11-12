@@ -933,6 +933,18 @@ final class NativeRelayLifecycle {
         }
     }
 
+    private func viewShowHandler(generation: UUID,
+                                 transportID: UUID) -> @Sendable (Data) -> Void {
+        { [weak self] data in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.refreshGeneration == generation,
+                      self.focusTransportID == transportID else { return }
+                NativePushedViewCoordinator.shared.receive(data)
+            }
+        }
+    }
+
     private func installFocusReportHandler(for session: URLSessionInstallationSession?,
                                            transportID: UUID?) {
         guard let session, let transportID else {
@@ -969,6 +981,9 @@ final class NativeRelayLifecycle {
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
                                                               onFocusReportingUnsupported: focusReportingUnsupportedHandler(
+                                                                generation: generation,
+                                                                transportID: transportAttemptID),
+                                                              onViewShow: viewShowHandler(
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
                                                               onDiagnostic: diagnosticSink())
@@ -1046,6 +1061,9 @@ final class NativeRelayLifecycle {
                                                                 generation: migrationGeneration,
                                                                 transportID: focusTransportID),
                                                               onFocusReportingUnsupported: focusReportingUnsupportedHandler(
+                                                                generation: migrationGeneration,
+                                                                transportID: focusTransportID),
+                                                              onViewShow: viewShowHandler(
                                                                 generation: migrationGeneration,
                                                                 transportID: focusTransportID))
         var nextCore: NativeRelayCore?
@@ -1692,6 +1710,9 @@ final class NativeRelayLifecycle {
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
                                                               onFocusReportingUnsupported: focusReportingUnsupportedHandler(
+                                                                generation: generation,
+                                                                transportID: transportAttemptID),
+                                                              onViewShow: viewShowHandler(
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
                                                               onDiagnostic: diagnosticSink())

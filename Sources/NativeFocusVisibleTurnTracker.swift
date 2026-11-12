@@ -9,6 +9,7 @@ final class NativeFocusVisibleTurnTracker {
     private var framesByEventID: [String: CGRect] = [:]
     private var visibleRect: CGRect?
     private var selectedEventID: String?
+    private var isAtNewestTurn = false
 
     func updateFrame(_ frame: CGRect, for eventID: String) {
         guard framesByEventID[eventID] != frame else { return }
@@ -23,10 +24,22 @@ final class NativeFocusVisibleTurnTracker {
         visibleRect = rect
     }
 
+    func updateIsAtNewestTurn(_ value: Bool) {
+        isAtNewestTurn = value
+    }
+
+    func retainEventIDs(_ eventIDs: Set<String>) {
+        framesByEventID = framesByEventID.filter { eventIDs.contains($0.key) }
+        if let selectedEventID, !eventIDs.contains(selectedEventID) {
+            self.selectedEventID = nil
+        }
+    }
+
     func reset() {
         framesByEventID.removeAll(keepingCapacity: true)
         visibleRect = nil
         selectedEventID = nil
+        isAtNewestTurn = false
     }
 
     /// Returns the newest turn at the bottom, or the turn with the greatest
@@ -63,7 +76,7 @@ final class NativeFocusVisibleTurnTracker {
     }
 
     func chatVisibility(for turns: [ConversationTurn],
-                        isAtNewestTurn: Bool) -> NativeFocusChatVisibility? {
+                        isAtNewestTurn override: Bool? = nil) -> NativeFocusChatVisibility? {
         guard let newestTurn = turns.last else {
             reset()
             return .noTurns
@@ -71,7 +84,7 @@ final class NativeFocusVisibleTurnTracker {
         let eventIDs = turns.map { $0.id.rawValue }
         guard let eventID = settle(orderedEventIDs: eventIDs,
                                   newestEventID: newestTurn.id.rawValue,
-                                  isAtNewestTurn: isAtNewestTurn) else { return nil }
+                                  isAtNewestTurn: override ?? isAtNewestTurn) else { return nil }
         return .eventID(eventID)
     }
 }

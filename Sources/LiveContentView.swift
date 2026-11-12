@@ -217,9 +217,8 @@ private struct AnswerConfirmationCard: View {
     }
 }
 
-/// True while a reply editor below has keyboard focus. The foreground connection
-/// alert defers while this is set, because presenting over the editor resigns
-/// first responder mid-typing.
+/// True while a live text field has keyboard focus. Foreground notices defer
+/// while this is set, because presenting over a field resigns first responder.
 struct ReplyEditorFocusKey: PreferenceKey {
     static let defaultValue = false
 
@@ -583,6 +582,7 @@ struct LiveContentView: View {
                 refreshInbox: inboxRefreshAction,
                 showsLocalExamples: showsSampleMessages && !store.isReadOnly,
                 notificationNavigation: testNotificationNavigation ?? launch?.notificationNavigation,
+                userOpenedMessage: { launch?.userOpenedMessage() },
                 notificationChatRouteDidOpen: { serial in
                     if let testNotificationChatRouteDidOpen {
                         testNotificationChatRouteDidOpen(serial)
@@ -612,11 +612,28 @@ struct LiveContentView: View {
                 fixtureStore?.refreshFromDurableStore()
             }
             .onChange(of: scenePhase) { _, phase in
+                NativeFocusReporter.shared.scenePhaseChanged(phase)
+                NativePushedViewCoordinator.shared.scenePhaseChanged(phase)
                 if phase == .active { refreshRetractionVisibilityForSceneActivation() }
                 if phase == .background { store.flushPendingDrafts() }
             }
-            .onPreferenceChange(ReplyEditorFocusKey.self) { replyEditorFocused = $0 }
-            .onAppear { applyPresentationTestFixtureIfNeeded() }
+            .onPreferenceChange(ReplyEditorFocusKey.self) { isFocused in
+                replyEditorFocused = isFocused
+                NativePushedViewCoordinator.shared.replyEditorFocusChanged(isFocused)
+            }
+            .onAppear {
+                NativeFocusReporter.shared.scenePhaseChanged(scenePhase)
+                NativePushedViewCoordinator.shared.scenePhaseChanged(scenePhase)
+                if let launch {
+                    NativePushedViewCoordinator.shared.setApplyHandler { show in
+                        await launch.applyPushedView(show)
+                    }
+                }
+                applyPresentationTestFixtureIfNeeded()
+            }
+            .onDisappear {
+                NativePushedViewCoordinator.shared.setApplyHandler(nil)
+            }
             .task(id: store.nextRetractionExpiry) {
                 await store.waitForNextRetractionExpiry()
             }
@@ -1183,6 +1200,7 @@ struct LiveRequestDetail: View {
                 },
                 set: { text in
                     guard !controlsReadOnly else { return }
+                    NativePushedViewCoordinator.shared.noteReplyTextChanged()
                     markLocalReplyInteraction()
                     session.updateText(text, target: target)
                 })
@@ -1203,6 +1221,7 @@ struct LiveRequestDetail: View {
             },
             set: { text in
                 guard !controlsReadOnly else { return }
+                NativePushedViewCoordinator.shared.noteReplyTextChanged()
                 if let inputID = target.inputID {
                     store.stageText(text, input: ExactText(inputID), action: ExactText(target.actionID),
                                     for: request.key, requestRevision: request.requestRevision)
@@ -1943,6 +1962,9 @@ struct LiveRequestDetail: View {
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
         }
+        .onChange(of: context.chatTargetFallsBackToMessage) { _, fallsBack in
+            if fallsBack { chatPresented = false }
+        }
         .onChange(of: context.notificationChatRouteSerial, initial: true) { _, serial in
             guard serial != nil else { return }
             // Capture the scroll target before didOpen, which may clear the route.
@@ -1953,6 +1975,13 @@ struct LiveRequestDetail: View {
         .onChange(of: request) { _, _ in
             refreshStorePresentationSnapshot()
             refreshUneditedReplySession()
+        }
+        .onChange(of: focusedReplyActionID) { _, focused in
+            if focused != nil {
+                NativePushedViewCoordinator.shared.replyEditorFocusChanged(true,
+                                                                           resetActivity: true)
+                activatePassivePushContent()
+            }
         }
         .onChange(of: failedResponseWarning) { previous, current in
             if previous != nil, current == nil, warningDialog == .failedResponse {
@@ -2085,6 +2114,10 @@ struct LiveRequestDetail: View {
 
     private var chatButton: some View {
         Button("Chat", systemImage: "bubble.left.and.bubble.right") {
+            if localExample == nil {
+                activatePassivePushContent()
+                NativePushedViewCoordinator.shared.recordOwnOpen()
+            }
             localExample?.chatRead = true
             chatPresented = true
         }
@@ -2092,6 +2125,13 @@ struct LiveRequestDetail: View {
         .badge(conversationIndicator == true ? 1 : 0)
         .accessibilityLabel("Chat")
         .accessibilityHint(conversationIndicator == true ? "Unread conversation" : "")
+    }
+
+    private func activatePassivePushContent() {
+        guard localExample == nil,
+              NativePushedViewCoordinator.shared.contentWasTouched(request.key) else { return }
+        store.newMessageAreaStore?.open(request.key)
+        store.reportMessageContentOpened(request)
     }
 
     private var requestDetailsSheet: some View {
@@ -2625,6 +2665,7 @@ private struct LiveProjectedInputView: View {
                 get: { localReplyDraftSession.draft.inputs[input.id]?.text?.rawValue ?? "" },
                 set: {
                     guard !readOnly else { return }
+                    NativePushedViewCoordinator.shared.noteReplyTextChanged()
                     onLocalReplyInteraction()
                     localReplyDraftSession.updateText($0, target: target)
                 })
@@ -2632,6 +2673,7 @@ private struct LiveProjectedInputView: View {
         return Binding(
             get: { typedInputTextByRevision[request.requestRevision] ?? draft?.text?.rawValue ?? "" },
             set: {
+                NativePushedViewCoordinator.shared.noteReplyTextChanged()
                 typedInputTextByRevision[request.requestRevision] = $0
                 store.stageText($0, input: input.id, action: nil, for: request.key,
                                 requestRevision: request.requestRevision)
@@ -2659,11 +2701,23 @@ private struct LiveProjectedInputView: View {
             .accessibilityIdentifier("request-input-" + input.id.rawValue)
             .focused($focusedReplyActionID, equals: target.actionIdentifier)
             .onChange(of: focusedReplyActionID) { _, focused in
+                if focused == target.actionIdentifier {
+                    NativePushedViewCoordinator.shared.replyEditorFocusChanged(true,
+                                                                               resetActivity: true)
+                    activatePassivePushContent()
+                }
                 guard focused == target.actionIdentifier else { return }
                 onLocalReplyInteraction()
                 openReplyEditor(target)
             }
             .disabled(readOnly)
+    }
+
+    private func activatePassivePushContent() {
+        guard localExample == nil else { return }
+        guard NativePushedViewCoordinator.shared.contentWasTouched(request.key) else { return }
+        store.newMessageAreaStore?.open(request.key)
+        store.reportMessageContentOpened(request)
     }
 
     private var replyEditorSurface: Color {

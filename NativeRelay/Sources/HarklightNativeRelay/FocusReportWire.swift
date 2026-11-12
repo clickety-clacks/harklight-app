@@ -75,8 +75,8 @@ public enum FocusReportWireError: Error, Equatable {
 }
 
 /// Encodes and correlates the app-side focus request on the existing relay socket.
-/// Shared contract: Harklight focus and push-a-view r5, SHA-256
-/// `1b74d561ca8c1fd748e0ccec9acee319ab1d551f7a65292f0f5a5a0cbdc5c88d`.
+/// Shared contract: Harklight focus and push-a-view r6, SHA-256
+/// `15ab3a8de81b28b9ae11a5dd3689070af299010c063e57d0f04a6a9104e4c6c4`.
 public struct FocusReportWire: Sendable {
     public init() {}
 
@@ -140,5 +140,57 @@ public struct FocusReportWire: Sendable {
             messageID = report.messageID
             visibleEventID = report.visibleEventID
         }
+    }
+}
+
+public enum ViewShowTarget: String, Equatable, Sendable {
+    case message
+    case chat
+}
+
+public struct ViewShowFrame: Equatable, Sendable {
+    public let senderID: String
+    public let messageID: String
+    public let target: ViewShowTarget
+    public let heldMilliseconds: UInt64?
+
+    fileprivate init(senderID: String, messageID: String,
+                     target: ViewShowTarget, heldMilliseconds: UInt64?) {
+        self.senderID = senderID
+        self.messageID = messageID
+        self.target = target
+        self.heldMilliseconds = heldMilliseconds
+    }
+}
+
+/// Reads the unsolicited `view_show` frame without turning it into a reply to
+/// an outstanding request. Unknown targets are ignored by the app.
+public struct ViewShowWire: Sendable {
+    public init() {}
+
+    public func frame(_ bytes: Data) -> ViewShowFrame? {
+        guard let value = try? JSONValue.parse(bytes),
+              case .object = value,
+              value.hasUniqueObjectKeys,
+              value.uniqueValue(named: "v")?.integerValue == 1,
+              value.uniqueValue(named: "type")?.stringValue?.rawValue == "view_show",
+              let senderID = value.uniqueValue(named: "sender_id")?.stringValue?.rawValue,
+              !senderID.isEmpty,
+              let messageID = value.uniqueValue(named: "message_id")?.stringValue?.rawValue,
+              !messageID.isEmpty,
+              let targetValue = value.uniqueValue(named: "target")?.stringValue?.rawValue,
+              let target = ViewShowTarget(rawValue: targetValue) else { return nil }
+
+        let heldMilliseconds: UInt64?
+        if let heldValue = value.uniqueValue(named: "held_ms") {
+            guard case let .number(number) = heldValue,
+                  let parsed = UInt64(number.lexeme) else { return nil }
+            heldMilliseconds = parsed
+        } else {
+            heldMilliseconds = nil
+        }
+
+        return ViewShowFrame(senderID: senderID, messageID: messageID,
+                             target: target, heldMilliseconds: heldMilliseconds)
     }
 }
