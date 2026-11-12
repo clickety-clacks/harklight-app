@@ -149,9 +149,11 @@ final class NativeGuidedJoinStore {
     func prepare(_ invitation: NativeJoinInvitation, deviceLabel: String) throws -> NativeJoinAttempt {
         try invitation.validate()
         var unconfirmedDeparture: NativeAccountDeparture?
+        var confirmedDeparture: NativeAccountDeparture?
         if let departure = try departure() {
             if departure.removed {
                 try finishConfirmedDeparture(departure)
+                confirmedDeparture = departure
             } else {
                 unconfirmedDeparture = departure
                 if departure.replacement != invitation {
@@ -201,6 +203,11 @@ final class NativeGuidedJoinStore {
                                         statusSecret: secret.map { String(format: "%02x", $0) }.joined(),
                                         phase: .prepared)
         try save(attempt)
+        // Keep the confirmed receipt until its successor request is durable.
+        if let confirmedDeparture, confirmedDeparture.replacement != nil,
+           try departure()?.archiveID == confirmedDeparture.archiveID {
+            try finishConfirmedDeparture(confirmedDeparture)
+        }
         return attempt
     }
 
@@ -569,9 +576,15 @@ final class NativeGuidedJoinStore {
         if let current = try enrollment.load(), sameInstallation(current, departure.record) {
             try enrollment.clearAfterConfirmedRemoval(of: departure.record)
         }
+        // A restart can now see the successor request and safely finish cleanup
+        // for the removed installation without losing the new request.
+        let hasSuccessorRequest = try loadAttempt().map {
+            $0.deviceID != departure.record.deviceID
+        } ?? false
         if let current = try self.departure(),
            current.archiveID == departure.archiveID,
-           departure.replacement != nil {
+           departure.replacement != nil,
+           hasSuccessorRequest {
             try deleteData(account: "guided-departure")
         }
     }
