@@ -4,6 +4,48 @@ import XCTest
 /// generated non-live content. No customer account or network is involved.
 @MainActor
 final class FreeRenderedUITests: XCTestCase {
+    func testNewMessageRowOffersSameSwipeActionAsItsNormalRow() {
+        // Prove eligibility on the same message's ordinary placement first.
+        // Merely revealing an action must neither answer nor open the message.
+        for swipeLeft in [true, false] {
+            let app = launchActionableNewMessage()
+            let list = app.collectionViews.firstMatch
+            XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
+            let normal = element("request-row-sample-approval-0", in: app)
+            reveal(normal, in: list)
+            if swipeLeft { normal.swipeLeft() } else { normal.swipeRight() }
+            let action = app.buttons["inbox-no-comment"]
+            let eligible = action.waitForExistence(timeout: 5)
+            XCTAssertTrue(eligible, app.debugDescription)
+            capture("normal-message-swipe-\(swipeLeft)", app)
+            app.terminate()
+            guard eligible else { return }
+
+            let fresh = launchActionableNewMessage()
+            let newRow = element("new-message-area-request-row-sample-approval-0", in: fresh)
+            XCTAssertTrue(newRow.waitForExistence(timeout: 10), fresh.debugDescription)
+            reveal(newRow, in: fresh.collectionViews.firstMatch, downward: true)
+            if swipeLeft { newRow.swipeLeft() } else { newRow.swipeRight() }
+            XCTAssertTrue(fresh.buttons["inbox-no-comment"].waitForExistence(timeout: 5),
+                          "The same actionable message must offer No comment in New. \(fresh.debugDescription)")
+            XCTAssertTrue(newRow.exists, "Revealing a swipe action must not answer the message.")
+            XCTAssertFalse(fresh.scrollViews["message-card-scroll"].exists,
+                           "A horizontal row swipe must not select the message.")
+            capture("new-message-swipe-\(swipeLeft)", fresh)
+            fresh.terminate()
+        }
+    }
+
+    private func launchActionableNewMessage() -> XCUIApplication {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-inbox-list-column",
+                               "--harklight-test-inbox-list-state=actionableNewMessage",
+                               "--harklight-ui-diagnostics"]
+        app.launch()
+        return app
+    }
+
     func testCapturedFreeNewSelectionAndReadTransition() {
         for appearance in ["light", "dark"] {
             let app = launch(appearance)

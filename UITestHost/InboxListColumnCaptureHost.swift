@@ -214,6 +214,7 @@ private enum InboxListColumnCaptureFixture {
         case selectedHigh
         case selectedPlainAndUnselectedComparison
         case acceptedNewMessage
+        case actionableNewMessage
         case markdown
         case fullWidthHigh
         case replyItem
@@ -257,6 +258,14 @@ private enum InboxListColumnCaptureFixture {
                 NewMessageAreaMessage(key: markdownRow.key, acceptanceOrder: 1,
                                       isResolved: false, hasSubmittedAnswer: false)
             ], revisions: [markdownRow.key: markdownRow.requestRevision],
+               accountScopes: accountScopes, now: now.addingTimeInterval(-60))
+        } else if state == .actionableNewMessage {
+            // Use the sample's actual local No comment eligibility so swipe
+            // tests compare the same actionable request in both placements.
+            store.reconcile([
+                NewMessageAreaMessage(key: plainRow.key, acceptanceOrder: 1,
+                                      isResolved: false, hasSubmittedAnswer: false)
+            ], revisions: [plainRow.key: plainRow.requestRevision],
                accountScopes: accountScopes, now: now.addingTimeInterval(-60))
         } else if state == .acceptedNewMessage || isReplyState {
             store.reconcile([
@@ -313,6 +322,9 @@ private enum InboxListColumnCaptureFixture {
             selected = nil
         case .acceptedNewMessage:
             rows = [newMessageRow]
+            selected = nil
+        case .actionableNewMessage:
+            rows = [plainRow]
             selected = nil
         case .markdown:
             guard let markdownRow else {

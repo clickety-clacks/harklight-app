@@ -2,6 +2,31 @@ import XCTest
 
 @MainActor
 final class AdaptiveDuoNavigationUITests: XCTestCase {
+    func testFreshLaunchWithoutSelectionShowsInboxAndOpensSelectedMessage() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-ui-diagnostics"]
+        app.launch()
+
+        let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        XCTAssertTrue(diagnostic.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(diagnostic.label.contains("selection=nil"), diagnostic.label)
+        let row = app.descendants(matching: .any)["request-row-facilities-01"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable,
+                      "A fresh launch must expose Inbox without first pressing Back or Show Sidebar.")
+        attachScreenshot("fresh-launch-without-selection")
+        attachHierarchy("fresh-launch-without-selection-hierarchy", app: app)
+        row.tap()
+
+        let card = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(card.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
+                      "Selecting the inbox row must open that message.")
+        attachScreenshot("fresh-launch-selected-detail")
+        attachHierarchy("fresh-launch-selected-detail-hierarchy", app: app)
+    }
+
     func testPortraitSelectionShowsDetailAndDismissesMasterOverlay() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -100,6 +125,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
                       "The inbox list must remain beside the selected Facilities detail. \(app.debugDescription)")
         XCTAssertTrue(facilities.isHittable,
                       "The Facilities row must remain visible beside its detail. \(app.debugDescription)")
+        assertSideBySide(list: app.collectionViews.firstMatch, detail: card, in: app)
         attachScreenshot("landscape-facilities-detail-with-list")
 
         review.tap()
@@ -110,8 +136,86 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
                       "The inbox list must remain beside the second selected detail. \(app.debugDescription)")
         XCTAssertTrue(review.isHittable,
                       "The Studio review row must remain visible beside its detail. \(app.debugDescription)")
+        assertSideBySide(list: app.collectionViews.firstMatch, detail: card, in: app)
         attachScreenshot("landscape-studio-review-detail-with-list")
         attachHierarchy("landscape-second-selection-hierarchy", app: app)
+    }
+
+    func testSelectionFromActualOverlaidListOpensDetailAndDismissesList() {
+        // Establish detail first in a wide layout, then reopen its list in
+        // portrait. Portrait alone is not proof of overlay presentation.
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-ui-diagnostics"]
+        app.launch()
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"].firstMatch
+        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
+        facilities.tap()
+        let card = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(card.staticTexts["Facilities desk"].waitForExistence(timeout: 5), app.debugDescription)
+
+        XCUIDevice.shared.orientation = .portrait
+        let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        let portrait = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS 'landscape=false'"), object: diagnostic)
+        XCTAssertEqual(XCTWaiter.wait(for: [portrait], timeout: 5), .completed, app.debugDescription)
+
+        let review = app.descendants(matching: .any)["request-row-review-01"].firstMatch
+        if !review.isHittable {
+            let sidebar = app.buttons["Show Sidebar"]
+            let back = workspaceBackButton(in: app)
+            if sidebar.exists && sidebar.isHittable {
+                sidebar.tap()
+            } else if back.exists && back.isHittable {
+                back.tap()
+            }
+        }
+
+        let list = app.collectionViews.firstMatch
+        let overlay = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard review.exists, review.isHittable, list.exists, card.exists else { return false }
+            let listFrame = list.frame.intersection(app.frame)
+            let detailFrame = card.frame.intersection(app.frame)
+            let overlap = listFrame.intersection(detailFrame)
+            // A compact pushed list has no visible detail underneath it;
+            // a beside pane has no overlap. Require substantial overlap,
+            // plus exposed detail to the right of the overlaid list.
+            return listFrame.width > 0 && detailFrame.height > 0 &&
+                overlap.width > listFrame.width / 2 && overlap.height > 40 &&
+                detailFrame.maxX > listFrame.maxX + 40
+        }, object: nil)
+        let presentation = XCTWaiter.wait(for: [overlay], timeout: 5)
+        attachScreenshot("actual-overlay-before-selection")
+        attachHierarchy("actual-overlay-before-selection-hierarchy", app: app)
+        XCTAssertEqual(presentation, .completed,
+                       "Overlay precondition unmet: this destination must present a list over detail. " +
+                       "A compact list or beside pane cannot establish overlay acceptance. \(app.debugDescription)")
+        guard presentation == .completed else { return }
+        XCTAssertTrue(card.staticTexts["Facilities desk"].exists,
+                      "The previous message must remain underneath the overlaid list.")
+
+        review.tap()
+        XCTAssertTrue(card.staticTexts["Studio review"].waitForExistence(timeout: 5), app.debugDescription)
+        let dismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in !review.isHittable && !list.isHittable }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed,
+                       "Selecting from the proven overlay must dismiss the list. \(app.debugDescription)")
+        XCTAssertTrue(card.isHittable, "The selected detail must be available after dismissal.")
+        attachScreenshot("actual-overlay-after-selection")
+        attachHierarchy("actual-overlay-after-selection-hierarchy", app: app)
+    }
+
+    private func assertSideBySide(list: XCUIElement, detail: XCUIElement,
+                                 in app: XCUIApplication,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        let listFrame = list.frame.intersection(app.frame)
+        let detailFrame = detail.frame.intersection(app.frame)
+        XCTAssertGreaterThan(listFrame.width, 0, file: file, line: line)
+        XCTAssertGreaterThan(detailFrame.width, 0, file: file, line: line)
+        XCTAssertLessThanOrEqual(listFrame.maxX, detailFrame.minX + 1,
+                                "List and detail must occupy separate visible panes. \(app.debugDescription)",
+                                file: file, line: line)
     }
 
     func testSeenReturnsToListOnlyWhenNoListPaneIsVisible() {

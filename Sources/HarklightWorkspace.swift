@@ -1611,6 +1611,12 @@ struct InboxList: View {
         .navigationLinkIndicatorVisibility(.hidden)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .tag(InboxSelection.request(item.row.key))
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            messageSwipeActions(for: .request(item.row), in: tab)
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            messageSwipeActions(for: .request(item.row), in: tab)
+        }
         .id(InboxListRowScrollTarget(tab: tab,
                                      selection: .request(item.row.key),
                                      placement: .newMessageArea))
@@ -1956,51 +1962,38 @@ struct InboxList: View {
     }
 
     @ViewBuilder
-    private func listRow(for row: InboxItem, in tab: InboxWorkspaceTab) -> some View {
+    private func messageSwipeActions(for row: InboxItem, in tab: InboxWorkspaceTab) -> some View {
         let messageTab = tab.messageTab
+        if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
+            Button { clearRetracted(row.id) } label: {
+                Label("Clear", systemImage: "xmark")
+            }
+            .tint(designPalette.neutral.secondaryTextColor)
+            .accessibilityIdentifier("inbox-clear-retracted")
+        } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
+            Button { markSeen(row.id) } label: {
+                Label("Seen", systemImage: "checkmark")
+            }
+            .tint(designPalette.accent.seenColor)
+            .accessibilityIdentifier("inbox-mark-seen")
+        } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
+            Button { markNoComment(row.id) } label: {
+                Label("No comment", systemImage: "hand.raised")
+            }
+            .tint(designPalette.neutral.secondaryTextColor)
+            .accessibilityIdentifier("inbox-no-comment")
+        }
+    }
+
+    @ViewBuilder
+    private func listRow(for row: InboxItem, in tab: InboxWorkspaceTab) -> some View {
         rowContent(for: row)
             .tag(row.id)
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
-                    Button { clearRetracted(row.id) } label: {
-                        Label("Clear", systemImage: "xmark")
-                    }
-                    .tint(designPalette.neutral.secondaryTextColor)
-                    .accessibilityIdentifier("inbox-clear-retracted")
-                } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
-                    Button { markSeen(row.id) } label: {
-                        Label("Seen", systemImage: "checkmark")
-                    }
-                    .tint(designPalette.accent.seenColor)
-                    .accessibilityIdentifier("inbox-mark-seen")
-                } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
-                    Button { markNoComment(row.id) } label: {
-                        Label("No comment", systemImage: "hand.raised")
-                    }
-                    .tint(designPalette.neutral.secondaryTextColor)
-                    .accessibilityIdentifier("inbox-no-comment")
-                }
+                messageSwipeActions(for: row, in: tab)
             }
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
-                    Button { clearRetracted(row.id) } label: {
-                        Label("Clear", systemImage: "xmark")
-                    }
-                    .tint(designPalette.neutral.secondaryTextColor)
-                    .accessibilityIdentifier("inbox-clear-retracted")
-                } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
-                    Button { markSeen(row.id) } label: {
-                        Label("Seen", systemImage: "checkmark")
-                    }
-                    .tint(designPalette.accent.seenColor)
-                    .accessibilityIdentifier("inbox-mark-seen")
-                } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
-                    Button { markNoComment(row.id) } label: {
-                        Label("No comment", systemImage: "hand.raised")
-                    }
-                    .tint(designPalette.neutral.secondaryTextColor)
-                    .accessibilityIdentifier("inbox-no-comment")
-                }
+                messageSwipeActions(for: row, in: tab)
             }
             .id(InboxListRowScrollTarget(tab: tab, selection: row.id))
             .accessibilityIdentifier(row.accessibilityID)
