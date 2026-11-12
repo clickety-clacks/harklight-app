@@ -1072,6 +1072,9 @@ final class ConversationRelayTests: XCTestCase {
         let (context, _, store, session) = try setup()
         let diagnostics = DiagnosticCollector()
         let liveACK = expectation(description: "The live replay is acknowledged through its later known event")
+        let liveWait = expectation(description: "The fake session has installed the live replay waiter")
+        liveWait.assertForOverFulfill = false
+        session.onLiveConversationWait = { liveWait.fulfill() }
         var conversationACKCount = 0
         session.onConversationACK = {
             conversationACKCount += 1
@@ -1090,6 +1093,8 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertTrue(diagnostics.events.contains { $0.causeCode == "unknown_update_kind" })
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertEqual(session.conversationACKs.count, 1)
+
+        await fulfillment(of: [liveWait], timeout: 2)
 
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
             data(#"{"v":1,"type":"conversation","conversation_seq":3,"kind":"future_fact"}"#),
