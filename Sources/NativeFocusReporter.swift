@@ -32,7 +32,7 @@ final class NativeFocusReporter {
     private var reportHandlerGeneration = UUID()
     private var reportHandler: ReportHandler?
 
-    private init() {}
+    init() {}
 
     func installReportHandler(for transportID: UUID?, handler: ReportHandler?) {
         cancelPendingReport()

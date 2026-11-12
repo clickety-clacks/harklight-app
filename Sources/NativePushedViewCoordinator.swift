@@ -32,6 +32,7 @@ final class NativePushedViewCoordinator {
     }
 
     @ObservationIgnored private let wire = ViewShowWire()
+    @ObservationIgnored private let uptime: () -> TimeInterval
     @ObservationIgnored private var pendingShow: PendingShow?
     @ObservationIgnored private var mostRecentOwnOpenUptime: TimeInterval?
     @ObservationIgnored private var applyHandler: (@MainActor (ViewShowFrame) async -> Void)?
@@ -43,7 +44,9 @@ final class NativePushedViewCoordinator {
     @ObservationIgnored private var applyTask: Task<Void, Never>?
     @ObservationIgnored private var focusLossTasks: [TypingSource: Task<Void, Never>] = [:]
 
-    private init() {}
+    init(uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.uptime = uptime
+    }
 
     func setApplyHandler(_ handler: (@MainActor (ViewShowFrame) async -> Void)?) {
         applyHandler = handler
@@ -53,7 +56,7 @@ final class NativePushedViewCoordinator {
 
     func receive(_ data: Data) {
         guard let frame = wire.frame(data) else { return }
-        let arrival = ProcessInfo.processInfo.systemUptime -
+        let arrival = uptime() -
             TimeInterval(frame.heldMilliseconds ?? 0) / 1_000
         pendingShow = PendingShow(frame: frame, arrivalUptime: arrival)
         cancelApplyTask()
@@ -65,7 +68,7 @@ final class NativePushedViewCoordinator {
         case .active:
             guard !sceneIsActive else { return }
             sceneIsActive = true
-            activeStartedAt = ProcessInfo.processInfo.systemUptime
+            activeStartedAt = uptime()
             attemptPendingShow()
         case .inactive, .background:
             pauseActiveClock()
@@ -93,7 +96,7 @@ final class NativePushedViewCoordinator {
     /// Records a deliberate message open. Held shows older than this choice
     /// are discarded when received as well as when they become applicable.
     func recordOwnOpen() {
-        let ownOpenUptime = ProcessInfo.processInfo.systemUptime
+        let ownOpenUptime = uptime()
         mostRecentOwnOpenUptime = ownOpenUptime
         passivePair = nil
         if let pendingShow,
@@ -108,11 +111,12 @@ final class NativePushedViewCoordinator {
     }
 
     @discardableResult
-    func contentWasTouched(_ key: RequestKey) -> Bool {
+    func contentWasTouched(_ key: RequestKey, perform action: () -> Void) -> Bool {
         guard isPassive(key) else { return false }
         lastTouchedPair = passivePair
         passivePair = nil
         contentTouchRevision &+= 1
+        action()
         return true
     }
 
@@ -134,7 +138,7 @@ final class NativePushedViewCoordinator {
 
     private var activeTimeNow: TimeInterval {
         accumulatedActiveTime + (activeStartedAt.map {
-            max(0, ProcessInfo.processInfo.systemUptime - $0)
+            max(0, uptime() - $0)
         } ?? 0)
     }
 
@@ -177,12 +181,12 @@ final class NativePushedViewCoordinator {
             sceneIsActive = false
             return
         }
-        accumulatedActiveTime += max(0, ProcessInfo.processInfo.systemUptime - activeStartedAt)
+        accumulatedActiveTime += max(0, uptime() - activeStartedAt)
         self.activeStartedAt = nil
         sceneIsActive = false
     }
 
-    private func attemptPendingShow() {
+    func attemptPendingShow() {
         cancelApplyTask()
         guard sceneIsActive, let pendingShow, let applyHandler else { return }
 

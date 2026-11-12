@@ -582,7 +582,6 @@ struct LiveContentView: View {
                 refreshInbox: inboxRefreshAction,
                 showsLocalExamples: showsSampleMessages && !store.isReadOnly,
                 notificationNavigation: testNotificationNavigation ?? launch?.notificationNavigation,
-                userOpenedMessage: { launch?.userOpenedMessage() },
                 notificationChatRouteDidOpen: { serial in
                     if let testNotificationChatRouteDidOpen {
                         testNotificationChatRouteDidOpen(serial)
@@ -590,6 +589,7 @@ struct LiveContentView: View {
                         launch?.notificationChatRouteWasOpened(serial: serial)
                     }
                 },
+                userOpenedMessage: { launch?.userOpenedMessage() },
                 testNotificationRouter: testNotificationRouter,
                 testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
             .alert("Connection needs attention", isPresented: failureAlertPresented,
@@ -2128,10 +2128,11 @@ struct LiveRequestDetail: View {
     }
 
     private func activatePassivePushContent() {
-        guard localExample == nil,
-              NativePushedViewCoordinator.shared.contentWasTouched(request.key) else { return }
-        store.newMessageAreaStore?.open(request.key)
-        store.reportMessageContentOpened(request)
+        guard localExample == nil else { return }
+        NativePushedViewCoordinator.shared.contentWasTouched(request.key) {
+            store.newMessageAreaStore?.open(request.key)
+            store.reportMessageContentOpened(request)
+        }
     }
 
     private var requestDetailsSheet: some View {
@@ -2715,9 +2716,10 @@ private struct LiveProjectedInputView: View {
 
     private func activatePassivePushContent() {
         guard localExample == nil else { return }
-        guard NativePushedViewCoordinator.shared.contentWasTouched(request.key) else { return }
-        store.newMessageAreaStore?.open(request.key)
-        store.reportMessageContentOpened(request)
+        NativePushedViewCoordinator.shared.contentWasTouched(request.key) {
+            store.newMessageAreaStore?.open(request.key)
+            store.reportMessageContentOpened(request)
+        }
     }
 
     private var replyEditorSurface: Color {

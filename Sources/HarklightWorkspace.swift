@@ -798,7 +798,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         if case let .request(key)? = next {
             let pushes = NativePushedViewCoordinator.shared
             openedPassivePush = pushes.isPassive(key)
-            if pushes.contentWasTouched(key) {
+            pushes.contentWasTouched(key) {
                 conversationStore?.newMessageAreaStore?.open(key)
                 reportMessageContentOpen(for: key)
             }
@@ -859,9 +859,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func activatePassivePushContent(for key: RequestKey) {
-        guard NativePushedViewCoordinator.shared.contentWasTouched(key) else { return }
-        conversationStore?.newMessageAreaStore?.open(key)
-        reportMessageContentOpen(for: key)
+        NativePushedViewCoordinator.shared.contentWasTouched(key) {
+            conversationStore?.newMessageAreaStore?.open(key)
+            reportMessageContentOpen(for: key)
+        }
     }
 
     /// Opens a reply group's parent with its relevant reply in view.

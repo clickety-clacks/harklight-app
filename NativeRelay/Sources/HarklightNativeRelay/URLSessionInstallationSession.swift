@@ -60,11 +60,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let onFocusReportingUnsupported: @Sendable () -> Void
     private let onViewShow: @Sendable (Data) -> Void
     private let focusReportWire = FocusReportWire()
+    private var focusReportReplyRouter = FocusReportReplyRouter()
     private let attemptID: UUID?
     private var postCheckpointReader: Task<Void, Never>?
     private var postCheckpointReaderOwnsSocket = false
-    private var focusReportRefs = Set<String>()
-    private var focusReportingSupported = true
     private var responseFrames: [Data] = []
     private var responseWaiters: [CheckedContinuation<Data, any Error>] = []
     // One queued event bounds native-side memory while the core catches up.
@@ -184,16 +183,16 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// post-checkpoint reader and never delays this caller until the server
     /// responds.
     public func sendFocusReport(_ report: FocusReport) async {
-        guard focusReportingSupported,
+        guard focusReportReplyRouter.supportsFocusReports,
               postCheckpointReaderOwnsSocket,
               postCheckpointReadFailure == nil else { return }
         let ref = "focus-\(UUID().uuidString.lowercased())"
         guard let frame = try? focusReportWire.request(for: report, ref: ref) else { return }
-        focusReportRefs.insert(ref)
+        guard focusReportReplyRouter.register(ref: ref) else { return }
         do {
             try await send(frame)
         } catch {
-            focusReportRefs.remove(ref)
+            focusReportReplyRouter.remove(ref: ref)
         }
     }
 
@@ -724,7 +723,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         postCheckpointReader?.cancel()
         postCheckpointReader = nil
         postCheckpointReaderOwnsSocket = false
-        focusReportRefs.removeAll(keepingCapacity: false)
+        focusReportReplyRouter.reset()
         failPostCheckpointReader(InstallationTransportError.unexpectedServerFrame)
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
@@ -885,7 +884,15 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             while !Task.isCancelled {
                 let frame = try await receiveTaskFrame()
                 let kind = Self.frameType(frame)
-                if routeFocusReportReply(frame) { continue }
+                switch focusReportReplyRouter.route(frame, using: focusReportWire) {
+                case .unrelated:
+                    break
+                case .consumed:
+                    continue
+                case .unsupported:
+                    onFocusReportingUnsupported()
+                    continue
+                }
                 if kind == "view_show" {
                     onViewShow(frame)
                     continue
@@ -917,16 +924,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         } catch {
             failPostCheckpointReader(error)
         }
-    }
-
-    private func routeFocusReportReply(_ frame: Data) -> Bool {
-        guard let reply = try? focusReportWire.replyFrame(frame),
-              focusReportRefs.remove(reply.ref) != nil else { return false }
-        if reply.result == .unsupported, focusReportingSupported {
-            focusReportingSupported = false
-            onFocusReportingUnsupported()
-        }
-        return true
     }
 
     private func enqueuePostCheckpointInboxEvent(_ frame: Data) async throws {

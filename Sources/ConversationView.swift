@@ -36,20 +36,19 @@ enum ConversationPanelText {
         "This request was replaced. You can browse its chat history, but cannot send new messages."
 }
 
-private struct FocusVisibleTurnFramesKey: PreferenceKey {
-    static let defaultValue: [String: CGRect] = [:]
-
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
-    }
+private struct FocusVisibleGeometry: Equatable {
+    var frames: [String: CGRect] = [:]
+    var visibleRect: CGRect = .null
 }
 
-private struct FocusVisibleChatRectKey: PreferenceKey {
-    static let defaultValue = CGRect.null
+private struct FocusVisibleGeometryKey: PreferenceKey {
+    static let defaultValue = FocusVisibleGeometry()
 
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+    static func reduce(value: inout FocusVisibleGeometry,
+                       nextValue: () -> FocusVisibleGeometry) {
         let next = nextValue()
-        if !next.isNull { value = next }
+        value.frames.merge(next.frames, uniquingKeysWith: { _, latest in latest })
+        if !next.visibleRect.isNull { value.visibleRect = next.visibleRect }
     }
 }
 
@@ -178,7 +177,7 @@ struct ConversationPanel: View {
                             fileError = nil
                             inspectedFile = file
                             inspectedFileRevision = fileRevision
-                        })
+                        }, onContentTouch: { activatePassivePushContent() })
                         .padding(verticalSizeClass == .compact ? 4 : 12)
                         .simultaneousGesture(TapGesture().onEnded { activatePassivePushContent() })
                 }
@@ -285,10 +284,11 @@ struct ConversationPanel: View {
 
     private func activatePassivePushContent() {
         guard !store.isLocalExample else { return }
-        guard NativePushedViewCoordinator.shared.contentWasTouched(key) else { return }
-        store.newMessageAreaStore?.open(key)
-        if let request = store.request(for: key) {
-            store.reportMessageContentOpened(request)
+        NativePushedViewCoordinator.shared.contentWasTouched(key) {
+            store.newMessageAreaStore?.open(key)
+            if let request = store.request(for: key) {
+                store.reportMessageContentOpened(request)
+            }
         }
     }
 
@@ -317,7 +317,7 @@ private struct ConversationHistoryContent: View, Equatable {
     let inspect: (ConversationFile, UInt64) -> Void
     @State private var visibleAgentReplyTurnIDs = Set<ExactText>()
     @State private var focusTurnTracker = NativeFocusVisibleTurnTracker()
-    @State private var focusScrollIsSettled = true
+    @State private var focusScrollSampling = NativeFocusScrollSampling()
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         // Read cursors change as replies cross the visibility threshold, but
@@ -373,10 +373,13 @@ private struct ConversationHistoryContent: View, Equatable {
                             inspect: inspect)
                             .id(turn.id)
                             .background {
-                                GeometryReader { geometry in
-                                    Color.clear.preference(
-                                        key: FocusVisibleTurnFramesKey.self,
-                                        value: [turn.id.rawValue: geometry.frame(in: .global)])
+                                if focusScrollSampling.shouldMeasureTurnFrames {
+                                    GeometryReader { geometry in
+                                        Color.clear.preference(
+                                            key: FocusVisibleGeometryKey.self,
+                                            value: FocusVisibleGeometry(
+                                                frames: [turn.id.rawValue: geometry.frame(in: .global)]))
+                                    }
                                 }
                             }
                             .onScrollVisibilityChange(threshold: 0.5) { isVisible in
@@ -397,44 +400,37 @@ private struct ConversationHistoryContent: View, Equatable {
             .background {
                 GeometryReader { geometry in
                     Color.clear.preference(
-                        key: FocusVisibleChatRectKey.self,
-                        value: geometry.frame(in: .global))
+                        key: FocusVisibleGeometryKey.self,
+                        value: FocusVisibleGeometry(visibleRect: geometry.frame(in: .global)))
                 }
             }
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(TapGesture().onEnded { activatePassivePushContent() })
-            .onPreferenceChange(FocusVisibleTurnFramesKey.self) { frames in
-                focusTurnTracker.retainEventIDs(Set(frames.keys))
-                for (eventID, frame) in frames {
+            .onPreferenceChange(FocusVisibleGeometryKey.self) { geometry in
+                focusTurnTracker.updateVisibleRect(geometry.visibleRect)
+                guard focusScrollSampling.shouldMeasureTurnFrames,
+                      !geometry.frames.isEmpty else { return }
+                focusTurnTracker.retainEventIDs(Set(geometry.frames.keys))
+                for (eventID, frame) in geometry.frames {
                     focusTurnTracker.updateFrame(frame, for: eventID)
                 }
-                if focusScrollIsSettled {
-                    reportVisibleChatTurn()
+                if reportVisibleChatTurn() {
+                    focusScrollSampling.didMeasureTurnFrames()
                 }
-            }
-            .onPreferenceChange(FocusVisibleChatRectKey.self) { rect in
-                focusTurnTracker.updateVisibleRect(rect)
-                if focusScrollIsSettled { reportVisibleChatTurn() }
             }
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.visibleRect.maxY >= geometry.contentSize.height - 24
             } action: { _, isAtNewestTurn in
                 focusTurnTracker.updateIsAtNewestTurn(isAtNewestTurn)
-                if focusScrollIsSettled { reportVisibleChatTurn() }
             }
             .onScrollPhaseChange { _, phase in
-                let isSettled = phase == .idle
-                let didSettle = !focusScrollIsSettled && isSettled
-                if focusScrollIsSettled != isSettled {
-                    focusScrollIsSettled = isSettled
-                }
-                if !isSettled {
+                focusScrollSampling.phaseChanged(isIdle: phase == .idle)
+                if phase != .idle {
                     NativeFocusReporter.shared.conversationScrollBegan(
                         senderID: key.senderID.rawValue,
                         messageID: key.messageID.rawValue)
                 }
                 if phase == .interacting { activatePassivePushContent() }
-                if didSettle { reportVisibleChatTurn() }
             }
             .onChange(of: store.canUseCurrentServerState(for: key)) { _, canUseCurrentServerState in
                 guard canUseCurrentServerState,
@@ -452,7 +448,9 @@ private struct ConversationHistoryContent: View, Equatable {
                     store.markConversationRead(key, through: turnID)
                 }
             }
-            .onAppear { reportVisibleChatTurn() }
+            .onAppear {
+                if thread.turns.isEmpty { reportVisibleChatTurn() }
+            }
             .onChange(of: thread.turns.count) { _, _ in
                 if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
             }
@@ -463,9 +461,10 @@ private struct ConversationHistoryContent: View, Equatable {
         }
     }
 
-    private func reportVisibleChatTurn() {
-        guard !local else { return }
-        guard let visibility = focusTurnTracker.chatVisibility(for: thread.turns) else { return }
+    @discardableResult
+    private func reportVisibleChatTurn() -> Bool {
+        guard !local else { return false }
+        guard let visibility = focusTurnTracker.chatVisibility(for: thread.turns) else { return false }
         let reporter = NativeFocusReporter.shared
         if reporter.currentFocus?.screen == .chat,
            reporter.currentFocus?.senderID == key.senderID.rawValue,
@@ -478,13 +477,15 @@ private struct ConversationHistoryContent: View, Equatable {
                                           messageID: key.messageID.rawValue,
                                           visibility: visibility)
         }
+        return true
     }
 
     private func activatePassivePushContent() {
-        guard NativePushedViewCoordinator.shared.contentWasTouched(key) else { return }
-        store.newMessageAreaStore?.open(key)
-        if let request = store.request(for: key) {
-            store.reportMessageContentOpened(request)
+        NativePushedViewCoordinator.shared.contentWasTouched(key) {
+            store.newMessageAreaStore?.open(key)
+            if let request = store.request(for: key) {
+                store.reportMessageContentOpened(request)
+            }
         }
     }
 }
@@ -621,6 +622,7 @@ private struct ConversationComposer: View {
     let key: RequestKey
     let revision: UInt64
     let inspect: (ConversationFile, UInt64) -> Void
+    let onContentTouch: () -> Void
     @State private var pickingFiles = false
     @State private var attachmentChoices = false
     @State private var textSession = ConversationComposerTextSession()
@@ -688,7 +690,7 @@ private struct ConversationComposer: View {
                         scheduleTextSave()
                     },
                     onFocusChange: {
-                        if $0 { activatePassivePushContent() }
+                        if $0 { onContentTouch() }
                         NativePushedViewCoordinator.shared.conversationComposerFocusChanged($0)
                     },
                     onReturn: sendStagedText)
