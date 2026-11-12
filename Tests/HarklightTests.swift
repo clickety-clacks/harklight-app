@@ -1704,7 +1704,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
     }
 
-    func testOwnOperationReceiptDoesNotJumpCursorAndEnablesKnownAnswerScene() throws {
+    func testOwnOperationReceiptDoesNotJumpCursorOrBecomeSharedOutcome() throws {
         let fixtures = try loadFixtures()
         let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
         guard case let .sender(document) = fixture.interface else { return XCTFail("Expected a facilities sender document.") }
@@ -1749,17 +1749,16 @@ final class HarklightTests: XCTestCase {
         try store.finishReplay(at: 2, context: context)
         let presented = try XCTUnwrap(port.observe(context: port.context).requests.first)
         XCTAssertEqual(presented.lifecycleStatus, .answered)
-        XCTAssertEqual(presented.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertNil(presented.accountAnswerOutcome)
+        XCTAssertNil(presented.receiptFacts,
+                     "An account terminal without a shared outcome does not expose this device's receipt.")
+        XCTAssertNil(presented.intentReceipt)
         guard case let .sender(projection) = presented.projection else { return XCTFail("Expected a sender projection.") }
         XCTAssertEqual(projection.illustrations, document.illustrations)
         XCTAssertEqual(projection.submissionLabel, document.submissionLabel)
         let projectedPoints = resultPointNodes(in: projection.scene)
-        XCTAssertEqual(projectedPoints.count, 1)
-        guard case let .resultPoint(illustrationID, _, point) = try XCTUnwrap(projectedPoints.first?.kind) else {
-            return XCTFail("Expected the authorized result point to be projected as coordinates.")
-        }
-        XCTAssertNotNil(document.illustration(withID: illustrationID))
-        XCTAssertEqual(point, PointValue(x: 240, y: 610))
+        XCTAssertTrue(projectedPoints.isEmpty,
+                      "A device-local accepted answer is not shown as the shared account outcome.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
     }
 
