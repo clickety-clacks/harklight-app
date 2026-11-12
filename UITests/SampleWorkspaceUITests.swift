@@ -219,6 +219,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(pending.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(pending.value as? String, "Pending",
                        "The persisted ordinary submission retains its pending confirmation after local example actions.")
+        for answer in ["Cover A", "Cover B", "Send a note"] {
+            XCTAssertFalse(app.buttons[answer].exists,
+                           "Pending confirmation replaces the editable answer controls.")
+        }
         capture("ordinary-request-after-example", app)
     }
 
