@@ -1296,7 +1296,7 @@ struct LiveRequestDetail: View {
     }
 
     func finishSeenAction(_ action: ExactText, returnToList: () -> Void) {
-        submitSeenAction(action)
+        guard submitSeenAction(action) else { return }
         returnToList()
     }
 
@@ -1540,12 +1540,13 @@ struct LiveRequestDetail: View {
         }
     }
 
-    private func submitSeenAction(_ action: ExactText) {
+    private func submitSeenAction(_ action: ExactText) -> Bool {
         if let localSeenAction {
             localSeenAction(action)
+            return true
         } else {
-            store.submitFromUser(request.key, explicitCompatibilityAction: action,
-                                 requestRevision: request.requestRevision)
+            return store.submitFromUser(request.key, explicitCompatibilityAction: action,
+                                        requestRevision: request.requestRevision)
         }
     }
 
