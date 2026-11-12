@@ -386,7 +386,7 @@ private struct ConversationHistoryContent: View, Equatable {
                                 guard turn.kind == .reply, turn.author == .origin else { return }
                                 if isVisible {
                                     visibleAgentReplyTurnIDs.insert(turn.id)
-                                    if !NativePushedViewCoordinator.shared.isPassive(key) {
+                                    NativePushedViewCoordinator.shared.performReadIfContentIsActive(for: key) {
                                         store.markConversationRead(key, through: turn.id)
                                     }
                                 } else {
@@ -433,10 +433,11 @@ private struct ConversationHistoryContent: View, Equatable {
                 if phase == .interacting { activatePassivePushContent() }
             }
             .onChange(of: store.canUseCurrentServerState(for: key)) { _, canUseCurrentServerState in
-                guard canUseCurrentServerState,
-                      !NativePushedViewCoordinator.shared.isPassive(key) else { return }
-                for turnID in visibleAgentReplyTurnIDs {
-                    store.markConversationRead(key, through: turnID)
+                guard canUseCurrentServerState else { return }
+                NativePushedViewCoordinator.shared.performReadIfContentIsActive(for: key) {
+                    for turnID in visibleAgentReplyTurnIDs {
+                        store.markConversationRead(key, through: turnID)
+                    }
                 }
             }
             .onChange(of: thread.turns.map { $0.id.rawValue }) { _, eventIDs in
@@ -444,8 +445,10 @@ private struct ConversationHistoryContent: View, Equatable {
             }
             .onChange(of: NativePushedViewCoordinator.shared.contentTouchRevision) { _, _ in
                 guard NativePushedViewCoordinator.shared.lastTouchedPair?.matches(key) == true else { return }
-                for turnID in visibleAgentReplyTurnIDs {
-                    store.markConversationRead(key, through: turnID)
+                NativePushedViewCoordinator.shared.performReadIfContentIsActive(for: key) {
+                    for turnID in visibleAgentReplyTurnIDs {
+                        store.markConversationRead(key, through: turnID)
+                    }
                 }
             }
             .onAppear {

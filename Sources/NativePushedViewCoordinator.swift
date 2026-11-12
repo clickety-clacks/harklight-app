@@ -111,6 +111,13 @@ final class NativePushedViewCoordinator {
     }
 
     @discardableResult
+    func performReadIfContentIsActive(for key: RequestKey, action: () -> Void) -> Bool {
+        guard !isPassive(key) else { return false }
+        action()
+        return true
+    }
+
+    @discardableResult
     func contentWasTouched(_ key: RequestKey, perform action: () -> Void) -> Bool {
         guard isPassive(key) else { return false }
         lastTouchedPair = passivePair
