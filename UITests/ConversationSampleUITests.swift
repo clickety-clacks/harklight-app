@@ -946,6 +946,9 @@ final class ConversationSampleUITests: XCTestCase {
 
         let seenAction = app.buttons["request-seen-action"]
         XCTAssertTrue(seenAction.waitForExistence(timeout: 5), app.debugDescription)
+        let requestHeading = app.buttons["request-heading"]
+        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
+        let selectedRequestLabel = requestHeading.label
         let chat = app.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         chat.tap()
@@ -966,12 +969,12 @@ final class ConversationSampleUITests: XCTestCase {
         let end = noChatDescription.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: end,
                     withVelocity: .slow, thenHoldForDuration: 0.1)
-        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(row.isHittable, app.debugDescription)
-        row.tap()
         XCTAssertTrue(noChatTitle.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(requestHeading.label, selectedRequestLabel,
+                       "Dismissing no-chat Chat returns to the same request detail, not the list.")
         XCTAssertTrue(seenAction.waitForExistence(timeout: 5),
-                      "The message's Seen response remains available after returning from no-chat Chat.")
+                      "The message's Seen response remains available on the detail after Chat closes.")
     }
 
     func testChatPanelRemovesRedundantRowsAndKeepsComposerControlsAlignedAsPromptGrows() {
