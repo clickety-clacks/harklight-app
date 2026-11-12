@@ -1,6 +1,6 @@
 # Harklight app design system
 
-Status: candidate for independent spec review.
+Status: approved by the Client PO.
 Scope: the Harklight iPhone and iPad app (`Sources/`), light and dark.
 Supersedes: `Design/README.md` (the earlier Nordic direction).
 Work item: `wi_44f29e86-6006-4513-97aa-cb147cb89fac`.
