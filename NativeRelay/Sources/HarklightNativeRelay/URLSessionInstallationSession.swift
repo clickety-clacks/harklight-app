@@ -92,8 +92,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 trustedRootDER: Data,
                 attemptID: UUID? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
-                onFocusReportingReady: @escaping @Sendable () -> Void = { _ in },
-                onFocusReportingUnsupported: @escaping @Sendable () -> Void = { _ in },
+                onFocusReportingReady: @escaping @Sendable () -> Void = {},
+                onFocusReportingUnsupported: @escaping @Sendable () -> Void = {},
                 onViewShow: @escaping @Sendable (Data) -> Void = { _ in },
                 onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
         guard profile.transportMode == .relay,
