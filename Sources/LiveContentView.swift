@@ -1538,13 +1538,6 @@ struct LiveRequestDetail: View {
         return true
     }
 
-    private var noCommentChoice: some View {
-        NoCommentChoiceRow(selected: noCommentSelected,
-                           unavailable: showsNoCommentUnavailable,
-                           canOpenFailureDetails: failedResponseWarning != nil,
-                           onSelect: selectNoCommentAction)
-    }
-
     private func selectNoCommentAction() {
         closeReplyEditor()
         if let session = localReplySession {
@@ -1599,6 +1592,34 @@ struct LiveRequestDetail: View {
         if let localExample { return localExample.message.initials }
         return String(senderLabel.split(whereSeparator: { !$0.isLetter })
             .prefix(2).compactMap(\.first)).uppercased()
+    }
+
+    private var answerConfirmation: AnswerConfirmationCard? {
+        if showsAnsweredConfirmation {
+            return AnswerConfirmationCard(
+                title: Self.answeredConfirmationTitle(isDefaultAnswered: request.isDefaultAnswered),
+                answer: confirmedAnswerText,
+                identifier: "request-answered",
+                accessibilityValue: "Completed",
+                symbolName: "checkmark",
+                answerIdentifier: request.isDefaultAnswered
+                    ? "request-default-answer" : "request-account-answer")
+        } else if showsNoCommentConfirmation {
+            return AnswerConfirmationCard(title: "No comment", answer: nil,
+                identifier: "request-no-comment-status",
+                accessibilityValue: "Completed", symbolName: "checkmark")
+        } else if showsPendingAnswerConfirmation {
+            return AnswerConfirmationCard(title: "Pending", answer: pendingAnswerText,
+                identifier: "request-pending-answer-status",
+                accessibilityValue: "Pending", symbolName: "clock",
+                answerIdentifier: "request-pending-answer")
+        } else if showsNotAcceptedConfirmation {
+            return AnswerConfirmationCard(title: "Not accepted", answer: attemptedAnswerText,
+                identifier: "request-not-accepted-status",
+                accessibilityValue: "Not accepted", symbolName: "xmark",
+                answerIdentifier: "request-not-accepted-answer")
+        }
+        return nil
     }
 
     var body: some View {
@@ -1711,82 +1732,33 @@ struct LiveRequestDetail: View {
                 if localExample?.message.kind == .review {
                     SampleDiffView()
                 }
-                if showsAnsweredConfirmation {
-                    AnswerConfirmationCard(
-                        title: Self.answeredConfirmationTitle(isDefaultAnswered: request.isDefaultAnswered),
-                        answer: confirmedAnswerText,
-                        identifier: "request-answered",
-                        accessibilityValue: "Completed",
-                        symbolName: "checkmark",
-                        answerIdentifier: request.isDefaultAnswered
-                            ? "request-default-answer" : "request-account-answer")
-                    closingScene
-                } else if showsNoCommentConfirmation {
-                    AnswerConfirmationCard(title: "No comment", answer: nil,
-                        identifier: "request-no-comment-status",
-                        accessibilityValue: "Completed", symbolName: "checkmark")
-                    closingScene
-                } else if showsPendingAnswerConfirmation {
-                    AnswerConfirmationCard(title: "Pending", answer: pendingAnswerText,
-                        identifier: "request-pending-answer-status",
-                        accessibilityValue: "Pending", symbolName: "clock",
-                        answerIdentifier: "request-pending-answer")
-                } else if showsNotAcceptedConfirmation {
-                    AnswerConfirmationCard(title: "Not accepted", answer: attemptedAnswerText,
-                        identifier: "request-not-accepted-status",
-                        accessibilityValue: "Not accepted", symbolName: "xmark",
-                        answerIdentifier: "request-not-accepted-answer")
+                if let answerConfirmation {
+                    answerConfirmation
+                    if showsAnsweredConfirmation || showsNoCommentConfirmation { closingScene }
                 } else {
-                    switch request.projection {
-                    case let .sender(sender):
-                        VStack(alignment: .leading, spacing: 10) {
-                            LiveProjectedSceneView(request: request,
-                                                   sender: sender,
-                                                   node: sender.scene,
-                                                   store: store,
-                                                   readOnly: controlsReadOnly,
-                                                   hideAnswerControls: isSupersedesReadOnly,
-                                                   focusedReplyActionID: $focusedReplyActionID,
-                                                   activeReplyEditor: activeReplyEditor,
-                                                   localReplyDraftSession: localReplySession,
-                                                   openReplyEditor: { openReplyEditor($0) },
-                                                   replyTextBinding: { replyTextBinding(for: $0) },
-                                                   closeReplyEditor: closeReplyEditor,
-                                                   onLocalReplyInteraction: markLocalReplyInteraction,
-                                                   localExample: localExample,
-                                                   enlargePicture: { enlargedPicture = $0 })
-                            if canOfferNoComment { noCommentChoice }
-                        }
-                    case let .compatibility(actions):
-                        LiveCompatibilityActions(request: request,
-                                                 actions: actions,
-                                                 store: store,
-                                                 readOnly: controlsReadOnly,
-                                                 hideAnswerControls: isSupersedesReadOnly,
-                                                 sendDisabled: sendControlsDisabled,
-                                                 localExample: localExample,
-                                                 onSeen: { action in
-                                                     finishSeenAction(action, returnToList: returnToListIfSinglePane)
-                                                 },
-                                                 canOfferNoComment: canOfferNoComment,
-                                                 noCommentSelected: noCommentSelected,
-                                                 noCommentUnavailable: showsNoCommentUnavailable,
-                                                 canOpenFailureDetails: failedResponseWarning != nil,
-                                                 onSelectNoComment: selectNoCommentAction,
-                                                 focusedReplyActionID: $focusedReplyActionID,
-                                                 replyTextBinding: { replyTextBinding(for: $0) },
-                                                 localReplyDraftSession: localReplySession,
-                                                 activeReplyEditor: activeReplyEditor,
-                                                 openReplyEditor: { openReplyEditor($0) },
-                                                 closeReplyEditor: closeReplyEditor,
-                                                 onLocalReplyInteraction: markLocalReplyInteraction)
-                    case .unsupported:
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("This request uses an unsupported answer format.")
-                                .foregroundStyle(detailColors.secondary)
-                            if canOfferNoComment { noCommentChoice }
-                        }
-                    }
+                    LiveRequestAnswerControls(
+                        request: request, store: store,
+                        controlsReadOnly: controlsReadOnly,
+                        isSupersedesReadOnly: isSupersedesReadOnly,
+                        sendControlsDisabled: sendControlsDisabled,
+                        localExample: localExample,
+                        canOfferNoComment: canOfferNoComment,
+                        noCommentSelected: noCommentSelected,
+                        showsNoCommentUnavailable: showsNoCommentUnavailable,
+                        canOpenFailureDetails: failedResponseWarning != nil,
+                        secondaryTextColor: detailColors.secondary,
+                        focusedReplyActionID: $focusedReplyActionID,
+                        activeReplyEditor: activeReplyEditor,
+                        localReplySession: localReplySession,
+                        openReplyEditor: openReplyEditor,
+                        replyTextBinding: { replyTextBinding(for: $0) },
+                        closeReplyEditor: closeReplyEditor,
+                        markLocalReplyInteraction: markLocalReplyInteraction,
+                        selectNoCommentAction: selectNoCommentAction,
+                        onSeen: { action in
+                            finishSeenAction(action, returnToList: returnToListIfSinglePane)
+                        },
+                        enlargePicture: { enlargedPicture = $0 })
                 }
                 if request.inboxStateIsCurrent {
                     if storePresentationSnapshot.isRetracted {
@@ -2528,6 +2500,91 @@ private func senderPictureLoader(for request: PresentedRequest,
     { file in
         try await store.prepareConversationPreview(file, for: request.key,
                                                   revision: 1)
+    }
+}
+
+/// A concrete boundary keeps the answer projection's generic view tree out of
+/// the surrounding card and its sheets. Draft and navigation state stay above it.
+@MainActor
+private struct LiveRequestAnswerControls: View {
+    let request: PresentedRequest
+    let store: LivePresentationStore
+    let controlsReadOnly: Bool
+    let isSupersedesReadOnly: Bool
+    let sendControlsDisabled: Bool
+    let localExample: SampleResponse?
+    let canOfferNoComment: Bool
+    let noCommentSelected: Bool
+    let showsNoCommentUnavailable: Bool
+    let canOpenFailureDetails: Bool
+    let secondaryTextColor: Color
+    @FocusState.Binding var focusedReplyActionID: String?
+    let activeReplyEditor: ReplyEditorTarget?
+    let localReplySession: ReplyEditorDraftSession?
+    let openReplyEditor: (ReplyEditorTarget) -> Void
+    let replyTextBinding: (ReplyEditorTarget) -> Binding<String>
+    let closeReplyEditor: () -> Void
+    let markLocalReplyInteraction: () -> Void
+    let selectNoCommentAction: () -> Void
+    let onSeen: (ExactText) -> Void
+    let enlargePicture: (SampleOption) -> Void
+
+    private var noCommentChoice: some View {
+        NoCommentChoiceRow(selected: noCommentSelected,
+                           unavailable: showsNoCommentUnavailable,
+                           canOpenFailureDetails: canOpenFailureDetails,
+                           onSelect: selectNoCommentAction)
+    }
+
+    var body: some View {
+        switch request.projection {
+        case let .sender(sender):
+            VStack(alignment: .leading, spacing: 10) {
+                LiveProjectedSceneView(request: request,
+                                       sender: sender,
+                                       node: sender.scene,
+                                       store: store,
+                                       readOnly: controlsReadOnly,
+                                       hideAnswerControls: isSupersedesReadOnly,
+                                       focusedReplyActionID: $focusedReplyActionID,
+                                       activeReplyEditor: activeReplyEditor,
+                                       localReplyDraftSession: localReplySession,
+                                       openReplyEditor: { openReplyEditor($0) },
+                                       replyTextBinding: { replyTextBinding($0) },
+                                       closeReplyEditor: closeReplyEditor,
+                                       onLocalReplyInteraction: markLocalReplyInteraction,
+                                       localExample: localExample,
+                                       enlargePicture: enlargePicture)
+                if canOfferNoComment { noCommentChoice }
+            }
+        case let .compatibility(actions):
+            LiveCompatibilityActions(request: request,
+                                     actions: actions,
+                                     store: store,
+                                     readOnly: controlsReadOnly,
+                                     hideAnswerControls: isSupersedesReadOnly,
+                                     sendDisabled: sendControlsDisabled,
+                                     localExample: localExample,
+                                     onSeen: onSeen,
+                                     canOfferNoComment: canOfferNoComment,
+                                     noCommentSelected: noCommentSelected,
+                                     noCommentUnavailable: showsNoCommentUnavailable,
+                                     canOpenFailureDetails: canOpenFailureDetails,
+                                     onSelectNoComment: selectNoCommentAction,
+                                     focusedReplyActionID: $focusedReplyActionID,
+                                     replyTextBinding: { replyTextBinding($0) },
+                                     localReplyDraftSession: localReplySession,
+                                     activeReplyEditor: activeReplyEditor,
+                                     openReplyEditor: { openReplyEditor($0) },
+                                     closeReplyEditor: closeReplyEditor,
+                                     onLocalReplyInteraction: markLocalReplyInteraction)
+        case .unsupported:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("This request uses an unsupported answer format.")
+                    .foregroundStyle(secondaryTextColor)
+                if canOfferNoComment { noCommentChoice }
+            }
+        }
     }
 }
 

@@ -486,7 +486,7 @@ private struct NewMessageAreaVisibility: Hashable {
 }
 
 private struct NewMessageAreaExpiryTaskKey: Hashable {
-    let scenePhase: String
+    let scenePhase: ScenePhase
     let nextExpiry: Date?
 }
 
@@ -716,7 +716,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.scenePhase) private var scenePhase
     @State private var selection: InboxSelection?
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
@@ -822,15 +821,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private var notificationPendingListPresentation: InboxNotificationPendingPresentation? {
         guard let route = visibleNotificationNavigation, route.request == nil else { return nil }
         return notificationPendingPresentation(for: route.serial)
-    }
-    private var newMessageAreaExpiryTaskKey: NewMessageAreaExpiryTaskKey {
-        NewMessageAreaExpiryTaskKey(
-            scenePhase: String(describing: scenePhase),
-            nextExpiry: nextNewMessageAreaExpiry)
-    }
-    private var nextNewMessageAreaExpiry: Date? {
-        [conversationStore?.newMessageAreaStore?.nextExpiry,
-         conversationStore?.replyItemAreaStore?.nextExpiry].compactMap { $0 }.min()
     }
     private var exposesNotificationTestAction: Bool {
         ProcessInfo.processInfo.arguments.contains("--harklight-test-notification-navigation")
@@ -1402,28 +1392,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                         fallback: NativeFocusSelection.report(for: selection))
                 }
             }
-            .onChange(of: scenePhase) { _, phase in
-                guard phase == .active, UIApplication.shared.isProtectedDataAvailable else { return }
-                conversationStore?.newMessageAreaStore?.removeExpired()
-                conversationStore?.replyItemAreaStore?.removeExpired()
-            }
-            .task(id: newMessageAreaExpiryTaskKey) {
-                guard scenePhase == .active,
-                      UIApplication.shared.isProtectedDataAvailable else { return }
-                while let expiry = nextNewMessageAreaExpiry {
-                    let delay = max(0, expiry.timeIntervalSinceNow)
-                    do {
-                        try await Task.sleep(for: .seconds(delay))
-                    } catch {
-                        return
-                    }
-                    guard !Task.isCancelled,
-                          scenePhase == .active,
-                          UIApplication.shared.isProtectedDataAvailable else { return }
-                    conversationStore?.newMessageAreaStore?.removeExpired()
-                    conversationStore?.replyItemAreaStore?.removeExpired()
-                }
-            }
+            .modifier(InboxAreaExpiry(newMessageAreaStore: conversationStore?.newMessageAreaStore,
+                                      replyItemAreaStore: conversationStore?.replyItemAreaStore))
             .onChange(of: samples.selectedID) { _, id in
                 let sampleIDDescription: String = id ?? "nil"
                 let selectionDescription: String = UIDiagnostics.describe(selection)
@@ -1466,6 +1436,50 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Text(dialog.localizedMessage)
         }
         .tint(HarklightDesignSystem.palette(for: colorScheme).text)
+    }
+}
+
+/// Expiry observes only its stores and scene phase. Its task does not extend
+/// the inbox navigation view's generic modifier chain.
+@MainActor
+private struct InboxAreaExpiry: ViewModifier {
+    let newMessageAreaStore: NewMessageAreaStore?
+    let replyItemAreaStore: ReplyItemAreaStore?
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var newMessageAreaExpiryTaskKey: NewMessageAreaExpiryTaskKey {
+        NewMessageAreaExpiryTaskKey(
+            scenePhase: scenePhase,
+            nextExpiry: nextNewMessageAreaExpiry)
+    }
+    private var nextNewMessageAreaExpiry: Date? {
+        [newMessageAreaStore?.nextExpiry,
+         replyItemAreaStore?.nextExpiry].compactMap { $0 }.min()
+    }
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active, UIApplication.shared.isProtectedDataAvailable else { return }
+                newMessageAreaStore?.removeExpired()
+                replyItemAreaStore?.removeExpired()
+            }
+            .task(id: newMessageAreaExpiryTaskKey) {
+                guard scenePhase == .active,
+                      UIApplication.shared.isProtectedDataAvailable else { return }
+                while let expiry = nextNewMessageAreaExpiry {
+                    let delay = max(0, expiry.timeIntervalSinceNow)
+                    do {
+                        try await Task.sleep(for: .seconds(delay))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled,
+                          scenePhase == .active,
+                          UIApplication.shared.isProtectedDataAvailable else { return }
+                    newMessageAreaStore?.removeExpired()
+                    replyItemAreaStore?.removeExpired()
+                }
+            }
     }
 }
 
