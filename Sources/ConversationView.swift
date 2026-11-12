@@ -37,7 +37,7 @@ enum ConversationPanelText {
 }
 
 private struct FocusVisibleTurnFramesKey: PreferenceKey {
-    static var defaultValue: [String: CGRect] = [:]
+    static let defaultValue: [String: CGRect] = [:]
 
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
@@ -45,7 +45,7 @@ private struct FocusVisibleTurnFramesKey: PreferenceKey {
 }
 
 private struct FocusVisibleChatRectKey: PreferenceKey {
-    static var defaultValue = CGRect.null
+    static let defaultValue = CGRect.null
 
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         let next = nextValue()
