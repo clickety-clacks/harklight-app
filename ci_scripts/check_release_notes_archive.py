@@ -102,7 +102,7 @@ def first_parent(repo: Path, head: str) -> str:
     return parent
 
 
-def check(repo: Path, commit: str) -> Optional[str]:
+def check(repo: Path, commit: str) -> tuple[Optional[str], bool]:
     head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").strip()
     resolved_commit = git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
     if not resolved_commit or resolved_commit != head:
@@ -128,20 +128,26 @@ def check(repo: Path, commit: str) -> Optional[str]:
             )
 
     if not pending:
-        return None
+        return None, False
 
     pending_id = pending[0]["id"]
     parent = first_parent(repo, head)
-    previous_ids = set()
+    previous_entries_by_id = {}
     if tree_file_exists(repo, parent):
         previous_entries = read_entries(repo, parent, "first-parent")
-        previous_ids = {entry["id"] for entry in previous_entries}
-    if pending_id in previous_ids:
-        raise CheckFailure(
-            f"pending release note {pending_id} is not new since the first parent"
-        )
+        previous_entries_by_id = {entry["id"]: entry for entry in previous_entries}
+    previous_pending_entry = previous_entries_by_id.get(pending_id)
+    if previous_pending_entry is not None:
+        if previous_pending_entry.get("testFlightBuildNumber") is not None:
+            raise CheckFailure(
+                f"pending release note {pending_id} was already released in the first parent"
+            )
+        if previous_pending_entry == pending[0]:
+            raise CheckFailure(
+                f"pending release note {pending_id} is unchanged since the first parent"
+            )
 
-    return pending_id
+    return pending_id, previous_pending_entry is not None
 
 
 def main() -> int:
@@ -150,14 +156,15 @@ def main() -> int:
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
     try:
-        pending_id = check(args.repo.resolve(), args.commit)
+        pending_id, was_updated = check(args.repo.resolve(), args.commit)
     except CheckFailure as error:
         print(f"Release notes archive check failed: {error}", file=sys.stderr)
         return 1
     if pending_id is None:
         print("Release notes archive check passed: no pending entry; follow-up is tracked after merge.")
     else:
-        print(f"Release notes archive check passed: new pending entry {pending_id}")
+        change = "updated" if was_updated else "new"
+        print(f"Release notes archive check passed: {change} pending entry {pending_id}")
     return 0
 
 
