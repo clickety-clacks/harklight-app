@@ -137,6 +137,25 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertNil(NewMessageAreaPriorityTreatment.forLevel(nil, colorScheme: .dark))
     }
 
+    func testLiveInboxLabelsMeetContrastOnTheirApprovedSurfaces() throws {
+        let source = HarklightDesignSystem.source
+
+        for (appearanceName, appearance) in [("light", source.light), ("dark", source.dark)] {
+            let neutralText = try XCTUnwrap(rgb(appearance.neutral.text))
+            let rowTop = try XCTUnwrap(rgb(appearance.neutral.rowTop))
+            let accent = try XCTUnwrap(rgb(appearance.accent.accent))
+            let background = try XCTUnwrap(rgb(appearance.neutral.bg))
+            let refreshingWash = composite(accent, over: background, opacity: 0.14)
+
+            XCTAssertGreaterThanOrEqual(
+                contrastRatio(foreground: neutralText, background: rowTop), 4.5,
+                "\(appearanceName) More/Less text must pass on rowTop.")
+            XCTAssertGreaterThanOrEqual(
+                contrastRatio(foreground: neutralText, background: refreshingWash), 4.5,
+                "\(appearanceName) Refreshing text must pass on its accent wash.")
+        }
+    }
+
     func testDuePhrasePresentationSplitsBetweenDayAndTimeButKeepsOneAccessiblePhrase() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -190,5 +209,44 @@ final class InboxVisualRulesTests: XCTestCase {
                                                 calendar: calendar, locale: locale), "Thursday")
         XCTAssertEqual(InboxFriendlyDate.label(for: date(7), now: now,
                                                 calendar: calendar, locale: locale), "10/7/26")
+    }
+
+    private struct RGB {
+        let red: Double
+        let green: Double
+        let blue: Double
+    }
+
+    private func rgb(_ token: String) -> RGB? {
+        guard token.hasPrefix("#"), let value = UInt32(token.dropFirst(), radix: 16) else {
+            return nil
+        }
+        return RGB(red: Double((value >> 16) & 0xFF) / 255,
+                   green: Double((value >> 8) & 0xFF) / 255,
+                   blue: Double(value & 0xFF) / 255)
+    }
+
+    private func composite(_ foreground: RGB, over background: RGB, opacity: Double) -> RGB {
+        RGB(red: foreground.red * opacity + background.red * (1 - opacity),
+            green: foreground.green * opacity + background.green * (1 - opacity),
+            blue: foreground.blue * opacity + background.blue * (1 - opacity))
+    }
+
+    private func contrastRatio(foreground: RGB, background: RGB) -> Double {
+        let foregroundLuminance = luminance(foreground)
+        let backgroundLuminance = luminance(background)
+        return (max(foregroundLuminance, backgroundLuminance) + 0.05) /
+            (min(foregroundLuminance, backgroundLuminance) + 0.05)
+    }
+
+    private func luminance(_ color: RGB) -> Double {
+        func linearize(_ component: Double) -> Double {
+            component <= 0.04045
+                ? component / 12.92
+                : pow((component + 0.055) / 1.055, 2.4)
+        }
+        return linearize(color.red) * 0.2126 +
+            linearize(color.green) * 0.7152 +
+            linearize(color.blue) * 0.0722
     }
 }
