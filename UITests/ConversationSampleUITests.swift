@@ -1210,13 +1210,18 @@ final class ConversationSampleUITests: XCTestCase {
         // dismiss the sheet during rotation. Reopen the button presentation.
         if !app.textViews["sample-chat-composer"].exists { app.buttons["Chat"].tap() }
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        dismissChatSheet(app)
-        XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if !isPad {
+            dismissChatSheet(app)
+            XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
+        }
+        // On iPad, the landscape rebuild moves Chat into the inline detail panel.
         XCUIDevice.shared.orientation = .landscapeLeft
+        if isPad { XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription) }
         showInbox(app)
         let other = app.descendants(matching: .any)["request-row-sample-review-0"]
         XCTAssertTrue(other.waitForExistence(timeout: 5))
-        guard reveal(other, in: listContainer(app), app: app) else { return }
+        guard reveal(other, in: listContainer(app, containing: other), app: app) else { return }
         other.tap()
         // In a regular-width split view the sidebar rows expose these titles too,
         // so only the detail card can show that the selection changed.
@@ -1225,12 +1230,12 @@ final class ConversationSampleUITests: XCTestCase {
         recordDiagnostics("after-departure", app)
         XCTAssertTrue(departed, "Selecting another row must change the detail identity before cleanup is assessed")
         showInbox(app)
-        guard reveal(row, in: listContainer(app), app: app) else { return }
+        guard reveal(row, in: listContainer(app, containing: row), app: app) else { return }
         row.tap()
         let returned = detail.staticTexts["Review the library welcome text"].waitForExistence(timeout: 5)
         recordDiagnostics("after-return", app)
         XCTAssertTrue(returned, "Returning to the original row must restore its exact detail identity")
-        app.buttons["Chat"].tap()
+        if !isPad { app.buttons["Chat"].tap() }
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         let cleanupShown = app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5)
         recordDiagnostics("after-return-chat", app)
@@ -1241,6 +1246,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Local example · cleanup is unconfirmed; no service is contacted."].exists)
         capture("upload-return-unconfirmed-no-resend", app)
         XCUIDevice.shared.orientation = .portrait
+        if !composer.exists { app.buttons["Chat"].tap() }
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep this file note.")
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
@@ -1453,7 +1459,7 @@ final class ConversationSampleUITests: XCTestCase {
     private func showInbox(_ app: XCUIApplication) {
         guard app.scrollViews["message-card-scroll"].exists else { return }
         let searchField = app.searchFields.firstMatch
-        let back = app.navigationBars.buttons.firstMatch
+        let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable {
             back.tap()
         } else {
@@ -1465,21 +1471,27 @@ final class ConversationSampleUITests: XCTestCase {
                       searchField.waitForExistence(timeout: 5), app.debugDescription)
     }
 
-    private func listContainer(_ app: XCUIApplication) -> XCUIElement {
-        // In split view, the detail card is also a scroll view but it cannot scroll the list.
+    private func listContainer(_ app: XCUIApplication, containing row: XCUIElement? = nil) -> XCUIElement {
+        // A split-view detail or Settings page can also expose a collection view.
+        // Anchor the scroll container to the row this test intends to reach.
+        if let row, !row.identifier.isEmpty {
+            let collectionView = app.collectionViews.containing(.button, identifier: row.identifier).firstMatch
+            if collectionView.exists { return collectionView }
+            let table = app.tables.containing(.button, identifier: row.identifier).firstMatch
+            if table.exists { return table }
+        }
         let collectionView = app.collectionViews.firstMatch
         if collectionView.exists { return collectionView }
         let table = app.tables.firstMatch
         if table.exists { return table }
         let listScrollViews = app.scrollViews.matching(NSPredicate(format: "identifier != %@", "message-card-scroll"))
-        let scrollView = listScrollViews.firstMatch
-        return scrollView
+        return listScrollViews.firstMatch
     }
 
     /// Whether the whole row is inside the list, above its bottom tab and search controls.
     private func unobscured(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.exists else { return false }
-        let bottom = bottomControlsTop(app)
+        let bottom = bottomControlsTop(app, in: scrollView)
         let frame = element.frame
         return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
     }
@@ -1492,7 +1504,7 @@ final class ConversationSampleUITests: XCTestCase {
             return false
         }
         func unobscured() -> Bool {
-            let bottom = bottomControlsTop(app)
+            let bottom = bottomControlsTop(app, in: scrollView)
             let navigationBar = app.navigationBars.firstMatch
             let top = max(scrollView.frame.minY,
                           navigationBar.exists ? navigationBar.frame.maxY : scrollView.frame.minY)
@@ -1514,14 +1526,20 @@ final class ConversationSampleUITests: XCTestCase {
         return false
     }
 
-    private func bottomControlsTop(_ app: XCUIApplication) -> CGFloat {
+    private func bottomControlsTop(_ app: XCUIApplication, in scrollView: XCUIElement) -> CGFloat {
         let tabButtons = [
             workspaceTab("Inbox", in: app),
             workspaceTab("Replied", in: app),
         ].filter(\.exists)
-        if let tabTop = tabButtons.map(\.frame.minY).min() { return tabTop }
+        if let tabTop = tabButtons.map(\.frame.minY).filter({ $0 > scrollView.frame.midY }).min() {
+            return tabTop
+        }
         let searchField = app.searchFields.firstMatch
-        return searchField.exists ? searchField.frame.minY : app.windows.firstMatch.frame.maxY
+        if searchField.exists, searchField.frame.minY > scrollView.frame.midY {
+            return searchField.frame.minY
+        }
+        // On iPad the workspace tabs and Search field sit above the sidebar list.
+        return scrollView.frame.maxY
     }
 }
 
