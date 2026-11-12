@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  ios-build-and-test:
-    name: iOS build and tests
+  ios-unit-tests:
+    name: iOS unit tests
     runs-on: xcode-27
     timeout-minutes: 120
     steps:
@@ -23,9 +23,38 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Build and test the iOS app
+      - name: Build and test iOS unit suites
+        env:
+          HARKLIGHT_ONLY_TESTING: >-
+            HarklightTests
+            HarklightNativeRelayTests
         run: Scripts/verify.sh test
 
-      - name: Build and test the native host
-        if: ${{ !cancelled() }}
+  ios-ui-tests:
+    name: iOS UI tests
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build and test iOS UI suites
+        env:
+          HARKLIGHT_ONLY_TESTING: >-
+            HarklightUITests
+            HarklightConversationUITests
+        run: Scripts/verify.sh test
+
+  native-host-tests:
+    name: NativeHost tests
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Test NativeHost
         run: Scripts/verify.sh native-host-test
