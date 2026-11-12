@@ -830,7 +830,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertFalse(pending.removed)
         XCTAssertTrue(launch.canRetryUnconfirmedDisconnectRemoval(for: pending))
         let removalNotice = try XCTUnwrap(pending.unconfirmedRemovalNotice)
-        XCTAssertTrue(removalNotice.contains("Invitation for \(replacement.claimedAccountLabel) is waiting"),
+        XCTAssertTrue(removalNotice.contains("The invitation for \(replacement.claimedAccountLabel) is waiting"),
                       "The removal notice names the saved replacement invitation")
 
         await launch.retryDisconnectRemoval(for: pending)
