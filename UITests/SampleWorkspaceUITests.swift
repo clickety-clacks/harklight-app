@@ -74,17 +74,24 @@ final class SampleWorkspaceUITests: XCTestCase {
     func testMessageDetailDetectedURLUsesSystemHandlerAndBodyCanBeCopied() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
-                               "--harklight-data-detector-acceptance"]
+                               "--harklight-data-detector-acceptance", "--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
 
         enterSearch("Detector acceptance", in: app)
         let row = app.descendants(matching: .any)["sample-data-detector-acceptance"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
-        row.tap()
+        // The preview URL is deliberately interactive. Select the title so
+        // this opens detail instead of activating the embedded preview link.
+        let title = row.staticTexts["Detector acceptance"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), app.debugDescription)
+        title.tap()
 
         let detail = app.scrollViews["message-card-scroll"]
-        XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        let opened = detail.waitForExistence(timeout: 5)
+        capture("detector-row-selection", app)
+        XCTAssertTrue(opened, app.debugDescription)
+        guard opened else { return }
         let body = app.textViews["request-message-body"]
         XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
         let bodyText = body.value as? String ?? body.label

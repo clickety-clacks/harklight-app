@@ -1556,10 +1556,8 @@ final class NativeRelayLifecycle {
         }
     }
 
-    private func refreshOnce(generation: UUID,
-                             checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
-        guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
-        guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
+    private func refreshConfirmedProjection(core: NativeRelayCore, context: ProfileContext,
+                                            generation: UUID) async throws {
         do {
             _ = try await core.resyncAndDrainOutbox()
         } catch {
@@ -1574,6 +1572,34 @@ final class NativeRelayLifecycle {
         }
         conversationAvailability.confirm(for: context, conversationsUnavailable: conversationsUnavailable)
         confirmedRelayContext = context
+    }
+
+#if DEBUG
+    /// Test-target entry into the same replay and confirmation path, without TLS
+    /// enrollment or notification registration. It never forces send permission.
+    func confirmInProcessSessionForTesting(store: AttentionDomainStore, context: ProfileContext,
+                                          session: any AuthenticatedInstallationSession,
+                                          serverStateCache: any ServerStateCaching) async throws -> NativeRelayRefreshResult {
+        await deactivate()
+        let generation = UUID()
+        let attemptID = UUID()
+        refreshGeneration = generation
+        activeTransportAttemptID = attemptID
+        self.context = context
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       attemptID: attemptID, serverStateCache: serverStateCache)
+        self.core = core
+        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
+            confirmedContext: context, confirmedTransportAttemptID: attemptID)
+    }
+#endif
+
+    private func refreshOnce(generation: UUID,
+                             checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
+        guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
+        guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
+        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
         if let configuration {
             let threads = try configuration.store.conversationSnapshot(context: context).threads
             for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {

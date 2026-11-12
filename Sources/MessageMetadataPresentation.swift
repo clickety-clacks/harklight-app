@@ -99,11 +99,24 @@ struct MessageMetadataBadges: View {
     }
 }
 
+private enum MessageMetadataBadgeStyle {
+    static var font: Font {
+        HarklightDesignSystem.font(for: .caption)
+            .weight(HarklightDesignSystem.typeStyle(.label).swiftUIFontWeight)
+    }
+}
+
 private struct MessageTypeBadge: View {
     let type: MessageTypeValue
 
+    @Environment(\.colorScheme) private var colorScheme
+
     private var title: LocalizedStringResource {
         MessageTypePresentation.title(for: type)
+    }
+
+    private var secondaryTextColor: Color {
+        HarklightDesignSystem.palette(for: colorScheme).neutral.secondaryTextColor
     }
 
     var body: some View {
@@ -112,11 +125,11 @@ private struct MessageTypeBadge: View {
                 .accessibilityHidden(true)
             Text(title)
         }
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.primary)
+        .font(MessageMetadataBadgeStyle.font)
+        .foregroundStyle(secondaryTextColor)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color.secondary.opacity(0.10), in: Capsule())
+        .background(secondaryTextColor.opacity(0.10), in: Capsule())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(title))
         .accessibilityIdentifier("message-type-\(type.rawValue)")
@@ -161,7 +174,7 @@ private struct MessageKindBadge: View {
                     .accessibilityHidden(true)
             }
         }
-        .font(.caption.weight(.semibold))
+        .font(MessageMetadataBadgeStyle.font)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(accentColor.opacity(0.10), in: Capsule())

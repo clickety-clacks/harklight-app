@@ -1287,11 +1287,17 @@ struct LiveRequestDetail: View {
             guard localExample.canFinishLocally else { return }
             localExample.finishLocally()
         } else if let availableSeenAction {
-            submitSeenAction(availableSeenAction)
+            finishSeenAction(availableSeenAction, returnToList: returnToListIfSinglePane)
+            return
         } else {
             return
         }
         returnToListIfSinglePane()
+    }
+
+    func finishSeenAction(_ action: ExactText, returnToList: () -> Void) {
+        submitSeenAction(action)
+        returnToList()
     }
 
     private var seenActionIsComplete: Bool {
@@ -1489,7 +1495,7 @@ struct LiveRequestDetail: View {
             ?? request.draft.noCommentSelected
     }
 
-    private var canSubmitCurrentAnswer: Bool {
+    var canSubmitCurrentAnswer: Bool {
         let locallyValid: Bool
         if let session = localReplySession {
             locallyValid = session.noCommentSelected
@@ -1745,8 +1751,7 @@ struct LiveRequestDetail: View {
                                                  sendDisabled: sendControlsDisabled,
                                                  localExample: localExample,
                                                  onSeen: { action in
-                                                     submitSeenAction(action)
-                                                     returnToListIfSinglePane()
+                                                     finishSeenAction(action, returnToList: returnToListIfSinglePane)
                                                  },
                                                  canOfferNoComment: canOfferNoComment,
                                                  noCommentSelected: noCommentSelected,
