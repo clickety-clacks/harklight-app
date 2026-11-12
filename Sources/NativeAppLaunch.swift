@@ -1240,6 +1240,7 @@ private struct PreparedNoReplyRoutingChange: Sendable {
 private struct PreparedLivePresentationInitialState: Sendable {
     let port: AttentionDomainPort
     let snapshot: PresentationSnapshot
+    let requestsByKey: [RequestKey: PresentedRequest]
     let conversationThreads: [RequestKey: ConversationThread]
     let submissionProgress: [RequestKey: InboxSubmissionProgress]
     let conversationFiles: ConversationFileStorage?
@@ -1262,6 +1263,7 @@ private struct VersionedPreparedReplyItemAreaReconciliation: Sendable {
 }
 
 private struct PreparedLivePresentationUpdate: Sendable {
+    let requestsByKey: [RequestKey: PresentedRequest]
     let conversationThreads: [RequestKey: ConversationThread]
     let submissionProgress: [RequestKey: InboxSubmissionProgress]
     let messageArea: VersionedPreparedNewMessageAreaReconciliation?
@@ -1343,6 +1345,9 @@ final class LivePresentationStore {
     private(set) var sendingAnswerIntentIDs: Set<UUID> = []
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
+    // Rows and detail controls repeatedly ask for the same request while rendering.
+    // Replace this lookup with each snapshot instead of scanning/copying every request.
+    private var requestsByKey: [RequestKey: PresentedRequest]
     private(set) var retractionVisibilityTime = Date()
     private(set) var selectedRequestKey: RequestKey?
     private var activeRefreshCount = 0
@@ -1547,7 +1552,9 @@ final class LivePresentationStore {
             let conversationFiles = try suppliedConversationFiles ??
                 ConversationFileStorage(identity: context.identity)
             return PreparedLivePresentationInitialState(
-                port: port, snapshot: snapshot, conversationThreads: conversationThreads,
+                port: port, snapshot: snapshot,
+                requestsByKey: Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.key, $0) }),
+                conversationThreads: conversationThreads,
                 submissionProgress: InboxSubmissionProgress.project(
                     snapshot: attentionSnapshot, threads: conversationThreads),
                 conversationFiles: conversationFiles,
@@ -1611,6 +1618,8 @@ final class LivePresentationStore {
         self.port = port
         self.attentionStore = store
         self.presentation = snapshot
+        self.requestsByKey = preparedInitialState?.requestsByKey ??
+            Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.key, $0) })
         self.conversationThreads = conversationThreads
         self.submissionProgress = try preparedInitialState?.submissionProgress ??
             InboxSubmissionProgress.project(snapshot: store.snapshot(context: context),
@@ -2468,11 +2477,11 @@ final class LivePresentationStore {
     }
 
     var selectedRequest: PresentedRequest? {
-        presentation.requests.first { $0.key == selectedRequestKey }
+        selectedRequestKey.flatMap { requestsByKey[$0] }
     }
 
     func request(for key: RequestKey) -> PresentedRequest? {
-        presentation.requests.first { $0.key == key }
+        requestsByKey[key]
     }
 
     func historicalRequest(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
@@ -3316,6 +3325,7 @@ final class LivePresentationStore {
             }
         }
         presentation = snapshot
+        requestsByKey = Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.key, $0) })
         reconcileNewMessageArea(snapshot.requests)
         if !locallyReconciledRead { reconcileReplyItemArea() }
         refreshFailedResponseWarnings(for: snapshot.requests)
@@ -3401,6 +3411,7 @@ final class LivePresentationStore {
                     }
                 } ?? false
                 return PreparedLivePresentationUpdate(
+                    requestsByKey: requestsByKey,
                     conversationThreads: conversationThreads,
                     submissionProgress: InboxSubmissionProgress.project(
                         snapshot: attentionSnapshot, threads: conversationThreads),
@@ -3458,6 +3469,7 @@ final class LivePresentationStore {
             locallyReconciledConversationReadRevisions = Set(
                 locallyReconciledConversationReadRevisions.filter { $0 > snapshot.revision })
             presentation = snapshot
+            requestsByKey = prepared.requestsByKey
             failedResponseWarnings = prepared.failedResponseWarnings
             failedResponseWarningGeneration &+= 1
             recordNoReplyRoutingChanges(prepared.noReplyRoutingChanges)
