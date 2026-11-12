@@ -51,6 +51,19 @@ struct NativeAccountDeparture: Codable {
     var archiveID: String {
         [record.profileAuthority, record.personID ?? "", record.deviceID].joined(separator: "|")
     }
+
+    var unconfirmedRemovalNotice: String? {
+        guard !removed else { return nil }
+        let account = record.savedAccountName ?? "this account"
+        let server = record.serverDisplayName ?? record.host
+        let nextStep: String
+        if let replacement {
+            nextStep = "The invitation for \(replacement.claimedAccountLabel) is waiting. It will open after \(server) confirms removal."
+        } else {
+            nextStep = "You can continue with another invitation and retry this removal later."
+        }
+        return "The server, \(server), may still list this phone as registered for \(account). \(nextStep) Saved messages, drafts and pending answers stay with this account and will not be shown or sent through another account."
+    }
 }
 
 struct NativeJoinResponse {
