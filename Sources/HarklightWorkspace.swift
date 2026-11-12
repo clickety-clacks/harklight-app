@@ -1647,7 +1647,9 @@ struct InboxList: View {
             if isRefreshing {
                 HStack(spacing: 5) {
                     ProgressView().controlSize(.small)
-                    Text("Refreshing").font(.caption2.weight(.semibold))
+                    Text("Refreshing")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(designPalette.neutral.textColor)
                 }
                 .foregroundStyle(designPalette.accent.color)
                 .tint(designPalette.accent.color)
@@ -2081,6 +2083,7 @@ struct InboxList: View {
                         Button(isNewMessageAreaExpanded ? "Less" : "More…") {
                             isNewMessageAreaExpanded.toggle()
                         }
+                        .foregroundStyle(designPalette.neutral.textColor)
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 16)
                         .padding(.top, 9)

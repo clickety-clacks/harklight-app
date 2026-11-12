@@ -12,12 +12,18 @@ enum HarklightMessageType: String, CaseIterable, Sendable {
 struct HarklightDesignSource: Decodable, Sendable {
     let light: Appearance
     let dark: Appearance
+    let type: HarklightTypographyTokens
+    let space: [String: Double]
+    let radius: [String: Double]
+    let motion: HarklightMotionTokens
 
     struct Appearance: Decodable, Sendable {
         let neutral: Neutral
         let accent: Accent
         let detail: Detail
         let types: [String: MessageType]
+        let elevation: HarklightElevationTokens
+        let grain: HarklightGrainTokens
 
         func messageType(_ type: HarklightMessageType) -> MessageType {
             guard let result = types[type.rawValue] else {
@@ -29,6 +35,7 @@ struct HarklightDesignSource: Decodable, Sendable {
 
     struct Neutral: Decodable, Sendable {
         let bg: String
+        let raised: String
         let rowTop: String
         let text: String
         let text2: String
@@ -36,9 +43,11 @@ struct HarklightDesignSource: Decodable, Sendable {
         let replySurface: String
         let glass: String
         let glassEdge: String
+        let swipeNeutral: String
         let tabOn: String
 
         var backgroundColor: Color { Color(harklightToken: bg) }
+        var raisedColor: Color { Color(harklightToken: raised) }
         var rowTopColor: Color { Color(harklightToken: rowTop) }
         var textColor: Color { Color(harklightToken: text) }
         var secondaryTextColor: Color { Color(harklightToken: text2) }
@@ -46,6 +55,7 @@ struct HarklightDesignSource: Decodable, Sendable {
         var replySurfaceColor: Color { Color(harklightToken: replySurface) }
         var glassColor: Color { Color(harklightToken: glass) }
         var glassEdgeColor: Color { Color(harklightToken: glassEdge) }
+        var swipeNeutralColor: Color { Color(harklightToken: swipeNeutral) }
         var selectedTabColor: Color { Color(harklightToken: tabOn) }
     }
 
@@ -62,9 +72,11 @@ struct HarklightDesignSource: Decodable, Sendable {
     struct Detail: Decodable, Sendable {
         let selectedChoice: String
         let replyField: String
+        let replyInput: String
 
         var selectedChoiceColor: Color { Color(harklightToken: selectedChoice) }
         var replyFieldColor: Color { Color(harklightToken: replyField) }
+        var replyInputColor: Color { Color(harklightToken: replyInput) }
     }
 
     struct MessageType: Decodable, Sendable {
