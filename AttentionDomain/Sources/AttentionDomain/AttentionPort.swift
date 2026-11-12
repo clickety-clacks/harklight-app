@@ -1229,6 +1229,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
         let projection: AdmittedRequestProjection
         let hasAccountTerminal = remote?.state != nil
+        let hasAcceptedOwnOperation = submission.map { value in
+            if case .accepted = value.disposition { return true }
+            return false
+        } ?? false
         let ownAnswerWasRefusedByRetraction: Bool
         if let submission, case .refusedByRetraction = submission.disposition {
             ownAnswerWasRefusedByRetraction = true
@@ -1250,10 +1254,17 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 authorizedAnswer = terminal.authorizedAnswer
                 scene = document.terminalScene(state: terminal.state, authorizedAnswer: terminal.authorizedAnswer)
             } else if let remoteState = remote?.state {
-                // The legacy answer field and a local receipt can differ by
-                // device. Shared terminal details come only from the common
-                // account outcome projection below.
-                authorizedAnswer = nil
+                // Prefer the shared answer. If the relay omits it, this
+                // device's accepted operation can still authorize its answer scene.
+                if let accountAnswer = remote?.authorizedOriginAnswer {
+                    authorizedAnswer = accountAnswer
+                } else if remoteState == .answered,
+                          hasAcceptedOwnOperation,
+                          let submission {
+                    authorizedAnswer = submission.answer
+                } else {
+                    authorizedAnswer = nil
+                }
                 terminalState = remoteState
                 scene = document.terminalScene(state: remoteState, authorizedAnswer: authorizedAnswer)
             } else {
@@ -1328,7 +1339,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                                  interface: interface),
                                 ownAnswerWasRefusedByRetraction: ownAnswerWasRefusedByRetraction,
                                 lifecycleStatus: status,
-                                receiptFacts: hasAccountTerminal ? nil : receiptFacts,
+                                receiptFacts: hasAccountTerminal &&
+                                    !(remote?.state == .answered && hasAcceptedOwnOperation) ? nil : receiptFacts,
                                 intentReceipt: hasAccountTerminal ? nil : submission.map { receipt($0, context: context) },
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
