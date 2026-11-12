@@ -1492,12 +1492,13 @@ final class ConversationSampleUITests: XCTestCase {
     private func unobscured(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.exists else { return false }
         let bottom = bottomControlsTop(app, in: scrollView)
+        let top = topControlsBottom(app, in: scrollView)
         let frame = element.frame
-        return element.isHittable && frame.minY >= scrollView.frame.minY && frame.maxY <= bottom
+        return element.isHittable && frame.minY >= top && frame.maxY <= bottom
     }
 
-    /// Scrolls until the whole row is below the navigation bar and above the
-    /// bottom controls. Returns false with a screenshot if it remains blocked.
+    /// Scrolls until the whole row clears visible controls above and below
+    /// the list. Returns false with a screenshot if it remains blocked.
     private func reveal(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
         guard element.waitForExistence(timeout: 5) else {
             XCTFail("Row does not exist: \(app.debugDescription)")
@@ -1505,9 +1506,7 @@ final class ConversationSampleUITests: XCTestCase {
         }
         func unobscured() -> Bool {
             let bottom = bottomControlsTop(app, in: scrollView)
-            let navigationBar = app.navigationBars.firstMatch
-            let top = max(scrollView.frame.minY,
-                          navigationBar.exists ? navigationBar.frame.maxY : scrollView.frame.minY)
+            let top = topControlsBottom(app, in: scrollView)
             let frame = element.frame
             return element.isHittable && frame.minY >= top && frame.maxY <= bottom
         }
@@ -1524,6 +1523,27 @@ final class ConversationSampleUITests: XCTestCase {
         capture("row-outside-list-after-scrolling", app)
         XCTFail("Row stayed outside the unobscured list after scrolling: frame=\(element.frame), hittable=\(element.isHittable), list=\(scrollView.frame)\n\(app.debugDescription)")
         return false
+    }
+
+    /// Returns the bottom of visible controls above the list, without treating
+    /// the navigation bar's empty background as an obstruction.
+    private func topControlsBottom(_ app: XCUIApplication, in scrollView: XCUIElement) -> CGFloat {
+        var controls = app.navigationBars.allElementsBoundByIndex.flatMap { navigationBar in
+            navigationBar.buttons.allElementsBoundByIndex + navigationBar.searchFields.allElementsBoundByIndex
+        }
+        controls.append(contentsOf: [
+            workspaceTab("Inbox", in: app),
+            workspaceTab("Replied", in: app),
+        ].filter { $0.exists && $0.frame.minY <= scrollView.frame.midY })
+        let searchField = app.searchFields.firstMatch
+        if searchField.exists && searchField.frame.minY <= scrollView.frame.midY {
+            controls.append(searchField)
+        }
+        let controlBottom = controls
+            .filter { $0.exists && $0.frame.minY <= scrollView.frame.midY && $0.frame.intersects(scrollView.frame) }
+            .map { $0.frame.maxY }
+            .max() ?? scrollView.frame.minY
+        return max(scrollView.frame.minY, controlBottom)
     }
 
     private func bottomControlsTop(_ app: XCUIApplication, in scrollView: XCUIElement) -> CGFloat {
