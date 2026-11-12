@@ -140,15 +140,13 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         XCTAssertEqual(applied.map(\.messageID), ["deferred"])
 
         let leavingField = NativePushedViewCoordinator(uptime: { uptime })
-        var appliedAfterBlur = false
-        leavingField.setApplyHandler { _ in appliedAfterBlur = true }
+        let appliedAfterBlur = expectation(description: "Pushed view applies after focus leaves the text field")
+        leavingField.setApplyHandler { _ in appliedAfterBlur.fulfill() }
         leavingField.scenePhaseChanged(.active)
         leavingField.conversationComposerFocusChanged(true)
         leavingField.receive(try viewShow(messageID: "after-blur", target: "message"))
         leavingField.conversationComposerFocusChanged(false)
-        await Task.yield()
-        await Task.yield()
-        XCTAssertTrue(appliedAfterBlur, "Leaving the focused text field ends the typing wait.")
+        await fulfillment(of: [appliedAfterBlur], timeout: 1)
 
         coordinator.accountConnectionWillBeRemoved()
         leavingField.accountConnectionWillBeRemoved()
