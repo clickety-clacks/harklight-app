@@ -7,6 +7,7 @@ struct ConversationReturnTextView: UIViewRepresentable {
     @Binding var text: String
     let isEnabled: Bool
     let onReturn: () -> Void
+    let onFocusChange: (Bool) -> Void
 
     private let placeholder = "Write a message…"
 
@@ -134,6 +135,14 @@ struct ConversationReturnTextView: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             parent.text = textView.text
             textView.accessibilityValue = textView.text.isEmpty ? parent.placeholder : textView.text
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            parent.onFocusChange(true)
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            parent.onFocusChange(false)
         }
 
         func textPasteConfigurationSupporting(

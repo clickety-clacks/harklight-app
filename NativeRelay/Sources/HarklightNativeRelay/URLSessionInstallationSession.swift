@@ -56,8 +56,14 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let profileContext: ProfileContext
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
+    private let onFocusReportingReady: @Sendable () -> Void
+    private let onFocusReportingUnsupported: @Sendable () -> Void
+    private let onViewShow: @Sendable (Data) -> Void
+    private let focusReportWire = FocusReportWire()
+    private var focusReportReplyRouter = FocusReportReplyRouter()
     private let attemptID: UUID?
     private var postCheckpointReader: Task<Void, Never>?
+    private var postCheckpointReaderOwnsSocket = false
     private var responseFrames: [Data] = []
     private var responseWaiters: [CheckedContinuation<Data, any Error>] = []
     // One queued event bounds native-side memory while the core catches up.
@@ -85,6 +91,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 trustedRootDER: Data,
                 attemptID: UUID? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
+                onFocusReportingReady: @escaping @Sendable () -> Void = {},
+                onFocusReportingUnsupported: @escaping @Sendable () -> Void = {},
+                onViewShow: @escaping @Sendable (Data) -> Void = { _ in },
                 onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
         guard profile.transportMode == .relay,
               relayURL.scheme == "wss",
@@ -115,6 +124,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         relayEndpointHost = host.lowercased()
         profileContext = profile
         self.onProgress = onProgress
+        self.onFocusReportingReady = onFocusReportingReady
+        self.onFocusReportingUnsupported = onFocusReportingUnsupported
+        self.onViewShow = onViewShow
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root,
@@ -163,6 +175,24 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         } catch {
             close()
             throw error
+        }
+    }
+
+    /// Sends a best-effort focus update on the owned relay socket without
+    /// holding the request/reply gate. Its reply is routed by `ref` by the
+    /// post-checkpoint reader and never delays this caller until the server
+    /// responds.
+    public func sendFocusReport(_ report: FocusReport) async {
+        guard focusReportReplyRouter.supportsFocusReports,
+              postCheckpointReaderOwnsSocket,
+              postCheckpointReadFailure == nil else { return }
+        let ref = "focus-\(UUID().uuidString.lowercased())"
+        guard let frame = try? focusReportWire.request(for: report, ref: ref) else { return }
+        guard focusReportReplyRouter.register(ref: ref) else { return }
+        do {
+            try await send(frame)
+        } catch {
+            focusReportReplyRouter.remove(ref: ref)
         }
     }
 
@@ -692,6 +722,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     public func close() {
         postCheckpointReader?.cancel()
         postCheckpointReader = nil
+        postCheckpointReaderOwnsSocket = false
+        focusReportReplyRouter.reset()
         failPostCheckpointReader(InstallationTransportError.unexpectedServerFrame)
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
@@ -846,10 +878,25 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func readPostCheckpointFrames() async {
+        postCheckpointReaderOwnsSocket = true
+        onFocusReportingReady()
         do {
             while !Task.isCancelled {
                 let frame = try await receiveTaskFrame()
                 let kind = Self.frameType(frame)
+                switch focusReportReplyRouter.route(frame, using: focusReportWire) {
+                case .unrelated:
+                    break
+                case .consumed:
+                    continue
+                case .unsupported:
+                    onFocusReportingUnsupported()
+                    continue
+                }
+                if kind == "view_show" {
+                    onViewShow(frame)
+                    continue
+                }
                 if kind == "conversation" {
                     signalLiveConversation(for: frame)
                     // Outside a conversation replay no reader wants this frame,
@@ -895,6 +942,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func failPostCheckpointReader(_ error: any Error) {
+        postCheckpointReaderOwnsSocket = false
         postCheckpointReadFailure = error
         let responseWaiters = self.responseWaiters
         self.responseWaiters.removeAll(keepingCapacity: false)

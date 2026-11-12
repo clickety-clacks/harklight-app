@@ -85,11 +85,13 @@ struct NativeInboxNavigation: Equatable {
     let serial: UInt64
     let request: RequestKey?
     var opensChat = false
+    var chatTargetFallsBackToMessage = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         // Consuming the one-shot chat presentation must not replay workspace
         // selection or its existing Seen/unread-related presentation effects.
-        lhs.serial == rhs.serial && lhs.request == rhs.request
+        lhs.serial == rhs.serial && lhs.request == rhs.request &&
+            lhs.chatTargetFallsBackToMessage == rhs.chatTargetFallsBackToMessage
     }
 }
 
@@ -104,6 +106,7 @@ struct NativeForegroundChatIndicator: Identifiable {
 struct NativeMessageDeepLink: Equatable {
     let senderID: String
     let messageID: String
+    var opensChat = false
 
     static func recognizes(_ url: URL) -> Bool {
         guard let scheme = url.scheme, let host = url.host else { return false }
@@ -127,6 +130,14 @@ struct NativeMessageDeepLink: Equatable {
         }
         self.senderID = senderID
         self.messageID = messageID
+        opensChat = false
+    }
+
+    init(senderID: String, messageID: String,
+         opensChat: Bool) {
+        self.senderID = senderID
+        self.messageID = messageID
+        self.opensChat = opensChat
     }
 }
 
@@ -149,6 +160,7 @@ final class NativeNotificationRouter {
 
     func receive(_ payload: JSONValue, opened: Bool) {
         guard opened else { return }
+        NativePushedViewCoordinator.shared.recordOwnOpen()
         let serial = UInt64(defaults.string(forKey: key + ".serial") ?? "0") ?? 0
         intent = NativeNotificationIntent(serial: serial &+ 1, locator: NativeNotificationLocator(payload))
         foregroundChatIndicator = nil

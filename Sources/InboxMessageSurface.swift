@@ -20,6 +20,7 @@ struct InboxCardContext {
     let hasNext: Bool
     var inlineChat = false
     var isSupersedesTarget = false
+    var chatTargetFallsBackToMessage = false
     var notificationChatRouteSerial: UInt64? = nil
     var notificationChatRouteDidOpen: (() -> Void)? = nil
     /// Turn the chat should scroll to when the chat route opens it, such as

@@ -14,7 +14,7 @@ final class ConversationPresentationTests: XCTestCase {
         var sendCount = 0
         let editor = ConversationReturnTextView(
             text: Binding(get: { text }, set: { text = $0 }),
-            isEnabled: true, onReturn: { sendCount += 1 })
+            isEnabled: true, onReturn: { sendCount += 1 }, onFocusChange: { _ in })
         let coordinator = editor.makeCoordinator()
         let view = UITextView()
         view.text = text

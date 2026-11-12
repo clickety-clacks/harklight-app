@@ -885,6 +885,7 @@ final class NativeRelayLifecycle {
     private var context: ProfileContext?
     private var confirmedRelayContext: ProfileContext?
     private var activeTransportAttemptID: UUID?
+    private var focusTransportID: UUID?
     private let foregroundDeadline = ForegroundConnectDeadline()
     private var diagnosticJournal: NativeClientDiagnosticJournal?
     private var foregroundDiagnosticContext: ProfileContext?
@@ -908,6 +909,53 @@ final class NativeRelayLifecycle {
 
     init() {}
 
+    private func focusReportingReadyHandler(generation: UUID,
+                                            transportID: UUID) -> @Sendable () -> Void {
+        { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.refreshGeneration == generation,
+                      self.focusTransportID == transportID else { return }
+                NativeFocusReporter.shared.relaySessionBecameReady(transportID)
+            }
+        }
+    }
+
+    private func focusReportingUnsupportedHandler(generation: UUID,
+                                                  transportID: UUID) -> @Sendable () -> Void {
+        { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.refreshGeneration == generation,
+                      self.focusTransportID == transportID else { return }
+                NativeFocusReporter.shared.relaySessionDoesNotSupportFocus(transportID)
+            }
+        }
+    }
+
+    private func viewShowHandler(generation: UUID,
+                                 transportID: UUID) -> @Sendable (Data) -> Void {
+        { [weak self] data in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.refreshGeneration == generation,
+                      self.focusTransportID == transportID else { return }
+                NativePushedViewCoordinator.shared.receive(data)
+            }
+        }
+    }
+
+    private func installFocusReportHandler(for session: URLSessionInstallationSession?,
+                                           transportID: UUID?) {
+        guard let session, let transportID else {
+            NativeFocusReporter.shared.installReportHandler(for: nil, handler: nil)
+            return
+        }
+        NativeFocusReporter.shared.installReportHandler(for: transportID) { report in
+            await session.sendFocusReport(report)
+        }
+    }
+
     func activate(store: AttentionDomainStore,
                   context: ProfileContext,
                   relayURL: URL,
@@ -929,6 +977,15 @@ final class NativeRelayLifecycle {
                                                               attemptID: transportAttemptID,
                                                               onProgress: progressHandler(generation: generation,
                                                                                           transportAttemptID: transportAttemptID),
+                                                              onFocusReportingReady: focusReportingReadyHandler(
+                                                                generation: generation,
+                                                                transportID: transportAttemptID),
+                                                              onFocusReportingUnsupported: focusReportingUnsupportedHandler(
+                                                                generation: generation,
+                                                                transportID: transportAttemptID),
+                                                              onViewShow: viewShowHandler(
+                                                                generation: generation,
+                                                                transportID: transportAttemptID),
                                                               onDiagnostic: diagnosticSink())
         } catch {
             recordDiagnostic(.connection, .approvedConnection,
@@ -955,6 +1012,9 @@ final class NativeRelayLifecycle {
         foregroundDeadline.beginSession(transportAttemptID: transportAttemptID)
         let priorCore = core
         let priorTransport = transport
+        if priorTransport != nil, let priorContext = self.context, priorContext != context {
+            await NativeFocusReporter.shared.accountConnectionWillBeRemoved()
+        }
         core = nil
         transport = nil
         self.context = nil
@@ -971,6 +1031,8 @@ final class NativeRelayLifecycle {
         core = nextCore
         self.context = context
         activeTransportAttemptID = transportAttemptID
+        focusTransportID = transportAttemptID
+        installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER, serverStateCache)
     }
 
@@ -989,10 +1051,21 @@ final class NativeRelayLifecycle {
             throw NativeRelayCoreError.inactive
         }
         let expectedGeneration = refreshGeneration
+        let migrationGeneration = UUID()
+        let focusTransportID = UUID()
         let nextTransport = try URLSessionInstallationSession(profile: current.context,
                                                               relayURL: relayURL,
                                                               clientIdentity: TrustedKeychainIdentity(current.identity),
-                                                              trustedRootDER: current.rootDER)
+                                                              trustedRootDER: current.rootDER,
+                                                              onFocusReportingReady: focusReportingReadyHandler(
+                                                                generation: migrationGeneration,
+                                                                transportID: focusTransportID),
+                                                              onFocusReportingUnsupported: focusReportingUnsupportedHandler(
+                                                                generation: migrationGeneration,
+                                                                transportID: focusTransportID),
+                                                              onViewShow: viewShowHandler(
+                                                                generation: migrationGeneration,
+                                                                transportID: focusTransportID))
         var nextCore: NativeRelayCore?
         do {
             nextCore = try NativeRelayCore(store: current.store, context: current.context,
@@ -1006,11 +1079,13 @@ final class NativeRelayLifecycle {
             }
             try persist()
 
-            refreshGeneration = UUID()
+            refreshGeneration = migrationGeneration
             refreshFlights.reset()
             confirmedRelayContext = nil
             core = nextCore
             transport = nextTransport
+            self.focusTransportID = focusTransportID
+            installFocusReportHandler(for: nextTransport, transportID: focusTransportID)
             configuration = (current.store, current.context, relayURL, current.identity,
                              current.rootDER, current.serverStateCache)
             nextCore = nil
@@ -1028,11 +1103,14 @@ final class NativeRelayLifecycle {
         refreshFlights.reset()
         let priorCore = core
         let priorTransport = transport
+        await NativeFocusReporter.shared.accountConnectionWillBeRemoved()
         core = nil
         transport = nil
         context = nil
         confirmedRelayContext = nil
         activeTransportAttemptID = nil
+        focusTransportID = nil
+        installFocusReportHandler(for: nil, transportID: nil)
         configuration = nil
         foregroundDiagnosticContext = nil
         foregroundDiagnosticOperationsAtStart = [:]
@@ -1614,6 +1692,8 @@ final class NativeRelayLifecycle {
         let priorTransport = transport
         core = nil
         transport = nil
+        focusTransportID = nil
+        installFocusReportHandler(for: nil, transportID: nil)
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
@@ -1626,6 +1706,15 @@ final class NativeRelayLifecycle {
                                                               attemptID: transportAttemptID,
                                                               onProgress: progressHandler(generation: generation,
                                                                                           transportAttemptID: transportAttemptID),
+                                                              onFocusReportingReady: focusReportingReadyHandler(
+                                                                generation: generation,
+                                                                transportID: transportAttemptID),
+                                                              onFocusReportingUnsupported: focusReportingUnsupportedHandler(
+                                                                generation: generation,
+                                                                transportID: transportAttemptID),
+                                                              onViewShow: viewShowHandler(
+                                                                generation: generation,
+                                                                transportID: transportAttemptID),
                                                               onDiagnostic: diagnosticSink())
         } catch {
             recordDiagnostic(.connection, .approvedConnection,
@@ -1656,6 +1745,8 @@ final class NativeRelayLifecycle {
         }
         self.transport = nextTransport
         self.core = nextCore
+        focusTransportID = transportAttemptID
+        installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
     }
 
     private func progressHandler(generation: UUID,
@@ -1739,6 +1830,8 @@ final class NativeRelayLifecycle {
         activeTransportAttemptID = nil
         refreshFlights.reset()
         confirmedRelayContext = nil
+        focusTransportID = nil
+        installFocusReportHandler(for: nil, transportID: nil)
         let priorCore = core
         let priorTransport = transport
         core = nil

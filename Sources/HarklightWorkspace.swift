@@ -643,6 +643,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var showsLocalExamples = false
     var notificationNavigation: NativeInboxNavigation? = nil
     var notificationChatRouteDidOpen: (UInt64) -> Void = { _ in }
+    var userOpenedMessage: () -> Void = {}
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -789,7 +790,22 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func navigate(from previous: InboxSelection?, to next: InboxSelection?) {
+        let nextRequest: RequestKey? = if case let .request(key)? = next { key } else { nil }
+        if case let .request(previousKey)? = previous, nextRequest != previousKey {
+            NativePushedViewCoordinator.shared.clearPassiveContent(previousKey)
+        }
+        var openedPassivePush = false
+        if case let .request(key)? = next {
+            let pushes = NativePushedViewCoordinator.shared
+            openedPassivePush = pushes.isPassive(key)
+            pushes.contentWasTouched(key) {
+                conversationStore?.newMessageAreaStore?.open(key)
+                reportMessageContentOpen(for: key)
+            }
+            pushes.recordOwnOpen()
+        }
         guard previous != next else { return }
+        if nextRequest != nil, !openedPassivePush { userOpenedMessage() }
         if let serial = InboxNotificationNavigationPolicy.dismissalSerial(from: previous, to: next) {
             dismissedNotificationSerial = serial
         }
@@ -827,7 +843,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
         if let next { lastViewedSelection = next }
         if let newRequest {
-            if replyChatRoute?.key != newRequest {
+            if replyChatRoute?.key != newRequest,
+               !NativePushedViewCoordinator.shared.isPassive(newRequest) {
                 conversationStore?.newMessageAreaStore?.open(newRequest)
                 reportMessageContentOpen(for: newRequest)
             }
@@ -839,6 +856,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func reportMessageContentOpen(for key: RequestKey) {
         guard let request = conversationStore?.request(for: key) else { return }
         conversationStore?.reportMessageContentOpened(request)
+    }
+
+    private func activatePassivePushContent(for key: RequestKey) {
+        NativePushedViewCoordinator.shared.contentWasTouched(key) {
+            conversationStore?.newMessageAreaStore?.open(key)
+            reportMessageContentOpen(for: key)
+        }
     }
 
     /// Opens a reply group's parent with its relevant reply in view.
@@ -948,12 +972,21 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder
     private func detailContent(for item: InboxSelection?, inlineChat: Bool,
                                geometry: GeometryProxy) -> some View {
+        let pushedChatFallsBackToMessage: Bool = if case let .request(key)? = item,
+            let route = activeNotificationNavigation, route.request == key {
+            route.chatTargetFallsBackToMessage
+        } else {
+            false
+        }
         HStack(spacing: 0) {
             Group {
                 switch item {
                 case let .request(key)?:
                     requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
                         .id(key)
+                        .simultaneousGesture(TapGesture().onEnded {
+                            activatePassivePushContent(for: key)
+                        })
                 case let .sample(id)?:
                     if showsLocalExamples,
                        samples.messages.contains(where: { $0.id == id }),
@@ -982,7 +1015,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            if inlineChat, case let .request(key)? = item,
+            if inlineChat, !pushedChatFallsBackToMessage, case let .request(key)? = item,
                !dismissedInlineChatRequests.contains(key), let conversationStore,
                let request = conversationStore.request(for: key) {
                 Group {
@@ -1064,10 +1097,21 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 relatedMessageNavigationPath.removeAll()
             }
             .onChange(of: relatedMessageNavigationPath) { oldPath, newPath in
-                guard newPath.count > oldPath.count, let target = newPath.last else { return }
-                switch target {
-                case let .supersedes(key), let .replacement(key):
-                    reportMessageContentOpen(for: key)
+                if let target = newPath.last {
+                    let key: RequestKey
+                    switch target {
+                    case let .supersedes(targetKey), let .replacement(targetKey):
+                        key = targetKey
+                    }
+                    NativeFocusReporter.shared.selectionChanged(
+                        to: NativeFocusSelection.messageReport(for: key))
+                    if newPath.count > oldPath.count {
+                        NativePushedViewCoordinator.shared.recordOwnOpen()
+                        reportMessageContentOpen(for: key)
+                    }
+                } else {
+                    NativeFocusReporter.shared.selectionChanged(
+                        to: NativeFocusSelection.report(for: selection))
                 }
             }
         }
@@ -1079,6 +1123,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let index = ids.firstIndex(of: id)
         let hasPrevious = index.map { $0 > 0 } ?? false
         let hasNext = index.map { $0 + 1 < ids.count } ?? false
+        let chatTargetFallsBack = if case let .request(key) = id,
+            let route = visibleNotificationNavigation, route.request == key {
+            route.chatTargetFallsBackToMessage
+        } else {
+            false
+        }
         let chatRouteSerial: UInt64?
         var chatScrollTargetTurnID: ExactText? = nil
         var chatRouteDidOpen: (() -> Void)? = nil
@@ -1107,6 +1157,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             hasPrevious: hasPrevious,
             hasNext: hasNext,
             inlineChat: inlineChat,
+            chatTargetFallsBackToMessage: chatTargetFallsBack,
             notificationChatRouteSerial: chatRouteSerial,
             notificationChatRouteDidOpen: chatRouteDidOpen,
             chatScrollTargetTurnID: chatScrollTargetTurnID,
@@ -1185,10 +1236,25 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 search = destination.search
                 selection = destination.selection
                 if let key = route.request {
-                    conversationStore?.newMessageAreaStore?.open(key)
-                    reportMessageContentOpen(for: key)
+                    if !NativePushedViewCoordinator.shared.isPassive(key) {
+                        conversationStore?.newMessageAreaStore?.open(key)
+                        reportMessageContentOpen(for: key)
+                    }
                     lastViewedSelection = .request(key)
                     selectRequest(key)
+                }
+            }
+            .onChange(of: selection, initial: true) { _, next in
+                NativeFocusReporter.shared.selectionChanged(to: next)
+            }
+            .onChange(of: settings) { _, isPresented in
+                if isPresented {
+                    let underlying = NativeFocusReporter.shared.currentFocus ??
+                        NativeFocusSelection.report(for: selection)
+                    NativeFocusReporter.shared.settingsPresented(underlyingFocus: underlying)
+                } else {
+                    NativeFocusReporter.shared.settingsDismissed(
+                        fallback: NativeFocusSelection.report(for: selection))
                 }
             }
             .onChange(of: scenePhase) { _, phase in
@@ -1295,6 +1361,7 @@ struct InboxList: View {
     }
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
+    @FocusState private var searchFieldFocused: Bool
     @State private var canRequestOlderPageOnDrag = false
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
@@ -1470,7 +1537,7 @@ struct InboxList: View {
                 return
             }
             visibleMessagePlacements.insert(token)
-            if canRecordFirstSeen {
+            if canRecordFirstSeen, !NativePushedViewCoordinator.shared.isPassive(token.key) {
                 markFirstSeen(token)
             }
         } else {
@@ -1493,7 +1560,9 @@ struct InboxList: View {
     private func recordVisibleMessagesAsSeen() {
         guard canRecordFirstSeen else { return }
         for placement in visibleMessagePlacements {
-            markFirstSeen(placement)
+            if !NativePushedViewCoordinator.shared.isPassive(placement.key) {
+                markFirstSeen(placement)
+            }
         }
     }
 
@@ -2155,7 +2224,18 @@ struct InboxList: View {
         // Compact Search floats over the List's bottom edge. Reserve its area
         // in the list viewport, scaling the clearance for Dynamic Type.
         .modifier(CompactSearchScrollClearance())
-        .searchable(text: $search, placement: .sidebar, prompt: "Search messages")
+        .searchable(text: Binding(get: { search }, set: { value in
+            search = value
+            NativePushedViewCoordinator.shared.noteReplyTextChanged()
+        }), placement: .sidebar, prompt: "Search messages")
+        .searchFocused($searchFieldFocused)
+        .preference(key: ReplyEditorFocusKey.self, value: searchFieldFocused)
+        .onChange(of: searchFieldFocused) { _, focused in
+            if focused {
+                NativePushedViewCoordinator.shared.replyEditorFocusChanged(true,
+                                                                           resetActivity: true)
+            }
+        }
         .searchPresentationToolbarBehavior(.avoidHidingContent)
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)
@@ -2189,6 +2269,9 @@ struct InboxList: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { recordVisibleMessagesAsSeen() }
+        }
+        .onChange(of: NativePushedViewCoordinator.shared.contentTouchRevision) { _, _ in
+            recordVisibleMessagesAsSeen()
         }
         .onChange(of: restoreLastViewed) { _, shouldRestore in
             if shouldRestore, workspaceTab == tab {

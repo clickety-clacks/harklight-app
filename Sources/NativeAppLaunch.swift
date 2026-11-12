@@ -456,6 +456,7 @@ final class NativeAppLaunch {
                 notificationNavigationMessage = "This message link couldn't be opened."
                 return
             }
+            NativePushedViewCoordinator.shared.recordOwnOpen()
             await receiveMessageDeepLink(deepLink)
             return
         }
@@ -476,13 +477,17 @@ final class NativeAppLaunch {
               !presentation.isReadOnly, !presentation.isLocalExample else { return }
 
         let key = messageKey(for: deepLink, in: presentation)
-        navigateToMessage(key, in: presentation)
+        navigateToMessage(key, in: presentation, from: deepLink)
         if presentation.isRetracted(key) {
             pendingMessageDeepLink = nil
             notificationNavigationMessage = "The sender retracted this message."
         } else if presentation.request(for: key) != nil {
-            pendingMessageDeepLink = nil
             notificationNavigationMessage = nil
+            if deepLink.opensChat && presentation.conversationAvailabilityState == .unconfirmed {
+                await refreshLive()
+            } else {
+                pendingMessageDeepLink = nil
+            }
         } else {
             notificationNavigationMessage = "Looking for this message."
             await refreshLive()
@@ -496,10 +501,45 @@ final class NativeAppLaunch {
                    messageID: ExactText(deepLink.messageID))
     }
 
-    private func navigateToMessage(_ key: RequestKey, in presentation: LivePresentationStore) {
+    func applyPushedView(_ show: ViewShowFrame) async {
+        notificationRouter.consumed()
+        let deepLink = NativeMessageDeepLink(
+            senderID: show.senderID,
+            messageID: show.messageID,
+            opensChat: show.target == .chat)
+        await receiveMessageDeepLink(deepLink)
+    }
+
+    func userOpenedMessage() {
+        pendingMessageDeepLink = nil
+        notificationNavigationMessage = nil
+    }
+
+    private func navigateToMessage(_ key: RequestKey, in presentation: LivePresentationStore,
+                                   from deepLink: NativeMessageDeepLink) {
         let serial = max(notificationNavigation?.serial ?? 0,
                          notificationRouter.intent?.serial ?? 0) &+ 1
-        notificationNavigation = NativeInboxNavigation(serial: serial, request: key)
+        let opensChat: Bool
+        let chatTargetFallsBackToMessage: Bool
+        if deepLink.opensChat {
+            switch presentation.conversationAvailabilityState {
+            case .unavailable:
+                opensChat = false
+                chatTargetFallsBackToMessage = true
+            case .available:
+                opensChat = presentation.conversation(for: key) != nil
+                chatTargetFallsBackToMessage = !opensChat
+            case .unconfirmed:
+                opensChat = false
+                chatTargetFallsBackToMessage = false
+            }
+        } else {
+            opensChat = false
+            chatTargetFallsBackToMessage = false
+        }
+        notificationNavigation = NativeInboxNavigation(serial: serial, request: key,
+                                                        opensChat: opensChat,
+                                                        chatTargetFallsBackToMessage: chatTargetFallsBackToMessage)
         if presentation.request(for: key) != nil {
             presentation.selectRequest(key)
         } else {
@@ -985,16 +1025,19 @@ final class NativeAppLaunch {
               !presentation.isReadOnly, !presentation.isLocalExample else { return }
         let key = messageKey(for: deepLink, in: presentation)
         if presentation.isRetracted(key) {
-            navigateToMessage(key, in: presentation)
+            navigateToMessage(key, in: presentation, from: deepLink)
             pendingMessageDeepLink = nil
             notificationNavigationMessage = "The sender retracted this message."
         } else if presentation.request(for: key) != nil {
-            navigateToMessage(key, in: presentation)
-            pendingMessageDeepLink = nil
+            navigateToMessage(key, in: presentation, from: deepLink)
             notificationNavigationMessage = nil
+            if deepLink.opensChat && presentation.conversationAvailabilityState == .unconfirmed {
+                return
+            }
+            pendingMessageDeepLink = nil
         } else {
             if notificationNavigation?.request != key {
-                navigateToMessage(key, in: presentation)
+                navigateToMessage(key, in: presentation, from: deepLink)
             }
             var pageAvailability = presentation.inboxPageAvailability()
             while synchronized, pageAvailability == .more {
@@ -1009,13 +1052,13 @@ final class NativeAppLaunch {
                 guard pendingMessageDeepLink == deepLink,
                       case let .live(current) = state, current === presentation else { return }
                 if presentation.isRetracted(key) {
-                    navigateToMessage(key, in: presentation)
+                    navigateToMessage(key, in: presentation, from: deepLink)
                     pendingMessageDeepLink = nil
                     notificationNavigationMessage = "The sender retracted this message."
                     return
                 }
                 if presentation.request(for: key) != nil {
-                    navigateToMessage(key, in: presentation)
+                    navigateToMessage(key, in: presentation, from: deepLink)
                     pendingMessageDeepLink = nil
                     notificationNavigationMessage = nil
                     return
