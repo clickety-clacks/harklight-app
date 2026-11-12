@@ -211,9 +211,14 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         selectMessageTab("Replied", in: app)
         XCTAssertTrue(original.exists, app.debugDescription)
+        XCTAssertTrue(original.label.contains("Pending"),
+                      "The submitted ordinary answer remains pending after relaunch and local example actions.")
         original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Cover A"].isSelected, "An ordinary draft survives local example actions")
+        let pending = app.descendants(matching: .any)["request-pending-answer-status"]
+        XCTAssertTrue(pending.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(pending.value as? String, "Pending",
+                       "The persisted ordinary submission retains its pending confirmation after local example actions.")
         capture("ordinary-request-after-example", app)
     }
 
