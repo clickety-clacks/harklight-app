@@ -765,7 +765,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertNotEqual(flow.screen, .cancelled)
     }
 
-    func testLostRemovalReplyKeepsOriginalKeyAndResumesBeforeFreshReplacement() async throws {
+    func testLostRemovalReplyReconnectsOldAccountAndKeepsRemovalRetryable() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
         let transport = FakeTransport()
@@ -800,21 +800,34 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(try store.approvedRecord(), record)
         _ = try NativeEnrollmentStore(service: fixture.namespace).material(from: record)
         let reopenedStore = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
-        let flow = NativeGuidedJoinCoordinator(store: reopenedStore, deviceName: "My phone")
+        let oldContext = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(record.profileAuthority),
+            personID: ExactText(try XCTUnwrap(record.personID)),
+            deviceID: ExactText(record.deviceID)), transportMode: .relay)
+        let oldDomain = try AttentionDomainStore(context: oldContext,
+                                                 persistence: MemoryAttentionStatePersistence())
+        let oldPresentation = try LivePresentationStore(store: oldDomain, context: oldContext)
+        let launch = NativeAppLaunch(arguments: [],
+            enrollmentStore: NativeEnrollmentStore(service: fixture.namespace),
+            joinStore: reopenedStore, initialState: .live(oldPresentation),
+            initialEnrollmentRecord: record)
+        let flow = launch.guidedJoin
+        flow.connectApproved = { _ in true }
         await flow.restore()
-        XCTAssertEqual(flow.screen, .replacementConfirmation)
-        await flow.keepCurrentAccount()
-        XCTAssertTrue(flow.isShowing, "An uncertain removal cannot be presented as a retained active account")
-        await flow.confirmReplacement()
+        XCTAssertEqual(flow.screen, .connected)
+        XCTAssertEqual(flow.currentAccount?.deviceID, prepared.deviceID)
+        XCTAssertFalse(flow.isShowing)
+        let pending = try XCTUnwrap(launch.unconfirmedAccountDepartures.first)
+        XCTAssertEqual(pending.record.deviceID, prepared.deviceID)
+        XCTAssertEqual(pending.replacement, replacement)
+        XCTAssertFalse(pending.removed)
+        XCTAssertTrue(launch.canRetryUnconfirmedDisconnectRemoval(for: pending))
+        XCTAssertNotNil(launch.unconfirmedDisconnectWarning(for: pending))
+
+        try await flow.removeStandaloneAccount(pending)
         XCTAssertEqual(calls, 2)
-        XCTAssertEqual(flow.screen, .confirmation)
+        XCTAssertTrue(try XCTUnwrap(reopenedStore.departure()).removed)
         XCTAssertNil(try reopenedStore.approvedRecord())
-        let restoringAfterReceipt = NativeGuidedJoinCoordinator(store: reopenedStore, deviceName: "My phone")
-        await restoringAfterReceipt.restore()
-        XCTAssertEqual(restoringAfterReceipt.screen, .confirmation)
-        let next = try reopenedStore.prepare(replacement, deviceLabel: "My phone")
-        fixture.retainForCleanup(next)
-        XCTAssertNotEqual(next.deviceID, prepared.deviceID, "A revoked identity cannot become the new installation")
     }
 
     func testWrongRemovalReceiptDoesNotClearTheJoinedAccount() async throws {

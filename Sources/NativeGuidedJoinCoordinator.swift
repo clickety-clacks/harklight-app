@@ -70,11 +70,15 @@ final class NativeGuidedJoinCoordinator {
                     if hasSuccessorAttempt || hasSuccessorEnrollment {
                         unconfirmedDepartureDeviceID = departure.record.deviceID
                         currentAccount = hasSuccessorEnrollment ? current : nil
-                    } else {
+                    } else if departure.replacement == nil {
                         currentAccount = current
                         screen = .replacementConfirmation
                         message = "The previous server may still have this phone registered. Its saved account is kept here while you retry removal."
                         return
+                    } else {
+                        // The removal request is still available to retry, but
+                        // it does not stop the approved account from reconnecting.
+                        currentAccount = current
                     }
                 }
             }
@@ -467,18 +471,7 @@ final class NativeGuidedJoinCoordinator {
         let departureAttemptID = UUID()
         // Once removal has been sent, its result may already be committed.
         // Keep the recovery route until the old server confirms the outcome.
-        do {
-            if let departure = try store.departure(),
-               !departure.removed,
-               let replacement = departure.replacement {
-                invitation = replacement
-                isShowing = true
-                screen = .replacementConfirmation
-                message = "The previous removal is still unconfirmed. Retry it before continuing."
-                return
-            }
-            try store.dismissConfirmedDeparture()
-        }
+        do { try store.dismissConfirmedDeparture() }
         catch {
             diagnostics?.record(area: .localStore, phase: .accountRemoval,
                                 transition: NativeDiagnosticCauseCode.failureTransition(for: error),
