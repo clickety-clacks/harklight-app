@@ -228,8 +228,10 @@ final class HarklightUITests: XCTestCase {
 
     func testHorizontalSwipeDismissesUnavailableChatStatus() throws {
         let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
-        let requestRow = app.descendants(matching: .any)["request-row-facilities-01"]
         selectFacilitiesRequest(in: app)
+        let requestHeading = app.buttons["request-heading"]
+        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
+        let selectedRequestLabel = requestHeading.label
 
         let chat = app.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
@@ -249,8 +251,13 @@ final class HarklightUITests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: end,
                     withVelocity: .slow, thenHoldForDuration: 0.1)
 
-        XCTAssertTrue(requestRow.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(requestRow.isHittable, app.debugDescription)
+        XCTAssertTrue(unavailable.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(requestHeading.label, selectedRequestLabel,
+                       "Dismissing unavailable Chat returns to the same request detail.")
+        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(chat.isHittable,
+                      "The message action remains available on the request detail after Chat closes.")
     }
 
     private func tapVisibleScreenCenter(of element: XCUIElement, in app: XCUIApplication,

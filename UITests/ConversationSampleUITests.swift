@@ -577,6 +577,80 @@ final class ConversationSampleUITests: XCTestCase {
         capture("foreground-chat-indicator-opened-matching-chat", app)
     }
 
+    func testChatDismissGesturesReturnToRequestDetailAndPreserveState() {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        XCUIDevice.shared.orientation = isPad ? .landscapeLeft : .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+
+        let replyText = "Agent example: the shorter path is faster, while the longer path is easier to revise."
+        let gestures: [(name: String, origin: String, startX: CGFloat, startY: CGFloat,
+                        deltaX: CGFloat, deltaY: CGFloat)] = [
+            ("down-from-chat-top", "history", 0.5, 0.01, 0, 110),
+            ("left-from-history", "history", 0.8, 0.5, -110, 0),
+            ("right-from-history", "history", 0.2, 0.5, 110, 0),
+            ("left-from-composer", "composer", 0.8, 0.5, -110, 0),
+            ("right-from-composer", "composer", 0.2, 0.5, 110, 0),
+        ]
+        for gesture in gestures {
+            let app = XCUIApplication()
+            app.launchArguments = ["--harklight-samples", "--harklight-test-foreground-chat-indicator"]
+            app.launch()
+
+            let indicator = app.buttons.matching(identifier: "foreground-chat-notification").firstMatch
+            XCTAssertTrue(indicator.waitForExistence(timeout: 10), app.debugDescription)
+            indicator.tap()
+
+            let heading = app.buttons["request-heading"]
+            XCTAssertTrue(heading.waitForExistence(timeout: 10), app.debugDescription)
+            let selectedRequest = heading.label
+            let history = app.scrollViews["conversation-history-scroll"]
+            XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(app.staticTexts[replyText].waitForExistence(timeout: 5),
+                          "The routed conversation must have its fixture history. \(app.debugDescription)")
+
+            let composer = app.textViews["sample-chat-composer"]
+            XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+            composer.tap()
+            let draft = "Unsent draft survives \(gesture.name)."
+            composer.typeText(draft)
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                          "The dismissal starts with the keyboard up.")
+
+            let startElement = gesture.origin == "history" ? history : composer
+            let start = startElement.coordinate(
+                withNormalizedOffset: CGVector(dx: gesture.startX, dy: gesture.startY))
+            let end = start.withOffset(CGVector(dx: gesture.deltaX, dy: gesture.deltaY))
+            start.press(forDuration: 0.05, thenDragTo: end,
+                        withVelocity: .fast, thenHoldForDuration: 0.1)
+
+            XCTAssertTrue(history.waitForNonExistence(timeout: 5),
+                          "One \(gesture.name) gesture must close Chat. \(app.debugDescription)")
+            XCTAssertFalse(history.waitForExistence(timeout: 2),
+                           "Closed Chat must stay closed during the two-second watch.")
+            XCTAssertFalse(composer.exists, app.debugDescription)
+            capture("request-chat-closed-\(gesture.name)", app)
+
+            XCTAssertTrue(heading.waitForExistence(timeout: 5),
+                          "Dismissal must return to the same request detail, not the message list. \(app.debugDescription)")
+            XCTAssertTrue(heading.isHittable, app.debugDescription)
+            XCTAssertEqual(heading.label, selectedRequest)
+
+            let chatButton = app.buttons["Chat"]
+            XCTAssertTrue(chatButton.waitForExistence(timeout: 5), app.debugDescription)
+            chatButton.tap()
+            let reopenedComposer = app.textViews["sample-chat-composer"]
+            XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(reopenedComposer.value as? String, draft,
+                           "An intentional reopen must retain the unsent draft.")
+            XCTAssertTrue(app.staticTexts[replyText].waitForExistence(timeout: 5),
+                          "An intentional reopen must retain the same chat history. \(app.debugDescription)")
+            XCTAssertEqual(heading.label, selectedRequest,
+                           "An intentional reopen must retain the same selected request.")
+            capture("request-chat-reopened-\(gesture.name)", app)
+            app.terminate()
+        }
+    }
+
     func testForegroundChatIndicatorAppearsOverOpenChatAndOpensOtherConversation() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -872,6 +946,9 @@ final class ConversationSampleUITests: XCTestCase {
 
         let seenAction = app.buttons["request-seen-action"]
         XCTAssertTrue(seenAction.waitForExistence(timeout: 5), app.debugDescription)
+        let requestHeading = app.buttons["request-heading"]
+        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
+        let selectedRequestLabel = requestHeading.label
         let chat = app.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         chat.tap()
@@ -892,12 +969,12 @@ final class ConversationSampleUITests: XCTestCase {
         let end = noChatDescription.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: end,
                     withVelocity: .slow, thenHoldForDuration: 0.1)
-        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(row.isHittable, app.debugDescription)
-        row.tap()
         XCTAssertTrue(noChatTitle.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(requestHeading.label, selectedRequestLabel,
+                       "Dismissing no-chat Chat returns to the same request detail, not the list.")
         XCTAssertTrue(seenAction.waitForExistence(timeout: 5),
-                      "The message's Seen response remains available after returning from no-chat Chat.")
+                      "The message's Seen response remains available on the detail after Chat closes.")
     }
 
     func testChatPanelRemovesRedundantRowsAndKeepsComposerControlsAlignedAsPromptGrows() {

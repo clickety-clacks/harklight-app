@@ -134,7 +134,7 @@ final class DetailChatButtonUITests: XCTestCase {
         attachScreenshot("chat-toolbar-after-reading")
     }
 
-    func testHorizontalSwipeInsideChatReturnsToListAndPreservesDraft() {
+    func testHorizontalSwipeInsideChatReturnsToSelectedDetailAndPreservesDraft() {
         for direction in ["left", "right"] {
             let app = XCUIApplication()
             app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
@@ -162,12 +162,12 @@ final class DetailChatButtonUITests: XCTestCase {
             start.press(forDuration: 0.05, thenDragTo: end,
                         withVelocity: .slow, thenHoldForDuration: 0.1)
 
-            XCTAssertTrue(row.waitForExistence(timeout: 5),
-                          "A horizontal \(direction) swipe in Chat returns to the message. \(app.debugDescription)")
-            XCTAssertTrue(row.isHittable, app.debugDescription)
+            let detail = app.scrollViews["message-card-scroll"]
+            XCTAssertTrue(detail.waitForExistence(timeout: 5),
+                          "A horizontal \(direction) swipe closes Chat back to the selected message detail, not the list. \(app.debugDescription)")
+            XCTAssertTrue(chat.isHittable, app.debugDescription)
             XCTAssertFalse(composer.exists, app.debugDescription)
 
-            row.tap()
             let reopenedChat = app.buttons["Chat"]
             XCTAssertTrue(reopenedChat.waitForExistence(timeout: 5), app.debugDescription)
             reopenedChat.tap()
@@ -179,7 +179,7 @@ final class DetailChatButtonUITests: XCTestCase {
         }
     }
 
-    func testSidewaysComposerDragsKeepChatOpen() {
+    func testLongComposerSwipeDismissesChatAndShortTextMovesDoNot() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -188,9 +188,9 @@ final class DetailChatButtonUITests: XCTestCase {
         let row = app.descendants(matching: .any)["sample-information-2"]
         XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
         row.tap()
-        let chat = app.buttons["Chat"]
-        XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
-        chat.tap()
+        let chatButton = app.buttons["Chat"]
+        XCTAssertTrue(chatButton.waitForExistence(timeout: 5), app.debugDescription)
+        chatButton.tap()
 
         let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
@@ -209,34 +209,40 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(attachmentStrip.isHittable, app.debugDescription)
 
         composer.tap()
-        let draft = "Sideways draft edits keep this Chat open."
+        let draft = "The composer draft survives a sideways Chat dismissal."
         composer.typeText(draft)
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(attachmentStrip.isHittable, app.debugDescription)
 
-        for (startX, endX) in [(CGFloat(0.9), CGFloat(0.1)), (CGFloat(0.1), CGFloat(0.9))] {
-            attachmentStrip.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
-                .press(forDuration: 0.05,
-                       thenDragTo: attachmentStrip.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5)),
-                       withVelocity: .slow,
-                       thenHoldForDuration: 0.1)
-            XCTAssertTrue(composer.exists,
-                          "A sideways attachment-strip drag must leave Chat open. \(app.debugDescription)")
-            XCTAssertTrue(app.keyboards.firstMatch.exists, app.debugDescription)
-        }
+        let start = attachmentStrip.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+        start.press(forDuration: 0.05,
+                    thenDragTo: start.withOffset(CGVector(dx: -110, dy: 0)),
+                    withVelocity: .fast,
+                    thenHoldForDuration: 0.1)
+        XCTAssertTrue(composer.waitForNonExistence(timeout: 5),
+                      "A deliberate horizontal swipe over the composer closes Chat. \(app.debugDescription)")
+        XCTAssertFalse(composer.waitForExistence(timeout: 2),
+                       "Closed Chat stays closed during the observation window.")
+        XCTAssertTrue(chatButton.waitForExistence(timeout: 5),
+                      "Dismissal returns to the same message detail. \(app.debugDescription)")
+        attachScreenshot("chat-closed-from-attachment-strip")
 
-        composer.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
-            .press(forDuration: 0.05,
-                   thenDragTo: composer.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)),
-                   withVelocity: .slow,
-                   thenHoldForDuration: 0.1)
-        XCTAssertTrue(composer.exists,
-                      "A sideways draft-text drag must leave Chat open. \(app.debugDescription)")
-        XCTAssertEqual(composer.value as? String, draft,
-                       "Dragging in draft text must preserve the unsent draft.")
+        chatButton.tap()
+        let reopenedComposer = app.textViews["sample-chat-composer"]
+        XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(reopenedComposer.value as? String, draft,
+                       "Reopening Chat retains the unsent draft.")
 
-        XCTAssertTrue(app.keyboards.firstMatch.exists, app.debugDescription)
-        attachScreenshot("chat-remains-open-after-composer-drags")
+        let shortTextDragStart = reopenedComposer.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+        shortTextDragStart.press(forDuration: 0.05,
+                                 thenDragTo: shortTextDragStart.withOffset(
+                                    CGVector(dx: -40, dy: 0)),
+                                 withVelocity: .slow,
+                                 thenHoldForDuration: 0.1)
+        XCTAssertTrue(reopenedComposer.exists,
+                      "A short text-editing movement does not dismiss Chat. \(app.debugDescription)")
+        XCTAssertEqual(reopenedComposer.value as? String, draft)
+        attachScreenshot("chat-open-after-short-composer-drag")
     }
 
     func testDetailVersionIndicatorOpensReadOnlyHistoricalMessageAndChatHasNoVersionPicker() {

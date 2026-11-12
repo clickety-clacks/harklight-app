@@ -2161,7 +2161,6 @@ struct LiveRequestDetail: View {
             testNotificationRouter: testNotificationRouter,
             testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
             testConversationSheetDidAppear: testConversationSheetDidAppear,
-            dismissToList: context.dismissToList,
             discussionUnavailableReason: isSupersedesReadOnly
                 ? ConversationPanelText.supersededReadOnlyReason
                 : nil)
