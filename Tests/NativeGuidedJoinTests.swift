@@ -831,6 +831,12 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(calls, 2)
         XCTAssertTrue(try XCTUnwrap(reopenedStore.departure()).removed)
         XCTAssertNil(try reopenedStore.approvedRecord())
+        let restoringAfterReceipt = NativeGuidedJoinCoordinator(store: reopenedStore, deviceName: "My phone")
+        await restoringAfterReceipt.restore()
+        XCTAssertEqual(restoringAfterReceipt.screen, .confirmation)
+        let next = try reopenedStore.prepare(replacement, deviceLabel: "My phone")
+        fixture.retainForCleanup(next)
+        XCTAssertNotEqual(next.deviceID, prepared.deviceID, "A revoked identity cannot become the new installation")
     }
 
     func testWrongRemovalReceiptDoesNotClearTheJoinedAccount() async throws {
