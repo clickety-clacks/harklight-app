@@ -1036,8 +1036,31 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(session.conversationACKs.count, 2)
     }
     func testLegacyDeliveryNeedsNoConversationProjection() async throws {
-        let (context, _, store, session) = try setup()
-        session.ordinary[1] = data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Legacy question"}}"#)
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("local-person"), deviceID: ExactText("reader")), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        // This legacy adapter intentionally has no conversation-session conformance.
+        final class LegacySession: AuthenticatedInboxEventStreamSession, @unchecked Sendable {
+            let authenticatedIdentity: ProfileIdentity
+            var ordinary: [Data] = []
+            var ordinaryACKs: [Data] = []
+            let conversationACKs: [Data] = []
+            let supportsPostCheckpointInboxEvents = false
+
+            init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
+            func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+                for frame in ordinary { try await consume(frame) }
+            }
+            func acknowledge(_ request: Data) async throws { ordinaryACKs.append(request) }
+            func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+                .unresolved
+            }
+            func nextPostCheckpointInboxEvent() async throws -> Data { throw CancellationError() }
+        }
+        let session = LegacySession(context.identity)
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Legacy question"}}"#),
+            data(#"{"v":1,"type":"resynced","seq":1}"#)]
         let core = try NativeRelayCore(store: store, context: context, session: session)
         let high = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(high, 1)
@@ -1083,6 +1106,8 @@ final class ConversationRelayTests: XCTestCase {
     func testUnknownRelayUpdateIsNotedSkippedAndAcknowledged() async throws {
         let (context, _, store, session) = try setup()
         let diagnostics = DiagnosticCollector()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0}"#)]
         session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
             data(#"{"v":1,"type":"future_relay_update","seq":1}"#),
             data(#"{"v":1,"type":"lifecycle","seq":2,"state":"future_terminal"}"#),
