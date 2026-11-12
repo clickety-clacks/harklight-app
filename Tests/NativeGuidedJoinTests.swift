@@ -777,6 +777,9 @@ final class NativeGuidedJoinTests: XCTestCase {
                           "device_id": prepared.deviceID])
         }
         _ = try await store.checkApproval()
+        let enrollmentStore = NativeEnrollmentStore(service: fixture.namespace)
+        try enrollmentStore.markForegroundRelayConfirmed(for: prepared.deviceID)
+        try enrollmentStore.markNotificationExplanationSeen(for: prepared.deviceID)
         let record = try XCTUnwrap(store.approvedRecord())
         let replacement = try fixture.invitationWith(token: String(repeating: "2", count: 64))
         var calls = 0
@@ -808,7 +811,7 @@ final class NativeGuidedJoinTests: XCTestCase {
                                                  persistence: MemoryAttentionStatePersistence())
         let oldPresentation = try LivePresentationStore(store: oldDomain, context: oldContext)
         let launch = NativeAppLaunch(arguments: [],
-            enrollmentStore: NativeEnrollmentStore(service: fixture.namespace),
+            enrollmentStore: enrollmentStore,
             joinStore: reopenedStore, initialState: .live(oldPresentation),
             initialEnrollmentRecord: record)
         let flow = launch.guidedJoin
