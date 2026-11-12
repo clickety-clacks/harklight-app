@@ -297,7 +297,7 @@ struct UnconfirmedAccountRemovalNotice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let warning = launch.unconfirmedDisconnectWarning(for: departure) {
+            if let warning = departure.unconfirmedRemovalNotice {
                 Label(warning, systemImage: "exclamationmark.triangle")
             }
             Button(launch.isDisconnectBusy(for: departure) ? "Retrying removal…" : "Retry removal") {

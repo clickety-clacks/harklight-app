@@ -137,6 +137,12 @@ final class NativeGuidedJoinCoordinator {
         }
         try await store.removeCurrentAccount(target.record, replacement: target.replacement)
         departureRecordsDidChange?()
+        // Retrying an older departure must not move away from a newer live account.
+        guard target.replacement != nil,
+              currentAccount?.deviceID == target.record.deviceID else { return }
+        await didRemoveCurrentAccount?()
+        restoreAfterStandaloneRemoval()
+        await restore()
     }
 
     /// The app may move only the endpoint of the currently approved identity.

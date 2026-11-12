@@ -781,7 +781,11 @@ final class NativeGuidedJoinTests: XCTestCase {
         try enrollmentStore.markForegroundRelayConfirmed(for: prepared.deviceID)
         try enrollmentStore.markNotificationExplanationSeen(for: prepared.deviceID)
         let record = try XCTUnwrap(store.approvedRecord())
-        let replacement = try fixture.invitationWith(token: String(repeating: "2", count: 64))
+        var replacementPayload = fixture.payload
+        replacementPayload["invite_token"] = String(repeating: "2", count: 64)
+        replacementPayload["person_label"] = "Replacement workspace"
+        let replacement = try NativeJoinInvitation.decodePayload(
+            JSONSerialization.data(withJSONObject: replacementPayload))
         var calls = 0
         transport.removalHandler = { url, body, root, identity in
             XCTAssertEqual(url.path, "/device/remove")
@@ -825,12 +829,20 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(pending.replacement, replacement)
         XCTAssertFalse(pending.removed)
         XCTAssertTrue(launch.canRetryUnconfirmedDisconnectRemoval(for: pending))
-        XCTAssertNotNil(launch.unconfirmedDisconnectWarning(for: pending))
+        let removalNotice = try XCTUnwrap(pending.unconfirmedRemovalNotice)
+        XCTAssertTrue(removalNotice.contains("The invitation for \(replacement.claimedAccountLabel) is waiting"),
+                      "The removal notice names the saved replacement invitation")
 
-        try await flow.removeStandaloneAccount(pending)
+        await launch.retryDisconnectRemoval(for: pending)
         XCTAssertEqual(calls, 2)
         XCTAssertTrue(try XCTUnwrap(reopenedStore.departure()).removed)
         XCTAssertNil(try reopenedStore.approvedRecord())
+        if case .enrollmentRequired = launch.state {} else {
+            XCTFail("Confirming removal of the current account must leave the live account")
+        }
+        XCTAssertTrue(flow.isShowing, "The replacement invitation must be offered immediately")
+        XCTAssertEqual(flow.screen, .confirmation)
+        XCTAssertEqual(flow.invitation, replacement)
         let restoringAfterReceipt = NativeGuidedJoinCoordinator(store: reopenedStore, deviceName: "My phone")
         await restoringAfterReceipt.restore()
         XCTAssertEqual(restoringAfterReceipt.screen, .confirmation)
