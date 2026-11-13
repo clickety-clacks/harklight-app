@@ -1059,6 +1059,15 @@ struct ConversationState: Codable, Equatable {
             thread.terminal = state
             thread.terminalTurn = turn
             thread.terminalAuthor = author
+            if let index = thread.turns.firstIndex(where: { $0.id == turn }) {
+                // An ordinary terminal can arrive before its conversation
+                // history. Use the server projection order as soon as it arrives.
+                thread.turns[index].conversationSequence = event.sequence
+                let sequences = Dictionary(uniqueKeysWithValues: thread.turns.compactMap { row in
+                    row.conversationSequence.map { (row.id, $0) }
+                })
+                thread.orderTurns(using: sequences)
+            }
             if !thread.allowsDiscussion {
                 for revision in thread.drafts.keys {
                     guard var draft = thread.drafts[revision] else { continue }

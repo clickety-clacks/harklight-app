@@ -175,7 +175,7 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertNil(thread.facts[reply.id]?.actedBy, "A reply does not imply that its own prompt was acted on")
     }
 
-    func testReloadOrdersOrdinaryTerminalTurnFromItsConversationProjectionSequence() throws {
+    func testServerProjectionOrdersOrdinaryTerminalTurnAndCacheRetainsOrder() async throws {
         let context = context()
         let persistence = MemoryPendingActionPersistence()
         let store = try ClientRepository(context: context, persistence: persistence)
@@ -204,11 +204,11 @@ final class ConversationDomainTests: XCTestCase {
         try store.applyConversation(ConversationEvent(sequence: 3, binding: binding,
             fact: .terminal(turn: terminalID, author: .server, state: .expired)), context: context)
 
-        // This matches the legacy numeric-ID ordering that placed the terminal first.
         let beforeReload = try XCTUnwrap(store.conversationSnapshot(context: context).threads[binding.request])
-        XCTAssertEqual(beforeReload.turns.map(\.id), [terminalID, prompt.id, reply.id])
+        XCTAssertEqual(beforeReload.turns.map(\.id), [prompt.id, reply.id, terminalID],
+                       "The server sequence orders the row immediately, without a restart repair.")
 
-        let restored = try ClientRepository(context: context, persistence: persistence)
+        let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
         XCTAssertEqual(thread.turns.map(\.id), [prompt.id, reply.id, terminalID])
         XCTAssertEqual(thread.turns.map(\.inReplyTo), [nil, prompt.id, nil])
@@ -216,7 +216,7 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertEqual(thread.terminal, .expired)
     }
 
-    func testConversationCanArriveBeforeOrdinaryDeliveryWithoutCreatingOrphanedLegacyState() throws {
+    func testCachedConversationCanArriveBeforeOrdinaryDelivery() async throws {
         let context = context()
         let persistence = MemoryPendingActionPersistence()
         let store = try ClientRepository(context: context, persistence: persistence)
@@ -230,13 +230,15 @@ final class ConversationDomainTests: XCTestCase {
             fact: .request(sessionHandle: ExactText("origin"), payload: revised)), context: context)
         try store.applyConversation(ConversationEvent(sequence: 3, binding: second,
             fact: .terminal(turn: ExactText("terminal"), author: .server, state: .expired)), context: context)
-        let restored = try ClientRepository(context: context, persistence: persistence)
+        let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
         XCTAssertTrue(try restored.snapshot(context: context).drafts.isEmpty)
         XCTAssertTrue(try restored.snapshot(context: context).remoteStates.isEmpty)
         try restored.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: first.request, originalPayload: original), .message)), context: context)
         let snapshot = try restored.snapshot(context: context)
-        XCTAssertEqual(snapshot.requests[first.request]?.originalPayload, revised)
+        XCTAssertEqual(snapshot.requests[first.request]?.originalPayload, original,
+                       "Delivery supplies the original; a revised question remains a separate server projection.")
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[first.request]?.currentQuestionPayload, revised)
         XCTAssertEqual(snapshot.remoteStates[first.request]?.state, .expired)
         XCTAssertEqual(snapshot.cursor, 1)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 3)
