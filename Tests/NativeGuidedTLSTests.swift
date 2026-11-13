@@ -1313,6 +1313,14 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         }
         await fulfillment(of: [answersArrived, sendsCompleted], timeout: 5)
+        // A responsive peer is alive even while the application ACK is held.
+        // Ping uses control frames and must not wait for that exchange gate.
+        try await replay.checkConnection()
+        relay.close()
+        do {
+            try await replay.checkConnection()
+            XCTFail("The actual closed connection must fail its health check")
+        } catch {}
         await sending.close()
         await replay.close()
         try await sends.value

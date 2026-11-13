@@ -4,6 +4,7 @@ import Foundation
 import HarklightNativeRelay
 import Security
 import Observation
+import Network
 
 /// Shareable error details deliberately exclude response bodies, decoder context,
 /// persistence messages and NSError userInfo, all of which may contain message text.
@@ -954,6 +955,8 @@ final class NativeRelayLifecycle {
     private var discussionTransports: [UUID: URLSessionInstallationSession] = [:]
     private var fileTransports: [UUID: URLSessionInstallationSession] = [:]
     private var refreshGeneration = UUID()
+    private var pathMonitor: NWPathMonitor?
+    private var hasObservedInitialPath = false
     private lazy var refreshFlights = RelayRefreshFlights(inactive: NativeRelayRefreshResult.unavailable) { [weak self] in
         guard let self else { return .unavailable }
         return await self.performRefresh(generation: self.refreshGeneration)
@@ -961,6 +964,43 @@ final class NativeRelayLifecycle {
     private let enrollment = NativeEnrollmentStore()
 
     init() {}
+
+    private func observeNetworkPath(generation: UUID) {
+        pathMonitor?.cancel()
+        hasObservedInitialPath = false
+        let monitor = NWPathMonitor()
+        pathMonitor = monitor
+        monitor.pathUpdateHandler = { [weak self] path in
+            let available = path.status == .satisfied
+            Task { @MainActor [weak self] in
+                await self?.networkPathChanged(available: available, generation: generation)
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "Harklight.relay-network-path"))
+    }
+
+    private func networkPathChanged(available: Bool, generation: UUID) async {
+        guard refreshGeneration == generation, let current = transport else { return }
+        // The first callback describes the current path, not a network change.
+        guard hasObservedInitialPath else { hasObservedInitialPath = true; return }
+        do {
+            try await current.checkConnection()
+            guard refreshGeneration == generation else { return }
+            resumeSavedAnswers()
+            resumeSavedDiscussions()
+        } catch {
+            guard refreshGeneration == generation, available else { return }
+            // A failed ping unblocks the current replay with its actual error.
+            // Serialize replacement after that replay saves its validated prefix.
+            _ = await refreshFlights.afterCurrent { [weak self] in
+                guard let self, self.refreshGeneration == generation else { return .unavailable }
+                do {
+                    if self.transport === current { try await self.reconnect(generation: generation) }
+                } catch { return .failed(error: error) }
+                return await self.performRefresh(generation: generation)
+            }
+        }
+    }
 
     private func focusReportingReadyHandler(generation: UUID,
                                             transportID: UUID) -> @Sendable () -> Void {
@@ -1091,6 +1131,7 @@ final class NativeRelayLifecycle {
         focusTransportID = transportAttemptID
         installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER, serverStateCache)
+        observeNetworkPath(generation: generation)
         resumeSavedAnswers()
         resumeSavedDiscussions()
     }
@@ -1148,6 +1189,7 @@ final class NativeRelayLifecycle {
             installFocusReportHandler(for: nextTransport, transportID: focusTransportID)
             configuration = (current.store, current.context, relayURL, current.identity,
                              current.rootDER, current.serverStateCache)
+            observeNetworkPath(generation: migrationGeneration)
             nextCore = nil
             await priorCore.deactivate()
             await priorTransport.close()
@@ -1171,6 +1213,9 @@ final class NativeRelayLifecycle {
     }
 
     func deactivate() async {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        hasObservedInitialPath = false
         refreshGeneration = UUID()
         refreshFlights.reset()
         let priorCore = core
