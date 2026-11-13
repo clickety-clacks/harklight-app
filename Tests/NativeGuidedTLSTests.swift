@@ -3776,10 +3776,17 @@ final class NativeGuidedTLSTests: XCTestCase {
                                         context: context)
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: requestKey).requests.first?.selector)
-        _ = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+        let queuedReceipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
                                          inputs: [.compatibilityValue(action: ExactText("got-it"))]))
-        let originalOperation = try XCTUnwrap(store.snapshot(context: context).outbox.first)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
+        let originalOperation = try XCTUnwrap(store.lookupIntent(queuedReceipt.intentID, context: context))
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+
+        let cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let cacheURL = cacheDirectory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: identity,
+            from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
 
         let diagnosticURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightDiagnostics-\(UUID().uuidString).json")
@@ -3788,7 +3795,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let lifecycle = NativeRelayLifecycle()
         try await lifecycle.activate(store: store, context: context, relayURL: relayURL,
                                      clientIdentity: installation.value, trustedRootDER: server.rootDER,
-                                     diagnostics: diagnosticJournal)
+                                     diagnostics: diagnosticJournal, serverStateCache: cache)
         var progressUpdates: [NativeForegroundConnectProgress] = []
         var operationSnapshots: [NativeForegroundOperationSnapshot] = []
         let result = await lifecycle.confirmForegroundProgress(for: context, deadline: .seconds(3)) {
@@ -3810,10 +3817,12 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(connectionClosed, "The timed-out matching relay session must close its local TLS connection.")
         XCTAssertFalse(progressUpdates.contains(where: { $0.outcome == .confirmed }))
         let restoredAfterTimeout = try ClientRepository(context: context, persistence: persistence)
+        let cached = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+        try restoredAfterTimeout.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: context)
         let restoredSnapshot = try restoredAfterTimeout.snapshot(context: context)
         XCTAssertEqual(restoredSnapshot.cursor, 1,
                        "The stalled connection must preserve the approved profile's replay cursor.")
-        XCTAssertEqual(restoredSnapshot.outbox.first?.operationID, originalOperation.operationID,
+        XCTAssertEqual(try restoredAfterTimeout.lookupIntent(queuedReceipt.intentID, context: context)?.operationID, originalOperation.operationID,
                        "The stalled connection must preserve its exact queued operation.")
         XCTAssertEqual(try restoredAfterTimeout.conversationSnapshot(context: context)
             .threads[requestKey]?.drafts[1]?.text, ExactText("Keep this draft"),
@@ -3821,7 +3830,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate().deviceID,
                        installation.deviceID, "The approved device identity remains available after timeout.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[requestKey]?.drafts[1]?.text,
                        ExactText("Keep this draft"))
         let timeoutEvent = try XCTUnwrap(diagnosticJournal.events.first {
@@ -3837,7 +3846,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(persistedDiagnostics.shareText.contains("transport_attempt_id=\(transportAttemptID.uuidString.lowercased())"))
         XCTAssertTrue(persistedDiagnostics.shareText.contains("operation_id=\(originalOperation.operationID.uuidString.lowercased())") == false,
                       "An operation not yet sent must not be mislabeled as a transport attempt.")
-        XCTAssertEqual(try store.snapshot(context: context).outbox.first?.operationID,
+        XCTAssertEqual(try store.lookupIntent(queuedReceipt.intentID, context: context)?.operationID,
                        originalOperation.operationID,
                        "Diagnostics must not change or resubmit the original queued operation.")
         let operationSnapshot = try XCTUnwrap(operationSnapshots.last)
@@ -3855,7 +3864,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(server.acceptedConnectionCount, 2,
                        "A later refresh retries the approved endpoint without a permanent timeout latch.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.first?.operationID,
+        XCTAssertEqual(try store.lookupIntent(queuedReceipt.intentID, context: context)?.operationID,
                        originalOperation.operationID)
         await lifecycle.deactivate()
     }

@@ -148,9 +148,13 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
             ]
             session.rejectFirstConversationACK = terminalIdentityIncluded
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+            let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
             let diagnostics = InboxFreshnessDiagnosticCollector()
             let core = try NativeRelayCore(store: store, context: context, session: session,
-                onDiagnostic: { diagnostics.append($0) })
+                serverStateCache: cache, onDiagnostic: { diagnostics.append($0) })
             if !terminalIdentityIncluded {
                 let frames = session.conversationFrames
                 session.conversationFrameBatches = [frames, frames,
@@ -164,6 +168,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
                     .conversationValidationRejection?.guardID, .referencedTurnExists)
             }
             let restored = try ClientRepository(context: context, persistence: persistence)
+            let cached = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+            try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: context)
             XCTAssertEqual(try restored.snapshot(context: context).cursor, 4)
             let presentation = try LivePresentationStore(store: restored, context: context)
             func key(_ message: String) -> RequestKey {
@@ -285,8 +291,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Original wording"},"session_handle":"handle","request_revision":1}"#),
                 data(#"{"v":1,"type":"resynced","seq":1}"#)
             ]
-            // A zero revision fails wire validation; a different payload for
-            // the accepted revision fails application. Neither blocks revision 2.
+            // Zero revision fails wire validation. A changed server payload for
+            // the same revision replaces cached content. Neither blocks revision 2.
             let revision = failure == "decode" ? 0 : 1
             session.conversationFrames = [
                 data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
@@ -297,11 +303,17 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
             ]
             session.rejectFirstConversationACK = true
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+            let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
             let diagnostics = InboxFreshnessDiagnosticCollector()
             let core = try NativeRelayCore(store: store, context: context, session: session,
-                onDiagnostic: { diagnostics.append($0) })
+                serverStateCache: cache, onDiagnostic: { diagnostics.append($0) })
             _ = try await core.resyncAndDrainOutbox()
             let reloaded = try ClientRepository(context: context, persistence: persistence)
+            let cached = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+            try reloaded.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: context)
             XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 2)
             let presentation = try LivePresentationStore(store: reloaded, context: context)
             XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Current wording"))
@@ -309,11 +321,13 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertEqual(try session.conversationACKs.map {
                 try JSONValue.parse($0).uniqueValue(named: "conversation_seq")?.integerValue
             }, [2, 2])
-            XCTAssertNotNil(diagnostics.events.first {
+            let rejected = diagnostics.events.first {
                 $0.phase == .conversationReplay && $0.transition == .observed && $0.conversationSequence == 1
-            })
-            XCTAssertFalse(try reloaded.conversationSnapshot(context: context).threads[key]?.turns
-                .contains { $0.id == ExactText("bad") } ?? true)
+            }
+            if failure == "decode" { XCTAssertNotNil(rejected) }
+            else { XCTAssertNil(rejected, "Server replacement content must not be refused by the cache.") }
+            XCTAssertEqual(try reloaded.conversationSnapshot(context: context).threads[key]?.turns
+                .contains { $0.id == ExactText("bad") }, failure != "decode")
             await core.deactivate()
         }
     }
@@ -752,9 +766,13 @@ final class InboxFreshnessReplayTests: XCTestCase {
             data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
         ]
 
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
         let diagnostics = InboxFreshnessDiagnosticCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
-            onDiagnostic: { diagnostics.append($0) })
+            serverStateCache: cache, onDiagnostic: { diagnostics.append($0) })
         _ = try await core.resyncAndDrainOutbox()
 
         let rejectedEventDiagnostic = try XCTUnwrap(diagnostics.events.first {
@@ -801,22 +819,25 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let lowerBinding = ConversationBinding(request: key, revision: 2)
         let lowerRequest = ConversationEvent(sequence: 3, binding: lowerBinding,
             fact: .request(sessionHandle: ExactText("handle"), payload: lowerPayload))
-        XCTAssertThrowsError(try store.applyConversation(lowerRequest, context: context)) {
-            XCTAssertEqual($0 as? ConversationError, .staleRevision(current: 3))
-        }
+        try store.applyConversation(lowerRequest, context: context)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 3,
+                       "Authoritative historical content does not roll back the current revision.")
         let lowerTurn = ConversationTurn(id: ExactText("lower-revision"), binding: lowerBinding,
             author: .origin, sessionHandle: ExactText("handle"), text: ExactText("Older wording"),
             kind: .revision)
-        let lowerRevision = ConversationEvent(sequence: 3, binding: lowerBinding,
+        let lowerRevision = ConversationEvent(sequence: 4, binding: lowerBinding,
             fact: .revision(lowerTurn, payload: lowerPayload))
-        XCTAssertThrowsError(try store.applyConversation(lowerRevision, context: context)) {
-            XCTAssertEqual($0 as? ConversationError, .staleRevision(current: 3))
-        }
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+        try store.applyConversation(lowerRevision, context: context)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 4)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 3)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: identity,
+            from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
 
         let restoredStore = try ClientRepository(context: context, persistence: persistence)
+        let cached = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+        try restoredStore.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: context)
         let restored = try restoredStore.conversationSnapshot(context: context)
-        XCTAssertEqual(restored.cursor, 2)
+        XCTAssertEqual(restored.cursor, 4)
         XCTAssertEqual(restored.threads[key]?.currentRevision, 3,
                        "The cursor and later revision survive reload without a stored rejection record.")
         await core.deactivate()
