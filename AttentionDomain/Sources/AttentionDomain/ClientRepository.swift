@@ -215,6 +215,7 @@ public final class ClientRepository: @unchecked Sendable {
         let keys = Set(cached.requests.keys)
             .union(cached.remoteStates.keys)
             .union(cached.conversations.keys)
+            .union(cached.conversationEvents.values.map { $0.binding.request })
             .union(cached.inboxReferences.keys)
             .union(cached.pendingRelayOverlays.values.compactMap { Self.requestKey(in: $0) })
         guard keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
@@ -239,6 +240,7 @@ public final class ClientRepository: @unchecked Sendable {
 
         var conversation = ConversationState()
         conversation.cursor = cached.conversationCursor
+        conversation.events = cached.conversationEvents
         conversation.threads = cached.conversations
         conversation.chatReadPositions = cached.chatReadPositions
         conversation.chatReadPositionSupport = cached.chatReadPositions != nil
@@ -2092,8 +2094,7 @@ public final class ClientRepository: @unchecked Sendable {
         guard suppliedContext.transportMode == .relay,
               var candidate = state.inboxCandidate,
               !snapshotID.isEmpty,
-              highWater >= candidate.since,
-              items.count <= 20 else { throw AttentionStoreError.inboxCheckpointIncomplete }
+              highWater >= candidate.since else { throw AttentionStoreError.inboxCheckpointIncomplete }
         let keys = items.map(\.key)
         guard Set(keys).count == keys.count,
               keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
@@ -2117,9 +2118,13 @@ public final class ClientRepository: @unchecked Sendable {
             return
         }
         var next = state
-        // The actual server response replaces the disposable projection,
-        // including an empty snapshot. User intents remain in their own queue.
+        // Inbox snapshots replace the ordinary projection, including an empty
+        // snapshot. User intents remain in their own queue. Conversation
+        // history has its own sequence: preserve its committed prefix so a
+        // reconnect resumes that stream instead of starting it over.
+        let conversation = next.server.conversation
         next.server = ServerProjectionCache()
+        next.server.conversation = conversation
         next.cursor = candidate.since
         do {
             for item in items {
@@ -2226,7 +2231,6 @@ public final class ClientRepository: @unchecked Sendable {
               checkpoint.highWater == highWater,
               checkpoint.hasInitialPage,
               checkpoint.nextCursor == cursor,
-              items.count <= 20,
               (items.count > 0 || nextCursor == nil) else {
             throw AttentionStoreError.inboxPageConflict
         }
@@ -2668,7 +2672,7 @@ public final class ClientRepository: @unchecked Sendable {
         return ConversationSnapshot(cursor: conversation.cursor, threads: conversation.threads,
             chatReadPositions: conversation.chatReadPositions,
             chatReadPositionSupport: conversation.chatReadPositionSupport,
-            pendingChatReadPositions: pending)
+            pendingChatReadPositions: pending, events: conversation.events)
     }
 
     /// Re-validates an already-accounted redacted revision without applying or

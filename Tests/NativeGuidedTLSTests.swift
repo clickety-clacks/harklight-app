@@ -1319,6 +1319,95 @@ final class NativeGuidedTLSTests: XCTestCase {
         do { try await heldAck.value; XCTFail("The withheld cursor was never confirmed") } catch {}
     }
 
+    func testLifecycleDeliversReplyAndSeenWhileConversationCatchUpRemainsOpen() async throws {
+        let namespace = "Harklight.lifecycle-open-replay." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let conversationStarted = expectation(description: "Post-ACK conversation replay is still open")
+        let frames = ConversationFrameCollector()
+        let seenPayload = #"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
+        let replyPayload = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text","placeholder":"Reply"}]}}"#
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue else { return [] }
+            if kind == "answer" {
+                frames.append(Data(text.utf8))
+                let sequence = value.uniqueValue(named: "message_id")?.stringValue?.rawValue == "reply" ? 3 : 4
+                return ["{\"v\":1,\"type\":\"ok\",\"seq\":\(sequence)}\n"]
+            }
+            guard let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue else { return [] }
+            let ok = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\""
+            let checkpoint = ",\"paging_version\":1,\"snapshot_id\":\"open-replay\",\"high_water\":2"
+            switch kind {
+            case "inbox_start":
+                let rows = [("seen", seenPayload), ("reply", replyPayload)].enumerated().map { index, row in
+                    "{\"acceptance\":{\"v\":1,\"type\":\"delivery\",\"seq\":\(index + 1),\"sender_id\":\"sender\",\"message_id\":\"\(row.0)\",\"origin\":\"origin\",\"as\":\"message\",\"message\":\(row.1)}}"
+                }.joined(separator: ",")
+                return [ok + checkpoint + ",\"items\":[\(rows)],\"next_cursor\":null,\"receipt_cursor\":null}\n"]
+            case "inbox_checkpoint_ack":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true}\n"]
+            case "inbox_attach":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        #"{"v":1,"type":"resynced","seq":2}"# + "\n"]
+            case "conversation_open":
+                conversationStarted.fulfill()
+                return [ok + "}\n"] // No conversation_resynced: catch-up stays active.
+            default: return [ok + "}\n"]
+            }
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("open-replay-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        var refreshCompleted = false
+        let refresh = Task { @MainActor in
+            let result = await lifecycle.refreshResultFromTrustedRelay()
+            refreshCompleted = true
+            return result
+        }
+        await fulfillment(of: [conversationStarted], timeout: 5)
+        XCTAssertFalse(refreshCompleted)
+        let domain = AttentionDomainPort(store: store)
+        let completed = expectation(description: "Lifecycle sends finish without completing catch-up")
+        let sends = Task { @MainActor in
+            defer { completed.fulfill() }
+            for message in ["reply", "seen"] {
+                let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                                     messageID: ExactText(message))
+                let selector = try XCTUnwrap(domain.inspect(context: domain.context, request: key).requests.first?.selector)
+                let input: TypedInputRecord = message == "seen" ? .compatibilityValue(action: ExactText("seen")) :
+                    .compatibilityText(action: ExactText("reply"), text: ExactText("While replay is open"))
+                let receipt = try domain.submit(SubmitIntent(context: domain.context, selector: selector,
+                    intentID: UUID(), inputs: [input]))
+                let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+                try await lifecycle.sendOriginalOperationForUserTap(receipt.intentID, expected: context)
+                XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, original.operationID)
+                XCTAssertFalse(refreshCompleted)
+                XCTAssertNil(try store.snapshot(context: context).remoteStates[key]?.state,
+                             "Transport acceptance cannot invent the Server's terminal projection.")
+            }
+        }
+        await fulfillment(of: [completed], timeout: 5)
+        await lifecycle.deactivate()
+        try await sends.value
+        _ = await refresh.value
+        let submitted = try frames.snapshot().map { try JSONValue.parse($0) }
+        XCTAssertEqual(submitted.count, 2)
+        XCTAssertEqual(submitted.first?.uniqueValue(named: "answer"), .string(ExactText("While replay is open")))
+        XCTAssertEqual(submitted.last?.uniqueValue(named: "answer"), .null)
+        XCTAssertEqual(Set(submitted.compactMap { $0.uniqueValue(named: "op_id")?.stringValue }).count, 2)
+    }
+
     func testUploadEndpointDiscoveryDoesNotWaitForConversationHistoryOrAcknowledgeIt() async throws {
         let namespace = "Harklight.upload-origin-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()

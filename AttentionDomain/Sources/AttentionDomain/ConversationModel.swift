@@ -1186,16 +1186,19 @@ public struct ConversationSnapshot: Sendable {
     public let chatReadPositions: [RequestKey: UInt64]?
     public let chatReadPositionSupport: Bool?
     public let pendingChatReadPositions: [PendingConversationReadPosition]
+    public let events: [UInt64: ConversationEvent]
 
     public init(cursor: UInt64, threads: [RequestKey: ConversationThread],
                 chatReadPositions: [RequestKey: UInt64]? = nil,
                 chatReadPositionSupport: Bool? = nil,
-                pendingChatReadPositions: [PendingConversationReadPosition] = []) {
+                pendingChatReadPositions: [PendingConversationReadPosition] = [],
+                events: [UInt64: ConversationEvent] = [:]) {
         self.cursor = cursor
         self.threads = threads
         self.chatReadPositions = chatReadPositions
         self.chatReadPositionSupport = chatReadPositionSupport
         self.pendingChatReadPositions = pendingChatReadPositions
+        self.events = events
     }
 }
 
