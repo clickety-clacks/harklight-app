@@ -102,7 +102,7 @@
     {
       "id": "post-148-inbox-notification-updates",
       "marketingVersion": "0.1.0",
-      "testFlightBuildNumber": null,
+      "testFlightBuildNumber": 193,
       "highlights": [
         {
           "id": "new-design-light-and-dark",
