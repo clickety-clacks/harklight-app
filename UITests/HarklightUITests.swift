@@ -317,8 +317,13 @@ final class HarklightUITests: XCTestCase {
                       "The pending row is reopened to simulate its later server outcome.")
         XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
                       "The reopened detail reflects the accepted answer.")
-        XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
-                      "A confirmed answer is no longer an available submit action.")
+        XCTAssertTrue(app.descendants(matching: .any)["request-closing-scene"].waitForExistence(timeout: 5),
+                      "The form's declared closing scene shows beneath the Answered card.\n\(app.debugDescription)")
+        // Ghost, don't hide: the check stays visible but disabled once answered.
+        let answeredFinish = app.buttons["request-finish"]
+        XCTAssertTrue(answeredFinish.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(answeredFinish.isEnabled,
+                       "A confirmed answer leaves the submit check visible but unavailable.")
         if !listVisibleAlongsideDetail {
             let back = workspaceBackButton(in: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
@@ -607,12 +612,15 @@ final class HarklightUITests: XCTestCase {
         XCTAssertEqual(seenConfirmation.value as? String, "Completed")
         XCTAssertFalse(app.staticTexts["Seen selected locally · nothing sent"].exists,
                        "The card is the single Seen confirmation.")
-        XCTAssertFalse(finishSeen.exists,
-                       "The toolbar action disappears after Seen is confirmed.")
+        XCTAssertTrue(finishSeen.exists,
+                      "Ghost, don't hide: the toolbar Seen action stays visible after Seen is confirmed.")
+        XCTAssertFalse(finishSeen.isEnabled,
+                       "The confirmed toolbar Seen action is unavailable.")
         XCTAssertFalse(seenAction.exists,
                        "The available Seen button is replaced by its confirmation card.")
         XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 0)
-        XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 0)
+        XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1,
+                       "The confirmed toolbar Seen action is kept, greyed out.")
         attachScreenshot("Notice detail Seen confirmation card", from: app)
     }
 
@@ -679,8 +687,11 @@ final class HarklightUITests: XCTestCase {
                       "The pending row is reopened to simulate its later accepted result.")
         XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        XCTAssertTrue(app.buttons["request-finish"].waitForNonExistence(timeout: 5),
-                      "A confirmed answer is no longer an available submit action.")
+        // Ghost, don't hide: the check stays visible but disabled once answered.
+        let answeredFinish = app.buttons["request-finish"]
+        XCTAssertTrue(answeredFinish.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(answeredFinish.isEnabled,
+                       "A confirmed answer leaves the submit check visible but unavailable.")
 
         let back = workspaceBackButton(in: app)
         if back.exists { back.tap() }

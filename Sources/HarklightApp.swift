@@ -12,6 +12,7 @@ struct HarklightApp: App {
     @State private var releaseNotes: ReleaseNotesPresentation
 
     init() {
+        HarklightTypography.configureNavigationTitles()
         let arguments = ProcessInfo.processInfo.arguments
         let launch = NativeAppLaunch(arguments: arguments)
         _launch = State(initialValue: launch)
@@ -124,6 +125,10 @@ struct HarklightApp: App {
                     }
                 }
             }
+            // Every screen sits on the design's page and takes its amber accent,
+            // including loading, empty and recovery states that have no drawing.
+            .background { Rectangle().fill(.hkBackground).ignoresSafeArea() }
+            .modifier(HarklightAccentTint())
             .modifier(AcceptanceReduceMotionOverride(isEnabled: acceptanceReduceMotionOverride))
             .foregroundChatNotificationLayer()
             .task {
@@ -159,6 +164,7 @@ struct HarklightApp: App {
                 if !releaseNotes.notesToShow.isEmpty {
                     ReleaseNotesSheet(notes: releaseNotes.notesToShow)
                         .foregroundChatNotificationLayer()
+                        .harklightSheetSurface()
                 }
             }
             .environment(launch)
@@ -192,6 +198,7 @@ private struct DisconnectedAccountRecoveryView: View {
             if launch.disconnectedAccount?.removed == true {
                 Button("Connect with an invitation") { launch.beginReconnect() }
                     .buttonStyle(.borderedProminent)
+                    .tint(HarklightColor(token: .inverse))
             }
             if !launch.unconfirmedAccountDepartures.isEmpty {
                 ForEach(launch.unconfirmedAccountDepartures, id: \.archiveID) { departure in
@@ -200,6 +207,7 @@ private struct DisconnectedAccountRecoveryView: View {
             } else if launch.disconnectedAccount?.removed != true {
                 Button("Retry removal") { Task { await launch.retryDisconnectRemoval() } }
                     .buttonStyle(.borderedProminent)
+                    .tint(HarklightColor(token: .inverse))
                     .disabled(launch.disconnectedAccount.map { launch.isDisconnectBusy(for: $0) } ?? false)
             }
         }

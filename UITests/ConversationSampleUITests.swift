@@ -3,7 +3,13 @@ import UIKit
 
 @MainActor
 final class ConversationSampleUITests: XCTestCase {
-    func testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn() {
+    func testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn() throws {
+        // The capture host measures rows in a real 250 point split sidebar. On
+        // iPhone the split collapses to one full-width stack even in landscape,
+        // so there is no sidebar column to measure.
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The 250 point list column needs an iPad split sidebar.")
+        }
         XCUIDevice.shared.orientation = .landscapeLeft
         let states: [(name: String, rowIdentifier: String, selectedMessageID: String?,
                       selectedTitle: String?, comparisonIdentifier: String?, fullWidth: Bool)] = [
@@ -141,61 +147,6 @@ final class ConversationSampleUITests: XCTestCase {
         }
     }
 
-    func testFloatingSearchKeepsNormalReplyTextVisibleAtLargeContentSizes() {
-        XCUIDevice.shared.orientation = .landscapeLeft
-
-        for contentSize in [
-            UIContentSizeCategory.large,
-            UIContentSizeCategory.extraExtraLarge,
-            UIContentSizeCategory.extraExtraExtraLarge
-        ] {
-            let app = XCUIApplication()
-            app.launchArguments = [
-                "-UIPreferredContentSizeCategoryName", contentSize.rawValue,
-                "--harklight-test-inbox-list-column",
-                "--harklight-test-inbox-list-light",
-                "--harklight-test-inbox-list-state=markdown",
-                "--harklight-markdown-acceptance",
-                "--harklight-test-markdown-reply-item"
-            ]
-            app.launch()
-
-            let list = app.collectionViews.firstMatch
-            XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
-
-            let normalReplyRow = app.descendants(matching: .any)[
-                "normal-reply-item-sample-markdown-acceptance"
-            ]
-            XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
-            let replyText = normalReplyRow.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS %@", "Open reply guide")
-            ).firstMatch
-            XCTAssertTrue(replyText.waitForExistence(timeout: 5), app.debugDescription)
-
-            let searchField = app.searchFields.firstMatch
-            XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(searchField.isHittable, searchField.debugDescription)
-            let scrollStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
-            let scrollEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
-            for _ in 0..<8 where replyText.frame.intersects(searchField.frame) {
-                scrollStart.press(forDuration: 0.05, thenDragTo: scrollEnd)
-            }
-            XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
-            XCTAssertTrue(replyText.isHittable, replyText.debugDescription)
-            XCTAssertFalse(
-                replyText.frame.intersects(searchField.frame),
-                "The floating Search field must not overlap normal reply text.\n\(app.debugDescription)"
-            )
-
-            searchField.tap()
-            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
-            searchField.typeText("Markdown\n")
-            XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5),
-                          "Searching still finds the visible reply.\n\(app.debugDescription)")
-            app.terminate()
-        }
-    }
-
     func testMarkdownRendersInNewNormalDetailAndConversationWithoutChangingRowTaps() {
         XCUIDevice.shared.orientation = .landscapeLeft
 
@@ -315,6 +266,8 @@ final class ConversationSampleUITests: XCTestCase {
                 NSPredicate(format: "label CONTAINS %@", "Open guide")
             ).firstMatch
             XCTAssertTrue(normalGuide.waitForExistence(timeout: 5), app.debugDescription)
+            // Taller rows can leave the link below a short landscape window.
+            for _ in 0..<4 where !normalGuide.isHittable { list.swipeUp() }
             XCTAssertTrue(normalGuide.isHittable, normalGuide.debugDescription)
             normalGuide.tap()
             XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10), app.debugDescription)
@@ -407,7 +360,13 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(normalRow.label.contains("A Markdown note"), normalRow.debugDescription)
         captureInboxColumnState("markdown-accessibility-normal-row", app)
 
-        for _ in 0..<8 where !newRow.isHittable { list.swipeDown() }
+        // Larger rows can stay partly under the top bar after the row first
+        // becomes hittable; bring the whole row below the bar before tapping.
+        let topBarBottom = app.navigationBars.firstMatch.exists
+            ? app.navigationBars.firstMatch.frame.maxY : list.frame.minY
+        for _ in 0..<8 where !newRow.isHittable || newRow.frame.minY < topBarBottom {
+            list.swipeDown()
+        }
         XCTAssertTrue(newRow.isHittable, newRow.debugDescription)
         newRow.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.82)).tap()
 
@@ -536,9 +495,10 @@ final class ConversationSampleUITests: XCTestCase {
                        "The top of the long history must be off screen when the chat lands on the reply.\n\(app.debugDescription)")
         capture("reply-item-tap-landed-on-earliest-unseen-reply", app)
 
-        let requestHeading = app.buttons["request-heading"]
-        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(requestHeading.label.contains("Unread conversation"), requestHeading.debugDescription)
+        // Revision 7 carries unread chat turns on the chat button's badge only.
+        let chatButton = app.buttons["bubble.left"]
+        XCTAssertTrue(chatButton.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(chatButton.value as? String, "1 item", chatButton.debugDescription)
 
         let newestReply = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply: the revised draft")
@@ -550,8 +510,8 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(newestReply.isHittable,
                       "Scrolling to the later reply must bring it into the chat viewport.\n\(app.debugDescription)")
-        let readLabel = NSPredicate(format: "label CONTAINS %@", "Conversation read")
-        expectation(for: readLabel, evaluatedWith: requestHeading)
+        let readBadge = NSPredicate(format: "value != %@", "1 item")
+        expectation(for: readBadge, evaluatedWith: chatButton)
         waitForExpectations(timeout: 5)
     }
 
@@ -1157,7 +1117,8 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "Keep the original mixed-result note.")
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label == %@",
             "Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend.")).firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["Unidentified example.txt"].exists)
+        // The drawn attachment is a thumbnail; its file name is the thumbnail's label.
+        XCTAssertTrue(app.buttons["Unidentified example.txt"].exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["Not ready · reselect after cleanup"].exists)
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
         XCTAssertFalse(app.staticTexts["Committed file references remain available in history. This result does not identify individual files."].exists)
@@ -1524,17 +1485,20 @@ private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIEleme
     return app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
 }
 
+/// Search is a tab: selecting it raises the one search field.
 @MainActor
 private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
     let field = app.searchFields.firstMatch
     if field.exists { return field }
-    let list = app.collectionViews.firstMatch
-    if list.exists {
-        for _ in 0..<3 {
-            list.swipeDown()
-            if field.waitForExistence(timeout: 1) { break }
-        }
+    let searchTab = app.tabBars.buttons["Search"]
+    if searchTab.exists {
+        searchTab.tap()
+    } else {
+        let tab = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Search")).firstMatch
+        if tab.exists { tab.tap() }
     }
+    _ = field.waitForExistence(timeout: 3)
     return field
 }
 

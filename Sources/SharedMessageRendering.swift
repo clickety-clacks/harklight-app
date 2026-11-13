@@ -325,10 +325,23 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
                 piece.addAttribute(.foregroundColor,
                                    value: foregroundColor,
                                    range: fullRange)
+                piece.addAttribute(.paragraphStyle,
+                                   value: Self.bodyParagraphStyle(for: bodyFont),
+                                   range: fullRange)
             }
             rendered.append(piece)
         }
         return rendered
+    }
+
+    /// The design's message body line height, 1.5 times the size.
+    private static func bodyParagraphStyle(for bodyFont: UIFont) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        let lineHeight = bodyFont.pointSize * 1.5
+        style.minimumLineHeight = lineHeight
+        style.maximumLineHeight = lineHeight
+        style.paragraphSpacing = bodyFont.pointSize * 0.5
+        return style
     }
 
     private static func bodyFont(matching intent: InlinePresentationIntent?,
@@ -360,24 +373,7 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     }
 
     private func preferredBodyFont(for textView: UITextView) -> UIFont {
-        let category: UIContentSizeCategory
-        switch dynamicTypeSize {
-        case .xSmall: category = .extraSmall
-        case .small: category = .small
-        case .medium: category = .medium
-        case .large: category = .large
-        case .xLarge: category = .extraLarge
-        case .xxLarge: category = .extraExtraLarge
-        case .xxxLarge: category = .extraExtraExtraLarge
-        case .accessibility1: category = .accessibilityMedium
-        case .accessibility2: category = .accessibilityLarge
-        case .accessibility3: category = .accessibilityExtraLarge
-        case .accessibility4: category = .accessibilityExtraExtraLarge
-        case .accessibility5: category = .accessibilityExtraExtraExtraLarge
-        @unknown default: category = textView.traitCollection.preferredContentSizeCategory
-        }
-        let traits = UITraitCollection(preferredContentSizeCategory: category)
-        return UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)
+        HarklightTypography.resolve(.messageBody, dynamicTypeSize: dynamicTypeSize).font
     }
 
     func makeUIView(context: Context) -> UITextView {
@@ -531,6 +527,8 @@ struct SenderIllustrationCanvas: View {
     let pictureLoader: SenderPictureLoader?
 
     @State private var pictureStates: [ExactText: PictureState] = [:]
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
 
     private enum PictureState {
         case loading
@@ -553,6 +551,7 @@ struct SenderIllustrationCanvas: View {
             let rect = Self.fittedRect(size: geometry.size,
                                        sourceWidth: illustration.width,
                                        sourceHeight: illustration.height)
+            let markerColor = HarklightDesignSystem.palette(for: colorScheme).typeColor(messageType)
             Canvas { context, _ in
                 context.clip(to: Path(rect))
                 for primitive in illustration.primitives {
@@ -561,7 +560,7 @@ struct SenderIllustrationCanvas: View {
                               pictureStates: pictureStates)
                 }
                 if let point {
-                    Self.draw(point, context: &context, rect: rect)
+                    Self.draw(point, color: markerColor, context: &context, rect: rect)
                 }
             }
         }
@@ -707,19 +706,20 @@ struct SenderIllustrationCanvas: View {
         fallbackContext.draw(label, at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
     }
 
-    private static func draw(_ point: PointValue, context: inout GraphicsContext, rect: CGRect) {
+    /// The app's marker for a chosen point, in the message's type color.
+    private static func draw(_ point: PointValue, color: Color, context: inout GraphicsContext, rect: CGRect) {
         let center = CGPoint(x: rect.minX + rect.width * CGFloat(point.x) / 1000,
                              y: rect.minY + rect.height * CGFloat(point.y) / 1000)
         let radius: CGFloat = 8
         let circle = Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
         context.fill(circle, with: .color(.white))
-        context.stroke(circle, with: .color(.blue), lineWidth: 2)
+        context.stroke(circle, with: .color(color), lineWidth: 2)
         var cross = Path()
         cross.move(to: CGPoint(x: center.x - 13, y: center.y))
         cross.addLine(to: CGPoint(x: center.x + 13, y: center.y))
         cross.move(to: CGPoint(x: center.x, y: center.y - 13))
         cross.addLine(to: CGPoint(x: center.x, y: center.y + 13))
-        context.stroke(cross, with: .color(.blue), lineWidth: 2)
+        context.stroke(cross, with: .color(color), lineWidth: 2)
     }
 
     private static func color(_ value: ExactText) -> Color {

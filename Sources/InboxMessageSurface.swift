@@ -116,8 +116,11 @@ struct MessageCardSurface<Content: View>: View {
                 }
             }
             .background {
+                // The type tint fills to every edge, behind the bars, and on
+                // iPad runs beneath the floating list panel.
                 HarklightDesignSystem.palette(for: colorScheme)
-                    .messageType(context.messageType).backgroundColor
+                    .typeTint(context.messageType)
+                    .backgroundExtensionEffect()
                     .ignoresSafeArea()
             }
             .toolbarBackground(.hidden, for: .navigationBar)
@@ -125,10 +128,11 @@ struct MessageCardSurface<Content: View>: View {
             .toolbar {
                 if let position = context.position, let total = context.total {
                     ToolbarItem(placement: .principal) {
-                        Text("\(position) of \(total)").font(.subheadline.monospacedDigit())
-                            .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme)
-                                .messageType(context.messageType).textColor)
-                            .padding(.horizontal, 12).padding(.vertical, 7).glassEffect(in: Capsule())
+                        Text("\(position) of \(total)")
+                            .harklightType(.positionPill)
+                            .monospacedDigit()
+                            .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).text)
+                            .padding(.horizontal, 14).padding(.vertical, 10).glassEffect(in: Capsule())
                     }
                 }
             }
@@ -150,68 +154,75 @@ struct MessageChoiceLabel: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
-    private var appearance: HarklightDesignSource.Appearance {
-        HarklightDesignSystem.palette(for: colorScheme)
+    private var messageColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
-    private var messageColors: HarklightDesignSource.MessageType {
-        appearance.messageType(messageType)
+    private var cornerRadius: CGFloat { HarklightDesignSystem.shape(.card) }
+
+    @ViewBuilder
+    private var mark: some View {
+        if multiple {
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(selected ? messageColors.beam : messageColors.secondary, lineWidth: 1.5)
+                    .frame(width: 20, height: 20)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.caption.bold())
+                        .foregroundStyle(messageColors.beam)
+                }
+            }
+        } else {
+            // A picked choice's mark is a 6 point ring in the type color.
+            Circle()
+                .stroke(selected ? messageColors.beam : messageColors.secondary,
+                        lineWidth: selected ? 6 : 1.5)
+                .frame(width: 20, height: 20)
+        }
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                if multiple {
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(selected ? messageColors.textColor : messageColors.secondaryTextColor,
-                                lineWidth: 1.5)
-                        .frame(width: 20, height: 20)
-                    if selected {
-                        Image(systemName: "checkmark")
-                            .font(.caption.bold())
-                            .foregroundStyle(messageColors.textColor)
-                    }
-                } else {
-                    Circle()
-                        .stroke(selected ? messageColors.textColor : messageColors.secondaryTextColor,
-                                lineWidth: selected ? 6 : 2)
-                        .frame(width: 20, height: 20)
-                }
-            }
-            .frame(width: 20, height: 22)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    Text(title).font(.headline)
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            mark
+                .frame(width: 20, height: 20)
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 6 }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(title)
+                        .harklightType(.choiceTitle)
+                        .foregroundStyle(messageColors.text)
                     if suggested {
                         Text("Suggested")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(messageColors.secondaryTextColor)
+                            .textCase(.uppercase)
+                            .harklightType(.suggested)
+                            .foregroundStyle(messageColors.secondary)
                     }
                 }
                 if !detail.isEmpty {
                     Text(detail)
-                        .font(.subheadline)
-                        .foregroundStyle(messageColors.secondaryTextColor)
+                        .harklightType(.choiceDetail)
+                        .foregroundStyle(messageColors.secondary)
                 }
             }
             Spacer(minLength: 0)
         }
-        .foregroundStyle(messageColors.textColor)
-        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(messageColors.text)
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
         .background {
             if drawsSurface {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(selected ? appearance.detail.selectedChoiceColor : Color.clear)
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(selected ? messageColors.pickedFill : messageColors.raised)
             }
         }
         .overlay {
             if drawsSurface {
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(selected ? messageColors.textColor : messageColors.textColor.opacity(0.3),
-                                  style: StrokeStyle(lineWidth: selected ? 1.5 : 1,
-                                                     dash: ownAnswer ? [5, 4] : []))
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(selected ? messageColors.beam : messageColors.line,
+                                  style: StrokeStyle(lineWidth: HarklightDesignSystem.shape(.lineWidth),
+                                                     dash: ownAnswer && !selected ? [4, 3] : []))
             }
         }
-        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
     }
 }

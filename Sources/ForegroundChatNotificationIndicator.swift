@@ -26,8 +26,9 @@ struct ForegroundChatNotificationIndicatorView: View {
                     .padding(.top, 3)
             }
             .padding(12)
-            .foregroundStyle(.primary)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .foregroundStyle(.hkText)
+            .background(.hkPanel, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.hkLine, lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: 16))
         }
         .buttonStyle(.plain)

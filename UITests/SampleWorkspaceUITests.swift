@@ -35,9 +35,9 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.descendants(matching: .any)["message-kind-success"].exists,
                           app.debugDescription)
             XCTAssertTrue(app.buttons["request-seen-action"].exists,
-                          "The FYI label leaves the existing Seen action available.")
-            XCTAssertTrue(app.descendants(matching: .any)["request-seen-form-label"].exists,
-                          "The legacy Seen-only form is separately labelled FYI.")
+                          "The typed FYI message keeps the existing Seen action available.")
+            XCTAssertFalse(app.descendants(matching: .any)["request-seen-form-label"].exists,
+                           "Revision 7 draws no FYI label above the Seen button.")
             capture("Success kind detail · Reduce Motion \(motionLabel)", app)
 
             showList(app)
@@ -61,7 +61,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertFalse(legacySeen.label.contains("FYI"),
                            "The Seen descriptor does not create a stored type label.")
             legacySeen.tap()
-            XCTAssertTrue(app.descendants(matching: .any)["request-seen-form-label"].waitForExistence(timeout: 5),
+            XCTAssertTrue(app.buttons["request-seen-action"].waitForExistence(timeout: 5),
                           app.debugDescription)
             XCTAssertFalse(app.descendants(matching: .any)["message-type-fyi"].exists,
                            "An untyped legacy Seen message remains untyped.")
@@ -369,7 +369,8 @@ final class SampleWorkspaceUITests: XCTestCase {
             let sidebar = app.buttons["Show Sidebar"]
             if sidebar.exists && sidebar.isHittable { sidebar.tap() }
         }
-        XCTAssertTrue(workspaceSearchField(in: app).waitForExistence(timeout: 5),
+        // Back returns to the list; search is a separate tab now.
+        XCTAssertTrue(app.collectionViews.firstMatch.waitForExistence(timeout: 5),
                       app.debugDescription)
     }
 
@@ -385,6 +386,8 @@ final class SampleWorkspaceUITests: XCTestCase {
     private func clearSearch(in app: XCUIApplication) {
         let clearText = workspaceSearchField(in: app).buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }
+        // Search is its own tab; leaving it returns to the list it searched.
+        leaveWorkspaceSearch(in: app)
     }
 
     private func seenSwipeAction(in app: XCUIApplication) -> XCUIElement? {
@@ -659,7 +662,8 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.descendants(matching: .any)["request-seen-confirmation"]
                 .waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertFalse(app.buttons["request-seen-action"].exists)
-            XCTAssertFalse(app.buttons["request-finish-seen"].exists)
+            XCTAssertFalse(app.buttons["request-finish-seen"].isEnabled,
+                           "The confirmed toolbar Seen action stays visible but unavailable.")
         } else {
             XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
                           "In a single-pane presentation, confirmed Seen returns to the list.")
