@@ -3,7 +3,13 @@ import UIKit
 
 @MainActor
 final class ConversationSampleUITests: XCTestCase {
-    func testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn() {
+    func testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn() throws {
+        // The capture host measures rows in a real 250 point split sidebar. On
+        // iPhone the split collapses to one full-width stack even in landscape,
+        // so there is no sidebar column to measure.
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The 250 point list column needs an iPad split sidebar.")
+        }
         XCUIDevice.shared.orientation = .landscapeLeft
         let states: [(name: String, rowIdentifier: String, selectedMessageID: String?,
                       selectedTitle: String?, comparisonIdentifier: String?, fullWidth: Bool)] = [
