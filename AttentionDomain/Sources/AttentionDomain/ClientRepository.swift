@@ -59,8 +59,27 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
 
     public func load(identity: ProfileIdentity) throws -> Data? {
         let retired = directoryURL.appendingPathComponent("\(identity.storageKey).plist")
-        if fileManager.fileExists(atPath: retired.path) { try fileManager.removeItem(at: retired) }
         let url = fileURL(for: identity)
+        if fileManager.fileExists(atPath: retired.path) {
+            if !fileManager.fileExists(atPath: url.path) {
+                // One-time transfer of user input only. The decoder has no
+                // server-record fields and cannot restore the retired cache.
+                let input = try PropertyListDecoder().decode(RetiredUnsentInput.self,
+                    from: Data(contentsOf: retired))
+                if input.profileIdentity == identity {
+                    var pending = ClientSessionState(profileIdentity: identity)
+                    pending.intents = input.intents ?? [:]
+                    pending.intentByRequest = input.intentByRequest ?? [:]
+                    pending.drafts = input.drafts ?? [:]
+                    let encoder = PropertyListEncoder()
+                    encoder.outputFormat = .binary
+                    try commit(encoder.encode(PersistedPendingActions(state: pending)), identity: identity)
+                }
+            }
+            // Delete only after the separate queue was committed. A restart
+            // after that commit uses the new queue and never imports twice.
+            try fileManager.removeItem(at: retired)
+        }
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         do {
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
@@ -1044,6 +1063,9 @@ public final class ClientRepository: @unchecked Sendable {
         try applyOrdinaryConversationMetadata(event, to: &next)
         if case let .delivery(request, _) = event.body {
             refreshEditableDraft(for: request.key, additionalFiles: Set(event.conversation?.files?.map(\.name) ?? []), in: &next)
+        }
+        if case let .terminal(key, _, _) = event.body {
+            dropUnsentAnswer(for: key, in: &next)
         }
         if let requestKey = Self.requestKey(in: event) {
             Self.markInboxCurrent(requestKey, at: event.sequence, in: &next)
@@ -2226,6 +2248,7 @@ public final class ClientRepository: @unchecked Sendable {
         checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
         checkpoint.nextCursor = nextCursor
         next.inboxCheckpoint = checkpoint
+        dropAnswersInvalidatedBySnapshot(checkpoint, in: &next)
         try commit(next, allowingCommittedReads: true)
         refreshAcceptedReplayIndexes(for: keys)
     }
@@ -2484,6 +2507,7 @@ public final class ClientRepository: @unchecked Sendable {
         candidate.checkpointAccepted = true
         var next = state
         next.inboxCheckpoint = candidate
+        dropAnswersInvalidatedBySnapshot(candidate, in: &next)
         next.inboxCandidate = nil
         next.cachedInboxCurrentKeys = nil
         next.cursor = highWater
@@ -2794,7 +2818,11 @@ public final class ClientRepository: @unchecked Sendable {
             next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
         }
         next.conversation = conversation
-        refreshEditableDraft(for: key, in: &next)
+        if next.remoteStates[key]?.isTerminal == true {
+            dropUnsentAnswer(for: key, in: &next)
+        } else {
+            refreshEditableDraft(for: key, in: &next)
+        }
         try commit(next, allowingCommittedReads: true)
         return conversation.cursor
     }
@@ -3652,6 +3680,32 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
+    private func dropUnsentAnswer(for key: RequestKey, in next: inout ClientSessionState) {
+        let ids = next.intents.compactMap { id, operation -> UUID? in
+            guard operation.requestKey == key else { return nil }
+            switch operation.disposition {
+            case .pending, .lost: return id
+            default: return nil
+            }
+        }
+        for id in ids { next.intents.removeValue(forKey: id) }
+        next.intentByRequest.removeValue(forKey: key)
+        next.outboxOrder.removeAll { ids.contains($0) }
+        next.drafts.removeValue(forKey: key)
+        next.pendingConversations[key]?.answerDrafts = nil
+    }
+
+    private func dropAnswersInvalidatedBySnapshot(_ checkpoint: InboxPagingCheckpoint,
+                                                       in next: inout ClientSessionState) {
+        guard checkpoint.checkpointAccepted else { return }
+        let queuedKeys = Set(next.drafts.keys).union(next.intentByRequest.keys)
+        for key in queuedKeys {
+            let terminal = next.remoteStates[key]?.isTerminal == true || next.inboxReferences?[key]?.isTerminal == true
+            let absent = checkpoint.nextCursor == nil && !checkpoint.currentKeys.contains(key)
+            if terminal || absent { dropUnsentAnswer(for: key, in: &next) }
+        }
+    }
+
     /// Editor input is local work, never a constraint on an incoming server
     /// projection. Recreate an incompatible editor from the current question;
     /// already queued operations retain their exact bytes for the send check.
@@ -3998,6 +4052,15 @@ private struct ClientSessionState {
     init(profileIdentity: ProfileIdentity) { self.profileIdentity = profileIdentity }
 }
 
+/// Read once during upgrade, then delete the source file. Deliberately omits
+/// every server-owned field from the retired store's schema.
+private struct RetiredUnsentInput: Decodable {
+    let profileIdentity: ProfileIdentity
+    let drafts: [RequestKey: RequestDraft]?
+    let intents: [UUID: Submission]?
+    let intentByRequest: [RequestKey: UUID]?
+}
+
 /// Only unsent/uncertain local requests cross a process restart. No Server
 /// question, terminal, revision, read position or replay cursor is encoded here.
 private struct PersistedPendingActions: Codable {
@@ -4013,16 +4076,17 @@ private struct PersistedPendingActions: Codable {
     init(state: ClientSessionState) {
         version = 1
         profileIdentity = state.profileIdentity
-        let pending = state.intents.filter { _, operation in
+        let pending = state.intents.filter { id, operation in
+            guard state.intentByRequest[operation.requestKey] == id else { return false }
             switch operation.disposition {
-            case .pending, .lost: true
-            default: false
+            case .pending, .lost: return true
+            default: return false
             }
         }
         operations = pending
         activeOperations = state.intentByRequest.filter { pending[$0.value] != nil }
         let keys = Set(pending.values.map(\.requestKey))
-        answerDrafts = state.drafts.filter { keys.contains($0.key) }
+        answerDrafts = state.drafts.filter { $0.value.hasEdits || keys.contains($0.key) }
         messageOpens = state.pendingMessageOpens
         conversations = state.pendingConversations
         readPositions = state.pendingReadPositions

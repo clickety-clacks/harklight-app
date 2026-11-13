@@ -90,7 +90,7 @@ final class ServerCacheReplacementTests: XCTestCase {
         }
     }
 
-    func testOldImmutableStoreFileIsDiscardedWithoutDecodingIt() throws {
+    func testUpgradeMovesOnlyUnsentUserInputOnceAndDiscardsServerState() throws {
         let context = context()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -102,10 +102,56 @@ final class ServerCacheReplacementTests: XCTestCase {
         ]).canonicalJSON
         let hash = SHA256.hash(data: Data(identityBytes.utf8)).map { String(format: "%02x", $0) }.joined()
         let retired = directory.appendingPathComponent("\(hash).plist")
-        try Data("retired server-owned state".utf8).write(to: retired)
+        let source = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"},{"id":"yes","label":"Yes","kind":"value","value":true},{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        let inputs: [[TypedInputRecord]] = [
+            [.compatibilityText(action: ExactText("reply"), text: ExactText("Unsent exact text"))],
+            [.compatibilityValue(action: ExactText("yes"))],
+            [.compatibilityValue(action: ExactText("seen"))],
+            [.compatibilityValue(action: ExactText("yes"))]
+        ]
+        for (index, input) in inputs.enumerated() {
+            let requestKey = key("input-\(index)", context: context)
+            _ = try source.apply(RelayEvent(sequence: UInt64(index + 1),
+                body: .delivery(StoredRequest(key: requestKey, originalPayload: payload), .message)), context: context)
+            let port = AttentionDomainPort(store: source)
+            let selector = try XCTUnwrap(port.inspect(context: port.context, request: requestKey).requests.first?.selector)
+            let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+                intentID: UUID(), inputs: input))
+            if index == inputs.count - 1 {
+                try source.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                    terminalSequence: 5, context: context)
+            }
+        }
+        let snapshot = try source.snapshot(context: context)
+        let expectedPending = snapshot.intents.filter { $0.value.disposition == .pending }
+        let draftKey = key("unfinished", context: context)
+        let unfinished = RequestDraft(inputs: [:], compatibility: CompatibilityDraft(
+            selectedActionID: ExactText("reply"), textByActionID: [ExactText("reply"): ExactText("Still typing")]))
+        let active = Dictionary(uniqueKeysWithValues: snapshot.intents.values.map { ($0.requestKey, $0.intentID) })
+        let old = UpgradeInputFixture(profileIdentity: context.identity, drafts: [draftKey: unfinished],
+            intents: snapshot.intents, intentByRequest: active)
+        let oldBytes = try PropertyListEncoder().encode(old)
+        try oldBytes.write(to: retired)
         let persistence = FilePendingActionPersistence(directoryURL: directory)
         let repository = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertTrue(try repository.snapshot(context: context).requests.isEmpty)
+        let upgraded = try repository.snapshot(context: context)
+        XCTAssertTrue(upgraded.requests.isEmpty)
+        XCTAssertTrue(upgraded.remoteStates.isEmpty)
+        XCTAssertEqual(upgraded.cursor, 0)
+        XCTAssertTrue(upgraded.conversationThreads.isEmpty)
+        XCTAssertEqual(upgraded.drafts[draftKey], unfinished)
+        XCTAssertEqual(upgraded.intents, expectedPending,
+                       "Typed answer, choice and Seen retain their exact operation IDs and bytes.")
+        XCTAssertTrue(upgraded.outbox.isEmpty, "Moved input is not sent before current server validation.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path))
+
+        // A crash after queue commit but before old-file removal cannot reimport it.
+        try repository.discardUnsentOperation(try XCTUnwrap(expectedPending.keys.first), context: context)
+        let remaining = try repository.snapshot(context: context).intents
+        try oldBytes.write(to: retired)
+        let restarted = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try restarted.snapshot(context: context).intents, remaining)
         XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path))
     }
 
@@ -141,13 +187,45 @@ final class ServerCacheReplacementTests: XCTestCase {
         _ = try restarted.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: 2, context: context)
 
         XCTAssertThrowsError(try restarted.queueOriginalOperationForUserTap(receipt.intentID, context: context)) {
-            XCTAssertEqual($0 as? AttentionStoreError, .requestClosed)
+            XCTAssertEqual($0 as? AttentionStoreError, .intentMissing)
         }
+        XCTAssertNil(try restarted.lookupIntent(receipt.intentID, context: context))
         XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
         let currentPort = AttentionDomainPort(store: restarted)
         let shown = try XCTUnwrap(currentPort.inspect(context: currentPort.context, request: key).requests.first)
         XCTAssertEqual(shown.accountAnswerOutcome, .reply(ExactText("Server answer")))
         XCTAssertNil(shown.submittedAnswer, "A queued local answer is not the server's answer.")
+    }
+
+    func testCompleteServerSnapshotDropsMissingAnswerButPartialPageDoesNot() throws {
+        let context = context()
+        let missing = key("missing", context: context)
+        let other = key("other", context: context)
+        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#.utf8))
+        let persistence = MemoryPendingActionPersistence()
+        let first = try ClientRepository(context: context, persistence: persistence)
+        _ = try first.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: missing, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: first)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: missing).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        let restarted = try ClientRepository(context: context, persistence: persistence)
+        _ = try restarted.beginInboxCandidate(startupID: "fresh", since: 0, batches: [], context: context)
+        try restarted.saveInboxInitialPage(snapshotID: "fresh", highWater: 2,
+            items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 2,
+                body: .delivery(StoredRequest(key: other, originalPayload: payload), .message)))],
+            nextCursor: "older", receiptCursor: nil, context: context)
+        _ = try restarted.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try restarted.acceptInboxCheckpoint(snapshotID: "fresh", highWater: 2, context: context)
+        XCTAssertNotNil(try restarted.lookupIntent(receipt.intentID, context: context),
+                        "An unloaded page does not prove the request is gone.")
+        try restarted.saveInboxOlderPage(snapshotID: "fresh", highWater: 2,
+            cursor: "older", items: [], nextCursor: nil, context: context)
+        XCTAssertNil(try restarted.lookupIntent(receipt.intentID, context: context))
+        XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
+        let again = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertNil(try again.lookupIntent(receipt.intentID, context: context))
     }
 
     func testChangedServerInterfaceRebuildsDraftAndAllowsReply() throws {
@@ -258,4 +336,18 @@ final class ServerCacheReplacementTests: XCTestCase {
     private func request(_ key: RequestKey, title: String) -> StoredRequest {
         StoredRequest(key: key, originalPayload: .object([JSONMember("title", .string(ExactText(title)))]))
     }
+}
+
+/// Only the historical user-input field names matter. These deliberately
+/// invalid server fields prove the upgrade never decodes server-owned records.
+private struct UpgradeInputFixture: Encodable {
+    let schemaVersion = 2
+    let profileIdentity: ProfileIdentity
+    let drafts: [RequestKey: RequestDraft]
+    let intents: [UUID: Submission]
+    let intentByRequest: [RequestKey: UUID]
+    let requests = "discarded server cache"
+    let remoteStates = "discarded server status"
+    let conversation = "discarded server conversation"
+    let cursor = 999
 }
