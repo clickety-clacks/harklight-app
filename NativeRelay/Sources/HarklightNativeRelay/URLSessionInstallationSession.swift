@@ -57,6 +57,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
+    private let pingCoordinator: WebSocketPingCoordinator
     private var isClosed = false
     private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
@@ -135,7 +136,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         self.onViewShow = onViewShow
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
+        let pingCoordinator = WebSocketPingCoordinator()
+        self.pingCoordinator = pingCoordinator
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root,
+                                         pingCoordinator: pingCoordinator,
                                          attemptID: attemptID, onProgress: onProgress,
                                          onDiagnostic: onDiagnostic)
         self.delegate = delegate
@@ -295,11 +299,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// Confirms the candidate TLS/WebSocket endpoint without sending an app
     /// frame. Endpoint migration uses this before replacing a working session.
     public func verifyEndpoint() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            task.sendPing { error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume() }
-            }
+        try await pingCoordinator.ping { [task] completion in
+            task.sendPing(pongReceiveHandler: completion)
         }
     }
 
@@ -762,6 +763,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     public func close() {
         guard !isClosed else { return }
         isClosed = true
+        pingCoordinator.closed(connectionFailure ?? CancellationError())
         postCheckpointReader?.cancel()
         postCheckpointReader = nil
         postCheckpointReaderOwnsSocket = false
@@ -1134,6 +1136,7 @@ public enum DeviceCertificateBinding {
 }
 
 private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, URLSessionWebSocketDelegate, @unchecked Sendable {
+    private let pingCoordinator: WebSocketPingCoordinator
     private let host: String
     private let identity: SecIdentity
     private let root: SecCertificate
@@ -1142,10 +1145,12 @@ private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, URLSess
     private let onDiagnostic: NativeClientDiagnosticSink
 
     init(host: String, identity: SecIdentity, root: SecCertificate,
+         pingCoordinator: WebSocketPingCoordinator,
          attemptID: UUID?,
          onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void,
          onDiagnostic: @escaping NativeClientDiagnosticSink) {
         self.host = host
+        self.pingCoordinator = pingCoordinator
         self.identity = identity
         self.root = root
         self.attemptID = attemptID
@@ -1155,7 +1160,19 @@ private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, URLSess
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
                     didOpenWithProtocol protocol: String?) {
+        pingCoordinator.opened()
         onProgress(.webSocketOpened)
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+                    didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        pingCoordinator.closed(URLError(.networkConnectionLost))
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        guard task is URLSessionWebSocketTask else { return }
+        pingCoordinator.closed(error ?? URLError(.networkConnectionLost))
     }
 
     func urlSession(_ session: URLSession,
