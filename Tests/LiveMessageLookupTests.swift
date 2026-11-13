@@ -9,8 +9,8 @@ final class LiveMessageLookupTests: XCTestCase {
             trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("lookup-" + UUID().uuidString),
             deviceID: ExactText("reader")), transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("message"))
         let laterKey = RequestKey(accountScope: context.identity.personID,

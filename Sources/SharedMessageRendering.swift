@@ -313,8 +313,13 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         let markdown = MessageMarkdown.attributed(text)
         let rendered = NSMutableAttributedString(string: "")
         for run in markdown.runs {
-            let piece = NSMutableAttributedString(
-                attributedString: NSAttributedString(AttributedString(markdown[run.range])))
+            let content = AttributedString(markdown[run.range])
+            // Markdown supplies Foundation attributes; UIKit font and color are
+            // applied below. Avoid loading every SDK attribute scope on first open.
+            let attributed = (try? NSAttributedString(
+                content, including: AttributeScopes.FoundationAttributes.self))
+                ?? NSAttributedString(content)
+            let piece = NSMutableAttributedString(attributedString: attributed)
             if piece.length > 0 {
                 let fullRange = NSRange(location: 0, length: piece.length)
                 piece.addAttribute(.font,
