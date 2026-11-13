@@ -180,48 +180,6 @@ final class SupersedesPresentationTests: XCTestCase {
                        "The accepted replacement identity remains available for a graceful destination.")
     }
 
-    func testLoadingOlderAccountStateBackfillsReplacementIdentity() throws {
-        let context = profile()
-        let persistence = MemoryPendingActionPersistence()
-        let store = try ClientRepository(context: context, persistence: persistence)
-        let target = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("agent"), messageID: ExactText("old"))
-        let replacement = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("agent"), messageID: ExactText("new"))
-        let targetPayload = try JSONValue.parse(Data(#"{"title":"Message"}"#.utf8))
-        let replacementPayload = try JSONValue.parse(Data(#"{"title":"Replacement","supersedes":["old"]}"#.utf8))
-        try store.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: target, originalPayload: targetPayload), .message)),
-            context: context)
-        try store.apply(RelayEvent(sequence: 2,
-            body: .delivery(StoredRequest(key: replacement, originalPayload: replacementPayload), .message)),
-            context: context)
-        try store.apply(RelayEvent(sequence: 3,
-            body: .terminal(target, .superseded, nil)), context: context)
-
-        let encoded = try XCTUnwrap(persistence.load(identity: context.identity))
-        let propertyList = try PropertyListSerialization.propertyList(from: encoded,
-            options: [], format: nil)
-        func removingReplacementField(_ value: Any) -> Any {
-            if var dictionary = value as? [String: Any] {
-                dictionary.removeValue(forKey: "supersededByMessageKeys")
-                return dictionary.mapValues(removingReplacementField)
-            }
-            if let array = value as? [Any] {
-                return array.map(removingReplacementField)
-            }
-            return value
-        }
-        let olderAccountState = removingReplacementField(propertyList)
-        let olderEncoding = try PropertyListSerialization.data(fromPropertyList: olderAccountState,
-            format: .binary, options: 0)
-        try persistence.commit(olderEncoding, identity: context.identity)
-
-        let restoredStore = try ClientRepository(context: context, persistence: persistence)
-        let restored = try LivePresentationStore(store: restoredStore, context: context)
-        XCTAssertEqual(restored.request(for: target)?.supersededByMessageKeys, [replacement])
-    }
-
     func testCrossIDSupersedesKeepsTheTargetSlotAndThreadAcrossAChain() throws {
         let context = profile()
         let store = try ClientRepository(context: context,

@@ -1,8 +1,24 @@
 import AttentionDomain
+import HarklightNativeRelay
 import XCTest
 @testable import Harklight
 
 final class ReplyItemAreaTests: XCTestCase {
+    private func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
+                                       persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
+        let cached = try await FileServerStateCache(identity: context.identity, fileURL: url).load()
+        let restored = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty)
+        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                              context: context)
+        return restored
+    }
     private let baselineDate = Date(timeIntervalSince1970: 1_800_000_000)
 
     private func parent(_ id: String, account: String = "account") -> RequestKey {
@@ -325,7 +341,7 @@ final class ReplyItemAreaTests: XCTestCase {
                      "The client waits for existing conversation content instead of fabricating a quote.")
     }
 
-    func testLiveReplyReceiptTimeIsRetainedOnceAndHistoryHasNoTime() throws {
+    func testLiveReplyReceiptTimeIsRetainedOnceAndHistoryHasNoTime() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"),
                                        deviceID: ExactText("device"))
@@ -370,7 +386,7 @@ final class ReplyItemAreaTests: XCTestCase {
         try store.applyConversation(ConversationEvent(sequence: 5, binding: binding,
             fact: .turn(personTurn)), context: context,
             locallyReceivedAtMilliseconds: 1_800_000_789_000)
-        let restored = try ClientRepository(context: context, persistence: persistence)
+        let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
         let snapshot = try restored.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.threads[key]?.facts[liveReply.id]?.localLiveArrivalAtMilliseconds,
                        1_800_000_123_000,
