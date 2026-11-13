@@ -197,6 +197,82 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path))
     }
 
+    func testUpgradeKeepsDiscussionAndRevisionAnswerInputUntilServerThreadReturns() throws {
+        let context = context()
+        let requestKey = key("upgrade-chat", context: context)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let identityBytes = JSONValue.array([
+            .string(context.identity.trustedRelayAuthority), .string(context.identity.personID),
+            .string(context.identity.deviceID)
+        ]).canonicalJSON
+        let hash = SHA256.hash(data: Data(identityBytes.utf8)).map { String(format: "%02x", $0) }.joined()
+        let retired = directory.appendingPathComponent("\(hash).plist")
+        let source = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try source.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: requestKey, revision: 1),
+            fact: .request(sessionHandle: ExactText("retired-session"),
+                payload: request(requestKey, title: "Retired question").originalPayload)), context: context)
+        var oldThread = try XCTUnwrap(source.conversationSnapshot(context: context).threads[requestKey])
+        let submittingID = UUID()
+        let unknownID = UUID()
+        let inputs: [UInt64: ConversationDraft] = [
+            1: ConversationDraft(binding: ConversationBinding(request: requestKey, revision: 1),
+                text: ExactText("Submitted but not confirmed"), disposition: .submitting(submittingID)),
+            2: ConversationDraft(binding: ConversationBinding(request: requestKey, revision: 2),
+                text: ExactText("Still editing")),
+            3: ConversationDraft(binding: ConversationBinding(request: requestKey, revision: 3),
+                text: ExactText("Unknown result"), disposition: .outcomeUnknown(unknownID))
+        ]
+        let answer = RequestDraft(inputs: [:], compatibility: CompatibilityDraft(
+            selectedActionID: ExactText("reply"), textByActionID: [ExactText("reply"): ExactText("Unsent archived answer")]))
+        oldThread.drafts = inputs
+        oldThread.answerDrafts = [1: answer, 2: answer]
+        oldThread.terminal = .answered
+        oldThread.accountReadThroughConversationSequence = 99
+        let old = UpgradeInputFixture(profileIdentity: context.identity, drafts: [:], intents: [:],
+            intentByRequest: [:], conversation: UpgradeConversationFixture(threads: [requestKey: oldThread]))
+        let bytes = try PropertyListEncoder().encode(old)
+        try bytes.write(to: retired)
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        let upgraded = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try upgraded.snapshot(context: context).requests.isEmpty)
+        XCTAssertTrue(try upgraded.conversationSnapshot(context: context).threads.isEmpty,
+                      "User input cannot manufacture server request state during upgrade.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path))
+
+        // Restart before any server response: the one-time transfer must already
+        // have committed the discussion queue to its own file.
+        let restarted = try ClientRepository(context: context, persistence: persistence)
+        _ = try restarted.apply(RelayEvent(sequence: 1,
+            body: .delivery(request(requestKey, title: "Current server question"), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("current-session"))),
+            context: context)
+        var thread = try XCTUnwrap(restarted.conversationSnapshot(context: context).threads[requestKey])
+        XCTAssertEqual(thread.drafts, inputs)
+        XCTAssertEqual(thread.answerDrafts, oldThread.answerDrafts)
+        XCTAssertEqual(thread.sessionHandle, ExactText("current-session"))
+        XCTAssertNil(thread.terminal)
+        XCTAssertNil(thread.accountReadThroughConversationSequence)
+        XCTAssertEqual(try restarted.snapshot(context: context).requests[requestKey]?.originalPayload,
+                       request(requestKey, title: "Current server question").originalPayload)
+        XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
+
+        // The server's exact accepted operation settles only that discussion.
+        let turn = ConversationTurn(id: ExactText("accepted-discussion"),
+            binding: ConversationBinding(request: requestKey, revision: 1), author: .person,
+            sessionHandle: ExactText("current-session"), text: inputs[1]!.text,
+            operationID: submittingID, kind: .discussion)
+        try restarted.applyConversation(ConversationEvent(sequence: 1, binding: turn.binding,
+            fact: .turn(turn)), context: context)
+        thread = try XCTUnwrap(restarted.conversationSnapshot(context: context).threads[requestKey])
+        XCTAssertNil(thread.drafts[1])
+        XCTAssertEqual(thread.drafts[2], inputs[2])
+        XCTAssertEqual(thread.drafts[3], inputs[3])
+        XCTAssertEqual(thread.answerDrafts, oldThread.answerDrafts)
+    }
+
     func testQueuedAnswerSurvivesRestartButCannotOverrideServerAnswer() throws {
         let context = context()
         let key = key("answer", context: context)
@@ -390,6 +466,13 @@ private struct UpgradeInputFixture: Encodable {
     let intentByRequest: [RequestKey: UUID]
     let requests = "discarded server cache"
     let remoteStates = "discarded server status"
-    let conversation = "discarded server conversation"
+    var conversation: UpgradeConversationFixture? = nil
     let cursor = 999
+}
+
+private struct UpgradeConversationFixture: Encodable {
+    let threads: [RequestKey: ConversationThread]
+    let cursor = "discarded server cursor"
+    let events = "discarded server events"
+    let chatReadPositions = "discarded server read positions"
 }

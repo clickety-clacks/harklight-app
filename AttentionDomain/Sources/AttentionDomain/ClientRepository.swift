@@ -71,6 +71,7 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
                     pending.intents = input.intents ?? [:]
                     pending.intentByRequest = input.intentByRequest ?? [:]
                     pending.drafts = input.drafts ?? [:]
+                    pending.pendingConversations = input.conversation?.threads ?? [:]
                     let encoder = PropertyListEncoder()
                     encoder.outputFormat = .binary
                     try commit(encoder.encode(PersistedPendingActions(state: pending)), identity: identity)
@@ -4040,6 +4041,28 @@ private struct ClientSessionState {
             value.pendingChatReadPositions = nil
             for key in Array(value.threads.keys) {
                 guard var thread = value.threads[key] else { continue }
+                if server.conversation?.threads[key] == nil,
+                   let queued = pendingConversations[key] {
+                    // Input can precede the first server thread after upgrade
+                    // or restart. Hydrating that thread must not empty its queue.
+                    thread.drafts = queued.drafts
+                    thread.answerDrafts = queued.answerDrafts
+                    thread.uploadGroups = queued.uploadGroups
+                    thread.uploadCleanups = queued.uploadCleanups
+                    // Held server history may already prove an exact operation
+                    // accepted before the thread's original delivery arrives.
+                    for turn in thread.turns where turn.kind != .result {
+                        guard let operation = turn.operationID,
+                              let draft = thread.drafts[turn.binding.revision] else { continue }
+                        switch draft.disposition {
+                        case let .submitting(id) where id == operation,
+                             let .outcomeUnknown(id) where id == operation,
+                             let .acceptedPendingReplay(id, _) where id == operation:
+                            thread.drafts.removeValue(forKey: turn.binding.revision)
+                        default: break
+                        }
+                    }
+                }
                 pendingConversations[key] = PendingConversationActions(thread: thread)
                 thread.drafts = [:]
                 thread.answerDrafts = nil
@@ -4060,6 +4083,13 @@ private struct RetiredUnsentInput: Decodable {
     let drafts: [RequestKey: RequestDraft]?
     let intents: [UUID: Submission]?
     let intentByRequest: [RequestKey: UUID]?
+    let conversation: ConversationInput?
+
+    struct ConversationInput: Decodable {
+        // Decode only user input from each historical thread. Request content,
+        // accepted turns, read positions and the conversation cursor are ignored.
+        let threads: [RequestKey: PendingConversationActions]
+    }
 }
 
 /// Only unsent/uncertain local requests cross a process restart. No Server
