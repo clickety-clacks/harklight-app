@@ -1286,7 +1286,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         let requestValues = try session.requests.map(JSONValue.parse)
         XCTAssertEqual(requestValues.compactMap { $0.uniqueValue(named: "type")?.stringValue?.rawValue }, [
-            "inbox_start", "inbox_attach"
+            "inbox_start", "inbox_checkpoint_ack", "inbox_attach"
         ])
         XCTAssertEqual(requestValues.dropFirst().compactMap {
             $0.uniqueValue(named: "since")?.integerValue
@@ -1543,7 +1543,20 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(reconciledOriginal.uniqueValue(named: "op_id")?.stringValue?.rawValue,
                        receipt.opID.uuidString.lowercased())
         XCTAssertEqual(try XCTUnwrap(reconciledOriginal.uniqueValue(named: "type")?.stringValue?.rawValue), "answer")
-        XCTAssertEqual(reconciledOriginal, exactOriginal.operation)
+        func canonicalized(_ value: JSONValue) -> JSONValue {
+            switch value {
+            case .object(let members):
+                return .object(members
+                    .map { JSONMember(key: $0.key, value: canonicalized($0.value)) }
+                    .sorted { $0.key.rawValue < $1.key.rawValue })
+            case .array(let values):
+                return .array(values.map(canonicalized))
+            default:
+                return value
+            }
+        }
+        XCTAssertEqual(canonicalized(reconciledOriginal), canonicalized(exactOriginal.operation),
+                       "JSON object member order does not change the operation payload.")
         XCTAssertEqual(try XCTUnwrap(settled.inboxCheckpoint?.batches.first?.results?.first?.terminal?.sequence), 2)
 
         let recoveredContext = ProfileContext(identity: identity, transportMode: .relay)
