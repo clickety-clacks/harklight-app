@@ -1425,7 +1425,7 @@ final class HarklightTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-a"))
-        let firstContext = ProfileContext(identity: identity, transportMode: .fixture)
+        let firstContext = ProfileContext(identity: identity, transportMode: .relay)
         let firstStore = try makeStore(fixtures: fixtures, context: firstContext, persistence: persistence)
         let firstPort = AttentionDomainPort(store: firstStore)
         let firstView = try firstPort.inspect(context: firstPort.context, request: fixture.key)
@@ -1439,8 +1439,8 @@ final class HarklightTests: XCTestCase {
         draft.inputs[noteInput.id]?.text = ExactText("  Near the door\n  ")
         try firstPort.saveDraft(context: firstPort.context, selector: firstSelector, completeDraft: draft)
 
-        // Reopening a process uses a fresh generation and the same protected profile file.
-        let restartedContext = ProfileContext(identity: identity, transportMode: .fixture)
+        // Reopening restores user input from the same pending-action file; relay events rebuild the question.
+        let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
         let restartedStore = try makeStore(fixtures: fixtures, context: restartedContext, persistence: persistence)
         let restartedPort = AttentionDomainPort(store: restartedStore)
         let restartedSnapshot = try restartedPort.observe(context: restartedPort.context)
@@ -1477,7 +1477,7 @@ final class HarklightTests: XCTestCase {
             context: restartedPort.context, requestKey: fixture.key, intentID: intentID))
         XCTAssertEqual(submitWonFence.opID, receipt.opID)
 
-        let postCommitContext = ProfileContext(identity: identity, transportMode: .fixture)
+        let postCommitContext = ProfileContext(identity: identity, transportMode: .relay)
         let postCommitStore = try makeStore(fixtures: fixtures, context: postCommitContext, persistence: persistence)
         let postCommitPort = AttentionDomainPort(store: postCommitStore)
         let recoveredRequest = try XCTUnwrap(postCommitPort.inspect(context: postCommitPort.context,
@@ -1493,7 +1493,9 @@ final class HarklightTests: XCTestCase {
                                                             intentID: intentID,
                                                             inputs: records))
         XCTAssertEqual(retried.opID, receipt.opID)
-        XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).outbox.count, 1)
+        XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).intents.count, 1)
+        XCTAssertTrue(try postCommitStore.snapshot(context: postCommitContext).outbox.isEmpty,
+                      "Restoring or looking up a pending intent never authorizes an automatic send.")
 
         let changed: [TypedInputRecord] = [
             .point(input: pointInput.id, point: PointValue(x: 240, y: 610)),
@@ -1505,7 +1507,9 @@ final class HarklightTests: XCTestCase {
                                                                    inputs: changed))) { error in
             XCTAssertEqual(error as? AttentionStoreError, .intentConflict)
         }
-        XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).outbox.count, 1)
+        XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).intents.count, 1)
+        XCTAssertTrue(try postCommitStore.snapshot(context: postCommitContext).outbox.isEmpty,
+                      "Restoring or looking up a pending intent never authorizes an automatic send.")
     }
 
     func testDurableFenceRejectsLateOriginalSubmitAfterRestartAndChangedDraft() throws {
@@ -1566,7 +1570,7 @@ final class HarklightTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-precommit"))
-        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        let context = ProfileContext(identity: identity, transportMode: .relay)
         let store = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: fixture.key).requests.first?.selector)
@@ -1592,7 +1596,7 @@ final class HarklightTests: XCTestCase {
             }
         }
 
-        let restartedContext = ProfileContext(identity: identity, transportMode: .fixture)
+        let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
         let restartedStore = try makeStore(fixtures: fixtures, context: restartedContext, persistence: persistence)
         let restartedPort = AttentionDomainPort(store: restartedStore)
         let inspected = try XCTUnwrap(restartedPort.inspect(context: restartedPort.context,
@@ -1605,7 +1609,9 @@ final class HarklightTests: XCTestCase {
                                                             intentID: UUID(),
                                                             inputs: records))
         XCTAssertEqual(retried.inputs, records)
-        XCTAssertEqual(try restartedStore.snapshot(context: restartedContext).outbox.count, 1)
+        XCTAssertEqual(try restartedStore.snapshot(context: restartedContext).intents.count, 1)
+        XCTAssertTrue(try restartedStore.snapshot(context: restartedContext).outbox.isEmpty,
+                      "Retrying a queue commit still requires the separate currentness-checked send.")
     }
 
     func testAccountAndGenerationBindingHideCollidingRequests() throws {
@@ -1839,7 +1845,14 @@ final class HarklightTests: XCTestCase {
                                                                       messageID: request.key.messageID),
                           originalPayload: request.originalPayload)
         }
-        try store.registerFixtureRequests(requests, context: context)
+        if context.transportMode == .relay {
+            for (index, request) in requests.enumerated() {
+                _ = try store.apply(RelayEvent(sequence: UInt64(index + 1),
+                    body: .delivery(request, .message)), context: context)
+            }
+        } else {
+            try store.registerFixtureRequests(requests, context: context)
+        }
         return store
     }
 
