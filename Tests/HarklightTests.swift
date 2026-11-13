@@ -1465,7 +1465,9 @@ final class HarklightTests: XCTestCase {
         })?.uniqueValue(named: "answer"))
         XCTAssertEqual(receipt.exactAnswer, expected)
         XCTAssertEqual(receipt.inputs, records)
-        XCTAssertEqual(receipt.localState, .durable)
+        XCTAssertEqual(receipt.localState, .queuedForRelay)
+        XCTAssertTrue(try restartedStore.snapshot(context: restartedContext).outbox.isEmpty,
+                      "Recoverable local input does not authorize sending without a current server projection.")
 
         // No caller-visible response was delivered. A second host resumes by intent ID and
         // obtains the original operation UUID and exact answer without creating another row.
