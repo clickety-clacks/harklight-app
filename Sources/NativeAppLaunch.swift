@@ -2890,7 +2890,7 @@ final class LivePresentationStore {
                 current = nil
             }
             if let current, current.intentReceipt != nil ||
-                (current.lifecycleStatus == .answered && current.submittedAnswer != nil) {
+                current.lifecycleStatus == .answered || current.lifecycleStatus == .noComment {
                 clearActionError()
                 return true
             } else {

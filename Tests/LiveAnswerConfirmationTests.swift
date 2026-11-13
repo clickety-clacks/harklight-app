@@ -123,7 +123,9 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(live.actionError)
         XCTAssertEqual(live.request(for: key)?.intentReceipt?.opID, receipt.opID)
         XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID])
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "A duplicate local callback does not authorize an automatic send.")
 
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                           terminalSequence: 2, context: context)
@@ -208,7 +210,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         live.submitFromUser(key)
 
         XCTAssertNil(live.actionError)
-        let sent = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let queuedID = try XCTUnwrap(live.request(for: key)?.intentReceipt?.intentID)
+        let sent = try XCTUnwrap(store.snapshot(context: context).intents[queuedID])
         XCTAssertEqual(sent.typedInputs,
                        [.compatibilityText(action: ExactText("reply"), text: ExactText(typed))],
                        "Ordinary surrounding whitespace goes out exactly as typed.")
@@ -225,7 +228,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(receipt.inputs, [])
         XCTAssertEqual(receipt.exactAnswer, .null,
                        "The local null placeholder is distinguished by answerKind and is never the wire frame.")
-        let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let submitted = try XCTUnwrap(store.snapshot(context: context).intents[receipt.intentID])
         XCTAssertEqual(submitted.requestRevision, 1,
                        "An ordinary request is the first revision even without conversation history.")
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
@@ -328,8 +331,12 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         live.updateCompatibilityText("Try again", action: ExactText("reply"), for: key)
         let retry = try live.submit(key)
         XCTAssertNotEqual(retry.opID, failed.opID)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [retry.opID],
-                       "Only the new answer is retryable after the relay explicitly rejected the old one.")
+        XCTAssertEqual(try store.snapshot(context: context).intents.values.filter {
+            $0.disposition == .pending
+        }.map(\.operationID), [retry.opID],
+                       "Only the new answer remains pending after the relay explicitly rejected the old one.")
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "The newly committed response still needs an explicit send.")
         XCTAssertFalse(try XCTUnwrap(live.request(for: key)).answerNotDelivered,
                        "A new pending attempt replaces the previous failure treatment.")
     }
@@ -425,13 +432,17 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                       "The pending response stays in Replied while its outcome is unknown.")
         XCTAssertFalse(row.hasFailedResponse)
         XCTAssertNil(row.localStatus)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID])
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "An unresolved send retains the same intent without scheduling automatic retransmission.")
 
         try await core.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID, receipt.opID],
                        "Retry sends the same durable operation rather than creating a duplicate answer.")
         XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID])
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "An unresolved send retains the same intent without scheduling automatic retransmission.")
     }
 
     func testSwipeNoCommentAcceptanceIsFinalAndCannotBeResubmitted() async throws {
@@ -683,11 +694,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                                                    requestRevision: request.requestRevision,
                                                    selectionIsLocal: true))
 
-        let submitted = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let queuedID = try XCTUnwrap(live.request(for: key)?.intentReceipt?.intentID)
+        let submitted = try XCTUnwrap(store.snapshot(context: context).intents[queuedID])
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"reply-only","request_revision":1}"# + "\n")
         XCTAssertNil(try store.snapshot(context: context).drafts[key])
-        XCTAssertTrue(try XCTUnwrap(live.request(for: key)).submittedAnswer?.noCommentSelected == true)
+        XCTAssertNil(try XCTUnwrap(live.request(for: key)).submittedAnswer,
+                     "The queued No comment operation does not create a server answer.")
         XCTAssertEqual(submitted.answerKind, .noComment)
     }
 
@@ -722,7 +735,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
-        let staleSubmission = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let staleSubmission = try XCTUnwrap(store.snapshot(context: context).intents[receipt.intentID])
         XCTAssertEqual(staleSubmission.requestRevision, 2)
         XCTAssertEqual(String(decoding: staleSubmission.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"conversation","request_revision":2}"# + "\n")
@@ -824,8 +837,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(high, 2)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
-        XCTAssertEqual(session.acknowledgedCursors, [1, 2],
-                       "The checkpoint ACK is distinct; ordinary ACKs cover only post-H events.")
+        XCTAssertEqual(session.acknowledgedCursors, [2],
+                       "The checkpoint ACK covers initial H=1; ordinary ACK covers only the later terminal event.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
         XCTAssertNil(live.request(for: key)?.receiptFacts,
