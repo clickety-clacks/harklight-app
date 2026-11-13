@@ -52,7 +52,7 @@ final class RetractionPresentationTests: XCTestCase {
                 try domain.apply(lifecycle, context: context)
                 XCTAssertEqual(try domain.conversationSnapshot(context: context).cursor, 0)
             }
-            let midway = try ClientRepository(context: context, persistence: persistence)
+            let midway = try await reopenWithServerCache(domain, context: context, persistence: persistence)
             XCTAssertTrue(try midway.conversationSnapshot(context: context).threads[key]?.isRetracted == true)
             XCTAssertEqual(try midway.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
                            Self.retractedAt, "Either durable copy alone carries the retraction time")
@@ -107,7 +107,7 @@ final class RetractionPresentationTests: XCTestCase {
                 .draft.compatibility.selectedActionID, ExactText("keep"))
             XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context), retained)
 
-            let relaunchedDomain = try ClientRepository(context: context, persistence: persistence)
+            let relaunchedDomain = try await reopenWithServerCache(domain, context: context, persistence: persistence)
             let relaunched = try LivePresentationStore(store: relaunchedDomain, context: context)
             XCTAssertFalse(relaunched.inboxRows.contains { $0.key == key }, "An expired timestamp stays hidden after relaunch")
             XCTAssertEqual(relaunched.expiredRetractionSearchRows.map(\.key), [key],
@@ -148,17 +148,17 @@ final class RetractionPresentationTests: XCTestCase {
                      "A plain legacy terminal still carries no conversation meaning")
     }
 
-    func testFreshInboxPageKeepsTheRetractionTimeOfItsTerminal() throws {
-        try checkFreshInboxRetraction(terminal: snapshotTerminal, enriched: false)
+    func testFreshInboxPageKeepsTheRetractionTimeOfItsTerminal() async throws {
+        try await checkFreshInboxRetraction(terminal: snapshotTerminal, enriched: false)
     }
 
-    func testFreshInboxPageWithAuthoritativeRetractionIdentityJoinsConversationReplay() throws {
+    func testFreshInboxPageWithAuthoritativeRetractionIdentityJoinsConversationReplay() async throws {
         // Paging enrichment copies these existing lifecycle identity fields;
         // it does not add a session handle or a new retraction event.
-        try checkFreshInboxRetraction(terminal: ordinary, enriched: true)
+        try await checkFreshInboxRetraction(terminal: ordinary, enriched: true)
     }
 
-    private func checkFreshInboxRetraction(terminal: Data, enriched: Bool) throws {
+    private func checkFreshInboxRetraction(terminal: Data, enriched: Bool) async throws {
         let context = profile()
         let persistence = MemoryPendingActionPersistence()
         let domain = try ClientRepository(context: context, persistence: persistence)
@@ -172,7 +172,7 @@ final class RetractionPresentationTests: XCTestCase {
         _ = try domain.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
         try domain.saveInboxInitialPage(snapshotID: page.snapshotID, highWater: page.highWater, items: page.items,
                                         nextCursor: page.nextCursor, receiptCursor: page.receiptCursor, context: context)
-        let restored = try ClientRepository(context: context, persistence: persistence)
+        let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
         XCTAssertTrue(thread.isRetracted)
         XCTAssertEqual(thread.terminal, .cleared)
@@ -344,7 +344,9 @@ final class RetractionPresentationTests: XCTestCase {
                 XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
                                Self.retractedAt)
             } else {
-                XCTAssertThrowsError(try domain.apply(lifecycle, context: context), "One retraction has one time")
+                try domain.apply(lifecycle, context: context)
+                XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
+                               Self.retractedAt + 1, "The new server projection replaces a cached retraction time.")
             }
         }
     }
@@ -420,6 +422,21 @@ final class RetractionPresentationTests: XCTestCase {
         }
     }
 
+    private func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
+                                       persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
+        let cached = try await FileServerStateCache(identity: context.identity, fileURL: url).load()
+        let restored = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty)
+        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                              context: context)
+        return restored
+    }
     private func edited(_ frame: Data, _ target: String, _ replacement: String) -> Data {
         let text = String(decoding: frame, as: UTF8.self)
         precondition(text.contains(target))
