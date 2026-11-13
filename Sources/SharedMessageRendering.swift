@@ -527,6 +527,8 @@ struct SenderIllustrationCanvas: View {
     let pictureLoader: SenderPictureLoader?
 
     @State private var pictureStates: [ExactText: PictureState] = [:]
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
 
     private enum PictureState {
         case loading
@@ -549,6 +551,7 @@ struct SenderIllustrationCanvas: View {
             let rect = Self.fittedRect(size: geometry.size,
                                        sourceWidth: illustration.width,
                                        sourceHeight: illustration.height)
+            let markerColor = HarklightDesignSystem.palette(for: colorScheme).typeColor(messageType)
             Canvas { context, _ in
                 context.clip(to: Path(rect))
                 for primitive in illustration.primitives {
@@ -557,7 +560,7 @@ struct SenderIllustrationCanvas: View {
                               pictureStates: pictureStates)
                 }
                 if let point {
-                    Self.draw(point, context: &context, rect: rect)
+                    Self.draw(point, color: markerColor, context: &context, rect: rect)
                 }
             }
         }
@@ -703,19 +706,20 @@ struct SenderIllustrationCanvas: View {
         fallbackContext.draw(label, at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
     }
 
-    private static func draw(_ point: PointValue, context: inout GraphicsContext, rect: CGRect) {
+    /// The app's marker for a chosen point, in the message's type color.
+    private static func draw(_ point: PointValue, color: Color, context: inout GraphicsContext, rect: CGRect) {
         let center = CGPoint(x: rect.minX + rect.width * CGFloat(point.x) / 1000,
                              y: rect.minY + rect.height * CGFloat(point.y) / 1000)
         let radius: CGFloat = 8
         let circle = Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
         context.fill(circle, with: .color(.white))
-        context.stroke(circle, with: .color(.blue), lineWidth: 2)
+        context.stroke(circle, with: .color(color), lineWidth: 2)
         var cross = Path()
         cross.move(to: CGPoint(x: center.x - 13, y: center.y))
         cross.addLine(to: CGPoint(x: center.x + 13, y: center.y))
         cross.move(to: CGPoint(x: center.x, y: center.y - 13))
         cross.addLine(to: CGPoint(x: center.x, y: center.y + 13))
-        context.stroke(cross, with: .color(.blue), lineWidth: 2)
+        context.stroke(cross, with: .color(color), lineWidth: 2)
     }
 
     private static func color(_ value: ExactText) -> Color {
