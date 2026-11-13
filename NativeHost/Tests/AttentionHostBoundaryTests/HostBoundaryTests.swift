@@ -131,4 +131,16 @@ final class HostBoundaryTests: XCTestCase {
         XCTAssertThrowsError(try HostHTTPBoundary(port: 43123).validateAPI(
             HTTPRequestParser.parse(Data(doubleOrigin.utf8)).head))
     }
+
+    func testHTTPParserAcceptsHeadersAndBodiesBeyondFormerSizeCaps() throws {
+        let origin = "http://127.0.0.1:43123"
+        let largeHeader = String(repeating: "h", count: 16_385)
+        let body = Data(repeating: 120, count: 1_048_577)
+        let head = "POST /api/inspect HTTP/1.1\r\nHost: 127.0.0.1:43123\r\n" +
+            "Origin: \(origin)\r\nContent-Type: application/json\r\n" +
+            "X-Long: \(largeHeader)\r\nContent-Length: \(body.count)\r\n\r\n"
+        let parsed = try HTTPRequestParser.parse(Data(head.utf8) + body)
+        XCTAssertEqual(parsed.head.soleHeader("X-Long"), largeHeader)
+        XCTAssertEqual(parsed.body, body)
+    }
 }
