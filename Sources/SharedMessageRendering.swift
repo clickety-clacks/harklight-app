@@ -325,10 +325,23 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
                 piece.addAttribute(.foregroundColor,
                                    value: foregroundColor,
                                    range: fullRange)
+                piece.addAttribute(.paragraphStyle,
+                                   value: Self.bodyParagraphStyle(for: bodyFont),
+                                   range: fullRange)
             }
             rendered.append(piece)
         }
         return rendered
+    }
+
+    /// The design's message body line height, 1.5 times the size.
+    private static func bodyParagraphStyle(for bodyFont: UIFont) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        let lineHeight = bodyFont.pointSize * 1.5
+        style.minimumLineHeight = lineHeight
+        style.maximumLineHeight = lineHeight
+        style.paragraphSpacing = bodyFont.pointSize * 0.5
+        return style
     }
 
     private static func bodyFont(matching intent: InlinePresentationIntent?,
@@ -360,24 +373,7 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     }
 
     private func preferredBodyFont(for textView: UITextView) -> UIFont {
-        let category: UIContentSizeCategory
-        switch dynamicTypeSize {
-        case .xSmall: category = .extraSmall
-        case .small: category = .small
-        case .medium: category = .medium
-        case .large: category = .large
-        case .xLarge: category = .extraLarge
-        case .xxLarge: category = .extraExtraLarge
-        case .xxxLarge: category = .extraExtraExtraLarge
-        case .accessibility1: category = .accessibilityMedium
-        case .accessibility2: category = .accessibilityLarge
-        case .accessibility3: category = .accessibilityExtraLarge
-        case .accessibility4: category = .accessibilityExtraExtraLarge
-        case .accessibility5: category = .accessibilityExtraExtraExtraLarge
-        @unknown default: category = textView.traitCollection.preferredContentSizeCategory
-        }
-        let traits = UITraitCollection(preferredContentSizeCategory: category)
-        return UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)
+        HarklightTypography.resolve(.messageBody, dynamicTypeSize: dynamicTypeSize).font
     }
 
     func makeUIView(context: Context) -> UITextView {

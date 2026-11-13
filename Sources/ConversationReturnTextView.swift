@@ -22,7 +22,10 @@ struct ConversationReturnTextView: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 0
         view.font = .preferredFont(forTextStyle: .body)
         view.adjustsFontForContentSizeCategory = true
-        view.textColor = .label
+        view.textColor = UIColor { traits in
+            UIColor(HarklightDesignSystem.palette(
+                for: traits.userInterfaceStyle == .dark ? .dark : .light).text)
+        }
         view.returnKeyType = .send
         view.isScrollEnabled = true
         view.accessibilityIdentifier = "sample-chat-composer"

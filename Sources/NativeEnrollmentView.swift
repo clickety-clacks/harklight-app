@@ -5,6 +5,7 @@ struct NativeEnrollmentView: View {
     let launch: NativeAppLaunch
     var pending: NativeEnrollmentRecord? = nil
     @State private var pastedInvitation = ""
+    @Environment(\.colorScheme) private var colorScheme
     private var flow: NativeGuidedJoinCoordinator { launch.guidedJoin }
 
     var body: some View {
@@ -17,14 +18,14 @@ struct NativeEnrollmentView: View {
                                 Label(warning, systemImage: "exclamationmark.triangle")
                                     .font(.caption).padding(12)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                                    .background(.hkRaised, in: RoundedRectangle(cornerRadius: 12))
                             }
                         } else {
                             ForEach(launch.unconfirmedAccountDepartures, id: \.archiveID) { departure in
                                 UnconfirmedAccountRemovalNotice(launch: launch, departure: departure)
                                     .font(.caption).padding(12)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                                    .background(.hkRaised, in: RoundedRectangle(cornerRadius: 12))
                             }
                         }
                     }
@@ -32,7 +33,7 @@ struct NativeEnrollmentView: View {
                         Label(message, systemImage: "info.circle")
                             .font(.caption).padding(12)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                            .background(.hkRaised, in: RoundedRectangle(cornerRadius: 12))
                     }
                     if launch.diagnostics.hasEvents {
                         ShareLink(item: launch.diagnostics.shareText) {
@@ -52,7 +53,9 @@ struct NativeEnrollmentView: View {
                 }
                 .padding(20).frame(maxWidth: 620, alignment: .leading)
                 .frame(maxWidth: .infinity)
+                .foregroundStyle(.hkText)
             }
+            .background { Rectangle().fill(.hkBackground).ignoresSafeArea() }
             .navigationTitle(title)
             .toolbar {
                 if flow.screen == .confirmation || flow.currentAccount?.isApproved == true {
@@ -62,6 +65,7 @@ struct NativeEnrollmentView: View {
                 }
             }
         }
+        .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
     }
 
     @ViewBuilder private var content: some View {
@@ -71,7 +75,7 @@ struct NativeEnrollmentView: View {
             Text("To join a server, open the invitation link its owner sent you on this device.")
             card {
                 Text("I got a link").font(.headline)
-                Text("Tap the link in the message. It opens here on its own.").foregroundStyle(.secondary)
+                Text("Tap the link in the message. It opens here on its own.").foregroundStyle(.hkSecondary)
             }
             card {
                 Text("Link won't open?").font(.headline)
@@ -86,7 +90,7 @@ struct NativeEnrollmentView: View {
                 }
             }
             Text("Don't have an invitation? Ask the person who runs the server. There is nothing to assemble here first.")
-                .font(.footnote).foregroundStyle(.secondary)
+                .font(.footnote).foregroundStyle(.hkSecondary)
         case .verifying:
             heading("Checking the invitation", symbol: "shield")
             Text("Confirming that the invited server is the one this link expects.")
@@ -97,20 +101,20 @@ struct NativeEnrollmentView: View {
             card {
                 labeled("You join as", flow.invitation?.claimedAccountLabel ?? "The invited account")
                 Text("This is what the invitation says. The server confirms the account when you join.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(.hkSecondary)
             }
             card {
-                Text("This device").font(.caption).foregroundStyle(.secondary)
+                Text("This device").font(.caption).foregroundStyle(.hkSecondary)
                 TextField("Device name", text: Binding(get: { flow.deviceName }, set: { flow.deviceName = $0 }))
                     .accessibilityLabel("This device's name")
             }
             primary("Join") { Task { await flow.join() } }
             Text("The owner still has to approve this device. Joining lets it receive requests; it gets no owner or sender rights.")
-                .font(.footnote).foregroundStyle(.secondary)
+                .font(.footnote).foregroundStyle(.hkSecondary)
         case .joining:
             heading("Joining…", symbol: "person.badge.plus")
             Text("This device creates and keeps its own identity, then sends one join request.")
-            Text("Nothing private needs to be shared or typed.").foregroundStyle(.secondary)
+            Text("Nothing private needs to be shared or typed.").foregroundStyle(.hkSecondary)
         case .pending:
             heading(flow.attempt?.cancellationRequested == true ? "Confirming cancellation" : "Waiting for approval", symbol: "clock")
             if flow.attempt?.cancellationRequested == true {
@@ -121,15 +125,15 @@ struct NativeEnrollmentView: View {
             requestDetails
             if let code = flow.currentApprovalCode, let deadline = flow.attempt?.approvalExpiresAt {
                 card {
-                    Text("Last confirmed approval code").font(.caption).foregroundStyle(.secondary)
+                    Text("Last confirmed approval code").font(.caption).foregroundStyle(.hkSecondary)
                     Text(code).font(.title.monospaced().weight(.bold)).textSelection(.enabled)
                         .accessibilityLabel("Approval code \(code)")
                     Text("Approval window closes \(Date(timeIntervalSince1970: Double(deadline) / 1000), format: .dateTime.month().day().hour().minute()).")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.hkSecondary)
                 }
             } else if flow.attempt?.cancellationRequested != true, flow.attempt?.approvalCode != nil {
                 Text("The saved approval details have not been confirmed as current. Harklight will refresh this request when it reaches the server.")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.hkSecondary)
             }
             primary("Check again") { Task { await flow.retry() } }
             if flow.attempt?.cancellationRequested != true {
@@ -137,7 +141,7 @@ struct NativeEnrollmentView: View {
                     .buttonStyle(.bordered).disabled(flow.busy)
             }
             Text("You can leave Harklight. It remembers this request and picks up where you left off.")
-                .font(.footnote).foregroundStyle(.secondary)
+                .font(.footnote).foregroundStyle(.hkSecondary)
         case .unreachable:
             heading("Can't reach the server", symbol: "wifi.slash")
             requestDetails
@@ -150,12 +154,12 @@ struct NativeEnrollmentView: View {
             }
             Text(flow.attempt == nil ? "Trying again checks the invited server before you join." :
                  "Trying again continues the same saved request. It will not ask the owner twice.")
-                .font(.footnote).foregroundStyle(.secondary)
+                .font(.footnote).foregroundStyle(.hkSecondary)
         case .approvedFinishing:
             heading("Approved, finishing up", symbol: "checkmark.shield")
             Text("The owner approved this device. Harklight is confirming its connection to the server.")
             Text(launch.foregroundConnectProgress?.userFacingMessage ?? "Connecting to the server…")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.hkSecondary)
             if let progress = launch.foregroundConnectProgress {
                 VStack(alignment: .leading, spacing: 8) {
                     if progress.outcome == .connecting { ProgressView() }
@@ -165,12 +169,12 @@ struct NativeEnrollmentView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
-                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                .background(.hkRaised, in: RoundedRectangle(cornerRadius: 12))
             }
             if let diagnostic = launch.foregroundConnectDiagnostic {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Connection details include the app build, observed phase and queued-operation receipt state. Answers and credentials are excluded.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                        .font(.footnote).foregroundStyle(.hkSecondary)
                     ShareLink(item: diagnostic.shareText) {
                         Label("Share connection details", systemImage: "square.and.arrow.up")
                     }
@@ -187,7 +191,7 @@ struct NativeEnrollmentView: View {
         case .notifications:
             heading("Hear about requests when Harklight is closed", symbol: "bell")
             Text("Requests can wait on someone's answer. With notifications on, this device can tell you when one arrives.")
-            Text("Without them, you will still see requests when you open Harklight.").foregroundStyle(.secondary)
+            Text("Without them, you will still see requests when you open Harklight.").foregroundStyle(.hkSecondary)
             primary("Turn on notifications") { Task { await flow.chooseNotifications(true) } }
             Button("Not now") { Task { await flow.chooseNotifications(false) } }.buttonStyle(.bordered)
         case .invitationExpired:
@@ -256,7 +260,7 @@ struct NativeEnrollmentView: View {
             labeled("Server", flow.invitation?.serverName ?? "Invited server")
             labeled("Verified address", flow.invitation?.enrollmentURL.host ?? "")
             Text("This address is the server the invitation expects. The account name is a claim until the server confirms it.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(.hkSecondary)
         }
     }
 
@@ -269,12 +273,16 @@ struct NativeEnrollmentView: View {
     }
 
     private func heading(_ title: String, symbol: String) -> some View {
-        Label(title, systemImage: symbol).font(.title2.weight(.semibold))
+        Label {
+            Text(title).harklightType(.messageTitle)
+        } icon: {
+            Image(systemName: symbol).font(.title3)
+        }
     }
 
     private func labeled(_ caption: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(caption).font(.caption).foregroundStyle(.secondary)
+            Text(caption).font(.caption).foregroundStyle(.hkSecondary)
             Text(value)
         }
     }
@@ -282,12 +290,17 @@ struct NativeEnrollmentView: View {
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12, content: content)
             .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.secondary.opacity(0.25)))
+            .background(.hkRaised, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.hkLine, lineWidth: 1))
     }
 
     private func primary(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action).buttonStyle(.borderedProminent)
-            .buttonBorderShape(.capsule).disabled(flow.busy)
+        Button(action: action) {
+            Text(title).foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).onInverse)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(HarklightDesignSystem.palette(for: colorScheme).inverse)
+        .buttonBorderShape(.capsule).disabled(flow.busy)
     }
 }
 
@@ -307,7 +320,7 @@ struct UnconfirmedAccountRemovalNotice: View {
             .disabled(launch.isDisconnectBusy(for: departure) ||
                       !launch.canRetryUnconfirmedDisconnectRemoval(for: departure))
             if let message = launch.disconnectRemovalMessage(for: departure) {
-                Text(message).foregroundStyle(.secondary)
+                Text(message).foregroundStyle(.hkSecondary)
             }
         }
     }

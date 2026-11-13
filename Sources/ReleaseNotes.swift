@@ -860,7 +860,7 @@ struct ReleaseNotesSettingsSection: View {
     let notes: [HarklightReleaseNote]
 
     var body: some View {
-        Section("About") {
+        HarklightFormSection("About") {
             NavigationLink {
                 ReleaseNotesHistoryView(notes: notes)
             } label: {
@@ -880,6 +880,7 @@ struct ReleaseNotesHistoryView: View {
                 ReleaseNoteSection(note: note)
             }
         }
+        .harklightListSurface(.sheet)
         .navigationTitle("Release notes")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -896,6 +897,7 @@ struct ReleaseNotesSheet: View {
                     ReleaseNoteSection(note: note)
                 }
             }
+            .harklightListSurface(.sheet)
             .navigationTitle("What’s New")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -915,6 +917,7 @@ private struct ReleaseNoteSection: View {
             ForEach(note.highlights) { highlight in
                 ReleaseNoteRow(highlight: highlight)
             }
+            .listRowBackground(Rectangle().fill(.hkGroup))
         } header: {
             VStack(alignment: .leading, spacing: 2) {
                 if let buildIdentifier = note.buildIdentifier {
@@ -932,6 +935,9 @@ private struct ReleaseNoteSection: View {
                     Text(historyDateDescription)
                 }
             }
+            .harklightType(.settingsHeading)
+            .foregroundStyle(.hkLabel)
+            .textCase(nil)
         }
     }
 }
@@ -942,15 +948,16 @@ private struct ReleaseNoteRow: View {
     var body: some View {
         Label {
             VStack(alignment: .leading, spacing: 2) {
-                Text(highlight.title).font(.headline)
+                Text(highlight.title).font(.headline).foregroundStyle(.hkText)
                 Text(highlight.detail)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.hkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         } icon: {
             Image(systemName: highlight.symbol)
                 .font(.title2)
+                .foregroundStyle(.hkText)
                 .frame(width: 36)
         }
     }

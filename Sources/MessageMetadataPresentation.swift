@@ -101,8 +101,7 @@ struct MessageMetadataBadges: View {
 
 private enum MessageMetadataBadgeStyle {
     static var font: Font {
-        HarklightDesignSystem.font(for: .caption)
-            .weight(HarklightDesignSystem.typeStyle(.label).swiftUIFontWeight)
+        .caption.weight(.medium)
     }
 }
 
@@ -116,7 +115,7 @@ private struct MessageTypeBadge: View {
     }
 
     private var secondaryTextColor: Color {
-        HarklightDesignSystem.palette(for: colorScheme).neutral.secondaryTextColor
+        HarklightDesignSystem.palette(for: colorScheme).secondary
     }
 
     var body: some View {
@@ -151,10 +150,13 @@ private struct MessageKindBadge: View {
         MessageKindPresentation(kind: kind)
     }
 
+    @Environment(\.colorScheme) private var colorScheme
+
     private var accentColor: Color {
-        switch presentation.accent {
-        case .blocker: .orange
-        case .success: .green
+        let palette = HarklightDesignSystem.palette(for: colorScheme)
+        return switch presentation.accent {
+        case .blocker: palette.amber
+        case .success: palette.teal
         }
     }
 
@@ -164,7 +166,7 @@ private struct MessageKindBadge: View {
                 .foregroundStyle(accentColor)
                 .accessibilityHidden(true)
             Text(presentation.title)
-                .foregroundStyle(.primary)
+                .foregroundStyle(.hkText)
             if let flair = presentation.celebratoryFlairSymbolName {
                 Image(systemName: flair)
                     .foregroundStyle(accentColor)

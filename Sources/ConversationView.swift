@@ -147,18 +147,18 @@ struct ConversationPanel: View {
                 ConversationDraftStatus(disposition: draft.disposition)
                 ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
                 if let error = store.conversationError {
-                    Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                    Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
                 }
                 if let message = store.conversationUnavailableMessage {
                     Text(message)
                         .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.hkSecondary)
                         .padding()
                         .accessibilityIdentifier("conversation-unavailable")
                 } else if let discussionUnavailableReason {
                     Label(discussionUnavailableReason, systemImage: "lock")
                         .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.hkSecondary)
                         .padding(.horizontal)
                         .accessibilityIdentifier("conversation-read-only-reason")
                 } else if store.isReadOnly {
@@ -263,12 +263,12 @@ struct ConversationPanel: View {
                         }.disabled(openingFile || (store.isReadOnly && !store.hasCachedConversationPreview(file)))
                         if store.isReadOnly && !store.hasCachedConversationPreview(file) {
                             Text("This file is not saved locally on this phone. The archive will not download it.")
-                                .font(.caption).foregroundStyle(.secondary)
+                                .font(.caption).foregroundStyle(.hkSecondary)
                         }
                     }
-                    if let fileError { Text(fileError).font(.caption).foregroundStyle(.secondary) }
+                    if let fileError { Text(fileError).font(.caption).foregroundStyle(.hkSecondary) }
                     Text("Transfer and agent-reported use are separate facts. A completed transfer does not establish that the agent read this file.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.hkSecondary)
                 }
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { inspectedFile = nil } } }
                 .quickLookPreview($previewURL)
@@ -497,7 +497,7 @@ private struct ReadOnlyConversationDraftView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(ConversationDraftPresentationText.readOnlyHeading, systemImage: "lock")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(.hkSecondary)
             if !draft.text.rawValue.isEmpty {
                 Text(draft.text.rawValue)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -511,7 +511,7 @@ private struct ReadOnlyConversationDraftView: View {
                 .buttonStyle(.plain)
             }
             Text("This account is disconnected. Its saved discussion cannot be edited or sent.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.caption2).foregroundStyle(.hkSecondary)
         }
         .padding(.horizontal)
         .accessibilityIdentifier("read-only-conversation-draft")
@@ -577,7 +577,8 @@ private struct ConversationComposerTextInput: View {
                 .padding(.vertical, 11)
             if session.stagedText.isEmpty {
                 Text("Write a message…")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.hkSecondary)
+                    .harklightType(.chatTurn)
                     .padding(.vertical, 11)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
@@ -603,10 +604,12 @@ private struct ConversationComposerSendButton: View {
         Button(action: action) {
             Image(systemName: frozen ? "arrow.clockwise" : "arrow.up")
                 .font(.headline)
+                .foregroundStyle(.hkOnAccent)
                 .frame(width: 30, height: 30)
                 .contentShape(Circle())
         }
         .buttonStyle(.glassProminent).buttonBorderShape(.circle).controlSize(.regular)
+        .tint(HarklightColor(token: .accentFill))
         .accessibilityLabel(isLocalExample ? "Send locally" : frozen ? "Retry" : "Send message")
         .accessibilityIdentifier("sample-chat-send")
         .disabled(isSendingDiscussion || !allowsDiscussion || hasPendingUploadCleanup ||
@@ -635,6 +638,42 @@ private struct ConversationComposer: View {
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+        if !draft.files.isEmpty {
+            ScrollView(.horizontal) {
+                HStack(spacing: 10) {
+                    ForEach(draft.files) { file in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Button { inspect(file, revision) } label: {
+                                ConversationAttachmentThumbnail(file: file, local: store.isLocalExample)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(file.name.rawValue)
+                            .disabled(store.uploadNeedsReselection(file, for: key, revision: revision))
+                            .overlay(alignment: .topTrailing) {
+                                Button("Remove", systemImage: "xmark.circle.fill") {
+                                    guard persistStagedText() else { return }
+                                    store.updateConversation(for: key, revision: revision,
+                                        files: draft.files.filter { $0.id != file.id })
+                                }
+                                .labelStyle(.iconOnly)
+                                .font(.title3)
+                                .foregroundStyle(.hkSecondary, .hkPanel)
+                                .offset(x: 8, y: -8)
+                                .disabled(frozen)
+                            }
+                            if store.uploadNeedsReselection(file, for: key, revision: revision) {
+                                Text("Not ready · reselect after cleanup").font(.caption2).foregroundStyle(.hkSecondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 10)
+                .padding(.trailing, 10)
+            }
+            .scrollIndicators(.hidden)
+            .accessibilityIdentifier("sample-chat-attachments")
+        }
         // Each regular glass button adds 7 points around its label, for a 44-point target.
         HStack(alignment: .bottom, spacing: 10) {
             Button {
@@ -642,6 +681,7 @@ private struct ConversationComposer: View {
                 if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
             } label: {
                 Image(systemName: "plus")
+                    .foregroundStyle(.hkText)
                     .frame(width: 30, height: 30)
                     .contentShape(Circle())
             }
@@ -656,32 +696,6 @@ private struct ConversationComposer: View {
                     Button("Cancel", role: .cancel) {}
                 }
             VStack(alignment: .leading, spacing: 8) {
-                if !draft.files.isEmpty {
-                    ScrollView(.horizontal) {
-                        HStack {
-                            ForEach(draft.files) { file in
-                                VStack(spacing: 4) {
-                                    Button { inspect(file, revision) } label: {
-                                        VStack(spacing: 4) {
-                                            ConversationAttachmentThumbnail(file: file, local: store.isLocalExample)
-                                            Text(file.name.rawValue).lineLimit(1)
-                                        }
-                                    }.font(.caption)
-                                    .disabled(store.uploadNeedsReselection(file, for: key, revision: revision))
-                                    if store.uploadNeedsReselection(file, for: key, revision: revision) {
-                                        Text("Not ready · reselect after cleanup").font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Button("Remove", systemImage: "xmark.circle.fill") {
-                                        guard persistStagedText() else { return }
-                                        store.updateConversation(for: key, revision: revision,
-                                            files: draft.files.filter { $0.id != file.id })
-                                    }.labelStyle(.iconOnly).disabled(frozen)
-                                }
-                            }
-                        }
-                    }
-                    .padding(.top, 8)
-                }
                 ConversationComposerTextInput(session: textSession,
                     isEnabled: !frozen && allowsDraftEditing,
                     onTextChange: {
@@ -706,6 +720,7 @@ private struct ConversationComposer: View {
                 hasAbandonedDiscussion: store.hasAbandonedDiscussion(for: key, revision: revision),
                 hasUnreadyUploadReference: store.hasUnreadyUploadReference(for: key, revision: revision),
                 action: sendStagedText)
+        }
         }
         .onChange(of: ConversationBinding(request: key, revision: revision), initial: true) { _, binding in
             if let stagedBinding = textSession.stagedBinding, stagedBinding != binding { _ = persistStagedText() }
@@ -848,7 +863,7 @@ private struct ConversationUploadCleanupStatus: View {
                     Text("Refresh history to reconcile retained file and submission identities. These unready references will not be resent.")
                     Button("Refresh discussion history") { Task { await store.refreshDiscussionHistory() } }
                 }
-            }.font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+            }.font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("conversation-upload-cleanup-status")
         }
@@ -861,13 +876,13 @@ private struct ConversationDraftStatus: View {
         if let status = ConversationDraftPresentationText.status(for: disposition) {
             switch status {
             case .submitting:
-                Text("Sending").font(.caption).foregroundStyle(.secondary)
+                Text("Sending").font(.caption).foregroundStyle(.hkSecondary)
             case .outcomeUnknown:
-                Text("Submission unconfirmed · saved draft retained").font(.caption).foregroundStyle(.secondary)
+                Text("Submission unconfirmed · saved draft retained").font(.caption).foregroundStyle(.hkSecondary)
             case .acceptedPendingReplay:
-                Text("Sent").font(.caption).foregroundStyle(.secondary)
+                Text("Sent").font(.caption).foregroundStyle(.hkSecondary)
             case let .rejected(reason):
-                Text(reason.rawValue).font(.caption).foregroundStyle(.secondary)
+                Text(reason.rawValue).font(.caption).foregroundStyle(.hkSecondary)
             }
         }
     }
@@ -968,10 +983,10 @@ private struct ConversationAvailabilityNotice: View {
                 EmptyView()
             case .nothingListening:
                 Label("Nothing's listening right now", systemImage: "exclamationmark.circle.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.hkAmber)
             case .noOneWillGetThis:
                 Label("No one will get this", systemImage: "xmark.circle.fill")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.hkCoral)
             }
         }
         .font(.caption.weight(.semibold))
@@ -995,11 +1010,11 @@ private struct ConversationSentChatStatus: View {
         VStack(alignment: .leading, spacing: 3) {
             if local {
                 Text("Local example · status is simulated; nothing was sent.")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.hkSecondary)
             }
             deliveryStatus
         }
-        .font(.caption2)
+        .harklightType(.delivered)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityIdentifier("conversation-sent-chat-status")
     }
@@ -1016,39 +1031,47 @@ private struct ConversationSentChatStatus: View {
         switch delivery {
         case .sent:
             Text("Sent")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.hkLabel)
         case .notDeliveredYet:
             Text("Not delivered yet")
                 .fontWeight(.semibold)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.hkAmber)
         case .noOneWillGetThis:
             Label("No one will get this", systemImage: "xmark.circle.fill")
                 .fontWeight(.semibold)
-                .foregroundStyle(.red)
+                .foregroundStyle(.hkCoral)
         case .delivered:
-            Text("Delivered")
-                .foregroundStyle(.secondary)
+            deliveredLabel(Text("Delivered"))
         case .sending:
             Text("Sending…")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.hkLabel)
         case .noListenerPickedThisUp:
             Text("No listener has picked this up")
                 .fontWeight(.semibold)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.hkAmber)
         case let .waitingFor(agent):
             Text("Waiting for \(agent)")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.hkSecondary)
         case let .notDelivered(reason):
             Text("Not delivered: \(reason)")
                 .fontWeight(.semibold)
-                .foregroundStyle(.red)
+                .foregroundStyle(.hkCoral)
         case .deliveredAck:
-            Label("Delivered", systemImage: "checkmark")
-                .foregroundStyle(.secondary)
+            deliveredLabel(Text("Delivered"))
         case let .deliveredTo(agent):
-            Label("Delivered to \(agent)", systemImage: "checkmark")
-                .foregroundStyle(.secondary)
+            deliveredLabel(Text("Delivered to \(agent)"))
         }
+    }
+
+    private func deliveredLabel(_ text: Text) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark")
+                .font(.system(size: 10, weight: .semibold))
+                .accessibilityHidden(true)
+            text
+        }
+        .foregroundStyle(.hkLabel)
+        .accessibilityElement(children: .combine)
     }
 
     private static func milliseconds(_ date: Date) -> UInt64 {
@@ -1067,21 +1090,24 @@ private struct ConversationTurnView: View {
     let replyContext: String?
     let retracted: Bool
     let inspect: (ConversationFile, UInt64) -> Void
+    private var isOwnTurn: Bool { turn.author == .person }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        let shape = RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.card))
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 authorLabel
                 if turn.binding.revision != 1 {
                     Text("· version \(turn.binding.revision)")
                 }
-            }.font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }.harklightType(.chatSpeaker).foregroundStyle(.hkSecondary)
             if let replyContext {
                 Text(MessageMarkdown.attributed(replyContext, prefixedBy: "Replying to: "))
-                    .lineLimit(2).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(2).font(.caption2).foregroundStyle(.hkSecondary)
             }
             if turn.contentRedacted == true {
                 Text("Person-authored content is not included in this device projection.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(.hkSecondary)
             } else {
                 if turn.kind == .revision { Text(turn.binding.revision == 1 ? "Original question" : "Updated").font(.caption.weight(.semibold)) }
                 if turn.kind == .terminal { Text(retracted ? "Retracted" : "Request closed").font(.caption.weight(.semibold)) }
@@ -1089,7 +1115,10 @@ private struct ConversationTurnView: View {
                     Text("Original answer result: " + status.rawValue).font(.caption.weight(.semibold))
                 }
                 if !turn.text.rawValue.isEmpty {
-                    Text(MessageMarkdown.attributed(turn.text.rawValue)).textSelection(.enabled)
+                    Text(MessageMarkdown.attributed(turn.text.rawValue))
+                        .harklightType(.chatTurn)
+                        .foregroundStyle(.hkText)
+                        .textSelection(.enabled)
                 }
             }
             ForEach(turn.files) { file in
@@ -1104,8 +1133,15 @@ private struct ConversationTurnView: View {
                     hasReply: hasReply, conversationAgentName: sender, local: local)
             }
         }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(turn.author == .person ? Color.blue.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, isOwnTurn ? 12 : 12)
+        .padding(.vertical, isOwnTurn ? 12 : 0)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            if isOwnTurn {
+                shape.fill(.hkRaised)
+                shape.strokeBorder(.hkLine, lineWidth: HarklightDesignSystem.shape(.lineWidth))
+            }
+        }
     }
 
     @ViewBuilder
@@ -1136,20 +1172,35 @@ private struct ConversationFileFacts: View {
             case .used: Text(prefix + "Agent reported used")
             case let .unusable(reason): Text(prefix + "Agent reported unusable" + (reason.map { ": " + $0.rawValue } ?? ""))
             }
-        }.font(.caption2).foregroundStyle(.secondary)
+        }.font(.caption2).foregroundStyle(.hkSecondary)
     }
 }
 
 private struct ConversationAttachmentThumbnail: View {
     let file: ConversationFile
     let local: Bool
+
+    private var fileLabel: String {
+        let ext = (file.name.rawValue as NSString).pathExtension
+        return ext.isEmpty ? String(localized: "File") : ext.uppercased()
+    }
+
     var body: some View {
-        if case let .inline(bytes) = file.content, let image = UIImage(data: bytes) {
-            Image(uiImage: image).resizable().scaledToFit().frame(width: 72, height: 48)
-        } else if local && (file.name.rawValue.hasPrefix("Photo") || file.name.rawValue.hasPrefix("Camera")) {
-            SamplePicture(name: "harbor").frame(width: 72)
-        } else {
-            Image(systemName: "doc.text.fill").font(.title).frame(width: 72, height: 48)
+        let shape = RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.small))
+        Group {
+            if case let .inline(bytes) = file.content, let image = UIImage(data: bytes) {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else if local && (file.name.rawValue.hasPrefix("Photo") || file.name.rawValue.hasPrefix("Camera")) {
+                SamplePicture(name: "harbor")
+            } else {
+                Text(verbatim: fileLabel)
+                    .font(.caption)
+                    .foregroundStyle(.hkSecondary)
+            }
         }
+        .frame(width: 72, height: 48)
+        .background(.hkField, in: shape)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(.hkLine, lineWidth: HarklightDesignSystem.shape(.lineWidth)))
     }
 }

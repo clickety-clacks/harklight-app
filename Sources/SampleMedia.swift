@@ -48,8 +48,8 @@ struct SamplePictureChoices: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
-    private var messageColors: HarklightDesignSource.MessageType {
-        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    private var messageColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
     var body: some View {
@@ -64,18 +64,18 @@ struct SamplePictureChoices: View {
                             .overlay {
                                 RoundedRectangle(cornerRadius: 14)
                                     .stroke(response.choices.contains(option.id)
-                                                ? messageColors.textColor
-                                                : messageColors.textColor.opacity(0.3),
+                                                ? messageColors.text
+                                                : messageColors.text.opacity(0.3),
                                             lineWidth: 1)
                             }
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(option.title).font(.headline).foregroundStyle(messageColors.textColor)
-                                Text(option.detail).font(.subheadline).foregroundStyle(messageColors.secondaryTextColor)
+                                Text(option.title).font(.headline).foregroundStyle(messageColors.text)
+                                Text(option.detail).font(.subheadline).foregroundStyle(messageColors.secondary)
                             }
                             Spacer()
                             if response.choices.contains(option.id) {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(messageColors.textColor)
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(messageColors.text)
                             }
                         }
                     }.contentShape(Rectangle())
@@ -236,8 +236,8 @@ struct SampleChoiceRow: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
-    private var messageColors: HarklightDesignSource.MessageType {
-        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    private var messageColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
     private var suggested: Bool {
@@ -259,7 +259,7 @@ struct SampleChoiceRow: View {
             }
         }
         .buttonStyle(.plain)
-        .foregroundStyle(messageColors.textColor)
+        .foregroundStyle(messageColors.text)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityValue(selected ? "Selected" : "Not selected")
     }
@@ -282,8 +282,8 @@ struct SampleNumberInput: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
-    private var messageColors: HarklightDesignSource.MessageType {
-        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    private var messageColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
     var body: some View {
@@ -292,18 +292,18 @@ struct SampleNumberInput: View {
                 TextField("Days", value: $response.number, format: .number)
                     .keyboardType(.numberPad).font(.system(size: 56, weight: .medium, design: .rounded))
                     .multilineTextAlignment(.center).frame(width: 150)
-                    .foregroundStyle(messageColors.textColor)
-                    .tint(messageColors.textColor)
+                    .foregroundStyle(messageColors.text)
+                    .tint(messageColors.text)
                     .disabled(isReadOnly)
-                Text("days").foregroundStyle(messageColors.secondaryTextColor)
+                Text("days").foregroundStyle(messageColors.secondary)
             }
             Slider(value: $response.number, in: 7...90, step: 1) { Text("Days to keep drafts") }
-                .tint(messageColors.textColor)
+                .tint(messageColors.text)
                 .disabled(isReadOnly)
             HStack { Text("7 days"); Spacer(); Text("90 days") }
-                .font(.caption).foregroundStyle(messageColors.secondaryTextColor)
+                .font(.caption).foregroundStyle(messageColors.secondary)
             if !(7...90).contains(response.number) {
-                Text("Choose 7 to 90 days.").foregroundStyle(messageColors.secondaryTextColor)
+                Text("Choose 7 to 90 days.").foregroundStyle(messageColors.secondary)
             }
         }
     }
@@ -313,8 +313,8 @@ struct SampleDiffView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
-    private var messageColors: HarklightDesignSource.MessageType {
-        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    private var messageColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
     var body: some View {
@@ -326,7 +326,7 @@ struct SampleDiffView: View {
                 .padding(14).frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(.system(.subheadline, design: .monospaced))
-        .foregroundStyle(messageColors.textColor)
+        .foregroundStyle(messageColors.text)
         .textSelection(.enabled)
     }
 }
@@ -336,8 +336,8 @@ struct LocalSampleContext: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
-    private var messageColors: HarklightDesignSource.MessageType {
-        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    private var messageColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
     var body: some View {
@@ -347,7 +347,7 @@ struct LocalSampleContext: View {
             }
             if let deadline = response.message.deadline {
                 Label(deadline, systemImage: "clock")
-                    .foregroundStyle(messageColors.secondaryTextColor)
+                    .foregroundStyle(messageColors.secondary)
             }
         }
         .font(.caption)

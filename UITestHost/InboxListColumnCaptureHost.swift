@@ -52,7 +52,7 @@ struct InboxListColumnCaptureHost: View {
                         selectedDetail(for: selection)
                     }
             }
-            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+            .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
             .overlay(alignment: .topLeading) { accessibilityProbe }
         } else {
             NavigationSplitView {
@@ -64,7 +64,7 @@ struct InboxListColumnCaptureHost: View {
                 }
             }
             .navigationSplitViewStyle(.balanced)
-            .tint(HarklightDesignSystem.palette(for: colorScheme).accent.color)
+            .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
             .overlay(alignment: .topLeading) { accessibilityProbe }
         }
     }
@@ -92,7 +92,7 @@ struct InboxListColumnCaptureHost: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background {
                     HarklightDesignSystem.palette(for: colorScheme)
-                        .messageType(.request).backgroundColor
+                        .message(.request).tint
                         .ignoresSafeArea()
                 }
         }

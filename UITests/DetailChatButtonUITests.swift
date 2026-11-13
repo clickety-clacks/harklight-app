@@ -118,7 +118,7 @@ final class DetailChatButtonUITests: XCTestCase {
         XCTAssertTrue(sample.waitForExistence(timeout: 5), app.debugDescription)
         sample.tap()
 
-        let chat = app.buttons["bubble.left.and.bubble.right"]
+        let chat = app.buttons["bubble.left"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(chat.value as? String, "1 item",
                        "The native toolbar badge must expose the unread chat count.")
@@ -203,8 +203,8 @@ final class DetailChatButtonUITests: XCTestCase {
             photo.tap()
         }
 
-        let inputSurface = app.otherElements["sample-chat-input-surface"]
-        let attachmentStrip = inputSurface.scrollViews.firstMatch
+        // Attachments show as thumbnails above the composer row.
+        let attachmentStrip = app.scrollViews["sample-chat-attachments"]
         XCTAssertTrue(attachmentStrip.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(attachmentStrip.isHittable, app.debugDescription)
 

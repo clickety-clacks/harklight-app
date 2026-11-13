@@ -29,62 +29,60 @@ final class HarklightDesignTokenTests: XCTestCase {
         XCTAssertEqual(informationalRow.resolvedMessageType, .info)
     }
 
-    func testEveryMessageTypeHasReadableLightAndDarkPaletteTokens() {
-        let source = HarklightDesignSystem.source
+    func testEveryMessageTypeHasATintInBothAppearances() {
         let expectedTypes = Set(HarklightMessageType.allCases.map(\.rawValue))
-        XCTAssertEqual(Set(source.light.types.keys), expectedTypes)
-        XCTAssertEqual(Set(source.dark.types.keys), expectedTypes)
+        XCTAssertEqual(Set(HarklightDesignSystem.source.light.derived.typeTint.keys), expectedTypes)
+        XCTAssertEqual(Set(HarklightDesignSystem.source.dark.derived.typeTint.keys), expectedTypes)
+        XCTAssertEqual(HarklightDesignSystem.source.light.typeTintToken(.request), "#DDDDF7")
+        XCTAssertEqual(HarklightDesignSystem.source.dark.typeTintToken(.request), "#131527")
+    }
 
-        for appearance in [source.light, source.dark] {
-            let solidColors = [
-                appearance.neutral.bg, appearance.neutral.text, appearance.neutral.text2,
-                appearance.neutral.separator, appearance.neutral.replySurface,
-                appearance.accent.accent, appearance.accent.onAccent, appearance.accent.seen,
-            ]
-            for color in solidColors {
-                XCTAssertNotEqual(color.uppercased(), "#FFFFFF", "Palette contains pure white.")
-                XCTAssertNotEqual(color.uppercased(), "#000000", "Palette contains pure black.")
+    func testDarkSmallLabelsUseTheReadableGray() {
+        // Client PO ruling: dark "Delivered" and every dark small label use #9aa4b8.
+        XCTAssertEqual(HarklightDesignSystem.source.dark.color.label, "#9AA4B8")
+        XCTAssertEqual(HarklightDesignSystem.source.light.color.label, "#4F5A6E")
+    }
+
+    func testTextMeetsContrastOnEverySurfaceItSits() {
+        for appearance in [HarklightDesignSystem.source.light, HarklightDesignSystem.source.dark] {
+            let background = HarklightRGBA(token: appearance.color.background)
+            let panel = HarklightRGBA(token: appearance.color.panel)
+            var surfaces = [background, panel]
+            for overlay in [appearance.color.raised, appearance.color.group] {
+                let token = HarklightRGBA(token: overlay)
+                surfaces.append(token.mixed(token.alpha, over: background))
+                surfaces.append(token.mixed(token.alpha, over: panel))
             }
-
             for type in HarklightMessageType.allCases {
-                guard let tokens = appearance.types[type.rawValue] else {
-                    XCTFail("Missing palette for \(type.rawValue).")
-                    continue
-                }
-                XCTAssertGreaterThan(contrastRatio(foreground: tokens.text, background: tokens.background),
-                                     4.5, "\(type.rawValue) primary text misses the approved contrast ratio.")
-                XCTAssertGreaterThan(contrastRatio(foreground: tokens.secondaryText, background: tokens.background),
-                                     4.5, "\(type.rawValue) secondary text misses the approved contrast ratio.")
-                for value in [tokens.background, tokens.text, tokens.secondaryText,
-                              tokens.listIcon, tokens.cameBackBar] {
-                    XCTAssertNotEqual(value.uppercased(), "#FFFFFF",
-                                      "\(type.rawValue) contains pure white.")
-                    XCTAssertNotEqual(value.uppercased(), "#000000",
-                                      "\(type.rawValue) contains pure black.")
+                surfaces.append(HarklightRGBA(token: appearance.typeTintToken(type)))
+            }
+            for surface in surfaces {
+                for text in [appearance.color.text, appearance.color.secondary, appearance.color.label] {
+                    XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(HarklightRGBA(token: text), surface), 4.5,
+                                                "\(text) on \(surface)")
                 }
             }
+            for type in HarklightMessageType.allCases {
+                let beam = HarklightRGBA(token: appearance.typeColorToken(type))
+                XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(beam, background), 4.5, "\(type) beam")
+                XCTAssertGreaterThanOrEqual(
+                    HarklightRGBA.contrast(beam, HarklightRGBA(token: appearance.typeTintToken(type))), 4.5,
+                    "\(type) beam on its tint")
+                XCTAssertGreaterThanOrEqual(
+                    HarklightRGBA.contrast(HarklightRGBA(token: appearance.color.onBeam), beam), 4.5,
+                    "\(type) on-beam text")
+            }
+            XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(HarklightRGBA(token: appearance.color.onInverse),
+                                                               HarklightRGBA(token: appearance.color.inverse)), 4.5)
+            XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(HarklightRGBA(token: appearance.color.onAccent),
+                                                               HarklightRGBA(token: appearance.color.accentFill)), 4.5)
         }
     }
 
-    private func contrastRatio(foreground: String, background: String) -> Double {
-        let foregroundLuminance = luminance(foreground)
-        let backgroundLuminance = luminance(background)
-        return (max(foregroundLuminance, backgroundLuminance) + 0.05) /
-            (min(foregroundLuminance, backgroundLuminance) + 0.05)
-    }
-
-    private func luminance(_ token: String) -> Double {
-        guard token.hasPrefix("#"), let value = UInt32(token.dropFirst(), radix: 16) else {
-            XCTFail("Expected a hex color token, got \(token).")
-            return 0
-        }
-        let components = [
-            Double((value >> 16) & 0xFF) / 255,
-            Double((value >> 8) & 0xFF) / 255,
-            Double(value & 0xFF) / 255,
-        ].map { component in
-            component <= 0.04045 ? component / 12.92 : pow((component + 0.055) / 1.055, 2.4)
-        }
-        return components[0] * 0.2126 + components[1] * 0.7152 + components[2] * 0.0722
+    func testHeadingFontIsBundled() {
+        XCTAssertNotNil(Bundle.main.url(forResource: "Fraunces", withExtension: "ttf"))
+        let title = HarklightTypography.resolve(.messageTitle)
+        XCTAssertTrue(title.font.familyName.contains("Fraunces"), title.font.familyName)
+        XCTAssertEqual(title.font.pointSize, 28, accuracy: 0.5)
     }
 }

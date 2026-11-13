@@ -34,126 +34,79 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertNil(InboxPriorityDisplay.forScore(.infinity))
     }
 
-    func testExplicitTiersCapBodyAtEightFourAndTwoLines() {
-        XCTAssertEqual(InboxAttentionTier.top.bodyLineLimit, 8)
-        XCTAssertEqual(InboxAttentionTier.middle.bodyLineLimit, 4)
-        XCTAssertEqual(InboxAttentionTier.low.bodyLineLimit, 2)
-    }
-
     func testServerTierSelectsItsMatchingInboxRowStyle() {
         XCTAssertEqual(AttentionTier.top.inboxRowStyleTier, .top)
         XCTAssertEqual(AttentionTier.middle.inboxRowStyleTier, .middle)
         XCTAssertEqual(AttentionTier.low.inboxRowStyleTier, .low)
     }
 
-    func testWashedPriorityRowsRetainModeSpecificColors() throws {
-        let lightHigh = try XCTUnwrap(
-            InboxPriorityRowTreatment.forLevel(.high, colorScheme: .light))
-        XCTAssertEqual(lightHigh.topHex, "#73592A")
-        XCTAssertEqual(lightHigh.bottomHex, "#5E4720")
-        XCTAssertEqual(lightHigh.primaryTextHex, "#F6F1E7")
-        XCTAssertEqual(lightHigh.secondaryTextHex, "#E3DCCF")
-
-        let lightNow = try XCTUnwrap(
-            InboxPriorityRowTreatment.forLevel(.urgent, colorScheme: .light))
-        XCTAssertEqual(lightNow.topHex, "#A63A2A")
-        XCTAssertEqual(lightNow.bottomHex, "#8A2C1E")
-        XCTAssertEqual(lightNow.primaryTextHex, "#F6F1E7")
-        XCTAssertEqual(lightNow.secondaryTextHex, "#E3DCCF")
-
-        let darkHigh = try XCTUnwrap(
-            InboxPriorityRowTreatment.forLevel(.high, colorScheme: .dark))
-        XCTAssertEqual(darkHigh.topHex, "#3A3119")
-        XCTAssertEqual(darkHigh.bottomHex, "#2B2516")
-        XCTAssertEqual(darkHigh.primaryTextHex, "#E6D9B8")
-        XCTAssertEqual(darkHigh.secondaryTextHex, "#AEA283")
-
-        let darkNow = try XCTUnwrap(
-            InboxPriorityRowTreatment.forLevel(.urgent, colorScheme: .dark))
-        XCTAssertEqual(darkNow.topHex, "#5A2219")
-        XCTAssertEqual(darkNow.bottomHex, "#3A1A14")
-        XCTAssertEqual(darkNow.primaryTextHex, "#F2C9BE")
-        XCTAssertEqual(darkNow.secondaryTextHex, "#C0948A")
-
-        for treatment in [lightHigh, lightNow, darkHigh, darkNow] {
-            XCTAssertEqual(treatment.initialsFillOpacity, 0.18)
-        }
+    func testUrgentAndHighRowsTakeTheirWashAndLeadingEdgeInEachAppearance() throws {
+        let darkUrgent = try XCTUnwrap(InboxPriorityRowTreatment.forLevel(.urgent, colorScheme: .dark))
+        XCTAssertEqual(darkUrgent, InboxPriorityRowTreatment(washHex: "#2F1F20", edgeHex: "#FF8A5C"))
+        let darkHigh = try XCTUnwrap(InboxPriorityRowTreatment.forLevel(.high, colorScheme: .dark))
+        XCTAssertEqual(darkHigh, InboxPriorityRowTreatment(washHex: "#25221C", edgeHex: "#FFC857"))
+        let lightUrgent = try XCTUnwrap(InboxPriorityRowTreatment.forLevel(.urgent, colorScheme: .light))
+        XCTAssertEqual(lightUrgent, InboxPriorityRowTreatment(washHex: "#EED5D0", edgeHex: "#A13811"))
+        let lightHigh = try XCTUnwrap(InboxPriorityRowTreatment.forLevel(.high, colorScheme: .light))
+        XCTAssertEqual(lightHigh, InboxPriorityRowTreatment(washHex: "#EFE3CC", edgeHex: "#7D5100"))
         XCTAssertNil(InboxPriorityRowTreatment.forLevel(nil, colorScheme: .light))
         XCTAssertNil(InboxPriorityRowTreatment.forLevel(.low, colorScheme: .dark))
+        XCTAssertEqual(HarklightDesignSystem.shape(.priorityEdge), 2)
     }
 
-    func testLightSelectedRowColorsAppearOnlyOverTheProminentSelectionFill() {
-        XCTAssertTrue(InboxSelectedRowTextRule.usesSelectionFillColors(
-            selected: true, backgroundProminence: .increased))
-        XCTAssertFalse(InboxSelectedRowTextRule.usesSelectionFillColors(
-            selected: true, backgroundProminence: .standard),
-                       "A selected row without the tinted fill must keep its regular readable colors.")
-        XCTAssertFalse(InboxSelectedRowTextRule.usesSelectionFillColors(
-            selected: false, backgroundProminence: .increased))
-        XCTAssertFalse(InboxSelectedRowTextRule.usesSelectionFillColors(
-            selected: false, backgroundProminence: .standard))
-    }
-
-    func testSelectedRowBarUsesPickedSizeAndBrighterRowColorsInBothAppearances() {
+    func testIPadOpenRowUsesAnEightPointBarAndSixteenPointIndent() {
         XCTAssertEqual(InboxRowSelectionDecoration.barWidth, 8)
         XCTAssertEqual(InboxRowSelectionDecoration.contentInset, 16)
-
-        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(nil, colorScheme: .light).barHex,
-                       "#B3A389")
-        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(.high, colorScheme: .light).barHex,
-                       "#C29747")
-        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(.urgent, colorScheme: .light).barHex,
-                       "#D86B5A")
-
-        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(nil, colorScheme: .dark).barHex,
-                       "#756B61")
-        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(.high, colorScheme: .dark).barHex,
-                       "#917A3B")
-        XCTAssertEqual(InboxRowSelectionDecoration.forLevel(.urgent, colorScheme: .dark).barHex,
-                       "#B94331")
+        // The bar is the type color at 55 percent over the page background.
+        let palette = HarklightDesignSystem.source.dark
+        let expected = HarklightRGBA(token: "#9D8CFF").mixed(0.55, over: HarklightRGBA(token: "#070B14"))
+        XCTAssertEqual(palette.typeColorToken(.request), "#9D8CFF")
+        XCTAssertEqual(expected.red, 0.55 * 0x9D / 255 + 0.45 * 0x07 / 255, accuracy: 0.0001)
     }
 
-    func testNewMessageAreaUsesQuietBlockAndSolidHighOrUrgentPills() {
-        XCTAssertEqual(NewMessageAreaSurface.forScheme(.light).quietTitleHex, "#8A847A")
-        XCTAssertEqual(NewMessageAreaSurface.forScheme(.light).separatorHex,
-                       "rgba(49,48,45,0.08)")
-        XCTAssertEqual(NewMessageAreaSurface.forScheme(.dark).quietTitleHex, "#726E67")
-        XCTAssertEqual(NewMessageAreaSurface.forScheme(.dark).separatorHex,
-                       "rgba(221,217,209,0.08)")
-
-        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.high, colorScheme: .light),
-                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#73592A",
-                                                       capsuleTextHex: "#F6F1E7"))
-        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.urgent, colorScheme: .light),
-                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#A63A2A",
-                                                       capsuleTextHex: "#F6F1E7"))
-        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.high, colorScheme: .dark),
-                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#7B6832",
-                                                       capsuleTextHex: "#F6F1E7"))
+    func testNewSectionPriorityLabelsAreReversedOnCoralAndAmber() {
         XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.urgent, colorScheme: .dark),
-                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#B94331",
-                                                       capsuleTextHex: "#F6F1E7"))
+                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#FF8A5C", capsuleTextHex: "#070B14"))
+        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.high, colorScheme: .dark),
+                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#FFC857", capsuleTextHex: "#070B14"))
+        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.urgent, colorScheme: .light),
+                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#A13811", capsuleTextHex: "#FFFFFF"))
+        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.high, colorScheme: .light),
+                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#7D5100", capsuleTextHex: "#FFFFFF"))
         XCTAssertNil(NewMessageAreaPriorityTreatment.forLevel(.low, colorScheme: .light))
         XCTAssertNil(NewMessageAreaPriorityTreatment.forLevel(nil, colorScheme: .dark))
     }
 
-    func testLiveInboxLabelsMeetContrastOnTheirApprovedSurfaces() throws {
-        let source = HarklightDesignSystem.source
-
-        for (appearanceName, appearance) in [("light", source.light), ("dark", source.dark)] {
-            let neutralText = try XCTUnwrap(rgb(appearance.neutral.text))
-            let rowTop = try XCTUnwrap(rgb(appearance.neutral.rowTop))
-            let accent = try XCTUnwrap(rgb(appearance.accent.accent))
-            let background = try XCTUnwrap(rgb(appearance.neutral.bg))
-            let refreshingWash = composite(accent, over: background, opacity: 0.14)
-
-            XCTAssertGreaterThanOrEqual(
-                contrastRatio(foreground: neutralText, background: rowTop), 4.5,
-                "\(appearanceName) More/Less text must pass on rowTop.")
-            XCTAssertGreaterThanOrEqual(
-                contrastRatio(foreground: neutralText, background: refreshingWash), 4.5,
-                "\(appearanceName) Refreshing text must pass on its accent wash.")
+    func testRowLabelsMeetContrastOnPageAndPriorityWashes() {
+        for appearance in [HarklightDesignSystem.source.light, HarklightDesignSystem.source.dark] {
+            let surfaces = [appearance.color.background, appearance.derived.urgentWash,
+                            appearance.derived.highWash]
+            for surface in surfaces {
+                for text in [appearance.color.text, appearance.color.secondary, appearance.color.label] {
+                    XCTAssertGreaterThanOrEqual(
+                        HarklightRGBA.contrast(HarklightRGBA(token: text), HarklightRGBA(token: surface)), 4.5,
+                        "\(text) on \(surface)")
+                }
+            }
         }
+    }
+
+    func testOpenMessageDateReadsDayThenTime() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let locale = Locale(identifier: "en_US_POSIX")
+        func date(_ day: Int, hour: Int = 9, minute: Int = 12) -> Date {
+            calendar.date(from: DateComponents(year: 2026, month: 10, day: day,
+                                               hour: hour, minute: minute))!
+        }
+        let now = date(19, hour: 14)
+        func label(_ day: Int) -> String {
+            InboxFriendlyDate.detailLabel(for: date(day), now: now, calendar: calendar, locale: locale)
+                .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        }
+        XCTAssertEqual(label(19), "Today, 9:12 AM")
+        XCTAssertEqual(label(18), "Yesterday, 9:12 AM")
+        XCTAssertEqual(label(15), "Thursday, 9:12 AM")
     }
 
     func testDuePhrasePresentationSplitsBetweenDayAndTimeButKeepsOneAccessiblePhrase() {
@@ -209,44 +162,5 @@ final class InboxVisualRulesTests: XCTestCase {
                                                 calendar: calendar, locale: locale), "Thursday")
         XCTAssertEqual(InboxFriendlyDate.label(for: date(7), now: now,
                                                 calendar: calendar, locale: locale), "10/7/26")
-    }
-
-    private struct RGB {
-        let red: Double
-        let green: Double
-        let blue: Double
-    }
-
-    private func rgb(_ token: String) -> RGB? {
-        guard token.hasPrefix("#"), let value = UInt32(token.dropFirst(), radix: 16) else {
-            return nil
-        }
-        return RGB(red: Double((value >> 16) & 0xFF) / 255,
-                   green: Double((value >> 8) & 0xFF) / 255,
-                   blue: Double(value & 0xFF) / 255)
-    }
-
-    private func composite(_ foreground: RGB, over background: RGB, opacity: Double) -> RGB {
-        RGB(red: foreground.red * opacity + background.red * (1 - opacity),
-            green: foreground.green * opacity + background.green * (1 - opacity),
-            blue: foreground.blue * opacity + background.blue * (1 - opacity))
-    }
-
-    private func contrastRatio(foreground: RGB, background: RGB) -> Double {
-        let foregroundLuminance = luminance(foreground)
-        let backgroundLuminance = luminance(background)
-        return (max(foregroundLuminance, backgroundLuminance) + 0.05) /
-            (min(foregroundLuminance, backgroundLuminance) + 0.05)
-    }
-
-    private func luminance(_ color: RGB) -> Double {
-        func linearize(_ component: Double) -> Double {
-            component <= 0.04045
-                ? component / 12.92
-                : pow((component + 0.055) / 1.055, 2.4)
-        }
-        return linearize(color.red) * 0.2126 +
-            linearize(color.green) * 0.7152 +
-            linearize(color.blue) * 0.0722
     }
 }

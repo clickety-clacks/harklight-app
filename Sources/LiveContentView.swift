@@ -171,46 +171,44 @@ private struct AnswerConfirmationCard: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
-    private var appearance: HarklightDesignSource.Appearance {
-        HarklightDesignSystem.palette(for: colorScheme)
+    private var messageColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
-    private var messageColors: HarklightDesignSource.MessageType {
-        appearance.messageType(messageType)
-    }
+    private let symbolWidth: CGFloat = 22
+    private let symbolSpacing: CGFloat = 12
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.card))
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: symbolSpacing) {
                 if let symbolName {
                     Image(systemName: symbolName)
-                        .font(.headline.weight(.semibold))
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(messageColors.beam)
+                        .frame(width: symbolWidth)
                 }
-                Text(title).font(.headline.weight(.semibold))
+                Text(title)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(messageColors.text)
             }
-            .foregroundStyle(messageColors.textColor)
 
             if let answer, !answer.isEmpty {
                 Text(answer)
-                    .font(.body.weight(.semibold))
+                    .harklightType(.messageBody)
+                    .fontWeight(.semibold)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 28)
-                    .foregroundStyle(messageColors.textColor)
+                    .padding(.leading, symbolName == nil ? 0 : symbolWidth + symbolSpacing)
+                    .foregroundStyle(messageColors.text)
                     .accessibilityIdentifier(answerIdentifier ?? "\(identifier)-answer")
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(appearance.detail.selectedChoiceColor)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(messageColors.textColor, lineWidth: 1.5)
-        }
+        .background(messageColors.pickedFill, in: shape)
+        .overlay(shape.strokeBorder(messageColors.beam, lineWidth: HarklightDesignSystem.shape(.lineWidth)))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(identifier)
         .accessibilityValue(Text(accessibilityValue))
@@ -344,14 +342,6 @@ final class ReplyEditorDraftSession {
     }
 }
 
-private enum ReplyInputSurfaceStyle {
-    static func fill(for colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? Color.black.opacity(0.10) : Color.white.opacity(0.10)
-    }
-
-    static let darkPlaceholder = Color.white.opacity(0.72)
-}
-
 @ViewBuilder
 private func liveChoiceButton<Label: View>(style: MessageChoiceStyle?,
                                            perform action: @escaping () -> Void,
@@ -369,6 +359,8 @@ private func liveChoiceButton<Label: View>(style: MessageChoiceStyle?,
     }
 }
 
+/// One card for a written reply: the Reply label on top and, once Reply is
+/// picked, the text pane below it inside the same border.
 private struct ReplyChoiceCard: View {
     let title: String
     let detail: String
@@ -380,60 +372,60 @@ private struct ReplyChoiceCard: View {
     let suggested: Bool
     let ownAnswer: Bool
     let style: MessageChoiceStyle?
-    let textColor: Color
-    let selectedColor: Color
-    let replySurface: Color
-    let inputSurface: Color
     let target: ReplyEditorTarget
     let isReadOnly: Bool
     let onOpen: () -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    private var messageColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
+    }
+
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 16)
-        let inputShape = UnevenRoundedRectangle(
-            topLeadingRadius: 0,
-            bottomLeadingRadius: 16,
-            bottomTrailingRadius: 16,
-            topTrailingRadius: 0,
-            style: .continuous
-        )
+        let radius = HarklightDesignSystem.shape(.card)
+        let shape = RoundedRectangle(cornerRadius: radius)
         let showsEditor = !isReadOnly && (isEditing || selected)
+        let showsPane = showsEditor || !text.isEmpty
         let card = VStack(alignment: .leading, spacing: 0) {
             MessageChoiceLabel(title: title, detail: detail, selected: selected,
                                multiple: multiple, suggested: suggested,
                                ownAnswer: ownAnswer, drawsSurface: false)
             if showsEditor {
                 TextEditor(text: $text)
-                    .font(.body)
-                    .foregroundColor(Color.white)
-                    .tint(Color.white)
+                    .harklightType(.messageBody)
+                    .foregroundStyle(messageColors.text)
+                    .tint(messageColors.text)
                     .scrollContentBackground(.hidden)
-                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+                    .frame(maxWidth: .infinity,
+                           minHeight: HarklightDesignSystem.shape(.replyPaneMinHeight),
+                           alignment: .topLeading)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
-                    .background(inputSurface, in: inputShape)
-                    .clipShape(inputShape)
+                    .background(messageColors.replyPane)
                     .focused($focusedActionID, equals: target.actionIdentifier)
                     .accessibilityLabel(title)
                     .accessibilityIdentifier(target.fieldIdentifier)
                     .disabled(isReadOnly || !selected)
-            } else if !text.isEmpty {
+            } else if showsPane {
                 Text(text)
-                    .font(.body)
-                    .foregroundStyle(Color.white)
+                    .harklightType(.messageBody)
+                    .foregroundStyle(messageColors.text)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(replySurface, in: RoundedRectangle(cornerRadius: 12))
-                    .padding(.top, 10)
+                    .frame(maxWidth: .infinity, minHeight: HarklightDesignSystem.shape(.replyPaneMinHeight),
+                           alignment: .topLeading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                    .background(messageColors.replyPane)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(showsEditor ? 0 : 14)
-        .background(selected ? selectedColor : Color.clear, in: shape)
-        .overlay(shape.strokeBorder(selected ? textColor : textColor.opacity(0.30), lineWidth: 1.5))
+        .background(selected ? messageColors.pickedFill : messageColors.raised, in: shape)
         .clipShape(shape)
-        .opacity(selected ? 1 : 0.55)
+        .overlay(shape.strokeBorder(selected ? messageColors.beam : messageColors.line,
+                                    style: StrokeStyle(lineWidth: HarklightDesignSystem.shape(.lineWidth),
+                                                       dash: selected ? [] : [4, 3])))
         .animation(.smooth(duration: 0.25), value: selected)
 
         if showsEditor || isReadOnly {
@@ -721,55 +713,45 @@ struct MessageHeading: View {
     let initials: String
     let title: String
     var createdAt: Date? = nil
-    var symbol: String? = nil
-    var titleColor: Color = .primary
-    var chatUnread: Bool? = nil
-    var secondaryTextColor: Color? = nil
+    var messageType: HarklightMessageType = .request
     @Environment(\.colorScheme) private var colorScheme
 
-    private var neutralTokens: HarklightDesignSource.Neutral {
-        HarklightDesignSystem.palette(for: colorScheme).neutral
+    private var palette: HarklightDesignSource.Appearance {
+        HarklightDesignSystem.palette(for: colorScheme)
     }
 
-    private var mutedTextColor: Color {
-        secondaryTextColor ?? neutralTokens.secondaryTextColor
+    private var senderLine: String? {
+        let parts = [sender, createdAt.map { InboxFriendlyDate.detailLabel(for: $0) }].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 9) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
                 if !initials.isEmpty {
                     Text(initials)
-                        .font(.caption.bold())
-                        .frame(width: 28, height: 28)
-                        .background(titleColor.opacity(0.18), in: Circle())
+                        .font(.caption)
+                        .foregroundStyle(palette.label)
+                        .frame(width: HarklightDesignSystem.shape(.messageInitials),
+                               height: HarklightDesignSystem.shape(.messageInitials))
+                        .background(palette.field, in: Circle())
+                        .overlay(Circle().strokeBorder(palette.line, lineWidth: 1))
                 }
-                if let sender {
-                    Text(verbatim: sender).font(.subheadline)
+                if let senderLine {
+                    Text(verbatim: senderLine)
+                        .harklightType(.messageSender)
+                        .foregroundStyle(palette.secondary)
                 }
                 Spacer(minLength: 0)
-                if let createdAt {
-                    Text(InboxFriendlyDate.label(for: createdAt))
-                        .font(.caption)
-                        .foregroundStyle(mutedTextColor)
-                }
-                if let chatUnread {
-                    Image(systemName: chatUnread ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
-                        .font(.caption)
-                        .foregroundStyle(chatUnread ? titleColor : mutedTextColor)
-                        .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
-                }
             }
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if let symbol {
-                    Image(systemName: symbol)
-                        .font(.system(size: 21, weight: .semibold))
-                        .foregroundStyle(titleColor)
-                        .accessibilityHidden(true)
-                }
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Image(systemName: messageType.symbol)
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(palette.typeColor(messageType))
+                    .accessibilityHidden(true)
                 Text(MessageMarkdown.attributed(title))
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundStyle(titleColor)
+                    .harklightType(.messageTitle)
+                    .foregroundStyle(palette.text)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -819,12 +801,12 @@ struct LiveInboxSettings: View {
         NavigationStack {
             Form {
                 if let connectionStatus {
-                    Section("Connection status") {
-                        Text(connectionStatus).foregroundStyle(.secondary)
+                    HarklightFormSection("Connection status") {
+                        Text(connectionStatus).foregroundStyle(.hkSecondary)
                     }
                 }
                 if let record {
-                    Section("Account") {
+                    HarklightFormSection("Account") {
                         LabeledContent("Account", value: record.savedAccountName ?? "Current account")
                         LabeledContent("Server", value: record.serverDisplayName ?? record.host)
                     }
@@ -833,7 +815,7 @@ struct LiveInboxSettings: View {
                     let otherArchives = launch.availableDisconnectedAccounts
                         .filter { $0.archiveID != archiveDeparture?.archiveID }
                     if !otherArchives.isEmpty {
-                        Section("Saved accounts") {
+                        HarklightFormSection("Saved accounts") {
                             ForEach(otherArchives, id: \.archiveID) { departure in
                                 Button {
                                     launch.showArchivedAccount(departure)
@@ -848,11 +830,11 @@ struct LiveInboxSettings: View {
                     }
                 }
                 if store.isReadOnly {
-                    Section("Connection") {
+                    HarklightFormSection("Connection") {
                         if let archiveDeparture {
                             Label("Disconnected · Read-only", systemImage: "lock")
                             Text("These saved messages, discussion history, drafts and local files belong to this account. They are read-only and are not shared with another account.")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.hkSecondary)
                             if launch?.activeEnrollmentRecord != nil {
                                 Button("Return to current account") {
                                     launch?.showCurrentAccount()
@@ -880,7 +862,7 @@ struct LiveInboxSettings: View {
                             Text(departure.removed
                                  ? "This phone is disconnected. Its saved messages and drafts are read-only. The account, other devices and server history remain."
                                  : (launch?.disconnectMessage ?? "This phone is disconnected locally. The server has not confirmed removal; the original account identity is kept for retry."))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.hkSecondary)
                             if departure.removed {
                                 Button("Connect with an invitation") { launch?.beginReconnect() }
                             } else {
@@ -893,7 +875,7 @@ struct LiveInboxSettings: View {
                         } else {
                             Label("Read-only saved messages", systemImage: "lock")
                             Text("These messages remain associated with their original account. Connect only with an invitation for that account to resume them.")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.hkSecondary)
                         }
                     }
                     if let launch {
@@ -902,7 +884,7 @@ struct LiveInboxSettings: View {
                             $0.archiveID != currentArchiveID
                         }
                         if !otherPendingRemovals.isEmpty {
-                            Section("Other pending removals") {
+                            HarklightFormSection("Other pending removals") {
                                 ForEach(otherPendingRemovals, id: \.archiveID) { departure in
                                     UnconfirmedAccountRemovalNotice(launch: launch, departure: departure)
                                         .font(.footnote)
@@ -911,9 +893,9 @@ struct LiveInboxSettings: View {
                         }
                     }
                 } else if launch != nil {
-                    Section("Connection") {
+                    HarklightFormSection("Connection") {
                         Text("This phone is registered to this account.")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.hkSecondary)
                         if let launch {
                             ForEach(launch.unconfirmedAccountDepartures, id: \.archiveID) { departure in
                                 UnconfirmedAccountRemovalNotice(launch: launch, departure: departure)
@@ -936,11 +918,12 @@ struct LiveInboxSettings: View {
                             }
                         }
                         if let message = launch?.endpointMigrationMessage {
-                            Text(message).font(.footnote).foregroundStyle(.secondary)
+                            Text(message).font(.footnote).foregroundStyle(.hkSecondary)
                         }
                         Button("Disconnect this phone…", role: .destructive) {
                             confirmingDisconnect = true
                         }
+                        .foregroundStyle(.hkCoral)
                         .disabled(launch?.isEndpointMigrationBusy == true)
                         .confirmationDialog("Disconnect this phone?", isPresented: $confirmingDisconnect,
                                             titleVisibility: .visible) {
@@ -952,7 +935,7 @@ struct LiveInboxSettings: View {
                             Text(disconnectDisclosure)
                         }
                         if let message = launch?.disconnectMessage {
-                            Text(message).font(.footnote).foregroundStyle(.red)
+                            Text(message).font(.footnote).foregroundStyle(.hkCoral)
                         }
                     }
                 }
@@ -966,11 +949,13 @@ struct LiveInboxSettings: View {
                     entries: HarklightReleaseNotes.numberedEntries(
                         currentBuildIdentifier: HarklightReleaseNotes.currentBuildIdentifier())))
             }
-            .navigationTitle("Settings")
+            .harklightListSurface(.sheet)
+            .harklightSheetTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) {
-                Button("Done", systemImage: "checkmark") { dismiss() }.labelStyle(.iconOnly)
+                HarklightDoneButton { dismiss() }
             } }
         }
+        .harklightSheetSurface()
     }
 }
 
@@ -1079,8 +1064,8 @@ struct LiveRequestDetail: View {
         }
     }
 
-    private var detailColors: HarklightDesignSource.MessageType {
-        HarklightDesignSystem.palette(for: colorScheme).messageType(context.messageType)
+    private var detailColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(context.messageType)
     }
 
     private var isSinglePanePresentation: Bool {
@@ -1092,9 +1077,6 @@ struct LiveRequestDetail: View {
         context.isSupersedesTarget || request.lifecycleStatus == .superseded
     }
 
-    private var replyEditorSurface: Color {
-        HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
-    }
 
     private var failedResponseWarning: LivePresentationStore.FailedResponseWarning? {
 #if DEBUG
@@ -1314,7 +1296,7 @@ struct LiveRequestDetail: View {
 
     private var seenToolbarTint: Color? {
         guard !seenActionIsComplete, !seenActionIsPending else { return nil }
-        return HarklightDesignSystem.palette(for: colorScheme).accent.seenColor
+        return HarklightDesignSystem.palette(for: colorScheme).teal
     }
 
     private var finishSeenButton: some View {
@@ -1327,9 +1309,13 @@ struct LiveRequestDetail: View {
                     .padding(.horizontal, 6)
             } else {
                 Image(systemName: seenActionIsPending ? "clock" : "checkmark")
+                    .foregroundStyle(seenToolbarTint == nil
+                                     ? HarklightDesignSystem.palette(for: colorScheme).text
+                                     : HarklightDesignSystem.palette(for: colorScheme).onBeam)
             }
         }
-        .tint(seenToolbarTint)
+        .buttonStyle(.glassProminent)
+        .tint(seenToolbarTint ?? HarklightDesignSystem.palette(for: colorScheme).raised)
         .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
         .accessibilityLabel(seenActionIsComplete ? "Seen"
                             : seenActionIsPending ? "Seen pending confirmation" : "Mark as seen")
@@ -1471,7 +1457,7 @@ struct LiveRequestDetail: View {
             Image(systemName: "exclamationmark.triangle.fill")
         }
         .labelStyle(.iconOnly)
-        .tint(.red)
+        .tint(HarklightColor(token: .coral))
         .accessibilityLabel("Response not delivered")
         .accessibilityHint("View the delivery details and retry the same response")
         .accessibilityIdentifier("request-delivery-warning")
@@ -1484,7 +1470,7 @@ struct LiveRequestDetail: View {
             Image(systemName: "exclamationmark.triangle.fill")
         }
         .labelStyle(.iconOnly)
-        .tint(.red)
+        .tint(HarklightColor(token: .coral))
         .accessibilityLabel("Message could not be loaded and was skipped")
         .accessibilityHint("View the safe diagnostic details")
         .accessibilityIdentifier("request-message-load-warning")
@@ -1601,10 +1587,7 @@ struct LiveRequestDetail: View {
                                initials: senderInitials,
                                title: request.title?.rawValue ?? "Message",
                                createdAt: request.createdAt,
-                               symbol: localExample?.message.kind.symbol ?? (request.informationalSeenStatus == nil ? "text.bubble" : "info.circle"),
-                               titleColor: detailColors.textColor,
-                               chatUnread: conversationIndicator,
-                               secondaryTextColor: detailColors.secondaryTextColor)
+                               messageType: context.messageType)
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("request-heading")
@@ -1634,7 +1617,7 @@ struct LiveRequestDetail: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("What’s at stake")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(detailColors.secondaryTextColor)
+                            .foregroundStyle(detailColors.secondary)
                         Text(MessageMarkdown.attributed(stake.rawValue))
                             .font(.body)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1647,7 +1630,7 @@ struct LiveRequestDetail: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Supersedes")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(detailColors.secondaryTextColor)
+                            .foregroundStyle(detailColors.secondary)
                         ForEach(request.supersedesMessageIDs, id: \.self) { messageID in
                             let targetKey = RequestKey(accountScope: request.key.accountScope,
                                 senderID: request.key.senderID, messageID: messageID)
@@ -1663,7 +1646,7 @@ struct LiveRequestDetail: View {
                 }
                 ReplacedByMessagesSection(
                     replacementKeys: request.supersededByMessageKeys,
-                    secondaryTextColor: detailColors.secondaryTextColor
+                    secondaryTextColor: detailColors.secondary
                 )
                 if let localExample {
                     if localExample.message.revised || localExample.message.deadline != nil {
@@ -1676,7 +1659,7 @@ struct LiveRequestDetail: View {
                                   ? "Answered locally · nothing sent"
                                   : "Seen selected locally · nothing sent",
                               systemImage: "checkmark.circle")
-                            .font(.subheadline).foregroundStyle(detailColors.secondaryTextColor)
+                            .font(.subheadline).foregroundStyle(detailColors.secondary)
                             .accessibilityIdentifier(localExample.noCommentSelected
                                 ? "request-local-no-comment-status"
                                 : "request-local-answer-status")
@@ -1685,16 +1668,16 @@ struct LiveRequestDetail: View {
                 HistoricalVersionAccess(key: request.key, store: store,
                     currentRevision: storePresentationSnapshot.conversationRevision,
                     hasAcceptedUpdate: storePresentationSnapshot.hasAcceptedUpdate,
-                    secondaryTextColor: detailColors.secondaryTextColor,
-                    messageTextColor: detailColors.textColor,
-                    messageBackgroundColor: detailColors.backgroundColor)
+                    secondaryTextColor: detailColors.secondary,
+                    messageTextColor: detailColors.text,
+                    messageBackgroundColor: detailColors.tint)
                 if storePresentationSnapshot.isRetracted {
                     Text("The sender retracted this request. Saved work and its original delivery status are retained; no further answer will be sent.")
-                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
+                        .font(.caption).foregroundStyle(detailColors.secondary)
                 }
                 if let body = request.body {
                     SystemDetectedMessageBody(text: body.rawValue,
-                                               foregroundColor: detailColors.textColor)
+                                               foregroundColor: detailColors.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if localExample?.message.kind == .review {
@@ -1770,7 +1753,7 @@ struct LiveRequestDetail: View {
                     case .unsupported:
                         VStack(alignment: .leading, spacing: 10) {
                             Text("This request uses an unsupported answer format.")
-                                .foregroundStyle(detailColors.secondaryTextColor)
+                                .foregroundStyle(detailColors.secondary)
                             if canOfferNoComment { noCommentChoice }
                         }
                     }
@@ -1778,16 +1761,16 @@ struct LiveRequestDetail: View {
                 if request.inboxStateIsCurrent {
                     if storePresentationSnapshot.isRetracted {
                         Text(storePresentationSnapshot.retractionLabel)
-                            .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
+                            .font(.caption).foregroundStyle(detailColors.secondary)
                             .accessibilityIdentifier("request-lifecycle-status")
                     } else if isSupersedesReadOnly {
                         Text(String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-                            .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
+                            .font(.caption).foregroundStyle(detailColors.secondary)
                             .accessibilityIdentifier("request-lifecycle-status")
                     } else if request.lifecycleStatus != .open && request.lifecycleStatus != .answered &&
                                 !showsNoCommentConfirmation {
                         Text(String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-                            .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
+                            .font(.caption).foregroundStyle(detailColors.secondary)
                             .accessibilityIdentifier("request-lifecycle-status")
                     }
                     if case let .reply(answerText)? = request.accountAnswerOutcome,
@@ -1795,10 +1778,10 @@ struct LiveRequestDetail: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Reply")
                                 .font(.caption.weight(.semibold))
-                                .foregroundStyle(detailColors.secondaryTextColor)
+                                .foregroundStyle(detailColors.secondary)
                             Text(answerText.rawValue)
                                 .font(.subheadline)
-                                .foregroundStyle(Color.white)
+                                .foregroundStyle(detailColors.text)
                                 .textSelection(.enabled)
                                 .accessibilityIdentifier("request-account-answer")
                         }
@@ -1808,28 +1791,28 @@ struct LiveRequestDetail: View {
                        !(seenActionIsComplete && !isSupersedesReadOnly) {
                         Label(Self.informationalSeenText(seenStatus),
                               systemImage: Self.informationalSeenSymbol(seenStatus))
-                            .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
+                            .font(.caption).foregroundStyle(detailColors.secondary)
                             .accessibilityIdentifier("informational-seen-status")
                     }
                 } else {
                     Label("Cached history · status not refreshed", systemImage: "clock.arrow.circlepath")
-                        .font(.caption).foregroundStyle(detailColors.secondaryTextColor)
+                        .font(.caption).foregroundStyle(detailColors.secondary)
                         .accessibilityIdentifier("inbox-status-unrefreshed")
                     if failedResponseWarning == nil,
                        let localStatus = store.answerOperationStatus(request.intentReceipt) {
-                        Text(localStatus).font(.caption).foregroundStyle(detailColors.secondaryTextColor)
+                        Text(localStatus).font(.caption).foregroundStyle(detailColors.secondary)
                     }
                 }
                 if request.isDefaultAnswered && !showsAnsweredConfirmation {
                     VStack(alignment: .leading, spacing: 4) {
                         Label("Answered by default", systemImage: "clock")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(detailColors.secondaryTextColor)
+                            .foregroundStyle(detailColors.secondary)
                             .accessibilityIdentifier("request-default-answer-status")
                         if let answerWords = request.defaultAnswerWords, !answerWords.isEmpty {
                             Text(answerWords)
                                 .font(.subheadline)
-                                .foregroundStyle(Color.white)
+                                .foregroundStyle(detailColors.text)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
                                 .accessibilityIdentifier("request-default-answer")
@@ -1870,26 +1853,26 @@ struct LiveRequestDetail: View {
                 }
                 if let actionError = store.actionError {
                     Label(actionError, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.hkCoral)
                         .accessibilityIdentifier("request-action-error")
                 } else if localExample == nil, fixtureStore == nil,
                           request.lifecycleStatus == .open,
                           let reason = store.actionUnavailableReason(for: request.key) {
                     Label(reason, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(detailColors.secondaryTextColor)
+                        .foregroundStyle(detailColors.secondary)
                         .accessibilityIdentifier("request-action-unavailable")
                 }
                 if let statusText = answerStatusText {
                     Text(statusText)
                         .font(.subheadline)
-                        .foregroundStyle(detailColors.secondaryTextColor)
+                        .foregroundStyle(detailColors.secondary)
                         .accessibilityIdentifier("request-receipt-evidence")
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .foregroundStyle(detailColors.textColor)
-            .tint(detailColors.textColor)
+            .foregroundStyle(detailColors.text)
+            .tint(detailColors.text)
         }
         .toolbar {
             if skippedMessageWarning != nil {
@@ -1909,11 +1892,16 @@ struct LiveRequestDetail: View {
                         if localExample.localSeenSelected {
                             EmptyView()
                         } else {
-                            Button("Finish locally", systemImage: "checkmark") {
+                            Button {
                                 closeReplyEditor()
                                 localExample.finishLocally()
+                            } label: {
+                                Label("Finish locally", systemImage: "checkmark")
+                                    .labelStyle(.iconOnly)
+                                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).onInverse)
                             }
-                            .labelStyle(.iconOnly)
+                            .buttonStyle(.glassProminent)
+                            .tint(HarklightDesignSystem.palette(for: colorScheme).inverse)
                             .disabled(!localExample.canFinishLocally || localExample.finished)
                             .accessibilityIdentifier("sample-finish")
                         }
@@ -1970,8 +1958,11 @@ struct LiveRequestDetail: View {
         }
         .sheet(isPresented: $chatPresented, onDismiss: { pendingChatScrollTarget = nil }) {
             conversationPanel
+                .padding(.top, 20)
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
+                .presentationDragIndicator(.visible)
+                .harklightSheetSurface()
         }
         .onChange(of: context.inlineChat) { _, inline in
             if inline { chatPresented = false }
@@ -2048,7 +2039,7 @@ struct LiveRequestDetail: View {
     }
 
     private var submitReplyButton: some View {
-        Button(submitLabel, systemImage: "checkmark") {
+        Button {
             let submitted: Bool
             if let fixtureStore {
                 let sent: Bool
@@ -2093,8 +2084,13 @@ struct LiveRequestDetail: View {
             replyDraftSession = nil
             closeReplyEditor()
             returnToListIfSinglePane()
+        } label: {
+            Label(submitLabel, systemImage: "checkmark")
+                .labelStyle(.iconOnly)
+                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).onInverse)
         }
-        .labelStyle(.iconOnly)
+        .buttonStyle(.glassProminent)
+        .tint(HarklightDesignSystem.palette(for: colorScheme).inverse)
         .disabled(isEditingLocalReply
                   ? !canSubmitCurrentAnswer
                   : (fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer))
@@ -2127,7 +2123,7 @@ struct LiveRequestDetail: View {
     }
 
     private var chatButton: some View {
-        Button("Chat", systemImage: "bubble.left.and.bubble.right") {
+        Button {
             if localExample == nil {
                 activatePassivePushContent()
                 NativePushedViewCoordinator.shared.recordOwnOpen()
@@ -2138,8 +2134,12 @@ struct LiveRequestDetail: View {
             } else {
                 chatPresented = true
             }
+        } label: {
+            Label("Chat", systemImage: "bubble.left")
+                .labelStyle(.iconOnly)
+                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).text)
         }
-        .labelStyle(.iconOnly)
+        .tint(HarklightDesignSystem.palette(for: colorScheme).text)
         .badge(conversationIndicator == true ? 1 : 0)
         .accessibilityLabel("Chat")
         .accessibilityHint(conversationIndicator == true ? "Unread conversation" : "")
@@ -2202,17 +2202,6 @@ struct LiveRequestDetail: View {
         return storePresentationSnapshot.conversationIndicator
     }
 
-    private var noticeTextColor: Color {
-        switch localExample?.message.kind {
-        case .some(.error): Color(red: 0.48, green: 0, blue: 0.04)
-        case .some(.warning): Color(red: 0.36, green: 0.24, blue: 0)
-        case .some(.completed): Color(red: 0.10, green: 0.37, blue: 0.16)
-        default: colorScheme == .dark
-            ? Color(uiColor: .secondaryLabel)
-            : Color(red: 0.04, green: 0.23, blue: 0.43)
-        }
-    }
-
     private var conversationPanel: some View {
         ConversationPanel(store: store, key: request.key,
             sender: detailSenderLabel, title: request.title?.rawValue ?? "",
@@ -2272,7 +2261,7 @@ struct HistoricalAnswerDraftView: View {
                 Text(MessageMarkdown.attributed(body.rawValue)).font(.body)
             }
             Text(retracted ? "Saved answer · request retracted. Its original wording and choices are retained." : "Not delivered · this selection belongs to the earlier question")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(.hkSecondary)
             switch request.projection {
             case let .sender(sender):
                 LiveProjectedSceneView(request: request, sender: sender, node: sender.scene,
@@ -2440,7 +2429,7 @@ private struct HistoricalMessageOverview: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Version \(version)")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.hkSecondary)
                 .accessibilityIdentifier("historical-version-number")
             Text(title)
                 .font(.title2.weight(.semibold))
@@ -2497,7 +2486,7 @@ private struct HistoricalMessageReadOnlyResponse: View {
                 replyTextBinding: replyTextBinding)
         case .unsupported:
             Text("This message version uses an unsupported answer format.")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(.callout).foregroundStyle(.hkSecondary)
         }
     }
 }
@@ -2663,8 +2652,8 @@ private struct LiveProjectedInputView: View {
         }
     }
 
-    private var detailColors: HarklightDesignSource.MessageType {
-        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    private var detailColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
     private var draft: InputDraft? {
@@ -2707,15 +2696,18 @@ private struct LiveProjectedInputView: View {
         return TextField(
             input.label.rawValue,
             text: textBinding,
-            prompt: Text(input.label.rawValue).foregroundColor(Color.white),
+            prompt: Text(input.label.rawValue).foregroundColor(detailColors.secondary),
             axis: .vertical
         )
             .lineLimit(4...8)
             .textFieldStyle(.plain)
-            .foregroundStyle(Color.white)
-            .tint(Color.white)
-            .padding(8)
-            .background(replyEditorSurface, in: RoundedRectangle(cornerRadius: 8))
+            .harklightType(.messageBody)
+            .foregroundStyle(detailColors.text)
+            .tint(detailColors.text)
+            .padding(12)
+            .background(detailColors.field, in: RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.small)))
+            .overlay(RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.small))
+                .strokeBorder(detailColors.line, lineWidth: HarklightDesignSystem.shape(.lineWidth)))
             .accessibilityLabel(input.label.rawValue)
             .accessibilityIdentifier("request-input-" + input.id.rawValue)
             .focused($focusedReplyActionID, equals: target.actionIdentifier)
@@ -2740,9 +2732,6 @@ private struct LiveProjectedInputView: View {
         }
     }
 
-    private var replyEditorSurface: Color {
-        HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor
-    }
 
     private func activate(_ action: ProjectedAction) {
         withAnimation(.smooth(duration: 0.25), completionCriteria: .logicallyComplete) {
@@ -2783,10 +2772,6 @@ private struct LiveProjectedInputView: View {
                         multiple: false, suggested: false,
                         ownAnswer: action.id.rawValue == "own",
                         style: action.style,
-                        textColor: detailColors.textColor,
-                        selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
-                        replySurface: replyEditorSurface,
-                        inputSurface: ReplyInputSurfaceStyle.fill(for: colorScheme),
                         target: target, isReadOnly: readOnly,
                         onOpen: { activate(action) })
     }
@@ -2999,8 +2984,8 @@ private struct LiveCompatibilityActions: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
 
-    private var detailColors: HarklightDesignSource.MessageType {
-        HarklightDesignSystem.palette(for: colorScheme).messageType(messageType)
+    private var detailColors: HarklightMessageColors {
+        HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
     private var selected: ExactText? {
@@ -3056,10 +3041,6 @@ private struct LiveCompatibilityActions: View {
                         isEditing: activeReplyEditor == target,
                         multiple: false, suggested: suggested, ownAnswer: false,
                         style: action.style,
-                        textColor: detailColors.textColor,
-                        selectedColor: HarklightDesignSystem.palette(for: colorScheme).detail.selectedChoiceColor,
-                        replySurface: HarklightDesignSystem.palette(for: colorScheme).detail.replyFieldColor,
-                        inputSurface: ReplyInputSurfaceStyle.fill(for: colorScheme),
                         target: target, isReadOnly: readOnly,
                         onOpen: { activate(action) })
     }
@@ -3082,7 +3063,7 @@ private struct LiveCompatibilityActions: View {
             VStack(alignment: .leading, spacing: 8) {
                 Label("FYI", systemImage: "info.circle.fill")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(detailColors.secondaryTextColor)
+                    .foregroundStyle(detailColors.label)
                     .accessibilityIdentifier("request-seen-form-label")
                 switch seenStatus {
                 case .available:
@@ -3096,12 +3077,13 @@ private struct LiveCompatibilityActions: View {
                         }
                     } label: {
                         Label("Seen", systemImage: "eye")
-                            .font(.body)
-                            .foregroundStyle(detailColors.textColor)
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(detailColors.text)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 6)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
-                    .tint(detailColors.textColor)
+                    .buttonStyle(.glass)
+                    .controlSize(.large)
                     .fixedSize(horizontal: true, vertical: false)
                     .disabled(sendDisabled)
                     .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
@@ -3111,15 +3093,15 @@ private struct LiveCompatibilityActions: View {
                     Button {} label: {
                         HStack(spacing: 10) {
                             Image(systemName: "clock")
-                                .foregroundStyle(detailColors.secondaryTextColor)
+                                .foregroundStyle(detailColors.secondary)
                             Text(seenActionPresentation.title)
-                                .foregroundStyle(detailColors.secondaryTextColor)
+                                .foregroundStyle(detailColors.secondary)
                         }
                         .font(.headline)
                         .frame(maxWidth: .infinity, minHeight: 50)
                     }
                     .buttonStyle(.glass)
-                    .tint(detailColors.secondaryTextColor)
+                    .tint(detailColors.secondary)
                     .disabled(true)
                     .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
                     .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
