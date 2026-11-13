@@ -1525,14 +1525,23 @@ public actor NativeRelayCore {
         activeInboxReplay = ReplayProgress(expected: cursor, durableCursor: snapshot.cursor)
         defer { activeInboxReplay = nil }
         let ref = Self.inboxRef("replay")
-        try await transport.attachInboxReplay(
-            inboxWire.inboxReplayAttach(snapshotID: snapshotID, since: cursor, ref: ref), ref: ref) { frame in
-                try await self.consumeInboxReplay(frame, ref: ref,
-                                                   snapshotID: snapshotID, highWater: highWater)
+        do {
+            try await transport.attachInboxReplay(
+                inboxWire.inboxReplayAttach(snapshotID: snapshotID, since: cursor, ref: ref), ref: ref) { frame in
+                    try await self.consumeInboxReplay(frame, ref: ref,
+                                                       snapshotID: snapshotID, highWater: highWater)
+                }
+            try validate()
+            guard let high = activeInboxReplay?.high else { throw NativeRelayCoreError.invalidReplay }
+            return high
+        } catch {
+            // Save the validated prefix once at the interruption boundary,
+            // rather than rewriting every message body for every wire frame.
+            if try store.relayCursor(context: context) > cursor {
+                try await saveServerStateCache()
             }
-        try validate()
-        guard let high = activeInboxReplay?.high else { throw NativeRelayCoreError.invalidReplay }
-        return high
+            throw error
+        }
     }
 
     private func consumeInboxReplay(_ frame: Data, ref: String,
@@ -1586,7 +1595,6 @@ public actor NativeRelayCore {
             return
         }
         activeInboxReplay = replay
-        try await saveServerStateCache()
     }
 
     private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession,
@@ -1772,64 +1780,73 @@ public actor NativeRelayCore {
                                     wire: ConversationWire) async throws -> UInt64 {
         try validate()
         defer { conversationReplay = nil }
-        var since = cursor
-        while true {
-            conversationReplay = ConversationReplayProgress(expected: since,
-                durableCursor: try store.conversationSnapshot(context: context).cursor)
-            try await transport.openConversation(wire.open(since: since)) { frame in
-                try await self.consumeConversationReplay(frame)
-            }
-            try validate()
-            guard let replay = conversationReplay, let high = replay.high else {
-                throw NativeRelayCoreError.invalidReplay
-            }
-            guard let receipt = replay.recoveryReceipt, let rejection = replay.recoveryRejection else {
-                return high
-            }
-            // The first response is fully drained, but the failed receipt and
-            // its suffix have not advanced the store or been acknowledged.
-            conversationRecoveryAttempts.insert(receipt.sequence)
-            conversationReplay = ConversationReplayProgress(expected: 0,
-                durableCursor: try store.conversationSnapshot(context: context).cursor,
-                recoveryReceipt: receipt, recoveryRejection: rejection,
-                recoveryOrigin: replay.recoveryOrigin, recoveryHandle: replay.recoveryHandle,
-                historyOnly: true)
-            do {
-                try await transport.openConversation(wire.open(since: 0)) { frame in
+        do {
+            var since = cursor
+            while true {
+                conversationReplay = ConversationReplayProgress(expected: since,
+                    durableCursor: try store.conversationSnapshot(context: context).cursor)
+                try await transport.openConversation(wire.open(since: since)) { frame in
                     try await self.consumeConversationReplay(frame)
                 }
-            } catch InstallationTransportError.serverRejected {
-                try skipConversationMessage(receipt.sequence, error: InstallationTransportError.serverRejected,
-                    event: receipt, rejection: rejection)
-                since = try store.conversationSnapshot(context: context).cursor
-                continue
-            } catch InstallationTransportError.conversationsUnavailable {
-                try skipConversationMessage(receipt.sequence, error: InstallationTransportError.conversationsUnavailable,
-                    event: receipt, rejection: rejection)
-                since = try store.conversationSnapshot(context: context).cursor
-                continue
-            }
-            try validate()
-            guard let history = conversationReplay, history.high != nil else {
-                throw NativeRelayCoreError.invalidReplay
-            }
-            if let target = history.historyTarget, !history.historyUnusable {
+                try validate()
+                guard let replay = conversationReplay, let high = replay.high else {
+                    throw NativeRelayCoreError.invalidReplay
+                }
+                guard let receipt = replay.recoveryReceipt, let rejection = replay.recoveryRejection else {
+                    return high
+                }
+                // The first response is fully drained, but the failed receipt and
+                // its suffix have not advanced the store or been acknowledged.
+                conversationRecoveryAttempts.insert(receipt.sequence)
+                conversationReplay = ConversationReplayProgress(expected: 0,
+                    durableCursor: try store.conversationSnapshot(context: context).cursor,
+                    recoveryReceipt: receipt, recoveryRejection: rejection,
+                    recoveryOrigin: replay.recoveryOrigin, recoveryHandle: replay.recoveryHandle,
+                    historyOnly: true)
                 do {
-                    try store.restoreReferencedConversationTurn(target, for: receipt,
-                        origin: replay.recoveryOrigin, context: context)
-                } catch {
-                    guard isUnusableConversationMessage(error) else { throw error }
-                    try skipConversationMessage(receipt.sequence, error: error,
+                    try await transport.openConversation(wire.open(since: 0)) { frame in
+                        try await self.consumeConversationReplay(frame)
+                    }
+                } catch InstallationTransportError.serverRejected {
+                    try skipConversationMessage(receipt.sequence, error: InstallationTransportError.serverRejected,
+                        event: receipt, rejection: rejection)
+                    since = try store.conversationSnapshot(context: context).cursor
+                    continue
+                } catch InstallationTransportError.conversationsUnavailable {
+                    try skipConversationMessage(receipt.sequence, error: InstallationTransportError.conversationsUnavailable,
+                        event: receipt, rejection: rejection)
+                    since = try store.conversationSnapshot(context: context).cursor
+                    continue
+                }
+                try validate()
+                guard let history = conversationReplay, history.high != nil else {
+                    throw NativeRelayCoreError.invalidReplay
+                }
+                if let target = history.historyTarget, !history.historyUnusable {
+                    do {
+                        try store.restoreReferencedConversationTurn(target, for: receipt,
+                            origin: replay.recoveryOrigin, context: context)
+                    } catch {
+                        guard isUnusableConversationMessage(error) else { throw error }
+                        try skipConversationMessage(receipt.sequence, error: error,
+                            event: receipt, rejection: rejection)
+                    }
+                } else {
+                    try skipConversationMessage(receipt.sequence, error: ConversationError.invalidBinding,
                         event: receipt, rejection: rejection)
                 }
-            } else {
-                try skipConversationMessage(receipt.sequence, error: ConversationError.invalidBinding,
-                    event: receipt, rejection: rejection)
+                // History open moves the socket's stream position. Replay from the
+                // durable cursor so neither the drained suffix nor events
+                // arriving during recovery are mistaken for committed progress.
+                since = try store.conversationSnapshot(context: context).cursor
             }
-            // History open moves the socket's stream position. Replay from the
-            // durable cursor so neither the drained suffix nor events
-            // arriving during recovery are mistaken for committed progress.
-            since = try store.conversationSnapshot(context: context).cursor
+        } catch {
+            // A reset/cancellation retains the contiguous prefix, including
+            // held facts, before the lifecycle replaces this replay session.
+            if try store.conversationSnapshot(context: context).cursor > cursor {
+                try await saveServerStateCache()
+            }
+            throw error
         }
     }
 
@@ -1894,7 +1911,6 @@ public actor NativeRelayCore {
                 }
                 replay.expected = sequence
                 conversationReplay = replay
-                if !replay.historyOnly && replay.recoveryReceipt == nil { try await saveServerStateCache() }
                 return
             }
             switch update {
@@ -1985,7 +2001,6 @@ public actor NativeRelayCore {
             }
         }
         conversationReplay = replay
-        if !replay.historyOnly && replay.recoveryReceipt == nil { try await saveServerStateCache() }
     }
 
     /// Message rejection can be accounted for; a failed durable write, stale

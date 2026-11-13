@@ -1,4 +1,5 @@
 import AttentionDomain
+import CryptoKit
 import Foundation
 @testable import HarklightNativeRelay
 import XCTest
@@ -1227,6 +1228,96 @@ final class NativeRelayCoreTests: XCTestCase {
         let visible = try port.observe(context: port.context)
         XCTAssertEqual(visible.requests.first?.body?.rawValue, body)
         XCTAssertEqual(session.acknowledgements.count, 1)
+    }
+
+    private final class CacheScaleSession: Session, AuthenticatedConversationSession, @unchecked Sendable {
+        var conversationFrames: [Data] = []
+        var conversationAcknowledgements: [Data] = []
+        func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+            for frame in conversationFrames { try await consume(frame) }
+        }
+        func acknowledgeConversation(_ request: Data) async throws {
+            conversationAcknowledgements.append(request)
+        }
+    }
+
+    private actor MeasuredFileCache: ServerStateCaching {
+        let file: FileServerStateCache
+        let url: URL
+        private(set) var writes: [(ordinary: UInt64, conversation: UInt64, bytes: Int)] = []
+        init(identity: ProfileIdentity, url: URL) {
+            self.url = url
+            file = FileServerStateCache(identity: identity, fileURL: url)
+        }
+        func load() async throws -> ServerStateCacheSnapshot? { try await file.load() }
+        func discard() async throws { try await file.discard() }
+        func save(_ snapshot: ServerStateCacheSnapshot) async throws {
+            try await file.save(snapshot)
+            writes.append((snapshot.cursor, snapshot.conversationCursor, try Data(contentsOf: url).count))
+        }
+    }
+
+    func testThreeHundredMessageReplayWritesAtBoundariesWithoutDuplicatingAppliedConversationEvents() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("scale-person"), deviceID: ExactText("scale-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let session = CacheScaleSession(identity)
+        let attachment = Data(repeating: 42, count: 4096)
+        let file: [String: Any] = ["name": "context.txt", "tier": "inline", "size": attachment.count,
+            "data_base64": attachment.base64EncodedString(),
+            "sha256": SHA256.hash(data: attachment).map { String(format: "%02x", $0) }.joined()]
+        var ordinary: [Data] = []
+        var conversation: [Data] = []
+        for index in 1...300 {
+            ordinary.append(try JSONSerialization.data(withJSONObject: [
+                "v": 1, "type": "delivery", "seq": index, "sender_id": "sender", "message_id": "m\(index)",
+                "origin": "origin", "as": "message", "request_revision": 1,
+                "session_handle": "session-\(index)", "event_id": "request-\(index)",
+                "message": ["title": "Question \(index)", "body": String(repeating: "context ", count: 128)],
+                "files": [file]
+            ]))
+            conversation.append(try JSONSerialization.data(withJSONObject: [
+                "v": 1, "type": "conversation", "conversation_seq": 2 * index - 1,
+                "sender_id": "sender", "message_id": "m\(index)", "request_revision": 2,
+                "origin": "origin", "session_handle": "session-\(index)", "kind": "revision",
+                "author": "origin", "event_id": "revision-\(index)", "message": ["title": "Updated \(index)"]
+            ]))
+            conversation.append(try JSONSerialization.data(withJSONObject: [
+                "v": 1, "type": "conversation", "conversation_seq": 2 * index,
+                "sender_id": "sender", "message_id": "m\(index)", "request_revision": 2,
+                "origin": "origin", "session_handle": "session-\(index)", "kind": "discussion",
+                "author": "person", "event_id": "chat-\(index)", "text": "Discuss the updated request", "files": [file]
+            ]))
+        }
+        session.frames = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#)] + ordinary +
+            [data(#"{"v":1,"type":"resynced","seq":300}"#)]
+        session.conversationFrames = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#)] +
+            conversation + [data(#"{"v":1,"type":"conversation_resynced","conversation_seq":600}"#)]
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = MeasuredFileCache(identity: identity, url: directory.appendingPathComponent("cache.json"))
+        let core = try NativeRelayCore(store: store, context: context, session: session, serverStateCache: cache)
+        _ = try await core.resyncAndDrainOutbox()
+        let writes = await cache.writes
+        XCTAssertEqual(writes.map(\.ordinary), [0, 300, 300],
+                       "Write the initial checkpoint and completed replay boundaries, not each frame.")
+        XCTAssertEqual(writes.map(\.conversation), [0, 0, 600])
+        let loaded = try await cache.load()
+        let saved = try XCTUnwrap(loaded)
+        XCTAssertEqual(saved.requests.count, 300)
+        XCTAssertEqual(saved.conversations.count, 300)
+        XCTAssertEqual(saved.conversationCursor, 600)
+        XCTAssertTrue(saved.conversationEvents?.isEmpty == true,
+                      "Applied conversation facts already exist in the thread projection.")
+        let restored = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try restored.restoreCachedServerState(saved.attentionDomainState(for: identity), context: context)
+        let threads = try restored.conversationSnapshot(context: context).threads.values
+        XCTAssertTrue(threads.allSatisfy { $0.currentRevision == 2 && $0.turns.count == 3 })
+        XCTAssertTrue(threads.allSatisfy { $0.turns.last?.files.first?.byteCount == 4096 })
+        print("CACHE_SCALE messages=300 conversation_events=600 attachment_bytes=\(attachment.count * 600) " +
+              "writes=\(writes.count) written_bytes=\(writes.reduce(0) { $0 + $1.bytes }) final_bytes=\(writes.last?.bytes ?? 0)")
+        await core.deactivate()
     }
 
     private final class ConversationResetSession: Session, AuthenticatedConversationSession, @unchecked Sendable {

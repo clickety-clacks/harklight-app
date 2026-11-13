@@ -99,7 +99,7 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
                                         chatReadPositions: conversations.chatReadPositions,
                                         pendingRelayOverlays: inbox.pendingRelayOverlays,
                                         inboxReferences: inbox.inboxReferences,
-                                        conversationEvents: conversations.events)
+                                        conversationEvents: conversations.heldEvents)
     }
 
     public func attentionDomainState(for identity: ProfileIdentity) throws -> CachedAttentionServerState {

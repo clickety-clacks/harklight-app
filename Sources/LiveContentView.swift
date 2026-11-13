@@ -532,8 +532,8 @@ struct LiveContentView: View {
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
         let failureKey = launch?.foregroundConnectFailureKey
         let diagnostic = launch?.foregroundConnectDiagnostic
-        let connectionStatus = showsRecovery ? progress?.headline : store.connectionWarning
-        let connectionWarning = showsRecovery ? progress?.message : store.connectionWarning
+        let connectionStatus = showsRecovery ? progress?.userFacingMessage : store.connectionWarning
+        let connectionWarning = showsRecovery ? progress?.userFacingMessage : store.connectionWarning
         let presentsFailureDetails = !store.isReadOnly && diagnostic != nil &&
             (failureKey.map { launch?.shouldPresentForegroundConnectFailure($0) ?? false } ?? false)
         let failureAlertPresented = Binding<Bool>(
@@ -610,7 +610,7 @@ struct LiveContentView: View {
                     }
                 }
             } message: { diagnostic in
-                Text(diagnostic.progress.message)
+                Text(diagnostic.progress.userFacingMessage)
             }
             .onChange(of: store.presentation.revision) { _, _ in
                 fixtureStore?.refreshFromDurableStore()

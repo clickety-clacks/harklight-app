@@ -15,6 +15,23 @@ final class ForegroundErrorSummaryTests: XCTestCase {
             appVersion: "test", buildNumber: "test", executableSHA256: "unavailable").shareText
     }
 
+    func testUserStatusKeepsReplayDetailsInDiagnosticCopyOnly() {
+        let outcomes: [NativeForegroundConnectProgress.Outcome] = [.connecting, .incomplete, .confirmed]
+        for outcome in outcomes {
+            let progress = NativeForegroundConnectProgress(lastConfirmedStage: .nativeSyncResynced,
+                webSocketOpenObserved: true, issue: nil, outcome: outcome)
+            for technical in ["replay high-water", "relay acknowledgement", "foreground completion"] {
+                XCTAssertFalse(progress.userFacingMessage.contains(technical))
+            }
+            if outcome != .confirmed {
+                XCTAssertTrue(progress.userFacingMessage.contains("pending actions are saved"))
+                XCTAssertTrue(progress.message.contains("relay acknowledgement"))
+                XCTAssertTrue(summary(progress).contains("last_confirmed_phase=native_sync_resynced"))
+                XCTAssertTrue(summary(progress).contains("post_ack_drain=not_started"))
+            }
+        }
+    }
+
     func testActualResetAndClosureReconnectButRefusalAndCancellationDoNot() {
         for error in [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .ENOTCONN, .EPIPE] {
             XCTAssertTrue(NativeRelayLifecycle.isInterruptedConnection(

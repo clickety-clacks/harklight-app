@@ -1188,6 +1188,12 @@ public struct ConversationSnapshot: Sendable {
     public let pendingChatReadPositions: [PendingConversationReadPosition]
     public let events: [UInt64: ConversationEvent]
 
+    /// Applied facts already live in threads or read positions. Only facts
+    /// waiting for an older request page need a separate durable copy.
+    public var heldEvents: [UInt64: ConversationEvent] {
+        events.filter { threads[$0.value.binding.request] == nil && $0.value.requiresLoadedThread }
+    }
+
     public init(cursor: UInt64, threads: [RequestKey: ConversationThread],
                 chatReadPositions: [RequestKey: UInt64]? = nil,
                 chatReadPositionSupport: Bool? = nil,

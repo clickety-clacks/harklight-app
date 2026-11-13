@@ -8,6 +8,21 @@ import XCTest
 final class TwoDeviceServerCacheUITests: XCTestCase {
     private let observationTimeout: TimeInterval = 30
 
+    func testMessageOpensDuringPostAckCatchUp() throws {
+        try requireCatchUpRun()
+        let message = try configuredMessage("SEEN")
+        let app = launchEnrolledApp()
+        let row = try findMessage(message, in: app)
+        try requireActiveCatchUp(app, stage: "before-opening-message")
+        try tap(row, stage: "open-message-during-catch-up", in: app)
+        guard app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5) else {
+            snapshot("detail-missing-during-catch-up", app)
+            throw Failure.missing("message detail during catch-up")
+        }
+        try requireActiveCatchUp(app, stage: "after-opening-message")
+        snapshot("detail-open-during-catch-up", app)
+    }
+
     /// The isolated relay must keep real post-ACK conversation replay open.
     /// This driver never toggles a fake refreshing flag or enrolls a device.
     func testSearchBothSwipesAndChatDuringPostAckCatchUp() throws {
@@ -84,7 +99,7 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
 
     private func requireCatchUpRun() throws {
         guard ProcessInfo.processInfo.environment["HARKLIGHT_ACTIVE_CATCHUP_UI"] == "1" else {
-            throw XCTSkip("Requires the isolated relay's controlled active replay and dedicated action rows.")
+            throw XCTSkip("Requires observed active catch-up on the isolated Server and dedicated action rows.")
         }
     }
 

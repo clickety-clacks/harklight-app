@@ -41,6 +41,8 @@ final class ServerCacheReplacementTests: XCTestCase {
             from: repository.serverCacheSnapshot(context: context),
             conversations: repository.conversationSnapshot(context: context)))
         let stored = try await FileServerStateCache(identity: context.identity, fileURL: path).load()
+        XCTAssertEqual(stored?.conversationEvents?.count, 1,
+                       "The held fact must survive until its older request is loaded.")
         let restored = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         try restored.restoreCachedServerState(XCTUnwrap(stored).attentionDomainState(for: context.identity), context: context)
         _ = try restored.beginInboxCandidate(startupID: "after-reset", since: 0, batches: [], context: context)
@@ -59,6 +61,10 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertEqual(conversation.cursor, 1)
         XCTAssertEqual(conversation.threads[key]?.turns.map(\.id), [turn.id])
         XCTAssertEqual(conversation.threads[key]?.turns.first?.text, turn.text)
+        let hydrated = ServerStateCacheSnapshot.make(identity: context.identity,
+            from: restored.serverCacheSnapshot(context: context), conversations: conversation)
+        XCTAssertTrue(hydrated.conversationEvents?.isEmpty == true,
+                      "The hydrated thread replaces the held journal copy.")
     }
 
     func testSnapshotReplacesChangedPayloadAndAcceptanceOrderWithoutStoppingOtherRows() throws {

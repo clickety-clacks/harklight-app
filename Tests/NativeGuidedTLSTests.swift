@@ -1439,7 +1439,12 @@ final class NativeGuidedTLSTests: XCTestCase {
                            kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
         }
         let requests = ConversationFrameCollector()
-        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID, closeAfterReply: { text in
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  value.uniqueValue(named: "type")?.stringValue == ExactText("conversation_open"),
+                  let since = value.uniqueValue(named: "since")?.integerValue else { return false }
+            return since == 0 || since == 1
+        }) { text in
             requests.append(Data(text.utf8))
             guard let value = try? JSONValue.parse(Data(text.utf8)),
                   let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
@@ -1460,8 +1465,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                 guard (0...2).contains(since) else { return [ok + "}\n"] }
                 let sequence = since + 1
                 let turn = "{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(sequence),\"sender_id\":\"sender\",\"message_id\":\"conversation\",\"request_revision\":1,\"origin\":\"origin\",\"session_handle\":\"session\",\"kind\":\"discussion\",\"author\":\"person\",\"event_id\":\"turn-\(sequence)\",\"text\":\"Server turn \(sequence)\"}\n"
-                // The cache observer disconnects only after turns 1 and 2 are
-                // durably saved. Neither interrupted replay has an end frame.
+                // Close the actual socket after writing turns 1 and 2. The
+                // client must save its prefix on failure, without a cache-triggered reset.
                 return [ok + "}\n", turn] + (sequence == 3
                     ? [#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"# + "\n"] : [])
             default: return [ok + "}\n"]
@@ -1474,9 +1479,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let cacheURL = directory.appendingPathComponent("cache.json")
-        let cache = DisconnectingConversationCache(identity: context.identity, url: cacheURL) {
-            relay.disconnectClients()
-        }
+        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
         let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let lifecycle = NativeRelayLifecycle()
         try await lifecycle.activate(store: store, context: context,
@@ -4507,11 +4510,15 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "Harklight.local-relay-websocket")
     private let reply: @Sendable (String) -> [String]
+    private let closeAfterReply: @Sendable (String) -> Bool
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
 
-    init(expectedDevice: String, reply: @escaping @Sendable (String) -> [String]) throws {
+    init(expectedDevice: String,
+         closeAfterReply: @escaping @Sendable (String) -> Bool = { _ in false },
+         reply: @escaping @Sendable (String) -> [String]) throws {
         self.reply = reply
+        self.closeAfterReply = closeAfterReply
         let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
         rootDER = root
         let webSocket = NWProtocolWebSocket.Options()
@@ -4558,7 +4565,12 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
                 as? NWProtocolWebSocket.Metadata
             if metadata?.opcode == .text, let data, let text = String(data: data, encoding: .utf8) {
-                for frame in reply(text) {
+                let frames = reply(text)
+                if closeAfterReply(text) {
+                    sendThenClose(frames[...], on: connection)
+                    return
+                }
+                for frame in frames {
                     let context = NWConnection.ContentContext(
                         identifier: "relay-frame", metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])
                     connection.send(content: Data(frame.utf8), contentContext: context, isComplete: true,
@@ -4569,12 +4581,22 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
         }
     }
 
-    /// Interrupt active sockets while leaving the listener available for reconnect.
-    func disconnectClients() {
-        queue.sync {
-            connections.forEach { $0.forceCancel() }
-            connections.removeAll()
+    private func sendThenClose(_ frames: ArraySlice<String>, on connection: NWConnection) {
+        guard let frame = frames.first else {
+            let close = NWConnection.ContentContext(identifier: "relay-close",
+                metadata: [NWProtocolWebSocket.Metadata(opcode: .close)])
+            // Going Away: a real closed WebSocket after the preceding data frames.
+            connection.send(content: Data([0x03, 0xe9]), contentContext: close, isComplete: true,
+                completion: .contentProcessed { _ in connection.cancel() })
+            return
         }
+        let context = NWConnection.ContentContext(identifier: "relay-frame",
+            metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])
+        connection.send(content: Data(frame.utf8), contentContext: context, isComplete: true,
+            completion: .contentProcessed { [weak self] error in
+                guard error == nil else { connection.cancel(); return }
+                self?.sendThenClose(frames.dropFirst(), on: connection)
+            })
     }
 
     func close() {
@@ -4583,25 +4605,6 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             connections.forEach { $0.cancel() }
             connections.removeAll()
         }
-    }
-}
-
-/// Fault injection observes the existing cache seam after an actual file write.
-private actor DisconnectingConversationCache: ServerStateCaching {
-    private let file: FileServerStateCache
-    private let disconnect: @Sendable () -> Void
-    private var disconnected: Set<UInt64> = []
-
-    init(identity: ProfileIdentity, url: URL, disconnect: @escaping @Sendable () -> Void) {
-        file = FileServerStateCache(identity: identity, fileURL: url)
-        self.disconnect = disconnect
-    }
-    func load() async throws -> ServerStateCacheSnapshot? { try await file.load() }
-    func discard() async throws { try await file.discard() }
-    func save(_ snapshot: ServerStateCacheSnapshot) async throws {
-        try await file.save(snapshot)
-        let cursor = snapshot.conversationCursor
-        if (cursor == 1 || cursor == 2), disconnected.insert(cursor).inserted { disconnect() }
     }
 }
 
