@@ -62,7 +62,7 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertEqual(conversation.threads[key]?.turns.map(\.id), [turn.id])
         XCTAssertEqual(conversation.threads[key]?.turns.first?.text, turn.text)
         let hydrated = ServerStateCacheSnapshot.make(identity: context.identity,
-            from: restored.serverCacheSnapshot(context: context), conversations: conversation)
+            from: try restored.serverCacheSnapshot(context: context), conversations: conversation)
         XCTAssertTrue(hydrated.conversationEvents?.isEmpty == true,
                       "The hydrated thread replaces the held journal copy.")
     }
