@@ -1761,9 +1761,6 @@ final class NativeGuidedTLSTests: XCTestCase {
             personID: ExactText("history-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
         let persistence = MemoryPendingActionPersistence()
         let store = try ClientRepository(context: context, persistence: persistence)
-        // Synthetic saved-state precondition: the cursor passed a discussion
-        // whose local dependency is absent. No current-client loss is asserted.
-        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
         let requests = ConversationFrameCollector()
         let items = #"""
             [{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"answered","origin":"origin","as":"message","message":{"title":"Answered"},"session_handle":"closed","request_revision":1,"event_id":"1"},
@@ -1776,6 +1773,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         let arriving = #"{"v":1,"type":"conversation","conversation_seq":4,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":3,"kind":"revision","author":"origin","event_id":"6","message":{"title":"Newest"}}"# + "\n"
         let unusable = #"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":0,"kind":"revision","author":"origin","event_id":"bad"}"# + "\n"
         let suffix = historyAvailable ? pending : unusable
+        // Account a deliberately malformed history entry in this connection's
+        // generation; the following receipt then requires a history lookup.
+        let skippedHistory = #"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed","request_revision":1,"kind":"revision","author":"person","event_id":"unusable-history"}"# + "\n"
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
             guard let value = try? JSONValue.parse(Data(text.utf8)),
                   let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
@@ -1802,7 +1802,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 if count == 1 {
                     // The transport reader queues later frames while the core
                     // handles the missing target. A live frame follows the end.
-                    return [ok + "}\n", receipt, suffix,
+                    return [ok + "}\n", skippedHistory, receipt, suffix,
                             "{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":3}\n", arriving]
                 }
                 if since == 0 {
@@ -1812,7 +1812,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                     return [ok + "}\n", discussion, receipt, pending, arriving, end]
                 }
                 if since == 2 { return [ok + "}\n", suffix, arriving, end] }
-                if since == 1 { return [ok + "}\n", receipt, suffix, arriving, end] }
+                if since == 1 { return [ok + "}\n", skippedHistory, receipt, suffix, arriving, end] }
                 return [ok + "}\n", end]
             case "conversation_ack":
                 return [ok + ",\"conversation_seq\":4}\n"]
@@ -1825,7 +1825,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let session = try URLSessionInstallationSession(profile: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
             clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
+        let core = try NativeRelayCore(store: store, context: context, session: session, serverStateCache: cache)
         do {
             _ = try await core.resyncAndDrainOutbox()
         } catch {
@@ -1836,6 +1840,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         await core.deactivate()
         await session.close()
         let restored = try ClientRepository(context: context, persistence: persistence)
+        let saved = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
+        try restored.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(for: context.identity), context: context)
         let snapshot = try restored.conversationSnapshot(context: context)
         let answered = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("answered"))
@@ -1851,8 +1857,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(presentation.request(for: open)?.title, ExactText("Newest"))
         let values = try requests.snapshot().map { try JSONValue.parse($0) }
         let opens = values.filter { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open" }
-        XCTAssertEqual(Array(opens.prefix(3)).map { $0.uniqueValue(named: "since")?.integerValue }, [1, 0, historyAvailable ? 1 : 2])
-        XCTAssertEqual(opens.filter { $0.uniqueValue(named: "since")?.integerValue == 0 }.count, 1)
+        XCTAssertEqual(Array(opens.prefix(3)).map { $0.uniqueValue(named: "since")?.integerValue }, [0, 0, historyAvailable ? 1 : 2])
+        XCTAssertEqual(opens.filter { $0.uniqueValue(named: "since")?.integerValue == 0 }.count, 2,
+                       "The initial replay and one dependency lookup each start from zero.")
         let acks = values.filter { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_ack" }
         XCTAssertFalse(acks.isEmpty)
         XCTAssertTrue(acks.allSatisfy { $0.uniqueValue(named: "conversation_seq")?.integerValue == 4 })
