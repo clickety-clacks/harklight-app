@@ -195,9 +195,6 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let context = ProfileContext(identity: identity, transportMode: .relay)
             let persistence = MemoryPendingActionPersistence()
             let store = try ClientRepository(context: context, persistence: persistence)
-            // Explicit synthetic missing-local-history precondition. The Server
-            // sequence below produces a discussion followed by its origin ACK.
-            _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
             let session = InboxFreshnessRelaySession(identity: identity)
             session.readConversationCursor = { try store.conversationSnapshot(context: context).cursor }
             session.inboxStartHighWater = 3
@@ -218,8 +215,12 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let arriving = data(#"{"v":1,"type":"conversation","conversation_seq":4,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open-handle","request_revision":3,"kind":"revision","author":"origin","event_id":"6","message":{"title":"Newest update"}}"#)
             let high3 = data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
             let high4 = data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#)
+            // Construct the missing dependency in the current replay generation:
+            // a malformed sequence is durably skipped, then its receipt requires
+            // authenticated history recovery. This is a synthetic guard exercise.
+            let skippedHistory = data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed-handle","request_revision":1,"kind":"revision","author":"person","event_id":"unusable-history"}"#)
             session.conversationFrameBatches = [
-                [accepted, receipt, pending, high3],
+                [accepted, skippedHistory, receipt, pending, high3],
                 [accepted, discussion, receipt, pending, arriving, high4],
                 succeeds ? [accepted, receipt, pending, arriving, high4]
                          : [accepted, pending, arriving, high4],
@@ -228,14 +229,18 @@ final class InboxFreshnessReplayTests: XCTestCase {
             if historyCase == "refused" { session.conversationOpenErrors[2] = .serverRejected }
             session.rejectFirstConversationACK = true
             let diagnostics = InboxFreshnessDiagnosticCollector()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+            let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
             let core = try NativeRelayCore(store: store, context: context, session: session,
-                onDiagnostic: { diagnostics.append($0) })
+                serverStateCache: cache, onDiagnostic: { diagnostics.append($0) })
             _ = try await core.resyncAndDrainOutbox()
             XCTAssertEqual(session.conversationACKCountsAtOpen, [0, 0, 0, 1])
-            XCTAssertEqual(session.conversationCursorsAtOpen, [1, 1, succeeds ? 1 : 2, 4])
+            XCTAssertEqual(session.conversationCursorsAtOpen, [0, 1, succeeds ? 1 : 2, 4])
             XCTAssertEqual(try session.conversationOpens.map {
                 try JSONValue.parse($0).uniqueValue(named: "since")?.integerValue
-            }, [1, 0, succeeds ? 1 : 2, 0],
+            }, [0, 0, succeeds ? 1 : 2, 0],
                 "Only one dependency fetch; the last open is ACK-behind replay")
             XCTAssertEqual(try session.conversationACKs.map {
                 try JSONValue.parse($0).uniqueValue(named: "conversation_seq")?.integerValue
@@ -252,6 +257,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 XCTAssertEqual(skipped.requestRevision, 1)
             }
             let reloaded = try ClientRepository(context: context, persistence: persistence)
+            let saved = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+            try reloaded.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(for: identity), context: context)
             let snapshot = try reloaded.conversationSnapshot(context: context)
             func key(_ message: String) -> RequestKey {
                 RequestKey(accountScope: identity.personID, senderID: ExactText("author"),
