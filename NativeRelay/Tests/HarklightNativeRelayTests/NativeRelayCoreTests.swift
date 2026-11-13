@@ -101,7 +101,7 @@ final class NativeRelayCoreTests: XCTestCase {
         func recordedStates() -> [Bool] { states }
     }
 
-    private final class Session: AuthenticatedInboxEventStreamSession, @unchecked Sendable {
+    private class Session: AuthenticatedInboxEventStreamSession, @unchecked Sendable {
         var authenticatedIdentity: ProfileIdentity
         var supportsPostCheckpointInboxEvents = false
         var frames: [Data] = []
@@ -1229,6 +1229,80 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(session.acknowledgements.count, 1)
     }
 
+    private final class ConversationResetSession: Session, AuthenticatedConversationSession, @unchecked Sendable {
+        var resetAfterNextTurn = false
+        var conversationStarts: [UInt64] = []
+        var conversationAcknowledgements: [Data] = []
+
+        func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+            let value = try JSONValue.parse(request)
+            let since = UInt64(try XCTUnwrap(value.uniqueValue(named: "since")?.integerValue))
+            conversationStarts.append(since)
+            try await consume(Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#.utf8))
+            if since < 4 {
+                let sequence = since + 1
+                let turn: [String: Any] = ["v": 1, "type": "conversation", "conversation_seq": sequence,
+                    "sender_id": "sender", "message_id": "conversation", "request_revision": 1,
+                    "origin": "other-installation", "session_handle": "session", "kind": "discussion",
+                    "author": "person", "event_id": "turn-\(sequence)", "text": "Server turn \(sequence)"]
+                try await consume(JSONSerialization.data(withJSONObject: turn))
+                if resetAfterNextTurn { throw POSIXError(.ECONNRESET) }
+            }
+            try await consume(Data(#"{"v":1,"type":"conversation_resynced","conversation_seq":4}"#.utf8))
+        }
+
+        func acknowledgeConversation(_ request: Data) async throws {
+            conversationAcknowledgements.append(request)
+        }
+    }
+
+    func testConversationResetsResumeEachPersistedSuffixAcrossRelaunches() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let pending = MemoryPendingActionPersistence()
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("conversation"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let initial = try ClientRepository(context: context, persistence: pending)
+        try initial.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .object([]))), context: context)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("cache.json")
+        let cache = FileServerStateCache(identity: identity, fileURL: path)
+        var repository = initial
+        for expectedSince in UInt64(1)...3 {
+            let session = ConversationResetSession(identity)
+            session.snapshotHighWater = 1
+            session.initialItems = [snapshotItem(key, payload: .object([]))]
+            session.resetAfterNextTurn = expectedSince < 3
+            let core = try NativeRelayCore(store: repository, context: context, session: session,
+                                           serverStateCache: cache)
+            if session.resetAfterNextTurn {
+                do {
+                    _ = try await core.resyncAndDrainOutbox()
+                    XCTFail("The actual connection reset must remain an unconfirmed replay.")
+                } catch let error as POSIXError {
+                    XCTAssertEqual(error.code, .ECONNRESET)
+                }
+                XCTAssertTrue(session.conversationAcknowledgements.isEmpty)
+            } else {
+                _ = try await core.resyncAndDrainOutbox()
+                XCTAssertFalse(session.conversationAcknowledgements.isEmpty)
+            }
+            XCTAssertEqual(session.conversationStarts.first, expectedSince)
+            let cached = try await FileServerStateCache(identity: identity, fileURL: path).load()
+            let prefix = try XCTUnwrap(cached)
+            XCTAssertEqual(prefix.conversationCursor, expectedSince + 1)
+            await core.deactivate()
+            repository = try ClientRepository(context: context, persistence: pending)
+            try repository.restoreCachedServerState(prefix.attentionDomainState(for: identity), context: context)
+            let turns = try repository.conversationSnapshot(context: context).threads[key]?.turns ?? []
+            XCTAssertEqual(Set(turns.map(\.id)).count, Int(expectedSince))
+        }
+    }
+
     func testLargeInterruptedReplayResumesFromDurableCursorAndThenShowsInbox() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"),
@@ -1272,7 +1346,7 @@ final class NativeRelayCoreTests: XCTestCase {
         try restarted.restoreCachedServerState(prefix.attentionDomainState(for: identity), context: restartedContext)
         let secondSession = Session(identity)
         secondSession.snapshotHighWater = 5
-        secondSession.snapshotItems = try events.prefix(5).map {
+        secondSession.initialItems = try events.prefix(5).map {
             .object([JSONMember(key: ExactText("acceptance"), value: try JSONValue.parse($0))])
         }
         secondSession.frames = [start] + Array(events.dropFirst(5)) + [end]

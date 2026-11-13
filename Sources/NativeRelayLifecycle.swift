@@ -1712,27 +1712,11 @@ final class NativeRelayLifecycle {
 
     private func performRefreshAttempt(generation: UUID,
                                        checkBlockedPush: Bool) async -> NativeRelayRefreshResult {
-        // Refreshing the same session does not invalidate its last confirmed
-        // inbox. A transport failure/replacement does; sends still revalidate.
-        recordDiagnostic(.relay, .projectionRefresh, .began, attemptID: activeTransportAttemptID)
-        do {
-            let result = try await refreshOnce(generation: generation,
-                                               checkBlockedPush: checkBlockedPush)
-            recordDiagnostic(.relay, .projectionRefresh,
-                             result.relayConfirmed ? .completed : .unresolved,
-                             attemptID: activeTransportAttemptID)
-            return refreshGeneration == generation ? result : .unavailable
-        } catch {
-            guard refreshGeneration == generation else { return .unavailable }
-            recordDiagnostic(.relay, .projectionRefresh, .retrying, error: error,
-                             attemptID: activeTransportAttemptID)
-            foregroundProgress.recordFailure(error)
-            confirmedRelayContext = nil
-            // Retire an ambiguous WebSocket before retrying C's exact durable
-            // outbox and cursor once on a fresh authenticated session.
+        var needsReconnect = false
+        while refreshGeneration == generation && !Task.isCancelled {
             do {
-                try await reconnect(generation: generation)
-                guard refreshGeneration == generation else { return .unavailable }
+                if needsReconnect { try await reconnect(generation: generation) }
+                recordDiagnostic(.relay, .projectionRefresh, .began, attemptID: activeTransportAttemptID)
                 let result = try await refreshOnce(generation: generation,
                                                    checkBlockedPush: checkBlockedPush)
                 recordDiagnostic(.relay, .projectionRefresh,
@@ -1740,13 +1724,38 @@ final class NativeRelayLifecycle {
                                  attemptID: activeTransportAttemptID)
                 return refreshGeneration == generation ? result : .unavailable
             } catch {
-                guard refreshGeneration == generation else { return .unavailable }
-                recordDiagnostic(.relay, .projectionRefresh, .failed, error: error,
-                                 attemptID: activeTransportAttemptID)
+                guard refreshGeneration == generation, !Task.isCancelled else { return .unavailable }
                 foregroundProgress.recordFailure(error)
-                return .failed(error: error)
+                confirmedRelayContext = nil
+                guard Self.isInterruptedConnection(error) else {
+                    recordDiagnostic(.relay, .projectionRefresh, .failed, error: error,
+                                     attemptID: activeTransportAttemptID)
+                    return .failed(error: error)
+                }
+                // A real reset/closure ends this socket, not the catch-up.
+                // Each replacement starts from the committed repository/cache
+                // prefix. There is no elapsed-time or retry-count cutoff.
+                recordDiagnostic(.relay, .projectionRefresh, .retrying, error: error,
+                                 attemptID: activeTransportAttemptID)
+                needsReconnect = true
             }
         }
+        return .unavailable
+    }
+
+    static func isInterruptedConnection(_ error: Error) -> Bool {
+        let value = error as NSError
+        if value.domain == NSURLErrorDomain {
+            return value.code == URLError.networkConnectionLost.rawValue ||
+                value.code == URLError.timedOut.rawValue
+        }
+        if value.domain == NSPOSIXErrorDomain {
+            return [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .ENOTCONN, .EPIPE]
+                .contains { Int($0.rawValue) == value.code }
+        }
+        // A refusal, invalid frame, or failed local write needs its actual
+        // reason surfaced; reconnecting cannot turn that fact into acceptance.
+        return false
     }
 
     private func refreshConfirmedProjection(core: NativeRelayCore, context: ProfileContext,

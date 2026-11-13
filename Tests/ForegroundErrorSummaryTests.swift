@@ -15,6 +15,17 @@ final class ForegroundErrorSummaryTests: XCTestCase {
             appVersion: "test", buildNumber: "test", executableSHA256: "unavailable").shareText
     }
 
+    func testActualResetAndClosureReconnectButRefusalAndCancellationDoNot() {
+        for error in [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .ENOTCONN, .EPIPE] {
+            XCTAssertTrue(NativeRelayLifecycle.isInterruptedConnection(
+                NSError(domain: NSPOSIXErrorDomain, code: Int(error.rawValue))))
+        }
+        XCTAssertTrue(NativeRelayLifecycle.isInterruptedConnection(URLError(.networkConnectionLost)))
+        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(CancellationError()))
+        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(InstallationTransportError.serverRejected))
+        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(AttentionStoreError.persistence("Cannot save")))
+    }
+
     func testCaughtErrorsExposeTypeAndCauseWithoutMessageContent() async {
         let cases: [(Error, String, String)] = [
             (InboxPagingWireError.invalidFrame, "InboxPagingWireError", "inbox paging response was invalid"),
