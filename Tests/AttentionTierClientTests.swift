@@ -337,7 +337,11 @@ final class AttentionTierClientTests: XCTestCase {
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         XCTAssertEqual(receipt.selector.requestRevision, 1)
-        XCTAssertEqual(try store.snapshot(context: profile).outbox.first?.requestRevision, 1)
+        let queued = try XCTUnwrap(store.snapshot(context: profile).intents[receipt.intentID])
+        XCTAssertEqual(queued.requestRevision, 1)
+        XCTAssertEqual(queued.disposition, .pending)
+        XCTAssertTrue(try store.snapshot(context: profile).outbox.isEmpty,
+                      "Committing an intent does not bypass the explicit currentness-checked send path.")
 
         try store.beginReplay(through: 1, context: profile)
         XCTAssertEqual(try XCTUnwrap(store.snapshot(context: profile).inboxCurrentKeys), Set([key]),
