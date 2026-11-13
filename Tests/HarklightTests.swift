@@ -1539,7 +1539,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(retried.opID, receipt.opID)
         XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).intents.count, 1)
         XCTAssertTrue(try postCommitStore.snapshot(context: postCommitContext).outbox.isEmpty,
-                      "Restoring or looking up a pending intent never authorizes an automatic send.")
+                      "A store lookup alone does not execute the delivery worker.")
 
         let changed: [TypedInputRecord] = [
             .point(input: pointInput.id, point: PointValue(x: 240, y: 610)),
@@ -1553,7 +1553,7 @@ final class HarklightTests: XCTestCase {
         }
         XCTAssertEqual(try postCommitStore.snapshot(context: postCommitContext).intents.count, 1)
         XCTAssertTrue(try postCommitStore.snapshot(context: postCommitContext).outbox.isEmpty,
-                      "Restoring or looking up a pending intent never authorizes an automatic send.")
+                      "A store lookup alone does not execute the delivery worker.")
     }
 
     func testDurableFenceRejectsLateOriginalSubmitAfterRestartAndChangedDraft() throws {

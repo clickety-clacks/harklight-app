@@ -157,7 +157,7 @@ final class NativeAppLaunch {
                     progress,
                     operationSnapshot: NativeRelayLifecycle.shared.foregroundOperationDiagnostics(for: material.context))
                 if case let .live(presentation) = self.state {
-                    presentation.connectionWarning = progress.outcome == .confirmed ? nil : progress.message
+                    presentation.connectionWarning = progress.outcome == .confirmed ? nil : progress.userFacingMessage
                 }
             }
             guard self.activationGeneration == epoch else {
@@ -187,7 +187,7 @@ final class NativeAppLaunch {
             let reached = connect.outcome == .confirmed
             if reached { try self.enrollment.markForegroundRelayConfirmed(for: record.deviceID) }
             if case let .live(presentation) = self.state {
-                presentation.connectionWarning = reached ? nil : connect.message
+                presentation.connectionWarning = reached ? nil : connect.userFacingMessage
             }
             return reached
         }
@@ -483,11 +483,7 @@ final class NativeAppLaunch {
             notificationNavigationMessage = "The sender retracted this message."
         } else if presentation.request(for: key) != nil {
             notificationNavigationMessage = nil
-            if deepLink.opensChat && presentation.conversationAvailabilityState == .unconfirmed {
-                await refreshLive()
-            } else {
-                pendingMessageDeepLink = nil
-            }
+            pendingMessageDeepLink = nil
         } else {
             notificationNavigationMessage = "Looking for this message."
             await refreshLive()
@@ -530,7 +526,9 @@ final class NativeAppLaunch {
                 opensChat = presentation.conversation(for: key) != nil
                 chatTargetFallsBackToMessage = !opensChat
             case .unconfirmed:
-                opensChat = false
+                // Opening cached chat is a local navigation action, not a
+                // promise that replay or capability discovery has completed.
+                opensChat = true
                 chatTargetFallsBackToMessage = false
             }
         } else {
@@ -1017,9 +1015,6 @@ final class NativeAppLaunch {
         } else if presentation.request(for: key) != nil {
             navigateToMessage(key, in: presentation, from: deepLink)
             notificationNavigationMessage = nil
-            if deepLink.opensChat && presentation.conversationAvailabilityState == .unconfirmed {
-                return
-            }
             pendingMessageDeepLink = nil
         } else {
             if notificationNavigation?.request != key {
@@ -1338,7 +1333,11 @@ final class LivePresentationStore {
         guard permitsDelivery, !isReadOnly else { return nil }
         return conversationAvailability.message(for: profileContext)
     }
-    private(set) var isSendingDiscussion = false
+    private var sendingDiscussionBindings: Set<ConversationBinding> = []
+
+    func isSendingDiscussion(for key: RequestKey, revision: UInt64) -> Bool {
+        sendingDiscussionBindings.contains(ConversationBinding(request: key, revision: revision))
+    }
     private(set) var sendingAnswerIntentIDs: Set<UUID> = []
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
@@ -1354,7 +1353,11 @@ final class LivePresentationStore {
     private(set) var pushRegistrationWarning: String?
     private var storedConnectionWarning: String?
     var connectionWarning: String? {
-        get { NativeRelayLifecycle.shared.refreshFailureMessage(for: profileContext) ?? storedConnectionWarning }
+        get {
+            guard NativeRelayLifecycle.shared.refreshFailureMessage(for: profileContext) != nil ||
+                    storedConnectionWarning != nil else { return nil }
+            return "Waiting for the server. Your pending actions are saved."
+        }
         set { storedConnectionWarning = newValue }
     }
     private(set) var failedResponseWarnings: [RequestKey: FailedResponseWarning] = [:]
@@ -1398,22 +1401,11 @@ final class LivePresentationStore {
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
     var notificationContext: ProfileContext { profileContext }
-    var canSendToCurrentServer: Bool {
-        guard profileContext.transportMode == .relay,
-              attentionStore.requiresConfirmedServerProjection else {
-            return permitsDelivery && !isReadOnly
-        }
-        return permitsDelivery && !isReadOnly &&
-            NativeRelayLifecycle.shared.hasConfirmedServerSnapshot(for: profileContext)
-    }
+    // Delivery permission is independent of connection and catch-up status.
+    // The durable intent queue accepts actions while transport is unavailable.
+    var canSendToCurrentServer: Bool { permitsDelivery && !isReadOnly }
     func actionUnavailableReason(for key: RequestKey) -> String? {
         guard permitsDelivery, !isReadOnly else { return "This message is read-only." }
-        guard canSendToCurrentServer else {
-            return connectionWarning ?? "Connect to the server and refresh the inbox before answering."
-        }
-        guard profileContext.transportMode != .relay || request(for: key)?.inboxStateIsCurrent == true else {
-            return "Refresh this message before answering. Its saved status is not current."
-        }
         return nil
     }
 
@@ -1441,7 +1433,7 @@ final class LivePresentationStore {
         return conversationThreads[key]?.allowsDiscussion == true
     }
     func canSendDiscussion(for key: RequestKey) -> Bool {
-        canUseCurrentServerState(for: key) && conversationThreads[key]?.allowsDiscussion == true
+        canSendToCurrentServer && conversationThreads[key]?.allowsDiscussion == true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
     @ObservationIgnored var confirmedRelayRefresh: (() -> Void)?
@@ -1921,7 +1913,14 @@ final class LivePresentationStore {
         if let previous { flushPendingDraft(for: previous) }
         if !isReadOnly, let previous {
             do {
-                let pending = try port.abandonConversationUploads(for: previous, context: port.context)
+                let hasAcceptedSend = conversationThreads[previous]?.drafts.values.contains { draft in
+                    if draft.operationID != nil { return true }
+                    switch draft.disposition {
+                    case .submitting, .outcomeUnknown, .acceptedPendingReplay: return true
+                    case .saved, .rejected: return false
+                    }
+                } == true
+                let pending = hasAcceptedSend ? [] : try port.abandonConversationUploads(for: previous, context: port.context)
                 try refreshFromDurableStore()
                 UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) pending=\(pending.count)")
                 if !pending.isEmpty {
@@ -2038,12 +2037,14 @@ final class LivePresentationStore {
                 return
             }
             if permitsDelivery {
-                guard !isSendingDiscussion, let files = conversationFiles else { return }
-                isSendingDiscussion = true
+                guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
+                _ = try attentionStore.prepareDiscussion(binding, context: profileContext)
+                try refreshFromDurableStore()
+                sendingDiscussionBindings.insert(binding)
                 conversationError = nil
                 Task { [weak self] in
                     guard let self else { return }
-                    defer { isSendingDiscussion = false }
+                    defer { sendingDiscussionBindings.remove(binding) }
                     do {
                         let result = try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: profileContext) { file in
                             try files.fileURL(for: file)
@@ -2061,7 +2062,7 @@ final class LivePresentationStore {
                             conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
                             onResult?(false)
                         case .unresolved:
-                            conversationError = "Submission unconfirmed. Retry uses the same saved operation."
+                            conversationError = "Sending… Your text and files are saved."
                             onResult?(false)
                         }
                     } catch {
@@ -2077,7 +2078,7 @@ final class LivePresentationStore {
                         } else if (error as? ConversationError) == .emptyDraft {
                             conversationError = "Add a message before sending these files. Your draft is retained."
                         } else {
-                            conversationError = "Discussion could not be confirmed (\(error)). Your saved text and files are retained."
+                            conversationError = "Can't reach the server. Your text and files are saved and will resume when connected."
                         }
                     }
                 }
@@ -2300,7 +2301,7 @@ final class LivePresentationStore {
             declaredMessageType: request.messageType,
             declaredMessageKind: request.messageKind,
             canMarkSeen: canSendToCurrentServer &&
-                !retracted && request.inboxStateIsCurrent && request.lifecycleStatus == .open &&
+                !retracted && request.lifecycleStatus == .open &&
                 request.intentReceipt == nil && request.informationalSeenStatus == .available,
             canNoComment: canNoComment(request, isRetracted: retracted),
             noCommentUnavailable: request.noCommentUnavailable,
@@ -2343,7 +2344,7 @@ final class LivePresentationStore {
     }
 
     private func canNoComment(_ request: PresentedRequest, isRetracted: Bool) -> Bool {
-        guard canSendToCurrentServer, !isRetracted, request.inboxStateIsCurrent,
+        guard canSendToCurrentServer, !isRetracted,
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil else { return false }
         // No comment is its own wire answer and does not depend on the
@@ -2380,7 +2381,7 @@ final class LivePresentationStore {
             guard let self else { return }
             defer { self.endRefresh() }
             do {
-                let result = try await NativeRelayLifecycle.shared.sendOriginalOperationForUserTap(
+                try await NativeRelayLifecycle.shared.sendOriginalOperationForUserTap(
                     intentID, expected: self.profileContext,
                     onSendCallStateChange: { [weak self] isSending in
                         guard let self else { return }
@@ -2398,12 +2399,9 @@ final class LivePresentationStore {
                                           request: request)
                         }
                     })
-                self.applyRefreshResult(result)
             } catch {
                 self.actionErrorRequest = request
-                self.actionError = "The server could not confirm your answer. Check its saved status before trying again."
-                let result = await NativeRelayLifecycle.shared.refreshAfterAnswerStored()
-                self.applyRefreshResult(result)
+                self.actionError = "Can't reach the server. Your answer is saved and will resume when connected."
                 self.diagnose(.answer, .originalOperationDelivery, .unresolved, error: error,
                               operationID: intentID, request: request, receiptState: .unknown)
             }
@@ -2534,10 +2532,11 @@ final class LivePresentationStore {
     func canRetryUnconfirmedAnswer(for key: RequestKey) -> Bool {
         guard canSendToCurrentServer,
               let request = request(for: key),
-              request.inboxStateIsCurrent,
-              request.intentReceipt?.localState == .terminalUnconfirmed,
+              let receipt = request.intentReceipt,
+              [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState),
               request.lifecycleStatus == .open || request.lifecycleStatus == .pending,
-              !request.answerNotDelivered, !isRetracted(key) else { return false }
+              request.staleAnswerRevision == nil, !isRetracted(key),
+              !sendingAnswerIntentIDs.contains(receipt.intentID) else { return false }
         return true
     }
 
@@ -2554,7 +2553,6 @@ final class LivePresentationStore {
               let request = request(for: key),
               let warning = failedResponseWarning(for: key, revision: request.requestRevision),
               warning.canRetry,
-              request.inboxStateIsCurrent,
               request.lifecycleStatus == .open,
               request.informationalSeenStatus == nil,
               request.staleAnswerRevision == nil,
@@ -2575,21 +2573,24 @@ final class LivePresentationStore {
               let warning = failedResponseWarning(for: key, revision: request.requestRevision) else {
             return false
         }
-        if let receipt = request.intentReceipt {
-            sendAnswerOperationForUserTap(receipt.intentID, request: key)
-            return true
-        }
-        guard let answerDraft = warning.answerDraft else { return false }
         do {
-            let receipt = try submit(key, answerDraft: answerDraft,
-                                    requestRevision: warning.requestRevision)
+            // The failure dialog retries the saved operation, not a newly
+            // composed answer. Editing and submitting is a separate action.
+            guard let operationID = request.intentReceipt?.opID ?? warning.failedOperationID,
+                  let saved = try attentionStore.snapshot(context: profileContext).intents.values.first(where: {
+                      $0.operationID == operationID && $0.requestKey == key &&
+                          ($0.requestRevision ?? 1) == warning.requestRevision
+                  }) else { throw LiveReplyError.notOpen }
+            let queued = try attentionStore.queueOriginalOperationForUserTap(saved.intentID, context: profileContext)
             if var current = failedResponseWarnings[key],
                current.failedOperationID == warning.failedOperationID {
-                current.retryOperationID = receipt.opID
+                current.retryOperationID = queued.operationID
                 failedResponseWarnings[key] = current
                 failedResponseWarningGeneration &+= 1
             }
-            sendAnswerOperationForUserTap(receipt.intentID, request: key)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+            sendAnswerOperationForUserTap(queued.intentID, request: key)
             return true
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error,
@@ -2923,8 +2924,7 @@ final class LivePresentationStore {
         let revision: UInt64?
         if !selectionIsLocal {
             guard let request = try? inspectedRequest(key, revision: requestRevision),
-                  request.inboxStateIsCurrent,
-                  !isRetracted(key), request.lifecycleStatus == .open,
+                      !isRetracted(key), request.lifecycleStatus == .open,
                   request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
             revision = request.requestRevision
             selectNoComment(for: key, requestRevision: revision)
@@ -3510,9 +3510,10 @@ final class LivePresentationStore {
             if request.answerNotDelivered || request.noCommentUnavailable {
                 if let failed = failureSubmission(for: request, among: candidates,
                                                   diagnosticEvents: diagnosticEvents) {
-                    let retryOperationID = refreshed[request.key].flatMap {
-                        $0.failedOperationID == failed.operationID ? $0.retryOperationID : nil
-                    }
+                    let retryOperationID = request.intentReceipt?.opID == failed.operationID
+                        ? failed.operationID : refreshed[request.key].flatMap {
+                            $0.failedOperationID == failed.operationID ? $0.retryOperationID : nil
+                        }
                     refreshed[request.key] = makeFailedResponseWarning(
                         for: request, submission: failed, retryOperationID: retryOperationID,
                         diagnosticEvents: diagnosticEvents)

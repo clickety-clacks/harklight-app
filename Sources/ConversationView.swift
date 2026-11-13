@@ -6,18 +6,18 @@ import QuickLook
 
 enum ConversationPanelEmptyState: Equatable {
     case noChat
-    case checkingAvailability
+    case historyPending
     case chatUnavailable
     case connectionUnavailable
     case offline
-    case availabilityUnconfirmed
 
     @MainActor
     static func resolve(availability: NativeConversationAvailability.State,
                         isRefreshing: Bool,
                         hasConnectionWarning: Bool,
                         canCheckAvailability: Bool) -> Self {
-        if isRefreshing { return .checkingAvailability }
+        if availability == .unavailable { return .chatUnavailable }
+        if isRefreshing { return .historyPending }
         if hasConnectionWarning { return .connectionUnavailable }
 
         switch availability {
@@ -26,7 +26,7 @@ enum ConversationPanelEmptyState: Equatable {
         case .available:
             return .noChat
         case .unconfirmed:
-            return canCheckAvailability ? .availabilityUnconfirmed : .offline
+            return canCheckAvailability ? .historyPending : .offline
         }
     }
 }
@@ -193,10 +193,10 @@ struct ConversationPanel: View {
                         ContentUnavailableView("No chat", systemImage: "bubble.left.and.bubble.right",
                             description: Text("The agent that sent this didn’t open a chat for it. You can still respond to the message itself."))
                             .accessibilityIdentifier("conversation-no-chat-empty-state")
-                    case .checkingAvailability:
-                        ProgressView("Checking chat availability…")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .accessibilityIdentifier("conversation-availability-checking")
+                    case .historyPending:
+                        ContentUnavailableView("Chat history hasn’t arrived yet", systemImage: "bubble.left.and.bubble.right",
+                            description: Text("Messages will appear here as they arrive."))
+                            .accessibilityIdentifier("conversation-history-pending")
                     case .chatUnavailable:
                         ContentUnavailableView("Chat unavailable", systemImage: "bubble.left.and.bubble.right",
                             description: Text("Chat is not available on this server yet."))
@@ -209,10 +209,6 @@ struct ConversationPanel: View {
                         ContentUnavailableView("Chat status unavailable offline", systemImage: "wifi.slash",
                             description: Text("This offline view cannot confirm whether a chat was opened."))
                             .accessibilityIdentifier("conversation-status-offline")
-                    case .availabilityUnconfirmed:
-                        ContentUnavailableView("Chat status not confirmed", systemImage: "questionmark.bubble",
-                            description: Text("The server has not confirmed whether a chat was opened yet."))
-                            .accessibilityIdentifier("conversation-status-unconfirmed")
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -703,7 +699,7 @@ private struct ConversationComposer: View {
             .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
             ConversationComposerSendButton(session: textSession,
                 isLocalExample: store.isLocalExample, frozen: frozen,
-                isSendingDiscussion: store.isSendingDiscussion,
+                isSendingDiscussion: store.isSendingDiscussion(for: key, revision: revision),
                 allowsDiscussion: allowsDiscussion,
                 hasFiles: !draft.files.isEmpty,
                 hasPendingUploadCleanup: store.hasPendingUploadCleanup(for: key, revision: revision),
@@ -785,7 +781,7 @@ private struct ConversationComposer: View {
 
     private func sendStagedText() {
         textSession.textSaveTask?.cancel()
-        guard !store.isSendingDiscussion, allowsDiscussion,
+        guard !store.isSendingDiscussion(for: key, revision: revision), allowsDiscussion,
               !store.hasPendingUploadCleanup(for: key, revision: revision),
               !store.hasAbandonedDiscussion(for: key, revision: revision),
               !store.hasUnreadyUploadReference(for: key, revision: revision),
@@ -878,8 +874,6 @@ private struct ConversationDraftStatus: View {
 }
 
 enum ConversationSentChatStatusPresentation {
-    static let unpickedDelayMilliseconds: UInt64 = 120_000
-
     enum Delivery: Equatable {
         case sent
         case notDeliveredYet
@@ -906,12 +900,7 @@ enum ConversationSentChatStatusPresentation {
             case .listening: break
             }
         }
-        guard let acceptedAt = facts.acceptedAtMilliseconds,
-              nowMilliseconds >= acceptedAt,
-              nowMilliseconds - acceptedAt >= unpickedDelayMilliseconds else {
-            return .sent
-        }
-        return .notDeliveredYet
+        return .sent
     }
 
     static func delivery(for turn: ConversationTurn, facts: ConversationTurnFacts,
@@ -942,21 +931,9 @@ enum ConversationSentChatStatusPresentation {
         if case let .notHanded(_, reason, _, _)? = facts.deliveryAck2 {
             return .notDelivered(reason.rawValue)
         }
-        if case let .listenerReceived(atMilliseconds, true, _, _)? = facts.deliveryAck1 {
-            guard nowMilliseconds >= atMilliseconds,
-                  nowMilliseconds - atMilliseconds >= unpickedDelayMilliseconds else {
-                return .sending
-            }
-            return .waitingFor(conversationAgentName)
-        }
-
+        if case .listenerReceived(_, true, _, _)? = facts.deliveryAck1 { return .sending }
         if case .notListening? = availability?.state { return .noListenerPickedThisUp }
-        guard let acceptedAt = facts.acceptedAtMilliseconds,
-              nowMilliseconds >= acceptedAt,
-              nowMilliseconds - acceptedAt >= unpickedDelayMilliseconds else {
-            return .sending
-        }
-        return .noListenerPickedThisUp
+        return .sending
     }
 
     static func usesDeliveryAckPresentation(turn: ConversationTurn,
@@ -1027,40 +1004,11 @@ private struct ConversationSentChatStatus: View {
         .accessibilityIdentifier("conversation-sent-chat-status")
     }
 
-    @ViewBuilder
     private var deliveryStatus: some View {
-        if shouldAgeDelivery {
-            TimelineView(.periodic(from: .now, by: 15)) { timeline in
-                deliveryLabel(ConversationSentChatStatusPresentation.delivery(
-                    for: turn, facts: facts, availability: availability, hasReply: hasReply,
-                    conversationAgentName: conversationAgentName,
-                    nowMilliseconds: Self.milliseconds(timeline.date)))
-            }
-        } else {
-            deliveryLabel(ConversationSentChatStatusPresentation.delivery(
-                for: turn, facts: facts, availability: availability, hasReply: hasReply,
-                conversationAgentName: conversationAgentName,
-                nowMilliseconds: Self.milliseconds(.now)))
-        }
-    }
-
-    private var shouldAgeDelivery: Bool {
-        guard !facts.delivered, facts.actedBy == nil, !hasReply else { return false }
-        if ConversationSentChatStatusPresentation.usesDeliveryAckPresentation(turn: turn, facts: facts) {
-            if case .handed? = facts.deliveryAck2 { return false }
-            if case .notHanded? = facts.deliveryAck2 { return false }
-            if case .listenerReceived(_, false, _, _)? = facts.deliveryAck1 { return false }
-            if case .unsupported? = availability?.state { return false }
-            if case .gone? = availability?.state { return false }
-            if case .listenerReceived(_, true, _, _)? = facts.deliveryAck1 { return true }
-            if case .notListening? = availability?.state { return false }
-            return facts.acceptedAtMilliseconds != nil
-        }
-        guard facts.acceptedAtMilliseconds != nil else { return false }
-        switch availability?.state {
-        case .notListening?, .unsupported?, .gone?: return false
-        case .listening?, nil: return true
-        }
+        deliveryLabel(ConversationSentChatStatusPresentation.delivery(
+            for: turn, facts: facts, availability: availability, hasReply: hasReply,
+            conversationAgentName: conversationAgentName,
+            nowMilliseconds: Self.milliseconds(.now)))
     }
 
     @ViewBuilder

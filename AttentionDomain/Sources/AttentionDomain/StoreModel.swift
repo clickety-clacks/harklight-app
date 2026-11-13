@@ -125,8 +125,8 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     case pending
     case accepted(sequence: UInt64?)
     case lost
-    /// The relay explicitly rejected this operation, so it is safe to remove
-    /// its active outbox lock and let the person choose another answer.
+    /// The relay explicitly rejected this operation. Stop automatic attempts
+    /// but retain its identity and payload for an explicit Retry.
     case failed
     /// The relay declined the submitted revision and named the current one.
     case staleRevision(currentRevision: UInt64)
@@ -972,9 +972,12 @@ public struct CachedAttentionServerState: Sendable {
     public let cursor: UInt64
     public let conversationCursor: UInt64
     public let conversations: [RequestKey: ConversationThread]
+    public let conversationEvents: [UInt64: ConversationEvent]
     public let inboxView: InboxView?
     public let currentRequestKeys: Set<RequestKey>?
     public let chatReadPositions: [RequestKey: UInt64]?
+    public let pendingRelayOverlays: [UInt64: RelayEvent]
+    public let inboxReferences: [RequestKey: RemoteRequestState]
 
     public init(identity: ProfileIdentity, requests: [RequestKey: StoredRequest],
                 remoteStates: [RequestKey: RemoteRequestState],
@@ -983,16 +986,22 @@ public struct CachedAttentionServerState: Sendable {
                 conversations: [RequestKey: ConversationThread],
                 inboxView: InboxView?,
                 currentRequestKeys: Set<RequestKey>?,
-                chatReadPositions: [RequestKey: UInt64]? = nil) {
+                chatReadPositions: [RequestKey: UInt64]? = nil,
+                pendingRelayOverlays: [UInt64: RelayEvent] = [:],
+                inboxReferences: [RequestKey: RemoteRequestState] = [:],
+                conversationEvents: [UInt64: ConversationEvent] = [:]) {
         self.identity = identity
         self.requests = requests
         self.remoteStates = remoteStates
         self.cursor = cursor
         self.conversationCursor = conversationCursor
         self.conversations = conversations
+        self.conversationEvents = conversationEvents
         self.inboxView = inboxView
         self.currentRequestKeys = currentRequestKeys
         self.chatReadPositions = chatReadPositions
+        self.pendingRelayOverlays = pendingRelayOverlays
+        self.inboxReferences = inboxReferences
     }
 }
 

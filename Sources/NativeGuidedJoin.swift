@@ -100,7 +100,6 @@ struct PinnedNativeJoinTransport: NativeJoinTransport {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
-        request.timeoutInterval = 10
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12

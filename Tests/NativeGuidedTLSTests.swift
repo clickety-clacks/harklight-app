@@ -1053,7 +1053,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                        .resolvedWithoutSeen,
                        "An answer-free terminal from another device is not a local operation receipt.")
         XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: originSeenKey).requests.first).informationalSeenStatus,
-                       .confirmed, "An authorized origin answer remains sufficient confirmation.")
+                       .resolvedWithoutSeen, "An object-valued origin answer is not the Server shared Seen outcome.")
 
         let live = try LivePresentationStore(store: store, context: context)
         let availableSeenRow = try XCTUnwrap(live.inboxRows.first { $0.key == seenKey })
@@ -1067,7 +1067,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(nonSeenTerminalRow.informationalSeenStatus, .resolvedWithoutSeen)
 
         let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
-        XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
+        XCTAssertEqual(receipt.exactAnswer, .null)
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
 
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
@@ -1076,7 +1076,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         try live.refreshFromDurableStore()
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .resolvedWithoutSeen,
                        "An operation receipt alone cannot manufacture the server Seen value.")
-        try store.apply(RelayEvent(sequence: 9, body: .terminal(seenKey, .answered, seenValue)), context: context)
+        try store.apply(RelayEvent(sequence: 9, body: .terminal(seenKey, .answered, nil), accountAnswerOutcome: .seen), context: context)
         try live.refreshFromDurableStore()
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .confirmed)
 
@@ -1134,7 +1134,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(legacyActions.map(\.label), [ExactText("Reply")])
 
         let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
-        XCTAssertEqual(receipt.exactAnswer, seenAnswer)
+        XCTAssertEqual(receipt.exactAnswer, .null)
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
 
         let queuedHigh = try await core.resyncAndDrainOutbox()
@@ -1254,6 +1254,305 @@ final class NativeGuidedTLSTests: XCTestCase {
             }
             await session.close()
         }
+    }
+
+    func testAnswerAndSeenTransportDoNotWaitForAnotherConnectionsReplayAcknowledgement() async throws {
+        let namespace = "Harklight.independent-answer-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let acknowledgementArrived = expectation(description: "Replay ACK request is held by relay")
+        let answersArrived = expectation(description: "Reply and Seen reach relay while ACK remains held")
+        answersArrived.expectedFulfillmentCount = 2
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard let value = try? JSONValue.parse(Data(text.utf8)) else { return [] }
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "ack" {
+                acknowledgementArrived.fulfill()
+                return [] // Deliberately never confirm the replay cursor.
+            }
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "answer" {
+                answersArrived.fulfill()
+                return ["{\"v\":1,\"type\":\"ok\",\"seq\":7}\n"]
+            }
+            return []
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let url = try XCTUnwrap(URL(string: "wss://localhost:\(port)/relay"))
+        let replay = try URLSessionInstallationSession(profile: context, relayURL: url,
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let sending = try URLSessionInstallationSession(profile: context, relayURL: url,
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let heldAck = Task {
+            try await replay.acknowledge(Data(#"{"v":1,"type":"ack","seq":1,"ref":"native-ack"}"#.utf8))
+        }
+        await fulfillment(of: [acknowledgementArrived], timeout: 5)
+        let sendsCompleted = expectation(description: "Both send responses complete before replay ACK")
+        let sends = Task {
+            defer { sendsCompleted.fulfill() }
+            for answer in [JSONValue.null, .string(ExactText("Saved reply"))] {
+            let operation = UUID()
+            let frame = JSONValue.object([
+                JSONMember("v", .number(JSONNumber(lexeme: "1"))),
+                JSONMember("type", .string(ExactText("answer"))),
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText(operation.uuidString))),
+                JSONMember("request_revision", .number(JSONNumber(lexeme: "1"))),
+                JSONMember("op_id", .string(ExactText(operation.uuidString.lowercased()))),
+                JSONMember("answer", answer)
+            ])
+            let result = try await sending.sendOriginalOperation(Data((frame.jsonString + "\n").utf8), operationID: operation)
+            XCTAssertEqual(result, .accepted(operationID: operation, terminalSequence: 7))
+        }
+        }
+        await fulfillment(of: [answersArrived, sendsCompleted], timeout: 5)
+        // A responsive peer is alive even while the application ACK is held.
+        // Ping uses control frames and must not wait for that exchange gate.
+        try await replay.checkConnection()
+        relay.close()
+        do {
+            try await replay.checkConnection()
+            XCTFail("The actual closed connection must fail its health check")
+        } catch {}
+        await sending.close()
+        await replay.close()
+        try await sends.value
+        do { try await heldAck.value; XCTFail("The withheld cursor was never confirmed") } catch {}
+    }
+
+    func testLifecycleDeliversReplyAndSeenWhileConversationCatchUpRemainsOpen() async throws {
+        let namespace = "Harklight.lifecycle-open-replay." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let fileBytes = Data("File remains available during catch-up".utf8)
+        let fileHash = SHA256.hash(data: fileBytes).map { String(format: "%02x", $0) }.joined()
+        let origin = try LocalEnrollmentTLS(expectedDevice: identity.deviceID, replyBody: fileBytes,
+                                             responseFileHash: fileHash)
+        defer { origin.close() }
+        let originPort = try await origin.start()
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let conversationStarted = expectation(description: "Post-ACK conversation replay is still open")
+        let frames = ConversationFrameCollector()
+        let seenPayload = #"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
+        let replyPayload = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text","placeholder":"Reply"}]}}"#
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue else { return [] }
+            if kind == "answer" {
+                frames.append(Data(text.utf8))
+                let sequence = value.uniqueValue(named: "message_id")?.stringValue?.rawValue == "reply" ? 3 : 4
+                return ["{\"v\":1,\"type\":\"ok\",\"seq\":\(sequence)}\n"]
+            }
+            guard let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue else { return [] }
+            let ok = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\""
+            let checkpoint = ",\"paging_version\":1,\"snapshot_id\":\"open-replay\",\"high_water\":2"
+            switch kind {
+            case "inbox_start":
+                let rows = [("seen", seenPayload), ("reply", replyPayload)].enumerated().map { index, row in
+                    "{\"acceptance\":{\"v\":1,\"type\":\"delivery\",\"seq\":\(index + 1),\"sender_id\":\"sender\",\"message_id\":\"\(row.0)\",\"origin\":\"origin\",\"as\":\"message\",\"message\":\(row.1)}}"
+                }.joined(separator: ",")
+                return [ok + checkpoint + ",\"items\":[\(rows)],\"next_cursor\":null,\"receipt_cursor\":null}\n"]
+            case "inbox_checkpoint_ack":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true}\n"]
+            case "inbox_attach":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        #"{"v":1,"type":"resynced","seq":2}"# + "\n"]
+            case "conversation_open":
+                conversationStarted.fulfill()
+                return [ok + ",\"origin_https_port\":\(originPort)}\n"] // No replay end frame.
+            default: return [ok + "}\n"]
+            }
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("open-replay-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        var refreshCompleted = false
+        let refresh = Task { @MainActor in
+            let result = await lifecycle.refreshResultFromTrustedRelay()
+            refreshCompleted = true
+            return result
+        }
+        await fulfillment(of: [conversationStarted], timeout: 5)
+        XCTAssertFalse(refreshCompleted)
+        let domain = AttentionDomainPort(store: store)
+        let completed = expectation(description: "Lifecycle sends finish without completing catch-up")
+        let sends = Task { @MainActor in
+            defer { completed.fulfill() }
+            for message in ["reply", "seen"] {
+                let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                                     messageID: ExactText(message))
+                let selector = try XCTUnwrap(domain.inspect(context: domain.context, request: key).requests.first?.selector)
+                let input: TypedInputRecord = message == "seen" ? .compatibilityValue(action: ExactText("seen")) :
+                    .compatibilityText(action: ExactText("reply"), text: ExactText("While replay is open"))
+                let receipt = try domain.submit(SubmitIntent(context: domain.context, selector: selector,
+                    intentID: UUID(), inputs: [input]))
+                let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+                try await lifecycle.sendOriginalOperationForUserTap(receipt.intentID, expected: context)
+                XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, original.operationID)
+                XCTAssertFalse(refreshCompleted)
+                XCTAssertNil(try store.snapshot(context: context).remoteStates[key]?.state,
+                             "Transport acceptance cannot invent the Server's terminal projection.")
+            }
+        }
+        await fulfillment(of: [completed], timeout: 5)
+        let fileCompleted = expectation(description: "File downloads before catch-up finishes")
+        let download = Task { @MainActor in
+            defer { fileCompleted.fulfill() }
+            let file = ConversationFile(id: ExactText("file"), name: ExactText("file.txt"),
+                byteCount: UInt64(fileBytes.count), sha256: ExactText(fileHash),
+                content: .uploaded(ExactText(UUID().uuidString)))
+            try await lifecycle.fetchConversationFile(file, to: destination, expected: context)
+            XCTAssertFalse(refreshCompleted)
+        }
+        await fulfillment(of: [fileCompleted], timeout: 5)
+        await lifecycle.deactivate()
+        try await download.value
+        XCTAssertEqual(try Data(contentsOf: destination), fileBytes)
+        try await sends.value
+        let cancelled = await refresh.value
+        XCTAssertFalse(cancelled.relayConfirmed, "Deactivation cannot confirm an unfinished replay.")
+        let submitted = try frames.snapshot().map { try JSONValue.parse($0) }
+        XCTAssertEqual(submitted.count, 2)
+        XCTAssertEqual(submitted.first?.uniqueValue(named: "answer"), .string(ExactText("While replay is open")))
+        XCTAssertEqual(submitted.last?.uniqueValue(named: "answer"), .null)
+        XCTAssertEqual(Set(submitted.compactMap { $0.uniqueValue(named: "op_id")?.stringValue }).count, 2)
+    }
+
+    func testLifecycleReconnectsTwiceFromPersistedConversationPrefix() async throws {
+        let namespace = "Harklight.lifecycle-reset." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let requests = ConversationFrameCollector()
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID, closeAfterReply: { text in
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  value.uniqueValue(named: "type")?.stringValue == ExactText("conversation_open"),
+                  let since = value.uniqueValue(named: "since")?.integerValue else { return false }
+            return since == 0 || since == 1
+        }) { text in
+            requests.append(Data(text.utf8))
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
+                  let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue else { return [] }
+            let ok = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\""
+            let checkpoint = ",\"paging_version\":1,\"snapshot_id\":\"reset-replay\",\"high_water\":1"
+            switch kind {
+            case "inbox_start":
+                let item = #"{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"conversation","origin":"origin","as":"message","message":{"title":"Conversation"},"request_revision":1,"session_handle":"session","event_id":"request"}}"#
+                return [ok + checkpoint + ",\"items\":[\(item)],\"next_cursor\":null,\"receipt_cursor\":null}\n"]
+            case "inbox_checkpoint_ack":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true}\n"]
+            case "inbox_attach":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        #"{"v":1,"type":"resynced","seq":1}"# + "\n"]
+            case "conversation_open":
+                let since = value.uniqueValue(named: "since")?.integerValue ?? -1
+                guard (0...2).contains(since) else { return [ok + "}\n"] }
+                let sequence = since + 1
+                let turn = "{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(sequence),\"sender_id\":\"sender\",\"message_id\":\"conversation\",\"request_revision\":1,\"origin\":\"origin\",\"session_handle\":\"session\",\"kind\":\"discussion\",\"author\":\"person\",\"event_id\":\"turn-\(sequence)\",\"text\":\"Server turn \(sequence)\"}\n"
+                // Close the actual socket after writing turns 1 and 2. The
+                // client must save its prefix on failure, without a cache-triggered reset.
+                return [ok + "}\n", turn] + (sequence == 3
+                    ? [#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"# + "\n"] : [])
+            default: return [ok + "}\n"]
+            }
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("reset-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cacheURL = directory.appendingPathComponent("cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER, serverStateCache: cache)
+        let completed = expectation(description: "Catch-up completes after two real socket closures")
+        let refresh = Task { @MainActor in
+            defer { completed.fulfill() }
+            return await lifecycle.refreshResultFromTrustedRelay()
+        }
+        await fulfillment(of: [completed], timeout: 10)
+        await lifecycle.deactivate()
+        let result = await refresh.value
+        XCTAssertTrue(result.relayConfirmed)
+        let starts = try requests.snapshot().map { try JSONValue.parse($0) }.filter {
+            $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open"
+        }.compactMap { $0.uniqueValue(named: "since")?.integerValue }
+        XCTAssertEqual(starts, [0, 1, 2], "Reconnect requests only each uncommitted suffix.")
+        let loaded = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
+        let snapshot = try XCTUnwrap(loaded)
+        XCTAssertEqual(snapshot.conversationCursor, 3)
+        let restarted = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try restarted.restoreCachedServerState(snapshot.attentionDomainState(for: context.identity), context: context)
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("conversation"))
+        let turns = try restarted.conversationSnapshot(context: context).threads[key]?.turns ?? []
+        XCTAssertEqual(turns.map(\.id), [ExactText("turn-1"), ExactText("turn-2"), ExactText("turn-3")])
+    }
+
+    func testUploadEndpointDiscoveryDoesNotWaitForConversationHistoryOrAcknowledgeIt() async throws {
+        let namespace = "Harklight.upload-origin-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let requests = ConversationFrameCollector()
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            requests.append(Data(text.utf8))
+            guard text.contains("\"conversation_open\"") else { return [] }
+            // The server supplies metadata but deliberately withholds the
+            // conversation replay barrier. Upload preparation must still proceed.
+            return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-conversation-sync\",\"origin_https_port\":9443}\n"]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(profile: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let completed = expectation(description: "Origin metadata available before history completes")
+        let discovery = Task {
+            defer { completed.fulfill() }
+            return try await session.discoverConversationOrigin(since: 41)
+        }
+        await fulfillment(of: [completed], timeout: 5)
+        await session.close()
+        let endpoint = try await discovery.value
+        XCTAssertEqual(endpoint?.absoluteString, "https://localhost:9443/origin/v1")
+        XCTAssertEqual(requests.types, ["conversation_open"])
+        XCTAssertEqual(try JSONValue.parse(XCTUnwrap(requests.snapshot().first)).uniqueValue(named: "since")?.integerValue, 41)
     }
 
     func testOlderRelayUnsupportedVersionResponseMarksNoCommentUnsupported() async throws {
@@ -1409,8 +1708,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { collected.append($0) })
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued No comment choice.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
+        XCTAssertEqual(session.sent.map { $0.1 }, [receipt.opID],
+                       "Automatic delivery records the original No comment operation exactly once.")
         journal.record(collected.events)
         try presentation.refreshFromDurableStore()
         let reopened = try XCTUnwrap(presentation.inboxRow(for: request))
@@ -1604,15 +1903,15 @@ final class NativeGuidedTLSTests: XCTestCase {
 
     @MainActor
     func testForegroundConnectionWarningIncludesObservedTransportError() async {
-        let deadline = ForegroundConnectDeadline()
+        let deadline = ForegroundConnectProgressTracker()
         deadline.beginSession(transportAttemptID: UUID())
         let error = NSError(domain: "RelayConnection", code: 7,
                             userInfo: [NSLocalizedDescriptionKey: "The approved relay could not be reached."])
 
-        let progress = await deadline.run(deadline: .seconds(1), operation: {
+        let progress = await deadline.run(operation: {
             deadline.recordFailure(error)
             return false
-        }, onTimeout: {}) { _ in }
+        }) { _ in }
 
         XCTAssertTrue(progress.message.contains("The approved relay could not be reached."))
         let diagnostic = NativeForegroundConnectDiagnostic(
@@ -1623,7 +1922,7 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     @MainActor
-    func testOrdinaryRefreshTimesOutWhenConversationReplayNeverFinishes() async throws {
+    func testOrdinaryRefreshWaitsForActualConversationConnectionFailure() async throws {
         let namespace = "Harklight.refresh-timeout-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -1633,6 +1932,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                            kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
         }
         let requests = ConversationFrameCollector()
+        let conversationStarted = expectation(description: "Conversation replay is active")
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
             guard let value = try? JSONValue.parse(Data(text.utf8)),
                   let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
@@ -1650,6 +1950,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                         "{\"v\":1,\"type\":\"resynced\",\"seq\":0}\n"]
             case "conversation_open":
                 // A live socket acknowledges the request, but never ends replay.
+                conversationStarted.fulfill()
                 return [ok + "}\n"]
             default:
                 return [ok + "}\n"]
@@ -1664,18 +1965,27 @@ final class NativeGuidedTLSTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let lifecycle = NativeRelayLifecycle(refreshDeadline: .seconds(2))
+        let lifecycle = NativeRelayLifecycle()
         try await lifecycle.activate(store: store, context: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
             clientIdentity: identity.value, trustedRootDER: relay.rootDER,
             serverStateCache: FileServerStateCache(identity: context.identity, fileURL: directory.appendingPathComponent("cache.json")))
-        let result = await lifecycle.refreshResultFromTrustedRelay()
+        var completed = false
+        let refresh = Task { @MainActor in
+            let result = await lifecycle.refreshResultFromTrustedRelay()
+            completed = true
+            return result
+        }
+        await fulfillment(of: [conversationStarted], timeout: 5)
+        XCTAssertFalse(completed, "An open replay stays active until completion or actual failure.")
+        relay.close()
+        let result = await refresh.value
         XCTAssertTrue(requests.types.contains("inbox_checkpoint_ack"), "Establish that inbox setup reached its ACK.")
         XCTAssertTrue(requests.types.contains("conversation_open"), "Establish the exact stalled protocol phase.")
         XCTAssertFalse(result.relayConfirmed)
         XCTAssertNotNil(result.failureMessage)
         XCTAssertNotNil(lifecycle.refreshFailureMessage(for: context),
-                        "A background caller need not forward its result for the timeout to be visible.")
+                        "A background caller need not forward its result for the actual connection failure to be visible.")
         XCTAssertFalse(lifecycle.hasConfirmedServerSnapshot(for: context))
         await lifecycle.deactivate()
     }
@@ -2631,72 +2941,33 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(server.receivedRequest)
     }
 
-    func testForegroundConnectDeadlineClosesOneSessionAndFencesLateSuccessWithoutChangingSavedState() async throws {
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-                                       personID: ExactText("person-A"), deviceID: ExactText("device-A"))
-        let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryPendingActionPersistence()
-        let store = try ClientRepository(context: context, persistence: persistence)
-        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("saved"))
-        let payload = try JSONValue.parse(Data(#"{"title":"Saved request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
-        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
-            StoredRequest(key: key, originalPayload: payload), .message),
-            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))), context: context)
-        let binding = ConversationBinding(request: key, revision: 1)
-        try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Keep this draft")), context: context)
-        let port = AttentionDomainPort(store: store)
-        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
-        _ = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
-                                         inputs: [.compatibilityValue(action: ExactText("got-it"))]))
-        let before = try XCTUnwrap(persistence.load(identity: identity))
-        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1]?.text,
-                       ExactText("Keep this draft"))
-
-        let deadline = ForegroundConnectDeadline()
-        let transportAttemptID = UUID()
-        deadline.beginSession(transportAttemptID: transportAttemptID)
-        deadline.observe(.clientIdentityOffered, transportAttemptID: transportAttemptID)
-        let sessionID = UUID()
-        var closedSessions: [UUID] = []
-        var lateCompletion: CheckedContinuation<Bool, Never>?
-        var updates: [NativeForegroundConnectProgress] = []
-        let operationStarted = AsyncTestSignal()
+    func testForegroundCatchUpStaysActiveUntilTheOperationCompletes() async throws {
+        let progress = ForegroundConnectProgressTracker()
+        let transportID = UUID()
+        progress.beginSession(transportAttemptID: transportID)
+        let started = AsyncTestSignal()
+        let release = AsyncTestSignal()
+        var completed = false
         let run = Task { @MainActor in
-            await deadline.run(deadline: .milliseconds(100), operation: {
-                await operationStarted.signal()
-                return await withCheckedContinuation { continuation in lateCompletion = continuation }
-            }, onTimeout: {
-                closedSessions.append(sessionID)
-            }, onProgress: { progress in
-                updates.append(progress)
-            })
+            let result = await progress.run(operation: {
+                await started.signal()
+                await release.wait()
+                return true
+            }, onProgress: { _ in })
+            completed = true
+            return result
         }
-        await operationStarted.wait()
+        await started.wait()
+        for event in [NativeRelayProgressEvent.nativeSyncReplayRequested, .nativeSyncResynced,
+                      .nativeSyncAcknowledged, .postAckDrainBegan] {
+            progress.observe(event, transportAttemptID: transportID)
+            XCTAssertFalse(completed)
+            XCTAssertEqual(progress.progress.outcome, .connecting)
+        }
+        await release.signal()
         let result = await run.value
-
-        XCTAssertEqual(result.outcome, .timedOut)
-        XCTAssertEqual(result.headline, "Connection not confirmed")
-        XCTAssertFalse(result.webSocketOpenObserved)
-        XCTAssertTrue(result.message.contains("No WebSocket-open event arrived"))
-        XCTAssertTrue(result.message.contains("cannot distinguish a TLS failure from a WebSocket-upgrade timeout"))
-        XCTAssertEqual(closedSessions, [sessionID], "Timeout closes only the session captured by this attempt.")
-
-        // Neither a stale open callback nor a late successful operation may
-        // turn the timed-out attempt into foreground confirmation.
-        deadline.observe(.webSocketOpened, transportAttemptID: transportAttemptID)
-        lateCompletion?.resume(returning: true)
-        try await Task.sleep(for: .milliseconds(20))
-        XCTAssertEqual(deadline.progress.outcome, .timedOut)
-        XCTAssertFalse(updates.contains(where: { $0.outcome == .confirmed }))
-        XCTAssertEqual(try persistence.load(identity: identity), before,
-                       "Timeout preserves the pending answer and conversation draft byte-for-byte.")
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1]?.text,
-                       ExactText("Keep this draft"))
+        XCTAssertTrue(completed)
+        XCTAssertEqual(result.outcome, .confirmed)
     }
 
     func testForegroundDiagnosticShareIncludesExactBuildPhaseReceiptAndNoAnswerContent() throws {
@@ -3246,7 +3517,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             .postAckDrainFinished(.completed)
         ])
 
-        let progress = ForegroundConnectDeadline()
+        let progress = ForegroundConnectProgressTracker()
         let transportAttemptID = UUID()
         progress.beginSession(transportAttemptID: transportAttemptID)
         progress.observe(.serverTrustValidated, transportAttemptID: transportAttemptID)
@@ -3277,14 +3548,14 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(laterReplayAwaitingAck.message.contains("Full foreground completion remains unconfirmed"))
         XCTAssertFalse(laterReplayAwaitingAck.message.contains("through the saved native cursor were durably applied and that cursor was acknowledged"))
 
-        let rejectedTrust = ForegroundConnectDeadline()
+        let rejectedTrust = ForegroundConnectProgressTracker()
         let rejectedTrustTransportID = UUID()
         rejectedTrust.beginSession(transportAttemptID: rejectedTrustTransportID)
         rejectedTrust.observe(.serverTrustRejected, transportAttemptID: rejectedTrustTransportID)
         XCTAssertEqual(rejectedTrust.progress.issue, .serverTrustRejected)
         XCTAssertTrue(rejectedTrust.progress.message.contains("did not pass the saved host and CA check"))
 
-        let rejectedIdentity = ForegroundConnectDeadline()
+        let rejectedIdentity = ForegroundConnectProgressTracker()
         let rejectedIdentityTransportID = UUID()
         rejectedIdentity.beginSession(transportAttemptID: rejectedIdentityTransportID)
         rejectedIdentity.observe(.clientIdentityChallengeRejected, transportAttemptID: rejectedIdentityTransportID)
@@ -3377,17 +3648,17 @@ final class NativeGuidedTLSTests: XCTestCase {
 
     func testPostAckForegroundSummaryRetainsBoundaryValidationAndUnknownCause() async throws {
         let transportAttemptID = UUID()
-        let failedDeadline = ForegroundConnectDeadline()
+        let failedDeadline = ForegroundConnectProgressTracker()
         failedDeadline.beginSession(transportAttemptID: transportAttemptID)
         failedDeadline.observe(.nativeSyncAcknowledged, transportAttemptID: transportAttemptID)
         failedDeadline.observe(.postAckDrainBegan, transportAttemptID: transportAttemptID)
         failedDeadline.observe(.postAckDrainFinished(.failed), transportAttemptID: transportAttemptID)
-        let failed = await failedDeadline.run(deadline: .seconds(2), operation: {
+        let failed = await failedDeadline.run(operation: {
             failedDeadline.recordPostAckCompletion(postAckReached: true,
                 relayRefreshConfirmed: false, generationMatches: false,
                 profileMatches: true, relayContextMatches: false)
             return false
-        }, onTimeout: {}, onProgress: { _ in })
+        }, onProgress: { _ in })
 
         XCTAssertEqual(failed.outcome, .incomplete)
         XCTAssertNil(failed.failureClass, "No transport cause was observed in this invalidation case.")
@@ -3415,18 +3686,18 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(failedSummary.shareText.contains("terminal_reason=generation_invalidated"))
         XCTAssertTrue(failedSummary.shareText.contains("error_class=none_observed"))
 
-        let successfulDeadline = ForegroundConnectDeadline()
+        let successfulDeadline = ForegroundConnectProgressTracker()
         let successfulTransportID = UUID()
         successfulDeadline.beginSession(transportAttemptID: successfulTransportID)
         successfulDeadline.observe(.nativeSyncAcknowledged, transportAttemptID: successfulTransportID)
         successfulDeadline.observe(.postAckDrainBegan, transportAttemptID: successfulTransportID)
         successfulDeadline.observe(.postAckDrainFinished(.completed), transportAttemptID: successfulTransportID)
-        let confirmed = await successfulDeadline.run(deadline: .seconds(2), operation: {
+        let confirmed = await successfulDeadline.run(operation: {
             successfulDeadline.recordPostAckCompletion(postAckReached: true,
                 relayRefreshConfirmed: true, generationMatches: true,
                 profileMatches: true, relayContextMatches: true)
             return true
-        }, onTimeout: {}, onProgress: { _ in })
+        }, onProgress: { _ in })
         XCTAssertEqual(confirmed.outcome, .confirmed)
         XCTAssertEqual(confirmed.terminalReason, .confirmed)
         XCTAssertEqual(confirmed.lastCompletedPostAckBoundary, .foregroundConfirmed)
@@ -3435,54 +3706,34 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(confirmed.profileContextValidation, .passed)
         XCTAssertEqual(confirmed.relayContextValidation, .passed)
 
-        let timeoutDeadline = ForegroundConnectDeadline()
-        let timeoutTransportID = UUID()
-        timeoutDeadline.beginSession(transportAttemptID: timeoutTransportID)
-        timeoutDeadline.observe(.nativeSyncAcknowledged, transportAttemptID: timeoutTransportID)
-        timeoutDeadline.observe(.postAckDrainBegan, transportAttemptID: timeoutTransportID)
-        let timedOut = await timeoutDeadline.run(deadline: .milliseconds(20), operation: {
-            try? await Task.sleep(for: .seconds(2))
-            return false
-        }, onTimeout: {}, onProgress: { _ in })
-        XCTAssertEqual(timedOut.outcome, .timedOut)
-        timeoutDeadline.recordTimedOutValidation(attemptID: try XCTUnwrap(timedOut.attemptID),
-            generationMatches: false, profileMatches: true, relayContextMatches: false)
-        XCTAssertEqual(timeoutDeadline.progress.terminalReason, .deadlineExceeded)
-        XCTAssertEqual(timeoutDeadline.progress.lastCompletedPostAckBoundary, .nativeCursorAcknowledged)
-        XCTAssertEqual(timeoutDeadline.progress.postAckRelayRefresh, .failed)
-        XCTAssertEqual(timeoutDeadline.progress.postAckDrainTransition, .timedOut)
-        XCTAssertEqual(timeoutDeadline.progress.generationValidation, .failed)
-        XCTAssertEqual(timeoutDeadline.progress.profileContextValidation, .passed)
-        XCTAssertEqual(timeoutDeadline.progress.relayContextValidation, .failed)
-
-        let cancelledDeadline = ForegroundConnectDeadline()
+        let cancelledDeadline = ForegroundConnectProgressTracker()
         let cancelledTransportID = UUID()
         cancelledDeadline.beginSession(transportAttemptID: cancelledTransportID)
         cancelledDeadline.observe(.nativeSyncAcknowledged, transportAttemptID: cancelledTransportID)
         cancelledDeadline.observe(.postAckDrainBegan, transportAttemptID: cancelledTransportID)
         cancelledDeadline.observe(.postAckDrainFinished(.cancelled), transportAttemptID: cancelledTransportID)
-        let cancelled = await cancelledDeadline.run(deadline: .seconds(2), operation: {
+        let cancelled = await cancelledDeadline.run(operation: {
             cancelledDeadline.recordFailure(CancellationError())
             cancelledDeadline.recordPostAckCompletion(postAckReached: true,
                 relayRefreshConfirmed: false, generationMatches: true,
                 profileMatches: true, relayContextMatches: false)
             return false
-        }, onTimeout: {}, onProgress: { _ in })
+        }, onProgress: { _ in })
         XCTAssertEqual(cancelled.outcome, .incomplete)
         XCTAssertEqual(cancelled.failureClass, .cancelled)
         XCTAssertEqual(cancelled.terminalReason, .cancelled)
 
-        let lateProgressDeadline = ForegroundConnectDeadline()
+        let lateProgressDeadline = ForegroundConnectProgressTracker()
         let lateProgressTransportID = UUID()
         lateProgressDeadline.beginSession(transportAttemptID: lateProgressTransportID)
         let lateProgressStarted = AsyncTestSignal()
         let releaseLateProgressOperation = AsyncTestSignal()
         let lateProgressRun = Task { @MainActor in
-            await lateProgressDeadline.run(deadline: .seconds(2), operation: {
+            await lateProgressDeadline.run(operation: {
                 await lateProgressStarted.signal()
                 await releaseLateProgressOperation.wait()
                 return false
-            }, onTimeout: {}, onProgress: { _ in })
+            }, onProgress: { _ in })
         }
         await lateProgressStarted.wait()
         lateProgressDeadline.recordFailure(URLError(.networkConnectionLost))
@@ -3508,9 +3759,6 @@ final class NativeGuidedTLSTests: XCTestCase {
             NativeRelayLifecycle.foregroundTerminalDiagnosticEvents(progress: confirmed,
                 confirmed: true, generationMatches: true, profileMatches: true,
                 relayContextMatches: true),
-            NativeRelayLifecycle.foregroundTerminalDiagnosticEvents(progress: timeoutDeadline.progress,
-                confirmed: false, timedOut: true, generationMatches: false, profileMatches: true,
-                relayContextMatches: false),
             NativeRelayLifecycle.foregroundTerminalDiagnosticEvents(progress: cancelled,
                 confirmed: false, generationMatches: true, profileMatches: true,
                 relayContextMatches: false),
@@ -3532,8 +3780,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(completion.postAckBoundary, .relayRefreshReturned)
         XCTAssertEqual(completion.postAckDrainTransition, .failed)
         XCTAssertTrue(restored.shareText.contains("post_ack_boundary=foreground_confirmed"))
-        XCTAssertTrue(restored.shareText.contains("post_ack_drain=timedOut"))
-        XCTAssertTrue(restored.shareText.contains("terminal_reason=foreground_deadline"))
+        XCTAssertFalse(restored.events.contains { $0.terminalReason == .deadlineExceeded })
         XCTAssertTrue(restored.shareText.contains("phase=foregroundCompletion transition=cancelled cause=cancelled terminal_reason=cancelled"))
         XCTAssertTrue(restored.shareText.contains("cause=url_session_error_code_\(URLError.networkConnectionLost.rawValue)"))
         let successCompletion = try XCTUnwrap(restored.events.first {
@@ -3541,11 +3788,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         })
         XCTAssertEqual(successCompletion.postAckBoundary, .foregroundConfirmed)
         XCTAssertEqual(successCompletion.postAckDrainTransition, .completed)
-        let timeoutCompletion = try XCTUnwrap(restored.events.first {
-            $0.phase == .foregroundCompletion && $0.transition == .timedOut
-        })
-        XCTAssertEqual(timeoutCompletion.postAckBoundary, .nativeCursorAcknowledged)
-        XCTAssertEqual(timeoutCompletion.postAckDrainTransition, .timedOut)
         XCTAssertTrue(restored.shareText.contains("attempt_id=\(failed.attemptID!.uuidString.lowercased())"))
         XCTAssertTrue(restored.shareText.contains("transport_attempt_id=\(transportAttemptID.uuidString.lowercased())"))
         XCTAssertFalse(restored.shareText.contains("answer="))
@@ -3553,16 +3795,16 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testReplacementTransportHasFreshPhasesAndKeepsOnlyPriorTransportSummary() async throws {
-        let deadline = ForegroundConnectDeadline()
+        let deadline = ForegroundConnectProgressTracker()
         let firstTransportID = UUID()
         deadline.beginSession(transportAttemptID: firstTransportID)
         let operationStarted = AsyncTestSignal()
         var finishOperation: CheckedContinuation<Bool, Never>?
         let run = Task { @MainActor in
-            await deadline.run(deadline: .seconds(3), operation: {
+            await deadline.run(operation: {
                 await operationStarted.signal()
                 return await withCheckedContinuation { finishOperation = $0 }
-            }, onTimeout: {}, onProgress: { _ in })
+            }, onProgress: { _ in })
         }
         await operationStarted.wait()
 
@@ -3622,7 +3864,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(completed.outcome, .incomplete)
     }
 
-    func testRestoredInboxCanRetryTheSameApprovedIdentityAndTimeoutStopsAutomaticJoinRetry() async throws {
+    func testRestoredInboxAndPendingApprovalRetryTheSameApprovedIdentity() async throws {
         let establishedService = "Harklight.foreground-established-retry." + UUID().uuidString
         defer { deleteEnrollmentRecord(service: establishedService) }
         let establishedRecord = approvedRecord(foregroundRelayConfirmed: true,
@@ -3639,7 +3881,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         await establishedFlow.restore()
         XCTAssertFalse(establishedFlow.isShowing, "A restored joined account remains in its ordinary inbox while offline.")
         XCTAssertEqual(establishedConnections, [establishedRecord])
-        XCTAssertFalse(establishedFlow.shouldAutomaticallyRetry(foregroundOutcome: .timedOut))
+        XCTAssertFalse(establishedFlow.shouldAutomaticallyRetry())
 
         await establishedFlow.retryApprovedConnection()
         XCTAssertEqual(establishedConnections, [establishedRecord, establishedRecord],
@@ -3663,14 +3905,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(firstJoinFlow.isShowing)
         XCTAssertEqual(firstJoinFlow.screen, .approvedFinishing)
         XCTAssertEqual(firstJoinConnections, 1)
-        let retriedAutomatically = await firstJoinFlow.retryAutomaticallyIfNeeded(foregroundOutcome: .timedOut)
-        XCTAssertFalse(retriedAutomatically,
-                       "The scene poll must honor the explicit Retry boundary after timeout.")
-        XCTAssertEqual(firstJoinConnections, 1,
-                       "The actual scene-poll caller must not re-run an approved connection after timeout.")
-        XCTAssertFalse(firstJoinFlow.shouldAutomaticallyRetry(foregroundOutcome: .timedOut))
-        XCTAssertTrue(firstJoinFlow.shouldAutomaticallyRetry(foregroundOutcome: .incomplete),
-                      "Other saved approval checks retain their existing retry behavior.")
+        let retriedAutomatically = await firstJoinFlow.retryAutomaticallyIfNeeded()
+        XCTAssertTrue(retriedAutomatically)
+        XCTAssertEqual(firstJoinConnections, 2,
+                       "An actual failed connection retries the existing approved identity.")
+        XCTAssertTrue(firstJoinFlow.shouldAutomaticallyRetry())
     }
 
     func testReceivedInvitationContinuesAutomaticApprovalPolling() async throws {
@@ -3728,15 +3967,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(flow.screen, .pending)
         let originalAttempt = try XCTUnwrap(store.loadAttempt())
 
-        XCTAssertFalse(flow.shouldAutomaticallyRetry(foregroundOutcome: .timedOut),
-                       "The timeout stop still applies after receiving an invitation.")
-        let retriedTimedOutAttempt = await flow.retryAutomaticallyIfNeeded(foregroundOutcome: .timedOut)
-        XCTAssertFalse(retriedTimedOutAttempt)
-        XCTAssertEqual(transport.approvalCheckCount, 0,
-                       "A timed-out foreground attempt still waits for the explicit Retry action.")
-        XCTAssertTrue(flow.shouldAutomaticallyRetry(foregroundOutcome: .incomplete),
-                      "Receiving an invitation must not disable non-timed-out approval polling.")
-        let didPoll = await flow.retryAutomaticallyIfNeeded(foregroundOutcome: .incomplete)
+        XCTAssertTrue(flow.shouldAutomaticallyRetry())
+        let didPoll = await flow.retryAutomaticallyIfNeeded()
 
         XCTAssertTrue(didPoll)
         XCTAssertEqual(transport.joinSubmissionCount, 1,
@@ -3776,8 +4008,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                        kSecAttrService as String: service] as CFDictionary)
     }
 
-    func testStalledForegroundRelayTimesOutClosesOnlyItsSessionAndPreservesSavedState() async throws {
-        let namespace = "Harklight.foreground-deadline-test." + UUID().uuidString
+    func testCancellingStalledForegroundRelayPreservesSavedState() async throws {
+        let namespace = "Harklight.foreground-cancellation-test." + UUID().uuidString
         let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
             SecItemDelete([kSecClass as String: kSecClassCertificate,
@@ -3830,54 +4062,44 @@ final class NativeGuidedTLSTests: XCTestCase {
                                      diagnostics: diagnosticJournal, serverStateCache: cache)
         var progressUpdates: [NativeForegroundConnectProgress] = []
         var operationSnapshots: [NativeForegroundOperationSnapshot] = []
-        let result = await lifecycle.confirmForegroundProgress(for: context, deadline: .seconds(3)) {
-            progressUpdates.append($0)
-            operationSnapshots.append(lifecycle.foregroundOperationDiagnostics(for: context))
+        var finished = false
+        let connection = Task { @MainActor in
+            let result = await lifecycle.confirmForegroundProgress(for: context) {
+                progressUpdates.append($0)
+                operationSnapshots.append(lifecycle.foregroundOperationDiagnostics(for: context))
+            }
+            finished = true
+            return result
         }
-
-        XCTAssertEqual(result.outcome, .timedOut)
-        XCTAssertEqual(result.headline, "Connection not confirmed",
-                       "An actual stalled relay must keep the existing connection warning.")
-        XCTAssertEqual(result.failureClass, .foregroundDeadline)
-        XCTAssertNotNil(result.attemptID)
-        XCTAssertFalse(result.webSocketOpenObserved)
-        XCTAssertTrue(result.message.contains("No WebSocket-open event arrived"))
         let requestReceived = await eventually { server.receivedRequest }
-        XCTAssertTrue(requestReceived, "The local TLS fixture must receive the WebSocket request.")
-        XCTAssertEqual(server.acceptedConnectionCount, 1)
+        XCTAssertTrue(requestReceived, "The fixture holds an actual WebSocket request open.")
+        XCTAssertFalse(finished, "An unfinished connection remains active until an actual lifecycle event.")
+        await lifecycle.deactivate()
+        let result = await connection.value
+        XCTAssertNotEqual(result.outcome, .confirmed)
+        XCTAssertNotEqual(result.failureClass, .foregroundDeadline)
         let connectionClosed = await eventually { server.clientClosed }
-        XCTAssertTrue(connectionClosed, "The timed-out matching relay session must close its local TLS connection.")
+        XCTAssertTrue(connectionClosed, "Explicit deactivation closes only the owned connection.")
         XCTAssertFalse(progressUpdates.contains(where: { $0.outcome == .confirmed }))
-        let restoredAfterTimeout = try ClientRepository(context: context, persistence: persistence)
+        let restoredAfterCancellation = try ClientRepository(context: context, persistence: persistence)
         let cached = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
-        try restoredAfterTimeout.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: context)
-        let restoredSnapshot = try restoredAfterTimeout.snapshot(context: context)
+        try restoredAfterCancellation.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: context)
+        let restoredSnapshot = try restoredAfterCancellation.snapshot(context: context)
         XCTAssertEqual(restoredSnapshot.cursor, 1,
                        "The stalled connection must preserve the approved profile's replay cursor.")
-        XCTAssertEqual(try restoredAfterTimeout.lookupIntent(queuedReceipt.intentID, context: context)?.operationID, originalOperation.operationID,
+        XCTAssertEqual(try restoredAfterCancellation.lookupIntent(queuedReceipt.intentID, context: context)?.operationID, originalOperation.operationID,
                        "The stalled connection must preserve its exact queued operation.")
-        XCTAssertEqual(try restoredAfterTimeout.conversationSnapshot(context: context)
+        XCTAssertEqual(try restoredAfterCancellation.conversationSnapshot(context: context)
             .threads[requestKey]?.drafts[1]?.text, ExactText("Keep this draft"),
                        "The stalled connection must preserve the saved conversation draft.")
         XCTAssertEqual(try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate().deviceID,
-                       installation.deviceID, "The approved device identity remains available after timeout.")
+                       installation.deviceID, "The approved device identity remains available after cancellation.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[requestKey]?.drafts[1]?.text,
                        ExactText("Keep this draft"))
-        let timeoutEvent = try XCTUnwrap(diagnosticJournal.events.first {
-            $0.phase == .approvedConnection && $0.transition == .timedOut &&
-                $0.causeCode == "foreground_deadline"
-        }, "A real stalled local connection must leave a retrievable timeout record.")
-        XCTAssertEqual(timeoutEvent.transportAttemptID, result.transportAttemptID,
-                       "The foreground timeout and actual socket attempt must remain correlated.")
-        let persistedDiagnostics = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
-        XCTAssertTrue(persistedDiagnostics.shareText.contains("phase=approvedConnection"))
-        XCTAssertTrue(persistedDiagnostics.shareText.contains("transition=timedOut"))
-        let transportAttemptID = try XCTUnwrap(timeoutEvent.transportAttemptID)
-        XCTAssertTrue(persistedDiagnostics.shareText.contains("transport_attempt_id=\(transportAttemptID.uuidString.lowercased())"))
-        XCTAssertTrue(persistedDiagnostics.shareText.contains("operation_id=\(originalOperation.operationID.uuidString.lowercased())") == false,
-                      "An operation not yet sent must not be mislabeled as a transport attempt.")
+        XCTAssertFalse(diagnosticJournal.events.contains { $0.causeCode == "foreground_deadline" },
+                       "A stalled connection does not manufacture a deadline failure.")
         XCTAssertEqual(try store.lookupIntent(queuedReceipt.intentID, context: context)?.operationID,
                        originalOperation.operationID,
                        "Diagnostics must not change or resubmit the original queued operation.")
@@ -3890,15 +4112,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(operationSnapshot.operations.first?.requestRevision, 1)
         XCTAssertEqual(operationSnapshot.operations.first?.receiptState, "pending_unconfirmed")
 
-        let laterPass = await lifecycle.confirmForegroundProgress(for: context, deadline: .seconds(3))
-        XCTAssertEqual(laterPass.outcome, .timedOut,
-                       "The unavailable endpoint still fails this pass, rather than claiming success.")
-        XCTAssertGreaterThanOrEqual(server.acceptedConnectionCount, 2,
-                       "A later refresh retries the approved endpoint without a permanent timeout latch.")
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        XCTAssertEqual(try store.lookupIntent(queuedReceipt.intentID, context: context)?.operationID,
-                       originalOperation.operationID)
-        await lifecycle.deactivate()
+
     }
 
     func testAcceptedOriginalOperationReplayIsJoinedToItsSavedBinding() async throws {
@@ -3929,9 +4143,6 @@ final class NativeGuidedTLSTests: XCTestCase {
                                        onDiagnostic: { events.append($0) })
 
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued answer.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
-        _ = try await core.resyncAndDrainOutbox()
 
         let replay = events.events.filter {
             $0.phase == .ordinaryReplay && $0.operationID == submission.operationID
@@ -3944,8 +4155,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             $0.transition == .completed && $0.receiptState == .terminal &&
                 $0.requestTag != nil && $0.requestRevision == 1
         })
-        XCTAssertEqual(session.sent.first?.1, receipt.opID,
-                       "Replay must keep the accepted operation's original UUID.")
+        XCTAssertEqual(session.sent.map { $0.1 }, [receipt.opID],
+                       "Automatic recovery sends once with the original UUID; replay does not resend it.")
         XCTAssertEqual(session.acknowledgements.count, 1,
                        "The checkpoint ACK is separate; only terminal sequence 2 uses ordinary ACK.")
         XCTAssertEqual(try JSONValue.parse(try XCTUnwrap(session.acknowledgements.first))
@@ -3990,9 +4201,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { events.append($0) })
 
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued answer.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         do {
             _ = try await core.resyncAndDrainOutbox()
             XCTFail("The follow-on replay failure must remain visible to its accepted operation.")
@@ -4170,6 +4378,7 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
     private let advertiseSize: Bool
     private let redirectTo: URL?
     private let stallRequest: Bool
+    private let responseFileHash: String?
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
     private var requestWasReceived = false
@@ -4179,11 +4388,13 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
     var clientClosed: Bool { queue.sync { connectionWasClosed } }
 
     init(expectedDevice: String?, replyBody: Data = Data("{\"state\":\"reachable\"}".utf8),
-         advertiseSize: Bool = true, redirectTo: URL? = nil, stallRequest: Bool = false) throws {
+         advertiseSize: Bool = true, redirectTo: URL? = nil, stallRequest: Bool = false,
+         responseFileHash: String? = nil) throws {
         self.replyBody = replyBody
         self.advertiseSize = advertiseSize
         self.redirectTo = redirectTo
         self.stallRequest = stallRequest
+        self.responseFileHash = responseFileHash
         let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
         rootDER = root
         let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
@@ -4276,11 +4487,12 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
                         return
                     }
                     let lengthHeader = advertiseSize ? "Content-Length: \(replyBody.count)\r\n" : ""
+                    let hashHeader = responseFileHash.map { "X-Harklight-Sha256: \($0)\r\n" } ?? ""
                     let reply: Data
                     if let redirectTo {
                         reply = Data("HTTP/1.1 302 Found\r\nLocation: \(redirectTo.absoluteString)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
                     } else {
-                        reply = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\(lengthHeader)Connection: close\r\n\r\n".utf8) + replyBody
+                        reply = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\(lengthHeader)\(hashHeader)Connection: close\r\n\r\n".utf8) + replyBody
                     }
                     connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
                     return
@@ -4306,11 +4518,15 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "Harklight.local-relay-websocket")
     private let reply: @Sendable (String) -> [String]
+    private let closeAfterReply: @Sendable (String) -> Bool
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
 
-    init(expectedDevice: String, reply: @escaping @Sendable (String) -> [String]) throws {
+    init(expectedDevice: String,
+         closeAfterReply: @escaping @Sendable (String) -> Bool = { _ in false },
+         reply: @escaping @Sendable (String) -> [String]) throws {
         self.reply = reply
+        self.closeAfterReply = closeAfterReply
         let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
         rootDER = root
         let webSocket = NWProtocolWebSocket.Options()
@@ -4357,7 +4573,12 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
                 as? NWProtocolWebSocket.Metadata
             if metadata?.opcode == .text, let data, let text = String(data: data, encoding: .utf8) {
-                for frame in reply(text) {
+                let frames = reply(text)
+                if closeAfterReply(text) {
+                    sendThenClose(frames[...], on: connection)
+                    return
+                }
+                for frame in frames {
                     let context = NWConnection.ContentContext(
                         identifier: "relay-frame", metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])
                     connection.send(content: Data(frame.utf8), contentContext: context, isComplete: true,
@@ -4366,6 +4587,24 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             }
             receive(connection)
         }
+    }
+
+    private func sendThenClose(_ frames: ArraySlice<String>, on connection: NWConnection) {
+        guard let frame = frames.first else {
+            let close = NWConnection.ContentContext(identifier: "relay-close",
+                metadata: [NWProtocolWebSocket.Metadata(opcode: .close)])
+            // Going Away: a real closed WebSocket after the preceding data frames.
+            connection.send(content: Data([0x03, 0xe9]), contentContext: close, isComplete: true,
+                completion: .contentProcessed { _ in connection.cancel() })
+            return
+        }
+        let context = NWConnection.ContentContext(identifier: "relay-frame",
+            metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])
+        connection.send(content: Data(frame.utf8), contentContext: context, isComplete: true,
+            completion: .contentProcessed { [weak self] error in
+                guard error == nil else { connection.cancel(); return }
+                self?.sendThenClose(frames.dropFirst(), on: connection)
+            })
     }
 
     func close() {

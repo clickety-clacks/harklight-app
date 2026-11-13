@@ -108,6 +108,7 @@ final class NativeDomainRoutesTests: XCTestCase {
 
         let context2 = ProfileContext(identity: identity, transportMode: .fixture)
         let store2 = try ClientRepository(context: context2, persistence: persistence)
+        try store2.registerFixtureRequests([original], context: context2)
         let port2 = AttentionDomainPort(store: store2)
         let restarted = try NativeDomainRoutes(port: port2, gate: HostSessionGate())
         let token2 = try pair(restarted)
@@ -321,6 +322,7 @@ final class NativeDomainRoutesTests: XCTestCase {
         let reopenedContext = ProfileContext(identity: identity, transportMode: .fixture)
         let reopenedStore = try ClientRepository(context: reopenedContext,
                                                       persistence: persistence)
+        try reopenedStore.registerFixtureRequests([original], context: reopenedContext)
         let reopenedPort = AttentionDomainPort(store: reopenedStore)
         let reopenedRoutes = try NativeDomainRoutes(port: reopenedPort, gate: HostSessionGate())
         let reopenedToken = try pair(reopenedRoutes)

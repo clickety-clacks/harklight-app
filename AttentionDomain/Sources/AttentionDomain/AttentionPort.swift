@@ -814,7 +814,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             relayOutcome = .accepted(sequence: sequence)
         case .lost:
             // A missing send reply does not establish a terminal failure. The
-            // same operation waits for an explicit retry or server evidence.
+            // same operation waits for automatic recovery or server evidence.
             localState = .queuedForRelay
             relayOutcome = .unknown
         case .failed:
@@ -1315,7 +1315,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 deliveredFiles: deliveredFiles,
                                 selector: selector,
                                 draft: draft,
-                                submittedAnswer: session == nil || hasAccountTerminal ? nil :
+                                submittedAnswer: hasAccountTerminal || (session == nil && status != .pending) ? nil :
                                     submittedAnswer(for: submission, interface: interface),
                                 ownAnswerWasRefusedByRetraction: ownAnswerWasRefusedByRetraction,
                                 lifecycleStatus: status,
@@ -1392,16 +1392,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
             return .confirmed
         }
         guard request.hasExplicitInformationalSeenAction else { return nil }
-        let seenValue = JSONValue.object([
-            JSONMember("acknowledgment", .string(ExactText("seen")))
-        ])
-        if remote?.state == .answered,
-           remote?.authorizedOriginAnswer?.semanticallyEquals(seenValue) == true {
-            return .confirmed
-        }
         if submission?.isNoComment == true { return .resolvedWithoutSeen }
         if status == .open || status == .pending {
-            return submission?.answer.semanticallyEquals(seenValue) == true ? .pending : .available
+            return submission == nil ? .available : .pending
         }
         return .resolvedWithoutSeen
     }

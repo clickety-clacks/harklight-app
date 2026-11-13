@@ -8,6 +8,123 @@ import XCTest
 final class TwoDeviceServerCacheUITests: XCTestCase {
     private let observationTimeout: TimeInterval = 30
 
+    func testMessageOpensDuringPostAckCatchUp() throws {
+        try requireCatchUpRun()
+        let message = try configuredMessage("SEEN")
+        let app = launchEnrolledApp()
+        let row = try findMessage(message, in: app)
+        try requireActiveCatchUp(app, stage: "before-opening-message")
+        snapshot("open-message-during-catch-up-before", app)
+        guard row.exists, row.isEnabled, row.isHittable else {
+            throw Failure.missing("hittable message row during catch-up")
+        }
+        let startedAt = ISO8601DateFormatter().string(from: Date())
+        let started = ProcessInfo.processInfo.systemUptime
+        row.tap()
+        let tapReturned = ProcessInfo.processInfo.systemUptime
+        let detailAppeared = app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5)
+        let observed = ProcessInfo.processInfo.systemUptime
+        attach("started_at=\(startedAt) tap_return_seconds=\(tapReturned - started) " +
+               "detail_observation_seconds=\(observed - tapReturned) detail_exists=\(detailAppeared)",
+               named: "message-opening-timing")
+        guard detailAppeared else {
+            snapshot("detail-missing-during-catch-up", app)
+            throw Failure.missing("message detail during catch-up")
+        }
+        try requireActiveCatchUp(app, stage: "after-opening-message")
+        snapshot("detail-open-during-catch-up", app)
+    }
+
+    /// The isolated relay must keep real post-ACK conversation replay open.
+    /// This driver never toggles a fake refreshing flag or enrolls a device.
+    func testSearchBothSwipesAndChatDuringPostAckCatchUp() throws {
+        try requireCatchUpRun()
+        let message = try configuredMessage("SEEN")
+        let app = launchEnrolledApp()
+        let row = try findMessage(message, in: app)
+        try requireActiveCatchUp(app, stage: "after-search")
+        for left in [true, false] {
+            let edge = left ? "left" : "right"
+            try requireActiveCatchUp(app, stage: "before-" + edge)
+            if left { row.swipeLeft() } else { row.swipeRight() }
+            snapshot("catch-up-" + edge + "-menu", app)
+            let action = app.buttons["inbox-mark-seen"]
+            guard action.waitForExistence(timeout: 5), action.isEnabled, action.isHittable else {
+                throw Failure.missing(edge + " Seen menu during catch-up")
+            }
+            try requireActiveCatchUp(app, stage: "after-" + edge)
+            try tap(row, stage: edge + "-dismiss-menu", in: app)
+            let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: action)
+            guard XCTWaiter.wait(for: [closed], timeout: 5) == .completed else {
+                throw Failure.missing(edge + " menu dismissal")
+            }
+        }
+        try openMessage(message, in: app)
+        try requireActiveCatchUp(app, stage: "before-chat")
+        try tap(app.buttons["Chat"], stage: "open-chat-during-catch-up", in: app)
+        guard app.textViews["sample-chat-composer"].waitForExistence(timeout: 5) else {
+            throw Failure.missing("chat composer during catch-up")
+        }
+        snapshot("chat-open-during-catch-up", app)
+    }
+
+    func testSeenShowsPendingDuringPostAckCatchUp() throws {
+        try requireCatchUpRun()
+        let message = try configuredMessage("SEEN")
+        let app = launchEnrolledApp()
+        try openMessage(message, in: app)
+        try requireActiveCatchUp(app, stage: "before-Seen")
+        try tap(app.buttons["request-seen-action"], stage: "Seen-once-during-catch-up", in: app)
+        try openRepliedMessage(message, in: app)
+        try requireActiveCatchUp(app, stage: "after-Seen")
+        let seen = app.buttons["request-finish-seen"]
+        guard seen.waitForExistence(timeout: 5), (seen.value as? String) == "Pending" else {
+            snapshot("missing-Seen-pending", app)
+            throw Failure.missing("Seen pending confirmation during catch-up")
+        }
+        snapshot("Seen-pending-during-catch-up", app)
+    }
+
+    func testReplyShowsPendingTextDuringPostAckCatchUp() throws {
+        try requireCatchUpRun()
+        let message = try configuredMessage("REPLY")
+        guard let reply = ProcessInfo.processInfo.environment["HARKLIGHT_DIAGNOSTIC_REPLY_TEXT"], !reply.isEmpty else {
+            throw Failure.missing("synthetic reply configuration")
+        }
+        let app = launchEnrolledApp()
+        try openMessage(message, in: app)
+        try tap(app.buttons["Reply"], stage: "reply-choice", in: app)
+        let editor = app.textViews["request-compatibility-reply-response"]
+        try tap(editor, stage: "reply-editor", in: app)
+        editor.typeText(reply)
+        try requireActiveCatchUp(app, stage: "before-Reply")
+        try tap(app.buttons["request-finish"], stage: "Reply-once-during-catch-up", in: app)
+        try openRepliedMessage(message, in: app)
+        try requireActiveCatchUp(app, stage: "after-Reply")
+        guard app.descendants(matching: .any)["request-pending-answer-status"].firstMatch
+                .waitForExistence(timeout: 5), app.staticTexts[reply].exists else {
+            snapshot("missing-Reply-pending", app)
+            throw Failure.missing("pending exact reply during catch-up")
+        }
+        snapshot("Reply-pending-during-catch-up", app)
+    }
+
+    private func requireCatchUpRun() throws {
+        guard ProcessInfo.processInfo.environment["HARKLIGHT_ACTIVE_CATCHUP_UI"] == "1" else {
+            throw XCTSkip("Requires observed active catch-up on the isolated Server and dedicated action rows.")
+        }
+    }
+
+    private func requireActiveCatchUp(_ app: XCUIApplication, stage: String) throws {
+        let probe = app.descendants(matching: .any)["inbox-catch-up-diagnostics"].firstMatch
+        guard probe.waitForExistence(timeout: observationTimeout),
+              probe.label.contains("source=live"), probe.label.contains("post_ack_drain=running") else {
+            snapshot("catch-up-not-active-" + stage, app)
+            throw Failure.missing("actual post-ACK catch-up at " + stage)
+        }
+        attach(probe.label, named: "active-catch-up-" + stage)
+    }
+
     func testBothRowSwipesThenSeen() throws {
         let message = try configuredMessage("SEEN")
         let app = launchEnrolledApp()

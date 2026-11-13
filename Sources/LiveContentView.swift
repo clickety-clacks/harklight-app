@@ -532,8 +532,8 @@ struct LiveContentView: View {
         let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
         let failureKey = launch?.foregroundConnectFailureKey
         let diagnostic = launch?.foregroundConnectDiagnostic
-        let connectionStatus = showsRecovery ? progress?.headline : store.connectionWarning
-        let connectionWarning = showsRecovery ? progress?.message : store.connectionWarning
+        let connectionStatus = showsRecovery ? progress?.userFacingMessage : store.connectionWarning
+        let connectionWarning = showsRecovery ? progress?.userFacingMessage : store.connectionWarning
         let presentsFailureDetails = !store.isReadOnly && diagnostic != nil &&
             (failureKey.map { launch?.shouldPresentForegroundConnectFailure($0) ?? false } ?? false)
         let failureAlertPresented = Binding<Bool>(
@@ -592,6 +592,10 @@ struct LiveContentView: View {
                 userOpenedMessage: { launch?.userOpenedMessage() },
                 testNotificationRouter: testNotificationRouter,
                 testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
+            .uiDiagnostics("inbox-catch-up-diagnostics",
+                "source=\(launch != nil && !store.isLocalExample ? "live" : "fixture") " +
+                "post_ack_drain=\(progress?.outcome == .connecting && progress?.postAckDrainTransition == .began ? "running" : "not_running") " +
+                "transport=\(progress?.transportAttemptID?.uuidString ?? "none")")
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
                 Button("Copy details") {
@@ -606,7 +610,7 @@ struct LiveContentView: View {
                     }
                 }
             } message: { diagnostic in
-                Text(diagnostic.progress.message)
+                Text(diagnostic.progress.userFacingMessage)
             }
             .onChange(of: store.presentation.revision) { _, _ in
                 fixtureStore?.refreshFromDurableStore()
@@ -1364,10 +1368,9 @@ struct LiveRequestDetail: View {
         lifecycleStatus == .noComment && !isSupersedesReadOnly
     }
 
-    private var showsPendingAnswerConfirmation: Bool {
-        request.inboxStateIsCurrent &&
-            !isSupersedesReadOnly && !storePresentationSnapshot.isRetracted &&
-            request.lifecycleStatus == .pending && request.receiptFacts?.ownOutcome == .unconfirmed
+    var showsPendingAnswerConfirmation: Bool {
+        !isSupersedesReadOnly && !storePresentationSnapshot.isRetracted &&
+            request.lifecycleStatus == .pending && request.intentReceipt != nil && !request.answerNotDelivered
     }
 
     private var showsNotAcceptedConfirmation: Bool {
@@ -1402,7 +1405,7 @@ struct LiveRequestDetail: View {
             defaultAnswerAction: request.defaultAnswerAction)
     }
 
-    private var pendingAnswerText: String? { nil }
+    var pendingAnswerText: String? { attemptedAnswerText }
 
     private var attemptedAnswerText: String? {
         AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
@@ -1410,14 +1413,13 @@ struct LiveRequestDetail: View {
             projection: request.projection)
     }
 
-    /// A pending or refused send never counts as Answered; only a request the
-    /// relay reports answered, or an accepted submission, completes the state.
+    /// A send acknowledgement is not the final request state. Keep its saved
+    /// answer pending until the Server reports an answered terminal.
     static func answerStatusIsComplete(lifecycleStatus: AppLifecycleStatus,
                                        ownOutcome: OwnOutcome?,
                                        answerNotDelivered: Bool) -> Bool {
         guard !answerNotDelivered else { return false }
-        if lifecycleStatus == .answered { return true }
-        return ownOutcome == .accepted && lifecycleStatus != .noComment
+        return lifecycleStatus == .answered
     }
 
     private func returnToListIfSinglePane() {
@@ -1508,7 +1510,7 @@ struct LiveRequestDetail: View {
         }
         guard locallyValid else { return false }
         if localExample != nil || fixtureStore != nil { return true }
-        return store.canSendToCurrentServer && request.inboxStateIsCurrent
+        return store.canSendToCurrentServer
     }
 
     private var canOfferNoComment: Bool {
@@ -1517,7 +1519,6 @@ struct LiveRequestDetail: View {
         if let localExample { return localExample.canDeclineLocally }
         if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
         guard !store.isReadOnly, store.canSendToCurrentServer,
-              request.inboxStateIsCurrent,
               !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         return true
@@ -1836,8 +1837,8 @@ struct LiveRequestDetail: View {
                     }
                 }
                 if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
-                   request.inboxStateIsCurrent,
-                   request.intentReceipt?.localState == .terminalUnconfirmed {
+                   let receipt = request.intentReceipt,
+                   [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState) {
                     Button("Retry") { _ = store.retryUnconfirmedAnswerFromUser(request.key) }
                         .buttonStyle(.bordered)
                         .disabled(!store.canRetryUnconfirmedAnswer(for: request.key))

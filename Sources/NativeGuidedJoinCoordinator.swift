@@ -328,24 +328,15 @@ final class NativeGuidedJoinCoordinator {
         }
     }
 
-    /// The scene poll may continue ordinary approval checks, but an approved
-    /// foreground connection that timed out waits for a person to retry it.
-    func shouldAutomaticallyRetry(foregroundOutcome: NativeForegroundConnectProgress.Outcome?) -> Bool {
-        guard isShowing, !busy, !isApprovedConnectBusy,
-              [.pending, .approvalExpired, .unreachable, .approvedFinishing].contains(screen) else {
-            return false
-        }
-        return foregroundOutcome != .timedOut
+    /// Retry only a visible, idle approval flow using its existing identity.
+    func shouldAutomaticallyRetry() -> Bool {
+        isShowing && !busy && !isApprovedConnectBusy &&
+            [.pending, .approvalExpired, .unreachable, .approvedFinishing].contains(screen)
     }
 
-    /// Runs the same gated retry used by the foreground scene poll. Keeping
-    /// the decision and call together lets tests verify a timeout cannot be
-    /// bypassed by a caller that forgets the explicit-retry boundary.
     @discardableResult
-    func retryAutomaticallyIfNeeded(
-        foregroundOutcome: NativeForegroundConnectProgress.Outcome?
-    ) async -> Bool {
-        guard shouldAutomaticallyRetry(foregroundOutcome: foregroundOutcome) else { return false }
+    func retryAutomaticallyIfNeeded() async -> Bool {
+        guard shouldAutomaticallyRetry() else { return false }
         await retry()
         return true
     }

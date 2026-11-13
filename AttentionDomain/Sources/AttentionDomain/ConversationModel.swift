@@ -274,6 +274,10 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     public var text: ExactText
     public var files: [ConversationFile]
     public var disposition: Disposition
+    /// Delivery identity and the prepared bytes belong to the pending intent,
+    /// including a rejected intent offered for Retry. They are not Server state.
+    public var operationID: UUID?
+    public var wireFrame: Data?
 
     public enum Disposition: Equatable, Codable, Sendable {
         case saved
@@ -284,11 +288,14 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     }
 
     public init(binding: ConversationBinding, text: ExactText = ExactText(""),
-                files: [ConversationFile] = [], disposition: Disposition = .saved) {
+                files: [ConversationFile] = [], disposition: Disposition = .saved,
+                operationID: UUID? = nil, wireFrame: Data? = nil) {
         self.binding = binding
         self.text = text
         self.files = files
         self.disposition = disposition
+        self.operationID = operationID
+        self.wireFrame = wireFrame
     }
 }
 
@@ -507,6 +514,10 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         let ids = Set(abandoned.flatMap { $0.originals.map(\.id) })
         guard !ids.isEmpty else { return }
         draft.files.removeAll { ids.contains($0.id) }
+        // Explicitly discarded uploads change the draft payload. A later Send
+        // is a new operation, never a retry of the fenced request bytes.
+        draft.operationID = nil
+        draft.wireFrame = nil
         draft.disposition = .rejected(ExactText("Not delivered. Reselect files to upload again; text draft retained."))
         drafts[revision] = draft
     }
@@ -1175,16 +1186,25 @@ public struct ConversationSnapshot: Sendable {
     public let chatReadPositions: [RequestKey: UInt64]?
     public let chatReadPositionSupport: Bool?
     public let pendingChatReadPositions: [PendingConversationReadPosition]
+    public let events: [UInt64: ConversationEvent]
+
+    /// Applied facts already live in threads or read positions. Only facts
+    /// waiting for an older request page need a separate durable copy.
+    public var heldEvents: [UInt64: ConversationEvent] {
+        events.filter { threads[$0.value.binding.request] == nil && $0.value.requiresLoadedThread }
+    }
 
     public init(cursor: UInt64, threads: [RequestKey: ConversationThread],
                 chatReadPositions: [RequestKey: UInt64]? = nil,
                 chatReadPositionSupport: Bool? = nil,
-                pendingChatReadPositions: [PendingConversationReadPosition] = []) {
+                pendingChatReadPositions: [PendingConversationReadPosition] = [],
+                events: [UInt64: ConversationEvent] = [:]) {
         self.cursor = cursor
         self.threads = threads
         self.chatReadPositions = chatReadPositions
         self.chatReadPositionSupport = chatReadPositionSupport
         self.pendingChatReadPositions = pendingChatReadPositions
+        self.events = events
     }
 }
 

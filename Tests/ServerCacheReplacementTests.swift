@@ -5,6 +5,68 @@ import HarklightNativeRelay
 import XCTest
 
 final class ServerCacheReplacementTests: XCTestCase {
+    func testBothInitialAndOlderServerPagesMayContainMoreThanTwentyItems() throws {
+        let context = context()
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let items = (1...42).map { index in
+            InboxSnapshotItem(acceptance: RelayEvent(sequence: UInt64(index),
+                body: .delivery(request(key("row-\(index)", context: context), title: "Row \(index)"), .message)),
+                terminal: nil)
+        }
+        _ = try repository.beginInboxCandidate(startupID: "large-pages", since: 0, batches: [], context: context)
+        try repository.saveInboxInitialPage(snapshotID: "large-pages", highWater: 42,
+            items: Array(items.prefix(21)), nextCursor: "older", receiptCursor: nil, context: context)
+        _ = try repository.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try repository.acceptInboxCheckpoint(snapshotID: "large-pages", highWater: 42, context: context)
+        try repository.saveInboxOlderPage(snapshotID: "large-pages", highWater: 42, cursor: "older",
+            items: Array(items.suffix(21)), nextCursor: nil, context: context)
+        XCTAssertEqual(try repository.snapshot(context: context).requests.count, 42)
+    }
+
+    func testHeldConversationFactSurvivesCacheRestartAndInboxReplacement() async throws {
+        let context = context()
+        let key = key("older-chat", context: context)
+        let binding = ConversationBinding(request: key, revision: 1)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let turn = ConversationTurn(id: ExactText("held-reply"), binding: binding, author: .origin,
+            sessionHandle: ExactText("session"), text: ExactText("Before the older page"), kind: .reply)
+        try repository.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .turn(turn)), context: context)
+        XCTAssertNil(try repository.conversationSnapshot(context: context).threads[key])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: path)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: repository.serverCacheSnapshot(context: context),
+            conversations: repository.conversationSnapshot(context: context)))
+        let stored = try await FileServerStateCache(identity: context.identity, fileURL: path).load()
+        XCTAssertEqual(stored?.conversationEvents?.count, 1,
+                       "The held fact must survive until its older request is loaded.")
+        let restored = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try restored.restoreCachedServerState(XCTUnwrap(stored).attentionDomainState(for: context.identity), context: context)
+        _ = try restored.beginInboxCandidate(startupID: "after-reset", since: 0, batches: [], context: context)
+        try restored.saveInboxInitialPage(snapshotID: "after-reset", highWater: 1,
+            items: [], nextCursor: "older", receiptCursor: nil, context: context)
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 1,
+                       "An ordinary inbox replacement cannot reset the separate conversation stream.")
+        _ = try restored.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try restored.acceptInboxCheckpoint(snapshotID: "after-reset", highWater: 1, context: context)
+        let acceptance = RelayEvent(sequence: 1,
+            body: .delivery(request(key, title: "Older chat"), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session")))
+        try restored.saveInboxOlderPage(snapshotID: "after-reset", highWater: 1, cursor: "older",
+            items: [InboxSnapshotItem(acceptance: acceptance, terminal: nil)], nextCursor: nil, context: context)
+        let conversation = try restored.conversationSnapshot(context: context)
+        XCTAssertEqual(conversation.cursor, 1)
+        XCTAssertEqual(conversation.threads[key]?.turns.map(\.id), [turn.id])
+        XCTAssertEqual(conversation.threads[key]?.turns.first?.text, turn.text)
+        let hydrated = ServerStateCacheSnapshot.make(identity: context.identity,
+            from: try restored.serverCacheSnapshot(context: context), conversations: conversation)
+        XCTAssertTrue(hydrated.conversationEvents?.isEmpty == true,
+                      "The hydrated thread replaces the held journal copy.")
+    }
+
     func testSnapshotReplacesChangedPayloadAndAcceptanceOrderWithoutStoppingOtherRows() throws {
         let context = context()
         let first = key("first", context: context)

@@ -15,6 +15,34 @@ final class ForegroundErrorSummaryTests: XCTestCase {
             appVersion: "test", buildNumber: "test", executableSHA256: "unavailable").shareText
     }
 
+    func testUserStatusKeepsReplayDetailsInDiagnosticCopyOnly() {
+        let outcomes: [NativeForegroundConnectProgress.Outcome] = [.connecting, .incomplete, .confirmed]
+        for outcome in outcomes {
+            let progress = NativeForegroundConnectProgress(lastConfirmedStage: .nativeSyncResynced,
+                webSocketOpenObserved: true, issue: nil, outcome: outcome)
+            for technical in ["replay high-water", "relay acknowledgement", "foreground completion"] {
+                XCTAssertFalse(progress.userFacingMessage.contains(technical))
+            }
+            if outcome != .confirmed {
+                XCTAssertTrue(progress.userFacingMessage.contains("pending actions are saved"))
+                XCTAssertTrue(progress.message.contains("relay acknowledgement"))
+                XCTAssertTrue(summary(progress).contains("last_confirmed_phase=native_sync_resynced"))
+                XCTAssertTrue(summary(progress).contains("post_ack_drain=not_started"))
+            }
+        }
+    }
+
+    func testActualResetAndClosureReconnectButRefusalAndCancellationDoNot() {
+        for error in [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .ENOTCONN, .EPIPE] {
+            XCTAssertTrue(NativeRelayLifecycle.isInterruptedConnection(
+                NSError(domain: NSPOSIXErrorDomain, code: Int(error.rawValue))))
+        }
+        XCTAssertTrue(NativeRelayLifecycle.isInterruptedConnection(URLError(.networkConnectionLost)))
+        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(CancellationError()))
+        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(InstallationTransportError.serverRejected))
+        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(AttentionStoreError.persistence("Cannot save")))
+    }
+
     func testCaughtErrorsExposeTypeAndCauseWithoutMessageContent() async {
         let cases: [(Error, String, String)] = [
             (InboxPagingWireError.invalidFrame, "InboxPagingWireError", "inbox paging response was invalid"),
@@ -32,12 +60,12 @@ final class ForegroundErrorSummaryTests: XCTestCase {
              "NSError", "NSURLErrorDomain code -1005")
         ]
         for (error, type, description) in cases {
-            let deadline = ForegroundConnectDeadline()
+            let deadline = ForegroundConnectProgressTracker()
             deadline.beginSession(transportAttemptID: UUID())
-            let result = await deadline.run(deadline: .seconds(2), operation: {
+            let result = await deadline.run(operation: {
                 deadline.recordFailure(error)
                 return false
-            }, onTimeout: {}, onProgress: { _ in })
+            }, onProgress: { _ in })
             let text = summary(result)
             XCTAssertEqual(result.outcome, .incomplete)
             XCTAssertTrue(text.contains(type), text)
@@ -48,13 +76,13 @@ final class ForegroundErrorSummaryTests: XCTestCase {
     }
 
     func testReconnectKeepsPriorErrorDetailsAndClearsCurrentCause() async {
-        let deadline = ForegroundConnectDeadline()
+        let deadline = ForegroundConnectProgressTracker()
         deadline.beginSession(transportAttemptID: UUID())
-        let result = await deadline.run(deadline: .seconds(2), operation: {
+        let result = await deadline.run(operation: {
             deadline.recordFailure(AttentionStoreError.inboxCheckpointIncomplete)
             deadline.beginTransportAttempt(UUID())
             return false
-        }, onTimeout: {}, onProgress: { _ in })
+        }, onProgress: { _ in })
         let text = summary(result)
         XCTAssertTrue(text.contains("\nerror_class=none_observed\n"))
         XCTAssertTrue(text.contains("\nerror_type=none_observed\n"))
@@ -64,12 +92,12 @@ final class ForegroundErrorSummaryTests: XCTestCase {
     }
 
     func testConfirmedAttemptDoesNotReportRecoveredErrorAsCurrentFailure() async {
-        let deadline = ForegroundConnectDeadline()
+        let deadline = ForegroundConnectProgressTracker()
         deadline.beginSession(transportAttemptID: UUID())
-        let result = await deadline.run(deadline: .seconds(2), operation: {
+        let result = await deadline.run(operation: {
             deadline.recordFailure(InboxPagingWireError.invalidFrame)
             return true
-        }, onTimeout: {}, onProgress: { _ in })
+        }, onProgress: { _ in })
         let text = summary(result)
         XCTAssertEqual(result.outcome, .confirmed)
         XCTAssertTrue(text.contains("\nerror_class=none_observed\n"))

@@ -1977,25 +1977,44 @@ struct InboxList: View {
 
     @ViewBuilder
     private func messageSwipeActions(for row: InboxItem, in tab: InboxWorkspaceTab) -> some View {
-        let messageTab = tab.messageTab
-        if messageTab == .inbox, !row.belongsToReplied, row.isRetracted {
-            Button { clearRetracted(row.id) } label: {
-                Label("Clear", systemImage: "xmark")
-            }
-            .tint(designPalette.neutral.secondaryTextColor)
-            .accessibilityIdentifier("inbox-clear-retracted")
-        } else if messageTab == .inbox, !row.belongsToReplied, row.canMarkSeen {
-            Button { markSeen(row.id) } label: {
-                Label("Seen", systemImage: "checkmark")
-            }
-            .tint(designPalette.accent.seenColor)
-            .accessibilityIdentifier("inbox-mark-seen")
-        } else if messageTab == .inbox, !row.belongsToReplied, row.canNoComment {
-            Button { markNoComment(row.id) } label: {
-                Label("No comment", systemImage: "hand.raised")
-            }
-            .tint(designPalette.neutral.secondaryTextColor)
-            .accessibilityIdentifier("inbox-no-comment")
+        let canAct = tab.messageTab == .inbox && !row.belongsToReplied
+        let clearButton = Button { clearRetracted(row.id) } label: {
+            Label("Clear", systemImage: "xmark")
+        }
+        .disabled(!canAct || !row.isRetracted)
+        .tint(designPalette.neutral.secondaryTextColor)
+        .accessibilityIdentifier("inbox-clear-retracted")
+        let seenButton = Button { markSeen(row.id) } label: {
+            Label("Seen", systemImage: "checkmark")
+        }
+        .disabled(!canAct || !row.canMarkSeen)
+        .tint(designPalette.accent.seenColor)
+        .accessibilityIdentifier("inbox-mark-seen")
+        let noCommentButton = Button { markNoComment(row.id) } label: {
+            Label("No comment", systemImage: "hand.raised")
+        }
+        .disabled(!canAct || !row.canNoComment)
+        .tint(designPalette.neutral.secondaryTextColor)
+        .accessibilityIdentifier("inbox-no-comment")
+
+        // Full swipe invokes the first action. Keep the applicable action first
+        // while retaining the unavailable controls as visible, disabled buttons.
+        if row.isRetracted {
+            clearButton
+            seenButton
+            noCommentButton
+        } else if row.canMarkSeen {
+            seenButton
+            clearButton
+            noCommentButton
+        } else if row.canNoComment {
+            noCommentButton
+            clearButton
+            seenButton
+        } else {
+            clearButton
+            seenButton
+            noCommentButton
         }
     }
 

@@ -521,7 +521,6 @@ public struct InboxPagingWire: Sendable {
               expectedSnapshotID.map({ $0 == snapshotID }) ?? true,
               let highWater = uint64(value.uniqueValue(named: "high_water")),
               let rawItems = value.uniqueValue(named: "items")?.arrayValues,
-              rawItems.count <= 20,
               let next = optionalText(value, "next_cursor") else { throw InboxPagingWireError.invalidFrame }
         let receiptCursor: String?
         if includesReceiptCursor {

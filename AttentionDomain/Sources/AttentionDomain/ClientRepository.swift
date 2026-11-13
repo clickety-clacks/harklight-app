@@ -195,6 +195,7 @@ public final class ClientRepository: @unchecked Sendable {
             state.pendingMessageOpens = queue.messageOpens
             state.pendingConversations = queue.conversations
             state.pendingReadPositions = queue.readPositions
+            acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
         }
     }
 
@@ -214,6 +215,9 @@ public final class ClientRepository: @unchecked Sendable {
         let keys = Set(cached.requests.keys)
             .union(cached.remoteStates.keys)
             .union(cached.conversations.keys)
+            .union(cached.conversationEvents.values.map { $0.binding.request })
+            .union(cached.inboxReferences.keys)
+            .union(cached.pendingRelayOverlays.values.compactMap { Self.requestKey(in: $0) })
         guard keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
             throw AttentionStoreError.wrongAccount
         }
@@ -231,11 +235,12 @@ public final class ClientRepository: @unchecked Sendable {
         next.inboxCandidate = nil
         next.cachedInboxCurrentKeys = cached.currentRequestKeys
         next.inboxView = cached.inboxView
-        next.pendingRelayOverlays = nil
-        next.inboxReferences = nil
+        next.pendingRelayOverlays = cached.pendingRelayOverlays
+        next.inboxReferences = cached.inboxReferences
 
         var conversation = ConversationState()
         conversation.cursor = cached.conversationCursor
+        conversation.events = cached.conversationEvents
         conversation.threads = cached.conversations
         conversation.chatReadPositions = cached.chatReadPositions
         conversation.chatReadPositionSupport = cached.chatReadPositions != nil
@@ -272,8 +277,10 @@ public final class ClientRepository: @unchecked Sendable {
             }
             acceptanceOrder += 1
             next.requests[request.key] = request.assigningAcceptanceOrder(acceptanceOrder)
-            let draft = RequestDraft(interface: request.interface)
-            next.drafts[request.key] = draft
+            // Fixture definitions are reloaded on startup. Preserve compatible
+            // user input restored from the pending-action file.
+            refreshEditableDraft(for: request.key, in: &next)
+            let draft = next.drafts[request.key] ?? RequestDraft(interface: request.interface)
             next.fixtureSessions[request.key] = RequestSession(draft: draft)
             next.remoteStates[request.key] = RemoteRequestState()
             changed = true
@@ -392,7 +399,6 @@ public final class ClientRepository: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
-        guard state.replayBarrier == nil else { throw AttentionStoreError.replayAlreadyActive }
         guard isUUIDv4(intentID) else { throw AttentionStoreError.invalidSubmission }
         let interface = requestInterface(for: request)
         guard validateDraft(draft, for: interface) else { throw AttentionStoreError.invalidDraft }
@@ -481,7 +487,6 @@ public final class ClientRepository: @unchecked Sendable {
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
         guard suppliedContext.transportMode == .relay || suppliedContext.transportMode == .fixture,
-              state.replayBarrier == nil,
               isUUIDv4(intentID) else { throw AttentionStoreError.invalidSubmission }
         let descriptorFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
         var fingerprintParts = [
@@ -650,8 +655,9 @@ public final class ClientRepository: @unchecked Sendable {
         return true
     }
 
-    /// Queues one answer operation only for an explicit user retry. The exact
-    /// operation and id are reused; no background refresh calls this method.
+    /// Reuses the exact saved operation without waiting for replay or its ACK.
+    /// Explicit Retry may also reactivate a definitive failure; automatic
+    /// recovery only selects pending or uncertain operations.
     @discardableResult
     public func queueOriginalOperationForUserTap(_ intentID: UUID,
                                                  context suppliedContext: ProfileContext) throws -> Submission {
@@ -665,18 +671,14 @@ public final class ClientRepository: @unchecked Sendable {
               state.intentByRequest[submission.requestKey] == intentID else {
             throw AttentionStoreError.intentMissing
         }
-        let currentKeys = state.inboxCheckpoint.flatMap { $0.checkpointAccepted ? $0.currentKeys : nil }
-        guard state.requests[submission.requestKey] != nil,
-              currentKeys?.contains(submission.requestKey) == true,
-              state.remoteStates[submission.requestKey]?.isTerminal != true else {
+        // The saved request already binds the intended revision and exact bytes.
+        // Server validation, not a local catch-up checkpoint, decides whether it
+        // can still apply. A known final state is item-specific unavailability.
+        guard state.remoteStates[submission.requestKey]?.isTerminal != true else {
             throw AttentionStoreError.requestClosed
         }
-        let currentRevision = state.conversation?.threads[submission.requestKey]?.currentRevision ?? 1
-        guard (submission.requestRevision ?? 1) == currentRevision else {
-            throw AttentionStoreError.intentConflict
-        }
         switch submission.disposition {
-        case .pending, .lost:
+        case .pending, .lost, .failed, .unsupported:
             submission.disposition = .pending
         default:
             throw AttentionStoreError.intentConflict
@@ -688,7 +690,32 @@ public final class ClientRepository: @unchecked Sendable {
         return submission
     }
 
-    /// Retains the exact answer operation for a later explicit Retry tap.
+    /// Queue locally accepted work even before replay supplies any request page.
+    /// The operation's saved identity and bytes are sufficient for Server retry.
+    public func queueRecoverableOperations(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        next.outboxOrder = []
+        for (key, id) in state.intentByRequest.sorted(by: { $0.value.uuidString < $1.value.uuidString }) {
+            guard var operation = state.intents[id],
+                  state.remoteStates[key]?.isTerminal != true else { continue }
+            switch operation.disposition {
+            case .pending, .lost: break
+            default: continue
+            }
+            operation.disposition = .pending
+            next.intents[id] = operation
+            if !next.outboxOrder.contains(id) { next.outboxOrder.append(id) }
+        }
+        if next.outboxOrder != state.outboxOrder || next.intents != state.intents { try commit(next) }
+    }
+
+    /// Retains the exact answer operation for recovery on a later connection.
     public func recordUnresolvedOperation(_ intentID: UUID,
                                           operationID: UUID,
                                           context suppliedContext: ProfileContext) throws {
@@ -762,7 +789,7 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     /// A server that cannot parse the agreed No comment frame leaves the
-    /// request unanswered and releases it for ordinary answer methods.
+    /// request unanswered and retains the failed identity for explicit Retry.
     public func recordNoCommentUnsupported(_ intentID: UUID,
                                            operationID: UUID,
                                            context suppliedContext: ProfileContext) throws {
@@ -788,7 +815,6 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
-        next.intentByRequest.removeValue(forKey: intent.requestKey)
         if var published = next.replayPublishedIntents {
             published[intentID] = intent
             next.replayPublishedIntents = published
@@ -796,8 +822,8 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
-    /// A correlated relay error proves this operation was not delivered. Retain
-    /// the receipt for history while releasing its active request/outbox lock.
+    /// A correlated relay error stops automatic delivery. Keep the operation
+    /// durable so the person's Retry uses its original identity and payload.
     public func recordAnswerNotDelivered(_ intentID: UUID,
                                          operationID: UUID,
                                          context suppliedContext: ProfileContext) throws {
@@ -823,7 +849,6 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
-        next.intentByRequest.removeValue(forKey: intent.requestKey)
         if var published = next.replayPublishedIntents {
             published[intentID] = intent
             next.replayPublishedIntents = published
@@ -1784,9 +1809,6 @@ public final class ClientRepository: @unchecked Sendable {
         failed.disposition = .failed
         state.intents[submission.intentID] = failed
         state.outboxOrder.removeAll(where: { $0 == submission.intentID })
-        if state.intentByRequest[submission.requestKey] == submission.intentID {
-            state.intentByRequest.removeValue(forKey: submission.requestKey)
-        }
         if var published = state.replayPublishedIntents {
             published[submission.intentID] = failed
             state.replayPublishedIntents = published
@@ -1955,20 +1977,23 @@ public final class ClientRepository: @unchecked Sendable {
         return state.cursor
     }
 
-    /// Exact operation originals that must be covered before a new paging checkpoint.
-    /// The ordinary outbox and accepted-awaiting-terminal index are disjoint by design.
+    /// Reconcile durable, unfinished user operations, including accepted receipts
+    /// whose terminal has not arrived. The transient send queue can be empty on
+    /// restart or while an independent send is in flight.
     public func inboxOperationInventory(context suppliedContext: ProfileContext) throws -> [Submission] {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        var seen = Set<UUID>()
-        var inventory: [Submission] = []
-        for id in state.outboxOrder {
-            guard let submission = state.intents[id], seen.insert(submission.operationID).inserted else { continue }
-            inventory.append(submission)
-        }
-        return inventory
+        return state.intents.values.filter { submission in
+            guard state.intentByRequest[submission.requestKey] == submission.intentID else { return false }
+            switch submission.disposition {
+            case .pending, .lost: return true
+            case .accepted:
+                return Self.isAcceptedAwaitingTerminalReplay(submission, appliedEvents: state.appliedEvents)
+            default: return false
+            }
+        }.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
     }
 
     public func beginInboxCandidate(startupID: String,
@@ -2069,8 +2094,7 @@ public final class ClientRepository: @unchecked Sendable {
         guard suppliedContext.transportMode == .relay,
               var candidate = state.inboxCandidate,
               !snapshotID.isEmpty,
-              highWater >= candidate.since,
-              items.count <= 20 else { throw AttentionStoreError.inboxCheckpointIncomplete }
+              highWater >= candidate.since else { throw AttentionStoreError.inboxCheckpointIncomplete }
         let keys = items.map(\.key)
         guard Set(keys).count == keys.count,
               keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
@@ -2094,9 +2118,13 @@ public final class ClientRepository: @unchecked Sendable {
             return
         }
         var next = state
-        // The actual server response replaces the disposable projection,
-        // including an empty snapshot. User intents remain in their own queue.
+        // Inbox snapshots replace the ordinary projection, including an empty
+        // snapshot. User intents remain in their own queue. Conversation
+        // history has its own sequence: preserve its committed prefix so a
+        // reconnect resumes that stream instead of starting it over.
+        let conversation = next.server.conversation
         next.server = ServerProjectionCache()
+        next.server.conversation = conversation
         next.cursor = candidate.since
         do {
             for item in items {
@@ -2203,7 +2231,6 @@ public final class ClientRepository: @unchecked Sendable {
               checkpoint.highWater == highWater,
               checkpoint.hasInitialPage,
               checkpoint.nextCursor == cursor,
-              items.count <= 20,
               (items.count > 0 || nextCursor == nil) else {
             throw AttentionStoreError.inboxPageConflict
         }
@@ -2367,9 +2394,16 @@ public final class ClientRepository: @unchecked Sendable {
                       !Self.isAccepted(submission) else { throw AttentionStoreError.inboxPageConflict }
                 Self.recordInboxOperationFailure(submission, in: &next)
             case .notCommittedAtSnapshot:
-                guard receipt.result == nil, receipt.reason == nil,
-                      !Self.isAccepted(submission) else {
+                guard receipt.result == nil, receipt.reason == nil else {
                     throw AttentionStoreError.inboxPageConflict
+                }
+                // An independent send can commit after this frozen snapshot.
+                // Its accepted receipt must survive the older "not committed"
+                // answer until the later terminal is replayed.
+                if case let .accepted(sequence) = submission.disposition {
+                    guard let sequence, sequence > (candidate.highWater ?? 0) else {
+                        throw AttentionStoreError.inboxPageConflict
+                    }
                 }
                 if let terminal = receipt.terminal {
                     guard case let .terminal(key, _, _) = terminal.body,
@@ -2519,15 +2553,25 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     public func snapshot(context suppliedContext: ProfileContext) throws -> AttentionStoreSnapshot {
+        try snapshot(context: suppliedContext, published: true)
+    }
+
+    /// Cache the validated contiguous prefix, not the older view retained for
+    /// presentation while replay is active. Its bodies must match its cursor.
+    public func serverCacheSnapshot(context suppliedContext: ProfileContext) throws -> AttentionStoreSnapshot {
+        try snapshot(context: suppliedContext, published: false)
+    }
+
+    private func snapshot(context suppliedContext: ProfileContext, published: Bool) throws -> AttentionStoreSnapshot {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        let publishedRequests = (state.replayPublishedRequests ?? state.requests).mapValues { original in
+        let publishedRequests = (published ? (state.replayPublishedRequests ?? state.requests) : state.requests).mapValues { original in
             effectiveRequest(for: original.key) ?? original
         }
         let visibleDrafts: [RequestKey: RequestDraft]
         let visibleSessions: [RequestKey: RequestSession]
-        if state.replayPublishedRequests == nil {
+        if !published || state.replayPublishedRequests == nil {
             // Outside replay, these maps are already scoped to accepted requests.
             // A partial replay view is the only snapshot that needs to filter them.
             visibleDrafts = state.drafts
@@ -2539,7 +2583,7 @@ public final class ClientRepository: @unchecked Sendable {
         }
         let sortedOutbox = state.outboxOrder.compactMap { state.intents[$0] }
         var inboxCurrentKeys: Set<RequestKey>?
-        if state.replayBarrier != nil {
+        if published && state.replayBarrier != nil {
             inboxCurrentKeys = state.replayPublishedInboxCurrentKeys
         } else if state.inboxCandidate != nil,
                   let checkpoint = state.inboxCheckpoint, checkpoint.checkpointAccepted {
@@ -2563,9 +2607,9 @@ public final class ClientRepository: @unchecked Sendable {
         }
         return AttentionStoreSnapshot(requests: publishedRequests,
                                       drafts: visibleDrafts,
-                                      intents: state.replayPublishedIntents ?? state.intents,
+                                      intents: state.intents,
                                       outbox: sortedOutbox,
-                                      remoteStates: state.replayPublishedStates ?? state.remoteStates,
+                                      remoteStates: published ? (state.replayPublishedStates ?? state.remoteStates) : state.remoteStates,
                                       fixtureSessions: visibleSessions,
                                       revision: state.revision,
                                       cursor: state.cursor,
@@ -2628,7 +2672,7 @@ public final class ClientRepository: @unchecked Sendable {
         return ConversationSnapshot(cursor: conversation.cursor, threads: conversation.threads,
             chatReadPositions: conversation.chatReadPositions,
             chatReadPositionSupport: conversation.chatReadPositionSupport,
-            pendingChatReadPositions: pending)
+            pendingChatReadPositions: pending, events: conversation.events)
     }
 
     /// Re-validates an already-accounted redacted revision without applying or
@@ -2941,7 +2985,7 @@ public final class ClientRepository: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        let draft = try Self.externalizingConversationFiles(in: draft,
+        var draft = try Self.externalizingConversationFiles(in: draft,
             using: conversationFileReferences,
             allowInlinePersistence: persistence is MemoryPendingActionPersistence)
         try validate(draft.binding.request, in: context.identity)
@@ -2958,6 +3002,9 @@ public final class ClientRepository: @unchecked Sendable {
             }
         }
         guard case .saved = draft.disposition else { throw ConversationError.invalidBinding }
+        // An edited draft is a new submission, never new bytes under an old ID.
+        draft.operationID = nil
+        draft.wireFrame = nil
         try validateConversationFiles(draft.files)
         thread.drafts[draft.binding.revision] = draft
         conversation.threads[draft.binding.request] = thread
@@ -2991,8 +3038,11 @@ public final class ClientRepository: @unchecked Sendable {
         case .saved, .rejected:
             break
         }
+        guard draft.text != text else { return draft }
         draft.text = text
         draft.disposition = .saved
+        draft.operationID = nil
+        draft.wireFrame = nil
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation
@@ -3165,10 +3215,14 @@ public final class ClientRepository: @unchecked Sendable {
         case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
             guard thread.uploadGroups?[id]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
             operation = id
-        case .saved, .rejected:
+        case .saved:
             operation = UUID()
             draft.disposition = .submitting(operation)
+        case .rejected:
+            operation = draft.operationID ?? UUID()
+            draft.disposition = .submitting(operation)
         }
+        draft.operationID = operation
         // Register planned upload-tier files before awaiting limits or disk/HTTP.
         // Departure during that preparation must fence this original operation too.
         let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
@@ -3183,6 +3237,31 @@ public final class ClientRepository: @unchecked Sendable {
         next.conversation = conversation
         try commit(next)
         return operation
+    }
+
+    /// Persist the exact prepared request before the first send. A lost reply
+    /// or process restart must not rebuild it from new upload limits or handles.
+    public func freezeDiscussionFrame(_ frame: Data, binding: ConversationBinding,
+                                      operation: UUID, context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision], draft.operationID == operation,
+              thread.uploadGroups?[operation]?.cleanupID == nil else { throw ConversationError.conflict }
+        if let saved = draft.wireFrame {
+            guard saved == frame else { throw ConversationError.conflict }
+            return
+        }
+        draft.wireFrame = frame
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
     }
 
     /// Called before starting an upload, not after its response: navigation may
@@ -3310,6 +3389,7 @@ public final class ClientRepository: @unchecked Sendable {
         default: throw ConversationError.conflict
         }
         // Rejection and unknown outcomes retain text, selected files and addressed revision.
+        draft.operationID = operation
         draft.disposition = rejection.map { .rejected($0) } ?? .outcomeUnknown(operation)
         thread.drafts[binding.revision] = draft
         thread.settleAbandonedDraft(revision: binding.revision)
@@ -3602,7 +3682,7 @@ public final class ClientRepository: @unchecked Sendable {
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationDraft {
         ConversationDraft(binding: draft.binding, text: draft.text,
             files: try draft.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
-            disposition: draft.disposition)
+            disposition: draft.disposition, operationID: draft.operationID, wireFrame: draft.wireFrame)
     }
 
     private static func externalizingConversationFiles(in event: ConversationEvent,
@@ -3686,7 +3766,7 @@ public final class ClientRepository: @unchecked Sendable {
         let ids = next.intents.compactMap { id, operation -> UUID? in
             guard operation.requestKey == key else { return nil }
             switch operation.disposition {
-            case .pending, .lost: return id
+            case .pending, .lost, .accepted, .failed, .unsupported: return id
             default: return nil
             }
         }
@@ -3704,7 +3784,13 @@ public final class ClientRepository: @unchecked Sendable {
         for key in queuedKeys {
             let terminal = next.remoteStates[key]?.isTerminal == true || next.inboxReferences?[key]?.isTerminal == true
             let absent = checkpoint.nextCursor == nil && !checkpoint.currentKeys.contains(key)
-            if terminal || absent { dropUnsentAnswer(for: key, in: &next) }
+            if terminal {
+                dropUnsentAnswer(for: key, in: &next)
+            } else if absent, next.intentByRequest[key] == nil {
+                // Missing cached content may clear an editor, but it is not a
+                // Server rejection of an already accepted user operation.
+                dropUnsentAnswer(for: key, in: &next)
+            }
         }
     }
 
@@ -3825,6 +3911,9 @@ public final class ClientRepository: @unchecked Sendable {
             case .text:
                 guard text != nil else { throw AttentionStoreError.invalidSubmission }
             }
+            // The informational descriptor identifies Seen; the device protocol
+            // represents that action with a null answer, not the descriptor value.
+            if request.hasExplicitInformationalSeenAction { return .null }
             return answer
         default:
             throw AttentionStoreError.unsupportedInterface
@@ -4092,8 +4181,9 @@ private struct RetiredUnsentInput: Decodable {
     }
 }
 
-/// Only unsent/uncertain local requests cross a process restart. No Server
-/// question, terminal, revision, read position or replay cursor is encoded here.
+/// User operations remain durable until the Server confirms their terminal.
+/// Failure and acceptance receipts describe delivery, never cached message truth.
+/// No Server question, terminal, read position or replay cursor is encoded here.
 private struct PersistedPendingActions: Codable {
     let version: Int
     let profileIdentity: ProfileIdentity
@@ -4113,7 +4203,7 @@ private struct PersistedPendingActions: Codable {
         let pending = state.intents.filter { id, operation in
             guard state.intentByRequest[operation.requestKey] == id else { return false }
             switch operation.disposition {
-            case .pending, .lost: return true
+            case .pending, .lost, .accepted, .failed, .unsupported: return true
             default: return false
             }
         }

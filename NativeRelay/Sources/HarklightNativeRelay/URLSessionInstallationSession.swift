@@ -14,6 +14,10 @@ public enum InstallationTransportError: Error, Sendable {
     case acknowledgementBehind
 }
 
+public enum ConversationOriginDiscoveryError: Error, Sendable {
+    case rejected(ExactText)
+}
+
 /// Observable transport facts for a foreground connection attempt. Offering a
 /// client identity is deliberately distinct from evidence that the peer
 /// accepted it; a successful WebSocket open is the next observable boundary.
@@ -53,6 +57,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let delegate: DeviceTLSDelegate
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
+    private var isClosed = false
+    private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
@@ -135,8 +141,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         self.delegate = delegate
         let configuration = URLSessionConfiguration.ephemeral
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
-        configuration.timeoutIntervalForRequest = 15
-        configuration.timeoutIntervalForResource = 20
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
@@ -268,6 +272,26 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         try await replay(request, ref: "native-conversation-sync", event: "conversation", end: "conversation_resynced", consume: consume)
     }
 
+    /// Read only the authenticated origin metadata from the existing open reply.
+    /// This dedicated metadata connection is retired without consuming or ACKing
+    /// history; the ordinary replay connection owns that history independently.
+    public func discoverConversationOrigin(since cursor: UInt64) async throws -> URL? {
+        await socketExchangeGate.enter()
+        defer { close(); socketExchangeGate.leave() }
+        let wire = try ConversationWire(profile: profileContext, endpointHost: relayEndpointHost)
+        try await send(wire.open(since: cursor))
+        while true {
+            let frame = try await receive()
+            let type = try JSONValue.parse(frame).uniqueValue(named: "type")?.stringValue?.rawValue
+            if type == "delivery" || type == "lifecycle" || type == "conversation" { continue }
+            if type == "error", let reason = try JSONValue.parse(frame).uniqueValue(named: "reason")?.stringValue {
+                throw ConversationOriginDiscoveryError.rejected(reason)
+            }
+            guard try wire.isOpenAccepted(frame) else { throw InstallationTransportError.serverRejected }
+            return try wire.originEndpoint(frame)
+        }
+    }
+
     /// Confirms the candidate TLS/WebSocket endpoint without sending an app
     /// frame. Endpoint migration uses this before replacing a working session.
     public func verifyEndpoint() async throws {
@@ -276,6 +300,22 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 if let error { continuation.resume(throwing: error) }
                 else { continuation.resume() }
             }
+        }
+    }
+
+    /// A connection-health check is a WebSocket control frame, not an application
+    /// exchange. It must remain usable while replay or an ACK owns that gate.
+    /// Only URLSession's reported failure closes the connection; no timer races it.
+    public func checkConnection() async throws {
+        if let connectionFailure { throw connectionFailure }
+        guard !isClosed else { throw CancellationError() }
+        do {
+            try await verifyEndpoint()
+        } catch {
+            guard !isClosed else { throw connectionFailure ?? error }
+            connectionFailure = error
+            close()
+            throw error
         }
     }
 
@@ -720,11 +760,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     public func close() {
+        guard !isClosed else { return }
+        isClosed = true
         postCheckpointReader?.cancel()
         postCheckpointReader = nil
         postCheckpointReaderOwnsSocket = false
         focusReportReplyRouter.reset()
-        failPostCheckpointReader(InstallationTransportError.unexpectedServerFrame)
+        failPostCheckpointReader(connectionFailure ?? InstallationTransportError.unexpectedServerFrame)
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
     }
@@ -840,6 +882,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func send(_ frame: Data) async throws {
+        if let connectionFailure { throw connectionFailure }
         guard let text = String(data: frame, encoding: .utf8), text.hasSuffix("\n") else {
             throw InstallationTransportError.unexpectedServerFrame
         }
@@ -847,6 +890,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func receive() async throws -> Data {
+        if let connectionFailure { throw connectionFailure }
         if postCheckpointReader != nil {
             if !responseFrames.isEmpty {
                 let frame = responseFrames.removeFirst()
@@ -862,10 +906,16 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     }
 
     private func receiveTaskFrame() async throws -> Data {
-        switch try await task.receive() {
-        case let .string(text): return Data(text.utf8)
-        case .data: throw InstallationTransportError.unexpectedServerFrame
-        @unknown default: throw InstallationTransportError.unexpectedServerFrame
+        do {
+            switch try await task.receive() {
+            case let .string(text): return Data(text.utf8)
+            case .data: throw InstallationTransportError.unexpectedServerFrame
+            @unknown default: throw InstallationTransportError.unexpectedServerFrame
+            }
+        } catch {
+            // Closing a failed ping can cancel an outstanding receive. Keep
+            // the actual transport failure instead of replacing it with cancellation.
+            throw connectionFailure ?? error
         }
     }
 

@@ -278,8 +278,6 @@ final class RetractionPresentationTests: XCTestCase {
                                      payload: payload, terminal: ordinary)
         let core = try NativeRelayCore(store: domain, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued answer.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
         XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
 
