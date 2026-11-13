@@ -59,7 +59,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         }
         let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
             store: domain, context: context,
-            session: ReplyFocusSession(identity: context.identity, key: key, payload: payload),
+            session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload),
             serverStateCache: FileServerStateCache(identity: context.identity,
                 fileURL: directory.appendingPathComponent("server-cache.json")))
         XCTAssertTrue(result.relayConfirmed)
@@ -227,7 +227,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
 
 /// Supplies a real-shaped checkpoint and ordinary replay through the normal
 /// confirmation path. No method directly grants action eligibility.
-private final class ReplyFocusSession: AuthenticatedInboxPagingSession, @unchecked Sendable {
+final class ReplyCheckpointSession: AuthenticatedInboxPagingSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
     let key: RequestKey
     let payload: JSONValue
