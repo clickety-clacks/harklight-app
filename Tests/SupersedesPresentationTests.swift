@@ -267,8 +267,9 @@ final class SupersedesPresentationTests: XCTestCase {
         try store.saveInboxInitialPage(snapshotID: "page-refresh-snapshot", highWater: 7,
             items: [InboxSnapshotItem(acceptance: replacementAcceptance)], nextCursor: nil,
             receiptCursor: nil, context: context)
-        XCTAssertEqual(try store.snapshot(context: context).remoteStates[replacementTwo]?.supersedesOriginTarget,
-                       target, "Refreshing a page must retain the slot relation learned from relay events.")
+        XCTAssertNil(try store.snapshot(context: context).remoteStates[replacementTwo]?.supersedesOriginTarget,
+                     "A replacement snapshot cannot retain a cached relation absent from its server contents.")
+        XCTAssertEqual(Set(try store.snapshot(context: context).requests.keys), [replacementTwo])
     }
 
     func testSupersedesOriginTargetDoesNotCrossSenderIdentity() throws {
@@ -332,9 +333,6 @@ final class SupersedesPresentationTests: XCTestCase {
             StoredRequest(key: replacement,
                 originalPayload: try payload("Replacement", supersedes: "target")), .message))
         let targetTerminal = RelayEvent(sequence: 11, body: .terminal(target, .superseded, nil))
-        try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
-            InboxViewEntry(key: target, priority: .high, thread: ExactText("release"))
-        ]), context: context)
         _ = try store.beginInboxCandidate(startupID: "snapshot", since: 0,
                                           batches: [], context: context)
         try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 11,
@@ -343,6 +341,10 @@ final class SupersedesPresentationTests: XCTestCase {
                 InboxSnapshotItem(acceptance: targetAcceptance, terminal: targetTerminal)
             ], nextCursor: nil, receiptCursor: nil, context: context)
 
+        // The view is a server response for the newly supplied snapshot, not the discarded cache.
+        try store.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+            InboxViewEntry(key: target, priority: .high, thread: ExactText("release"))
+        ]), context: context)
         let live = try LivePresentationStore(store: store, context: context)
         XCTAssertEqual(try XCTUnwrap(live.request(for: replacement)).inboxPriority, .high)
         XCTAssertEqual(try XCTUnwrap(live.request(for: replacement)).inboxThread, ExactText("release"))
