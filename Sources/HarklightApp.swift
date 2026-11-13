@@ -151,8 +151,7 @@ struct HarklightApp: App {
                     } else {
                         await launch.refreshLive()
                     }
-                    await launch.guidedJoin.retryAutomaticallyIfNeeded(
-                        foregroundOutcome: launch.foregroundConnectProgress?.outcome)
+                    await launch.guidedJoin.retryAutomaticallyIfNeeded()
                     try? await Task.sleep(for: .seconds(15))
                 }
             }

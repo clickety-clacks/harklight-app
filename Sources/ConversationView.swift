@@ -878,8 +878,6 @@ private struct ConversationDraftStatus: View {
 }
 
 enum ConversationSentChatStatusPresentation {
-    static let unpickedDelayMilliseconds: UInt64 = 120_000
-
     enum Delivery: Equatable {
         case sent
         case notDeliveredYet
@@ -906,12 +904,7 @@ enum ConversationSentChatStatusPresentation {
             case .listening: break
             }
         }
-        guard let acceptedAt = facts.acceptedAtMilliseconds,
-              nowMilliseconds >= acceptedAt,
-              nowMilliseconds - acceptedAt >= unpickedDelayMilliseconds else {
-            return .sent
-        }
-        return .notDeliveredYet
+        return .sent
     }
 
     static func delivery(for turn: ConversationTurn, facts: ConversationTurnFacts,
@@ -942,21 +935,9 @@ enum ConversationSentChatStatusPresentation {
         if case let .notHanded(_, reason, _, _)? = facts.deliveryAck2 {
             return .notDelivered(reason.rawValue)
         }
-        if case let .listenerReceived(atMilliseconds, true, _, _)? = facts.deliveryAck1 {
-            guard nowMilliseconds >= atMilliseconds,
-                  nowMilliseconds - atMilliseconds >= unpickedDelayMilliseconds else {
-                return .sending
-            }
-            return .waitingFor(conversationAgentName)
-        }
-
+        if case .listenerReceived(_, true, _, _)? = facts.deliveryAck1 { return .sending }
         if case .notListening? = availability?.state { return .noListenerPickedThisUp }
-        guard let acceptedAt = facts.acceptedAtMilliseconds,
-              nowMilliseconds >= acceptedAt,
-              nowMilliseconds - acceptedAt >= unpickedDelayMilliseconds else {
-            return .sending
-        }
-        return .noListenerPickedThisUp
+        return .sending
     }
 
     static func usesDeliveryAckPresentation(turn: ConversationTurn,
@@ -1027,40 +1008,11 @@ private struct ConversationSentChatStatus: View {
         .accessibilityIdentifier("conversation-sent-chat-status")
     }
 
-    @ViewBuilder
     private var deliveryStatus: some View {
-        if shouldAgeDelivery {
-            TimelineView(.periodic(from: .now, by: 15)) { timeline in
-                deliveryLabel(ConversationSentChatStatusPresentation.delivery(
-                    for: turn, facts: facts, availability: availability, hasReply: hasReply,
-                    conversationAgentName: conversationAgentName,
-                    nowMilliseconds: Self.milliseconds(timeline.date)))
-            }
-        } else {
-            deliveryLabel(ConversationSentChatStatusPresentation.delivery(
-                for: turn, facts: facts, availability: availability, hasReply: hasReply,
-                conversationAgentName: conversationAgentName,
-                nowMilliseconds: Self.milliseconds(.now)))
-        }
-    }
-
-    private var shouldAgeDelivery: Bool {
-        guard !facts.delivered, facts.actedBy == nil, !hasReply else { return false }
-        if ConversationSentChatStatusPresentation.usesDeliveryAckPresentation(turn: turn, facts: facts) {
-            if case .handed? = facts.deliveryAck2 { return false }
-            if case .notHanded? = facts.deliveryAck2 { return false }
-            if case .listenerReceived(_, false, _, _)? = facts.deliveryAck1 { return false }
-            if case .unsupported? = availability?.state { return false }
-            if case .gone? = availability?.state { return false }
-            if case .listenerReceived(_, true, _, _)? = facts.deliveryAck1 { return true }
-            if case .notListening? = availability?.state { return false }
-            return facts.acceptedAtMilliseconds != nil
-        }
-        guard facts.acceptedAtMilliseconds != nil else { return false }
-        switch availability?.state {
-        case .notListening?, .unsupported?, .gone?: return false
-        case .listening?, nil: return true
-        }
+        deliveryLabel(ConversationSentChatStatusPresentation.delivery(
+            for: turn, facts: facts, availability: availability, hasReply: hasReply,
+            conversationAgentName: conversationAgentName,
+            nowMilliseconds: Self.milliseconds(.now)))
     }
 
     @ViewBuilder

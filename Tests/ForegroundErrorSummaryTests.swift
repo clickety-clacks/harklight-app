@@ -32,12 +32,12 @@ final class ForegroundErrorSummaryTests: XCTestCase {
              "NSError", "NSURLErrorDomain code -1005")
         ]
         for (error, type, description) in cases {
-            let deadline = ForegroundConnectDeadline()
+            let deadline = ForegroundConnectProgressTracker()
             deadline.beginSession(transportAttemptID: UUID())
-            let result = await deadline.run(deadline: .seconds(2), operation: {
+            let result = await deadline.run(operation: {
                 deadline.recordFailure(error)
                 return false
-            }, onTimeout: {}, onProgress: { _ in })
+            }, onProgress: { _ in })
             let text = summary(result)
             XCTAssertEqual(result.outcome, .incomplete)
             XCTAssertTrue(text.contains(type), text)
@@ -48,13 +48,13 @@ final class ForegroundErrorSummaryTests: XCTestCase {
     }
 
     func testReconnectKeepsPriorErrorDetailsAndClearsCurrentCause() async {
-        let deadline = ForegroundConnectDeadline()
+        let deadline = ForegroundConnectProgressTracker()
         deadline.beginSession(transportAttemptID: UUID())
-        let result = await deadline.run(deadline: .seconds(2), operation: {
+        let result = await deadline.run(operation: {
             deadline.recordFailure(AttentionStoreError.inboxCheckpointIncomplete)
             deadline.beginTransportAttempt(UUID())
             return false
-        }, onTimeout: {}, onProgress: { _ in })
+        }, onProgress: { _ in })
         let text = summary(result)
         XCTAssertTrue(text.contains("\nerror_class=none_observed\n"))
         XCTAssertTrue(text.contains("\nerror_type=none_observed\n"))
@@ -64,12 +64,12 @@ final class ForegroundErrorSummaryTests: XCTestCase {
     }
 
     func testConfirmedAttemptDoesNotReportRecoveredErrorAsCurrentFailure() async {
-        let deadline = ForegroundConnectDeadline()
+        let deadline = ForegroundConnectProgressTracker()
         deadline.beginSession(transportAttemptID: UUID())
-        let result = await deadline.run(deadline: .seconds(2), operation: {
+        let result = await deadline.run(operation: {
             deadline.recordFailure(InboxPagingWireError.invalidFrame)
             return true
-        }, onTimeout: {}, onProgress: { _ in })
+        }, onProgress: { _ in })
         let text = summary(result)
         XCTAssertEqual(result.outcome, .confirmed)
         XCTAssertTrue(text.contains("\nerror_class=none_observed\n"))

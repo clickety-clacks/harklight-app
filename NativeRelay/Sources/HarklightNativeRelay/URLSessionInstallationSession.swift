@@ -139,8 +139,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         self.delegate = delegate
         let configuration = URLSessionConfiguration.ephemeral
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
-        configuration.timeoutIntervalForRequest = 15
-        configuration.timeoutIntervalForResource = 20
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)

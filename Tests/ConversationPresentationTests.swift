@@ -75,7 +75,7 @@ final class ConversationPresentationTests: XCTestCase {
             current: "A later edit", currentEdit: 4), "A later edit")
     }
 
-    func testSentChatAgesToNotDeliveredYetAtTwoMinutesWithoutDeclaringFailure() {
+    func testSentChatDoesNotInferDeliveryFailureFromElapsedTime() {
         var facts = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
         let listening = ConversationAvailabilityObservation(
             state: .listening)
@@ -86,10 +86,10 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
             availability: listening, hasReply: false, nowMilliseconds: 159_999), .sent)
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
-            availability: listening, hasReply: false, nowMilliseconds: 160_000), .notDeliveredYet)
+            availability: listening, hasReply: false, nowMilliseconds: 160_000), .sent)
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
-            hasReply: false, nowMilliseconds: 160_000), .notDeliveredYet,
-            "Unknown current availability still ages an unacknowledged message.")
+            hasReply: false, nowMilliseconds: 160_000), .sent,
+            "Elapsed time alone does not establish a delivery failure.")
 
         facts.acceptedAtMilliseconds = nil
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: facts,
@@ -167,14 +167,14 @@ final class ConversationPresentationTests: XCTestCase {
 
         let unacknowledged = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
         XCTAssertEqual(status(unacknowledged, availability: listening, now: 159_999), .sending)
-        XCTAssertEqual(status(unacknowledged, availability: listening, now: 160_000), .noListenerPickedThisUp)
+        XCTAssertEqual(status(unacknowledged, availability: listening, now: 160_000), .sending)
         XCTAssertEqual(status(unacknowledged, availability: notListening, now: 40_001), .noListenerPickedThisUp)
 
         var waiting = unacknowledged
         waiting.deliveryAck1 = .listenerReceived(atMilliseconds: 40_000, ack2Expected: true,
             acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)
         XCTAssertEqual(status(waiting, availability: notListening, now: 159_999), .sending)
-        XCTAssertEqual(status(waiting, availability: notListening, now: 160_000), .waitingFor("Studio"),
+        XCTAssertEqual(status(waiting, availability: notListening, now: 160_000), .sending,
                        "An ACK1-to-ACK2 wait stays quiet, even if availability is now not-listening.")
         XCTAssertEqual(status(waiting, availability: gone, now: 160_000), .noOneWillGetThis)
 
@@ -217,7 +217,7 @@ final class ConversationPresentationTests: XCTestCase {
             sessionHandle: chat.sessionHandle, text: chat.text, kind: .discussion)
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: legacyTurn,
             facts: unacknowledged, availability: listening, hasReply: false,
-            conversationAgentName: "Studio", nowMilliseconds: 160_000), .notDeliveredYet,
+            conversationAgentName: "Studio", nowMilliseconds: 160_000), .sent,
             "An older Server keeps its current caption instead of showing a missing-ACK1 stall.")
         var markerlessButAcknowledged = unacknowledged
         markerlessButAcknowledged.deliveryAck1 = .listenerReceived(atMilliseconds: 155_000,
@@ -231,7 +231,7 @@ final class ConversationPresentationTests: XCTestCase {
             kind: .terminal, deliveryAcks: true)
         XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: noComment,
             facts: unacknowledged, availability: listening, hasReply: false,
-            conversationAgentName: "Studio", nowMilliseconds: 160_000), .notDeliveredYet,
+            conversationAgentName: "Studio", nowMilliseconds: 160_000), .sent,
             "Answers and No comment keep the existing presentation regardless of ack facts.")
     }
 

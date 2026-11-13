@@ -9,9 +9,9 @@ import XCTest
 /// No transport, certificate, account enrollment or historical fixture is used.
 @MainActor
 final class CacheBackedActionEligibilityTests: XCTestCase {
-    func testRejectedSeenSubmissionKeepsDetailOpen() throws {
+    func testColdCacheSeenTapQueuesWhileCatchUpIsActive() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-            personID: ExactText("rejected-seen-\(UUID().uuidString)"), deviceID: ExactText("test-installation"))
+            personID: ExactText("cold-cache-seen-\(UUID().uuidString)"), deviceID: ExactText("test-installation"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("seen"))
@@ -29,17 +29,23 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
         let live = try LivePresentationStore(store: domain, context: context)
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(request.informationalSeenStatus, .available)
-        XCTAssertFalse(live.canSendToCurrentServer)
-        XCTAssertFalse(live.submitFromUser(key, explicitCompatibilityAction: ExactText("seen"),
-            requestRevision: request.requestRevision), "Establish a rejected submission, not an accepted pending intent.")
+        live.beginRefresh()
+        defer { live.endRefresh() }
+        XCTAssertTrue(live.isRefreshing)
+        XCTAssertFalse(request.inboxStateIsCurrent)
+        XCTAssertTrue(live.canSendToCurrentServer)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).canMarkSeen)
         var dismissals = 0
         LiveRequestDetail(request: request, store: live).finishSeenAction(ExactText("seen")) {
             dismissals += 1
         }
-        XCTAssertTrue(try domain.snapshot(context: context).intents.isEmpty)
-        XCTAssertEqual(live.request(for: key)?.informationalSeenStatus, .available)
-        XCTAssertNotNil(live.actionError, "A rejected Seen tap must explain why it cannot proceed.")
-        XCTAssertEqual(dismissals, 0, "A rejected Seen tap must keep the detail open instead of navigating as if submitted.")
+        let queued = try domain.snapshot(context: context)
+        XCTAssertEqual(queued.intents.count, 1, "The tap persists its intent before catch-up finishes.")
+        XCTAssertNotNil(live.request(for: key)?.intentReceipt)
+        XCTAssertNil(live.actionError)
+        XCTAssertEqual(dismissals, 1, "Local acceptance completes the tap while Server confirmation stays pending.")
+        XCTAssertTrue(live.isRefreshing)
+        XCTAssertNil(queued.remoteStates[key], "Local acceptance cannot invent a Server terminal.")
     }
 
     func testConfirmedCacheBackedRefreshEnablesSeenRow() async throws {
@@ -85,17 +91,14 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
         }
     }
 
-    func testConnectionInvalidationNotifiesActionEligibilityObservers() async throws {
+    func testConnectionInvalidationKeepsApplicableActionsAvailable() async throws {
         let scenario = try await confirmedColdLaunch()
-        let changed = expectation(description: "Visible actions update when their connection is invalidated")
-        withObservationTracking {
-            XCTAssertTrue(scenario.live.canSendToCurrentServer)
-        } onChange: {
-            changed.fulfill()
-        }
         await NativeRelayLifecycle.shared.deactivate()
-        XCTAssertFalse(scenario.live.canSendToCurrentServer)
-        await fulfillment(of: [changed], timeout: 1)
+        XCTAssertTrue(scenario.live.canSendToCurrentServer)
+        XCTAssertTrue(try XCTUnwrap(scenario.live.inboxRows.first { $0.key == scenario.seen }).canMarkSeen)
+        XCTAssertTrue(try XCTUnwrap(scenario.live.inboxRows.first { $0.key == scenario.reply }).canNoComment)
+        XCTAssertTrue(scenario.live.submitFromUser(scenario.seen, explicitCompatibilityAction: ExactText("seen")))
+        XCTAssertNotNil(scenario.live.request(for: scenario.seen)?.intentReceipt)
     }
 
     func testBackgroundRefreshFailureIsVisibleWithoutViewOwnedRefresh() async throws {
@@ -105,11 +108,11 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
         let refreshed = await NativeRelayLifecycle.shared.refreshFromTrustedRelay()
         XCTAssertFalse(refreshed)
         XCTAssertFalse(scenario.live.isRefreshing)
-        XCTAssertFalse(scenario.live.canSendToCurrentServer)
+        XCTAssertTrue(scenario.live.canSendToCurrentServer)
         XCTAssertNotNil(scenario.live.connectionWarning,
                         "A push-owned refresh failure must reach the UI even without applyRefreshResult.")
-        XCTAssertFalse(scenario.live.submitFromUser(scenario.seen, explicitCompatibilityAction: ExactText("seen")))
-        XCTAssertNotNil(scenario.live.actionError)
+        XCTAssertTrue(scenario.live.submitFromUser(scenario.seen, explicitCompatibilityAction: ExactText("seen")))
+        XCTAssertNil(scenario.live.actionError)
         await NativeRelayLifecycle.shared.deactivate()
     }
 
@@ -156,9 +159,9 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
             requests: requests, remoteStates: [:], cursor: 2, conversationCursor: 0,
             conversations: [:], inboxView: nil, currentRequestKeys: [seen, reply]), context: context)
         let live = try LivePresentationStore(store: domain, context: context)
-        XCTAssertFalse(live.canSendToCurrentServer, "A cache restore alone cannot authorize sending.")
-        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == seen }).canMarkSeen)
-        XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == reply }).canNoComment)
+        XCTAssertTrue(live.canSendToCurrentServer, "Catch-up does not gate an applicable local intent.")
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == seen }).canMarkSeen)
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == reply }).canNoComment)
         let relay = CacheActionRelayDouble(identity: context.identity, messages: [
             ("seen", seenPayload), ("reply", replyPayload)
         ])
