@@ -1599,8 +1599,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { collected.append($0) })
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued No comment choice.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
+        XCTAssertEqual(session.sent.map { $0.1 }, [receipt.opID],
+                       "Automatic delivery records the original No comment operation exactly once.")
         journal.record(collected.events)
         try presentation.refreshFromDurableStore()
         let reopened = try XCTUnwrap(presentation.inboxRow(for: request))
@@ -4034,9 +4034,6 @@ final class NativeGuidedTLSTests: XCTestCase {
                                        onDiagnostic: { events.append($0) })
 
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued answer.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
-        _ = try await core.resyncAndDrainOutbox()
 
         let replay = events.events.filter {
             $0.phase == .ordinaryReplay && $0.operationID == submission.operationID
@@ -4049,8 +4046,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             $0.transition == .completed && $0.receiptState == .terminal &&
                 $0.requestTag != nil && $0.requestRevision == 1
         })
-        XCTAssertEqual(session.sent.first?.1, receipt.opID,
-                       "Replay must keep the accepted operation's original UUID.")
+        XCTAssertEqual(session.sent.map { $0.1 }, [receipt.opID],
+                       "Automatic recovery sends once with the original UUID; replay does not resend it.")
         XCTAssertEqual(session.acknowledgements.count, 1,
                        "The checkpoint ACK is separate; only terminal sequence 2 uses ordinary ACK.")
         XCTAssertEqual(try JSONValue.parse(try XCTUnwrap(session.acknowledgements.first))
@@ -4095,9 +4092,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { events.append($0) })
 
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued answer.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         do {
             _ = try await core.resyncAndDrainOutbox()
             XCTFail("The follow-on replay failure must remain visible to its accepted operation.")

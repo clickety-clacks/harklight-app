@@ -32,7 +32,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         return (context, store, try await confirmedPresentation(store: store, context: context, key: key, payload: payload), key)
     }
 
-    func testCachedCurrentRowDoesNotAuthorizeAnswerUntilRelayConfirmsIt() throws {
+    func testCachedCurrentRowAcceptsAnswerBeforeRelayConfirmsIt() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -53,15 +53,17 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let cachedRequest = try XCTUnwrap(live.request(for: key))
         XCTAssertTrue(cachedRequest.inboxStateIsCurrent,
                       "The saved copy can render the row immediately.")
-        XCTAssertFalse(live.canSendToCurrentServer,
-                       "A cached row does not prove that the relay has confirmed a current snapshot.")
+        XCTAssertTrue(live.canSendToCurrentServer,
+                      "An applicable action does not wait for a relay checkpoint.")
 
         let answerDraft = RequestDraft(inputs: [:],
             compatibility: CompatibilityDraft(selectedActionID: ExactText("got-it")))
-        XCTAssertFalse(live.submitFromUser(key, answerDraft: answerDraft, requestRevision: 1))
-        XCTAssertFalse(live.submitNoCommentFromUser(key, requestRevision: 1, selectionIsLocal: true))
-        XCTAssertTrue(try store.snapshot(context: context).intents.isEmpty)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        XCTAssertTrue(live.submitFromUser(key, answerDraft: answerDraft, requestRevision: 1))
+        let receipt = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+        try store.queueRecoverableOperations(context: context)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID])
     }
 
     private func setupTextReplyOnly() async throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
@@ -124,8 +126,9 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.intentReceipt?.opID, receipt.opID)
         XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
         XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "A duplicate local callback does not authorize an automatic send.")
+        try store.queueRecoverableOperations(context: context)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID],
+                       "Duplicate callbacks leave one saved operation eligible for recovery.")
 
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                           terminalSequence: 2, context: context)
@@ -264,8 +267,9 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                       "A swipe submission persists the explicit No comment choice for retry.")
         let retryID = try XCTUnwrap(live.request(for: key)?.intentReceipt?.intentID)
         let retry = try XCTUnwrap(store.snapshot(context: context).intents[retryID])
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "Queueing a retry does not authorize automatic sending.")
+        try store.queueRecoverableOperations(context: context)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [retry.operationID],
+                       "An explicitly retried choice is eligible for automatic delivery using its saved frame.")
         XCTAssertEqual(retry.answerKind, .noComment)
         XCTAssertEqual(String(decoding: retry.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"sample","request_revision":1}"# + "\n")
@@ -338,16 +342,18 @@ final class LiveAnswerConfirmationTests: XCTestCase {
             $0.disposition == .pending
         }.map(\.operationID), [retry.opID],
                        "Only the new answer remains pending after the relay explicitly rejected the old one.")
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "The newly committed response still needs an explicit send.")
+        try store.queueRecoverableOperations(context: context)
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [retry.opID],
+                       "The new deliberate answer is eligible for automatic delivery.")
         XCTAssertFalse(try XCTUnwrap(live.request(for: key)).answerNotDelivered,
                        "A new pending attempt replaces the previous failure treatment.")
     }
 
-    func testFailedResponseRetryUsesTheRetainedAnswerAndClearsWarningOnlyAfterAcceptance() async throws {
+    func testFailedResponseRetryKeepsOriginalIdentityAndReturnsToPendingUntilConfirmation() async throws {
         let (context, store, live, key) = try await setup()
         live.selectAction(ExactText("got-it"), input: nil, for: key)
         let original = try live.submit(key)
+        let originalFrame = try XCTUnwrap(store.snapshot(context: context).intents[original.intentID]).wireFrame
         try store.recordAnswerNotDelivered(original.intentID, operationID: original.opID,
                                            context: context)
         try live.refreshFromDurableStore()
@@ -366,13 +372,15 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
         XCTAssertTrue(live.retryFailedResponse(for: key))
         let retried = try XCTUnwrap(live.request(for: key)?.intentReceipt)
-        XCTAssertNotEqual(retried.opID, original.opID,
-                          "An explicitly rejected operation is retried as a new operation.")
+        XCTAssertEqual(retried.opID, original.opID,
+                       "Retry must preserve the original operation ID after a definite failure.")
+        XCTAssertEqual(retried.intentID, original.intentID)
+        XCTAssertEqual(try store.snapshot(context: context).intents[retried.intentID]?.wireFrame, originalFrame)
         XCTAssertEqual(retried.inputs, original.inputs,
                        "Retry uses the exact submitted response, not the editable draft.")
-        XCTAssertEqual(live.failedResponseWarning(for: key)?.retryOperationID, retried.opID)
-        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning,
-                      "Queueing the retry does not clear the known-failure warning.")
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertNil(live.failedResponseWarning(for: key),
+                     "Retry replaces the previous failure display with the saved pending answer.")
 
         try store.recordAcceptedOperation(retried.intentID, operationID: retried.opID,
                                           terminalSequence: 2, context: context)
@@ -381,7 +389,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         try live.refreshFromDurableStore()
 
         XCTAssertNil(live.failedResponseWarning(for: key),
-                     "The warning clears only after the server accepts the retry.")
+                     "Server confirmation completes the pending retry without restoring the old failure.")
         XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning)
     }
 
@@ -389,6 +397,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let (context, store, live, key) = try await setupReplyOnly()
         XCTAssertTrue(live.submitNoCommentFromUser(key))
         let original = try XCTUnwrap(live.request(for: key)?.intentReceipt)
+        let originalFrame = try XCTUnwrap(store.snapshot(context: context).intents[original.intentID]).wireFrame
         try store.recordNoCommentUnsupported(original.intentID, operationID: original.opID,
                                              context: context)
         try live.refreshFromDurableStore()
@@ -401,8 +410,11 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let retried = try XCTUnwrap(live.request(for: key)?.intentReceipt)
         XCTAssertEqual(retried.answerKind, .noComment)
         XCTAssertEqual(retried.inputs, [])
-        XCTAssertNotEqual(retried.opID, original.opID)
-        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning)
+        XCTAssertEqual(retried.opID, original.opID)
+        XCTAssertEqual(retried.intentID, original.intentID)
+        XCTAssertEqual(try store.snapshot(context: context).intents[retried.intentID]?.wireFrame, originalFrame)
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertNil(live.failedResponseWarning(for: key))
 
         try store.recordAcceptedOperation(retried.intentID, operationID: retried.opID,
                                           terminalSequence: 2, context: context)
@@ -838,9 +850,6 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let receipt = try commitAnswer(store, key: key)
         let session = AnswerSession(context.identity)
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued tap.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         let high = try await core.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
         XCTAssertEqual(high, 2)
@@ -860,9 +869,6 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let session = AnswerSession(context.identity)
         session.loseOperationReply = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued tap.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         _ = try await core.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
@@ -951,9 +957,6 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let session = AnswerSession(context.identity)
         session.failReplayAfterSend = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued tap.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         do { _ = try await core.resyncAndDrainOutbox(); XCTFail("The second replay is interrupted") }
         catch InstallationTransportError.unexpectedServerFrame {}
         try live.refreshFromDurableStore()
@@ -978,9 +981,6 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let receipt = try commitAnswer(store, key: key)
         let session = AnswerSession(context.identity)
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued tap.")
-        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         _ = try await core.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
 

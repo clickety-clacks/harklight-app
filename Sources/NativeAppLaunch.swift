@@ -2578,21 +2578,24 @@ final class LivePresentationStore {
               let warning = failedResponseWarning(for: key, revision: request.requestRevision) else {
             return false
         }
-        if let receipt = request.intentReceipt {
-            sendAnswerOperationForUserTap(receipt.intentID, request: key)
-            return true
-        }
-        guard let answerDraft = warning.answerDraft else { return false }
         do {
-            let receipt = try submit(key, answerDraft: answerDraft,
-                                    requestRevision: warning.requestRevision)
+            // The failure dialog retries the saved operation, not a newly
+            // composed answer. Editing and submitting is a separate action.
+            guard let operationID = request.intentReceipt?.opID ?? warning.failedOperationID,
+                  let saved = try attentionStore.snapshot(context: profileContext).intents.values.first(where: {
+                      $0.operationID == operationID && $0.requestKey == key &&
+                          ($0.requestRevision ?? 1) == warning.requestRevision
+                  }) else { throw LiveReplyError.notOpen }
+            let queued = try attentionStore.queueOriginalOperationForUserTap(saved.intentID, context: profileContext)
             if var current = failedResponseWarnings[key],
                current.failedOperationID == warning.failedOperationID {
-                current.retryOperationID = receipt.opID
+                current.retryOperationID = queued.operationID
                 failedResponseWarnings[key] = current
                 failedResponseWarningGeneration &+= 1
             }
-            sendAnswerOperationForUserTap(receipt.intentID, request: key)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+            sendAnswerOperationForUserTap(queued.intentID, request: key)
             return true
         } catch {
             diagnose(.localStore, .draftSave, .failed, error: error,
