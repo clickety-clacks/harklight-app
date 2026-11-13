@@ -1195,11 +1195,6 @@ public final class ClientRepository: @unchecked Sendable {
                       let retractedAtMilliseconds = event.conversation?.retractedAtMilliseconds else {
                     throw ConversationError.invalidBinding
                 }
-                if let intentID = next.intentByRequest[key],
-                   case let .refusedByRetraction(refusedAt)? = next.intents[intentID]?.disposition,
-                   refusedAt != retractedAtMilliseconds {
-                    throw ConversationError.conflict
-                }
                 if event.conversation?.revision == nil {
                     // An inbox snapshot terminal carries the time; the conversation stream carries the retraction turn.
                     try thread.recordReportedRetraction(at: retractedAtMilliseconds)

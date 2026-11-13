@@ -128,6 +128,26 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertNil(shown.submittedAnswer, "A queued local answer is not the server's answer.")
     }
 
+    func testServerRetractionReplacesEarlierOperationRefusalTimestamp() throws {
+        let context = context()
+        let key = key("retraction", context: context)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
+        _ = try repository.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))), context: context)
+        let port = AttentionDomainPort(store: repository)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        try repository.recordAnswerRefusedByRetraction(receipt.intentID, operationID: receipt.opID,
+            retractedAtMilliseconds: 100, context: context)
+        _ = try repository.apply(RelayEvent(sequence: 2, body: .terminal(key, .cleared, nil),
+            conversation: RelayConversationMetadata(revision: nil, terminalReason: ExactText("retracted"),
+                retractedAtMilliseconds: 200)), context: context)
+        XCTAssertEqual(try repository.conversationSnapshot(context: context).threads[key]?.reportedRetractedAtMilliseconds, 200)
+    }
+
     func testReadRequestWaitsForServerAndNextSnapshotReplacesReadPosition() throws {
         let context = context()
         let key = key("chat", context: context)
