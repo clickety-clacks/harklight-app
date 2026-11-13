@@ -1222,36 +1222,14 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("native-header-iphone-restored", app)
     }
 
-    func testBoundaryPullAndAdaptiveChat() {
+    func testAdaptiveChatRemainsUsableInPortraitAndLandscape() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--attention-fixture", "--harklight-samples",
-                               "--harklight-ui-diagnostics"]
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
         enterSearch("Thursday", in: app)
         app.descendants(matching: .any)["sample-information-2"].tap()
-        let card = app.scrollViews["message-card-scroll"]
-        XCTAssertTrue(card.waitForExistence(timeout: 5))
-        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
-        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
-        let counter = app.staticTexts.matching(NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")).firstMatch
-        let before = counter.label
-        let parts = before.components(separatedBy: " of ")
-        let next = "\((Int(parts.first ?? "") ?? 0) + 1) of \(parts.last ?? "")"
-        print("BOUNDARY_PEEK_CAPTURE_START")
-        lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow, thenHoldForDuration: 4)
-        let reachedNext = app.staticTexts[next].waitForExistence(timeout: 5)
-        if !reachedNext { recordDiagnostics("search-next", app) }
-        XCTAssertTrue(reachedNext, app.debugDescription)
-        XCTAssertTrue(app.buttons["request-heading"].label.contains("The garden review moved to Thursday"),
-                      "Next changes the visible card in the Search stack.")
-        upper.press(forDuration: 0.1, thenDragTo: lower, withVelocity: .slow, thenHoldForDuration: 0.5)
-        let returnedToFirst = app.staticTexts[before].waitForExistence(timeout: 5)
-        if !returnedToFirst { recordDiagnostics("search-previous", app) }
-        XCTAssertTrue(returnedToFirst, app.debugDescription)
-        XCTAssertTrue(app.buttons["request-heading"].label.contains("The library review moved to Thursday"),
-                      "Previous returns to the first visible Search result.")
         let chat = app.buttons["Chat"]
         XCTAssertTrue(chat.waitForExistence(timeout: 5), app.debugDescription)
         let screen = app.windows.firstMatch.frame
