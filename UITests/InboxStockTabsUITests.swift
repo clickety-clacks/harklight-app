@@ -170,8 +170,12 @@ final class InboxStockTabsUITests: XCTestCase {
         finish.tap()
 
         let back = workspaceBackButton(in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        if back.exists {
+            back.tap()
+        } else {
+            XCTAssertTrue(inboxTab.isHittable,
+                          "The iPad keeps Inbox beside the selected request detail.")
+        }
         XCTAssertFalse(approval.waitForExistence(timeout: 2),
                        "An answered request leaves the Inbox search results.")
         repliedTab.tap()
