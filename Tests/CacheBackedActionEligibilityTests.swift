@@ -25,7 +25,7 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
             persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
             requests: saved.requests, remoteStates: [:], cursor: 1, conversationCursor: 0,
-            conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            conversations: [:], inboxView: nil, currentRequestKeys: []), context: context)
         let live = try LivePresentationStore(store: domain, context: context)
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(request.informationalSeenStatus, .available)
@@ -54,10 +54,14 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
                              messageID: ExactText("reply"))
         let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        let previous = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        _ = try previous.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let saved = try previous.snapshot(context: context)
         let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
-            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:], cursor: 1,
-            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            requests: saved.requests, remoteStates: [:], cursor: 1,
+            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: []), context: context)
         let port = AttentionDomainPort(store: domain)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
@@ -74,9 +78,9 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
             ownOutcome: pending.receiptFacts?.ownOutcome, answerNotDelivered: false))
         try domain.recordAnswerNotDelivered(receipt.intentID, operationID: receipt.opID, context: context)
         try live.refreshFromDurableStore()
-        XCTAssertTrue(live.canRetryUnconfirmedAnswer(for: key))
-        XCTAssertEqual(live.request(for: key)?.intentReceipt?.opID, receipt.opID)
-        let retry = try domain.queueOriginalOperationForUserTap(receipt.intentID, context: context)
+        XCTAssertTrue(live.canRetryFailedResponse(for: key))
+        XCTAssertTrue(live.retryFailedResponse(for: key))
+        let retry = try XCTUnwrap(domain.lookupIntent(receipt.intentID, context: context))
         XCTAssertEqual(retry.operationID, receipt.opID)
         try domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
             terminalSequence: 2, context: context)

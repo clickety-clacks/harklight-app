@@ -38,8 +38,10 @@ final class HarklightUITests: XCTestCase {
         revealInCard(note, in: app)
         XCTAssertTrue(note.waitForExistence(timeout: 5), app.debugDescription)
         attachScreenshot("Sender scene note field", from: app)
-        XCTAssertTrue(app.staticTexts["Select the location on the floor plan and add a note."]
-            .waitForExistence(timeout: 5))
+        let messageBody = app.textViews["request-message-body"]
+        XCTAssertTrue(messageBody.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(messageBody.value as? String,
+                       "Select the location on the floor plan and add a note.")
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
                        "The card omits the extra Open status line from the design.")
         XCTAssertFalse(app.staticTexts["fixture:Facilities"].exists,

@@ -511,6 +511,19 @@ public final class ClientRepository: @unchecked Sendable {
                                      opaqueSubmissionID: ExactText(submissionID.uuidString.lowercased()))
     }
 
+    /// A definite refusal leaves the request open to a different response.
+    /// Keep the refused operation bound while editing so Retry can still use
+    /// its exact bytes; a valid new submission replaces the binding atomically.
+    /// Pending, lost and accepted operations remain protected from replacement.
+    private func canReplaceRefusedAnswer(for key: RequestKey) -> Bool {
+        guard let id = state.intentByRequest[key] else { return true }
+        guard let operation = state.intents[id] else { return false }
+        switch operation.disposition {
+        case .failed, .unsupported: return true
+        default: return false
+        }
+    }
+
     public func saveDraft(_ draft: RequestDraft,
                           selector: BoundDocumentSelector,
                           context suppliedContext: ProfileContext) throws {
@@ -523,7 +536,7 @@ public final class ClientRepository: @unchecked Sendable {
         let interface = requestInterface(for: request)
         guard validateDraft(draft, for: interface) else { throw AttentionStoreError.invalidDraft }
         guard state.remoteStates[request.key]?.isTerminal != true,
-              state.intentByRequest[request.key] == nil else {
+              canReplaceRefusedAnswer(for: request.key) else {
             throw AttentionStoreError.requestClosed
         }
         var next = state
@@ -594,7 +607,8 @@ public final class ClientRepository: @unchecked Sendable {
             throw AttentionStoreError.intentConflict
         }
 
-        if let activeID = state.intentByRequest[request.key] {
+        if let activeID = state.intentByRequest[request.key],
+           !canReplaceRefusedAnswer(for: request.key) {
             throw AttentionStoreError.competingIntent(activeID)
         }
         guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
@@ -674,7 +688,8 @@ public final class ClientRepository: @unchecked Sendable {
             return existing
         }
         if state.fencedIntents?[intentID] != nil { throw AttentionStoreError.intentConflict }
-        if let activeID = state.intentByRequest[request.key] {
+        if let activeID = state.intentByRequest[request.key],
+           !canReplaceRefusedAnswer(for: request.key) {
             throw AttentionStoreError.competingIntent(activeID)
         }
         guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
