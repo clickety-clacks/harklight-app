@@ -988,15 +988,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Group {
                 switch item {
                 case let .request(key)?:
-                    let reopenInlineChat: (() -> Void)?
-                    if inlineChat, !pushedChatFallsBackToMessage,
-                       conversationStore?.request(for: key) != nil {
-                        reopenInlineChat = { [self] in
-                            self.reopenInlineChat(for: key)
-                        }
-                    } else {
-                        reopenInlineChat = nil
-                    }
+                    let reopenInlineChat: (() -> Void)? = inlineChat &&
+                        !pushedChatFallsBackToMessage &&
+                        conversationStore?.request(for: key) != nil
+                        ? { [self] in self.reopenInlineChat(for: key) }
+                        : nil
                     requestDetail(key, cardContext(for: .request(key),
                         inlineChat: inlineChat, reopenInlineChat: reopenInlineChat))
                         .id(key)
